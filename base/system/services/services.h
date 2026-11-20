@@ -59,6 +59,8 @@ typedef struct _SERVICE_IMAGE
     HANDLE hProcess;
     DWORD dwProcessId;
     HANDLE hToken;
+    HANDLE hProcessToken;   /* The primary token of the process when it is not hToken: the write restricted token of a service with
+                               ServiceSidType RESTRICTED, or the token of a LocalSystem service with a service SID (hToken is NULL) */
     HANDLE hProfile;
     BOOL bServiceSid;       /* hToken has the service SID: the process gets the descriptor of ScmCreateServiceProcessSd */
     PSERVICE_PROCESS_WATCH pWatch;

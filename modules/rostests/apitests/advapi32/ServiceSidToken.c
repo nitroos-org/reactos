@@ -9,7 +9,12 @@
  * with the attributes ENABLED | ENABLED_BY_DEFAULT | OWNER and makes the default DACL
  * D:(A;;GA;;;SY)(A;;RC;;;OW)(A;;GA;;;<service SID>); a required-privileges list removes every other
  * privilege except SeChangeNotifyPrivilege and keeps the attributes of the listed ones; a listed
- * privilege the account lacks fails the start with ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE.
+ * privilege the account lacks fails the start with ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE. A LocalSystem service
+ * has the service SID as well (type none: not). Type RESTRICTED (LocalService, NetworkService, LocalSystem): also the
+ * group NT AUTHORITY\WRITE RESTRICTED (S-1-5-33, 0x7), IsTokenRestricted = 1 and the restricting SIDs, in this order, the
+ * service SID, Everyone, the logon session SID and S-1-5-33 (all 0x7); writes to an object need an ACE for one of them
+ * (an object that grants only the account: write refused with 5, a new file in a directory that grants only the
+ * account too), reads are not restricted.
  */
 
 #include "precomp.h"
@@ -30,6 +35,12 @@ typedef struct _TOKEN_DUMP
     CHAR Dacl[512];
     CHAR ProcessSd[512];
     BOOL Restricted;
+    ULONG RestrictCount;
+    CHAR Restrict[8][128];
+    ULONG RestrictAttrs[8];
+    ULONG WriteCount;
+    CHAR WriteFile[8][MAX_PATH];
+    ULONG WriteError[8];
     ULONG GroupCount;
     CHAR Groups[MAX_LINES][128];
     ULONG GroupAttrs[MAX_LINES];
@@ -42,6 +53,8 @@ static CHAR OutDir[MAX_PATH];
 
 /* Service side: write the facts of the process token into <dir>\<name>.txt */
 static CHAR SvcName[64], SvcFile[MAX_PATH];
+static PSTR *SvcTargets;
+static INT SvcTargetCount;
 static SERVICE_STATUS_HANDLE SvcStatusHandle;
 static HANDLE SvcStop;
 
@@ -136,6 +149,28 @@ WriteTokenFacts(FILE *f, HANDLE hToken)
         }
     }
     fprintf(f, "R %d\n", IsTokenRestricted(hToken) ? 1 : 0);
+    {
+        PTOKEN_GROUPS Restricting = QueryToken(hToken, TokenRestrictedSids);
+
+        for (i = 0; Restricting && i < Restricting->GroupCount; i++)
+        {
+            if (ConvertSidToStringSidA(Restricting->Groups[i].Sid, &Str))
+            {
+                fprintf(f, "X %s %lx\n", Str, Restricting->Groups[i].Attributes);
+                LocalFree(Str);
+            }
+        }
+        HeapFree(GetProcessHeap(), 0, Restricting);
+    }
+    /* open each target for writing: a file that exists is opened, a name in a directory is created */
+    for (i = 0; (INT)i < SvcTargetCount; i++)
+    {
+        HANDLE hFile = CreateFileA(SvcTargets[i], GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+        fprintf(f, "W %s %lu\n", SvcTargets[i], hFile != INVALID_HANDLE_VALUE ? 0 : GetLastError());
+        if (hFile != INVALID_HANDLE_VALUE)
+            CloseHandle(hFile);
+    }
     fprintf(f, "END\n");
     HeapFree(GetProcessHeap(), 0, User);
     HeapFree(GetProcessHeap(), 0, Groups);
@@ -187,10 +222,12 @@ SvcMain(DWORD argc, LPSTR *argv)
 }
 
 static VOID
-ServiceSide(PCSTR Name, PCSTR File)
+ServiceSide(PCSTR Name, PCSTR File, INT TargetCount, PSTR *Targets)
 {
     SERVICE_TABLE_ENTRYA Table[2];
 
+    SvcTargetCount = TargetCount;
+    SvcTargets = Targets;
     StringCbCopyA(SvcName, sizeof(SvcName), Name);
     StringCbCopyA(SvcFile, sizeof(SvcFile), File);
     SvcStop = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -267,6 +304,24 @@ ReadDump(PCSTR File, PTOKEN_DUMP Dump)
             StringCbCopyA(Dump->ProcessSd, sizeof(Dump->ProcessSd), Line + 2);
         else if (!strncmp(Line, "R ", 2))
             Dump->Restricted = atoi(Line + 2);
+        else if (!strncmp(Line, "X ", 2) && Dump->RestrictCount < 8 &&
+                 sscanf(Line + 2, "%127s %lx", Sid, &Attr) == 2)
+        {
+            StringCbCopyA(Dump->Restrict[Dump->RestrictCount], sizeof(Dump->Restrict[0]), Sid);
+            Dump->RestrictAttrs[Dump->RestrictCount++] = Attr;
+        }
+        else if (!strncmp(Line, "W ", 2) && Dump->WriteCount < 8)
+        {
+            PSTR Space = strrchr(Line, ' ');
+
+            if (Space && Space > Line + 2)
+            {
+                Attr = strtoul(Space + 1, NULL, 10);
+                *Space = 0;
+                StringCbCopyA(Dump->WriteFile[Dump->WriteCount], sizeof(Dump->WriteFile[0]), Line + 2);
+                Dump->WriteError[Dump->WriteCount++] = Attr;
+            }
+        }
         else if (!strncmp(Line, "G ", 2) && Dump->GroupCount < MAX_LINES &&
                  sscanf(Line + 2, "%127s %lx", Sid, &Attr) == 2)
         {
@@ -413,10 +468,12 @@ StartWithRawPrivileges(SC_HANDLE hScm, PCSTR Name, DWORD Type, const VOID *Data,
 }
 
 /* Create, configure and start a scratch service; its token facts into Dump. Returns the StartService error */
+static CHAR WriteTargets[4 * MAX_PATH];     /* quoted paths the service opens for writing, appended to its command line */
+
 static DWORD
 RunService(SC_HANDLE hScm, PCSTR Name, PCSTR Account, DWORD SidType, PCSTR Privileges, PTOKEN_DUMP Dump)
 {
-    CHAR Exe[MAX_PATH], Command[2 * MAX_PATH + 64], File[MAX_PATH], Multi[512];
+    CHAR Exe[MAX_PATH], Command[6 * MAX_PATH + 64], File[MAX_PATH], Multi[512];
     struct { DWORD dwServiceSidType; } SidInfo;     /* SERVICE_SID_INFO (not in our SDK headers) */
     SERVICE_REQUIRED_PRIVILEGES_INFOA PrivInfo;
     SC_HANDLE hService;
@@ -427,7 +484,7 @@ RunService(SC_HANDLE hScm, PCSTR Name, PCSTR Account, DWORD SidType, PCSTR Privi
     GetModuleFileNameA(NULL, Exe, sizeof(Exe));
     StringCbPrintfA(File, sizeof(File), "%s\\%s.txt", OutDir, Name);
     DeleteFileA(File);
-    StringCbPrintfA(Command, sizeof(Command), "\"%s\" ServiceSidToken service %s \"%s\"", Exe, Name, File);
+    StringCbPrintfA(Command, sizeof(Command), "\"%s\" ServiceSidToken service %s \"%s\"%s", Exe, Name, File, WriteTargets);
     hService = CreateServiceA(hScm, Name, Name, SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
                               SERVICE_DEMAND_START, SERVICE_ERROR_IGNORE, Command, NULL, NULL, NULL,
                               Account, Account ? "" : NULL);
@@ -537,6 +594,178 @@ CheckServiceSid(PCSTR Name, PTOKEN_DUMP Dump, PCSTR Account)
     }
 }
 
+
+/* The SID of the logon session of a dump: the group with SE_GROUP_LOGON_ID (0x40000000) */
+static INT
+FindLogonGroup(PTOKEN_DUMP Dump)
+{
+    ULONG i;
+    for (i = 0; i < Dump->GroupCount; i++)
+        if ((Dump->GroupAttrs[i] & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
+            return (INT)i;
+    return -1;
+}
+
+/*
+ * The token of a service with ServiceSidType RESTRICTED. Measured on Windows Server 2022 (LocalService, NetworkService,
+ * LocalSystem own-process services): the service SID (0xe), the group S-1-5-33 (0x7), IsTokenRestricted = 1 and four
+ * restricting SIDs with the attributes 0x7: the service SID, Everyone, the logon session SID and S-1-5-33. A LocalSystem
+ * token made here has no logon group (it stays in the logon session of the controller): its logon SID is not checked.
+ */
+static VOID
+CheckRestrictedToken(PCSTR Name, PTOKEN_DUMP Dump, BOOL HasLogonGroup)
+{
+    CHAR Sid[128];
+    INT g;
+
+    ok(Dump->Restricted, "%s: token not restricted\n", Name);
+    g = FindGroup(Dump, "S-1-5-33");
+    ok(g >= 0, "%s: no WRITE RESTRICTED group\n", Name);
+    if (g >= 0)
+        ok(Dump->GroupAttrs[g] == 7, "%s: WRITE RESTRICTED attributes 0x%lx, expected 0x7\n", Name, Dump->GroupAttrs[g]);
+    ok(Dump->RestrictCount == 4, "%s: %lu restricting SIDs, expected 4\n", Name, Dump->RestrictCount);
+    if (Dump->RestrictCount != 4)
+        return;
+    if (ServiceSidString(Name, Sid, sizeof(Sid)))
+        ok(!_stricmp(Dump->Restrict[0], Sid), "%s: first restricting SID %s, expected %s\n", Name, Dump->Restrict[0], Sid);
+    ok(!strcmp(Dump->Restrict[1], "S-1-1-0"), "%s: second restricting SID %s\n", Name, Dump->Restrict[1]);
+    if (HasLogonGroup)
+    {
+        g = FindLogonGroup(Dump);
+        ok(g >= 0, "%s: no logon group\n", Name);
+        if (g >= 0)
+            ok(!_stricmp(Dump->Restrict[2], Dump->Groups[g]), "%s: third restricting SID %s, logon SID %s\n",
+               Name, Dump->Restrict[2], Dump->Groups[g]);
+    }
+    else
+    {
+        ok(!_strnicmp(Dump->Restrict[2], "S-1-5-5-", 8), "%s: third restricting SID %s\n", Name, Dump->Restrict[2]);
+    }
+    ok(!strcmp(Dump->Restrict[3], "S-1-5-33"), "%s: fourth restricting SID %s\n", Name, Dump->Restrict[3]);
+    ok(Dump->RestrictAttrs[0] == 7 && Dump->RestrictAttrs[1] == 7 && Dump->RestrictAttrs[2] == 7 && Dump->RestrictAttrs[3] == 7,
+       "%s: restricting attributes 0x%lx 0x%lx 0x%lx 0x%lx, expected 0x7\n", Name, Dump->RestrictAttrs[0],
+       Dump->RestrictAttrs[1], Dump->RestrictAttrs[2], Dump->RestrictAttrs[3]);
+}
+
+/* A token that is not restricted: no restricting SIDs, no WRITE RESTRICTED group */
+static VOID
+CheckNotRestricted(PCSTR Name, PTOKEN_DUMP Dump)
+{
+    ok(!Dump->Restricted, "%s: restricted token\n", Name);
+    ok(Dump->RestrictCount == 0, "%s: %lu restricting SIDs\n", Name, Dump->RestrictCount);
+    ok(FindGroup(Dump, "S-1-5-33") < 0, "%s: WRITE RESTRICTED group\n", Name);
+}
+
+/* Files for the write rows of a service: one that grants only the account of the service, one that grants the service SID (plus
+ * Administrators and SYSTEM, which the SYSTEM and Administrators groups of a LocalSystem token would pass anyway), one that grants
+ * Everyone, one with Administrators and SYSTEM only, one with the account and the service SID, and a directory that grants
+ * only the account (a file is made in it). Needs a file system that keeps ACLs. */
+enum { W_ACCT, W_SVC, W_EV, W_ADM, W_BOTH, W_NEW, W_COUNT };
+
+static BOOL
+MakeWriteTargets(PCSTR Name, PCSTR AccountAlias)
+{
+    static const PCSTR Kinds[W_COUNT] = { "acct", "svc", "ev", "adm", "both", "dir" };
+    CHAR Sid[128], Sddl[512], Path[MAX_PATH], Quoted[MAX_PATH + 8];
+    SECURITY_ATTRIBUTES Sa;
+    HANDLE hFile;
+    INT k;
+
+    if (!ServiceSidString(Name, Sid, sizeof(Sid)))
+        return FALSE;
+    WriteTargets[0] = 0;
+    Sa.nLength = sizeof(Sa);
+    Sa.bInheritHandle = FALSE;
+    for (k = 0; k < W_COUNT; k++)
+    {
+        switch (k)
+        {
+            case W_ACCT: StringCbPrintfA(Sddl, sizeof(Sddl), "D:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FA;;;%s)", AccountAlias); break;
+            case W_SVC:  StringCbPrintfA(Sddl, sizeof(Sddl), "D:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FA;;;%s)", Sid); break;
+            case W_EV:   StringCbCopyA(Sddl, sizeof(Sddl), "D:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FA;;;WD)"); break;
+            case W_ADM:  StringCbCopyA(Sddl, sizeof(Sddl), "D:P(A;;FA;;;BA)(A;;FA;;;SY)"); break;
+            case W_BOTH: StringCbPrintfA(Sddl, sizeof(Sddl), "D:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FA;;;%s)(A;;FA;;;%s)", AccountAlias, Sid); break;
+            default:     StringCbPrintfA(Sddl, sizeof(Sddl), "D:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FA;;;%s)", AccountAlias); break;
+        }
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(Sddl, SDDL_REVISION_1, &Sa.lpSecurityDescriptor, NULL))
+            return FALSE;
+        StringCbPrintfA(Path, sizeof(Path), "%s\\%s_%s", OutDir, Name, Kinds[k]);
+        if (k == W_NEW)
+        {
+            CreateDirectoryA(Path, &Sa);
+            StringCbCatA(Path, sizeof(Path), "\\new.txt");
+        }
+        else
+        {
+            hFile = CreateFileA(Path, GENERIC_WRITE, 0, &Sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (hFile != INVALID_HANDLE_VALUE)
+                CloseHandle(hFile);
+        }
+        LocalFree(Sa.lpSecurityDescriptor);
+        StringCbPrintfA(Quoted, sizeof(Quoted), " \"%s\"", Path);
+        StringCbCatA(WriteTargets, sizeof(WriteTargets), Quoted);
+    }
+    return TRUE;
+}
+
+static VOID
+RemoveWriteTargets(PCSTR Name)
+{
+    static const PCSTR Kinds[W_COUNT] = { "acct", "svc", "ev", "adm", "both", "dir" };
+    CHAR Path[MAX_PATH];
+    INT k;
+
+    for (k = 0; k < W_COUNT; k++)
+    {
+        StringCbPrintfA(Path, sizeof(Path), "%s\\%s_%s", OutDir, Name, Kinds[k]);
+        if (k == W_NEW)
+        {
+            StringCbCatA(Path, sizeof(Path), "\\new.txt");
+            DeleteFileA(Path);
+            StringCbPrintfA(Path, sizeof(Path), "%s\\%s_%s", OutDir, Name, Kinds[k]);
+            RemoveDirectoryA(Path);
+        }
+        else
+        {
+            DeleteFileA(Path);
+        }
+    }
+    WriteTargets[0] = 0;
+}
+
+/* Expected write errors (0 = open succeeded, 5 = ERROR_ACCESS_DENIED). Measured on Windows Server 2022: with a
+ * write restricted token only the objects that also grant the service SID or Everyone can be written; the account alone, and
+ * Administrators and SYSTEM alone, do not; a new file in a directory that grants the account only is refused; without
+ * the restriction the account's own entry is enough, Administrators and SYSTEM alone do not admit LocalService or NetworkService
+ * (their tokens do not have those groups) and do admit LocalSystem. */
+static VOID
+CheckWrites(PCSTR Name, PTOKEN_DUMP Dump, BOOL Restricted, BOOL IsSystem)
+{
+    DWORD Expected[W_COUNT];
+    INT k;
+
+    Expected[W_ACCT] = Restricted ? ERROR_ACCESS_DENIED : 0;
+    Expected[W_SVC] = 0;
+    Expected[W_EV] = 0;
+    Expected[W_ADM] = (Restricted || !IsSystem) ? ERROR_ACCESS_DENIED : 0;
+    Expected[W_BOTH] = 0;
+    Expected[W_NEW] = Restricted ? ERROR_ACCESS_DENIED : 0;
+    ok(Dump->WriteCount == W_COUNT, "%s: %lu write rows, expected %d\n", Name, Dump->WriteCount, W_COUNT);
+    for (k = 0; k < W_COUNT && (ULONG)k < Dump->WriteCount; k++)
+        ok(Dump->WriteError[k] == Expected[k], "%s: write row %d (%s): error %lu, expected %lu\n", Name, k,
+           Dump->WriteFile[k], Dump->WriteError[k], Expected[k]);
+}
+
+static BOOL
+FileSystemKeepsAcls(PCSTR Dir)
+{
+    CHAR Root[4];
+    DWORD Flags = 0;
+
+    Root[0] = Dir[0]; Root[1] = ':'; Root[2] = '\\'; Root[3] = 0;
+    return GetVolumeInformationA(Root, NULL, 0, NULL, NULL, &Flags, NULL, 0) && (Flags & FILE_PERSISTENT_ACLS);
+}
+
 START_TEST(ServiceSidToken)
 {
     CHAR Sid[128], Name[64], Base[32], DirSddl[64];
@@ -551,7 +780,7 @@ START_TEST(ServiceSidToken)
     argc = winetest_get_mainargs(&argv);
     if (argc >= 5 && !strcmp(argv[2], "service"))
     {
-        ServiceSide(argv[3], argv[4]);
+        ServiceSide(argv[3], argv[4], argc - 5, argv + 5);
         return;
     }
 
@@ -734,24 +963,131 @@ START_TEST(ServiceSidToken)
         ok(Dump.PrivCount == 2, "network: %lu privileges, expected 2\n", Dump.PrivCount);
     }
 
-    /* 8. RESTRICTED: Windows makes the token write-restricted (restricted SIDs) */
-    StringCbPrintfA(Name, sizeof(Name), "%sh", Base);
-    Error = RunService(hScm, Name, "NT AUTHORITY\\LocalService", SERVICE_SID_TYPE_RESTRICTED, NULL, &Dump);
-    ok(Error == ERROR_SUCCESS, "restricted: StartService failed with %lu\n", Error);
-    if (Dump.Valid)
+    /* 8. LocalService, RESTRICTED: the service SID, WRITE RESTRICTED, the four restricting SIDs, write rows */
     {
-        CheckServiceSid(Name, &Dump, "S-1-5-19");
-        todo_ros ok(Dump.Restricted, "restricted: token not restricted\n");
+        BOOL Acls = FileSystemKeepsAcls(OutDir);
+
+        StringCbPrintfA(Name, sizeof(Name), "%sh", Base);
+        WriteTargets[0] = 0;
+        if (Acls)
+            MakeWriteTargets(Name, "LS");
+        Error = RunService(hScm, Name, "NT AUTHORITY\\LocalService", SERVICE_SID_TYPE_RESTRICTED, NULL, &Dump);
+        ok(Error == ERROR_SUCCESS, "restricted: StartService failed with %lu\n", Error);
+        if (Dump.Valid)
+        {
+            ok(!strcmp(Dump.User, "S-1-5-19"), "restricted: user %s\n", Dump.User);
+            CheckServiceSid(Name, &Dump, "S-1-5-19");
+            CheckRestrictedToken(Name, &Dump, TRUE);
+            ok(Dump.PrivCount == Plain.PrivCount, "restricted: %lu privileges, plain %lu\n", Dump.PrivCount, Plain.PrivCount);
+            if (Acls)
+                CheckWrites(Name, &Dump, TRUE, FALSE);
+        }
+        if (Acls)
+            RemoveWriteTargets(Name);
+
+        /* the same service with UNRESTRICTED: not restricted, the account's entry is enough */
+        StringCbPrintfA(Name, sizeof(Name), "%sk", Base);
+        if (Acls)
+            MakeWriteTargets(Name, "LS");
+        Error = RunService(hScm, Name, "NT AUTHORITY\\LocalService", SERVICE_SID_TYPE_UNRESTRICTED, NULL, &Dump);
+        ok(Error == ERROR_SUCCESS, "unrestricted writes: StartService failed with %lu\n", Error);
+        if (Dump.Valid)
+        {
+            CheckNotRestricted(Name, &Dump);
+            if (Acls)
+                CheckWrites(Name, &Dump, FALSE, FALSE);
+        }
+        if (Acls)
+            RemoveWriteTargets(Name);
+
+        /* NetworkService, RESTRICTED */
+        StringCbPrintfA(Name, sizeof(Name), "%sl", Base);
+        if (Acls)
+            MakeWriteTargets(Name, "NS");
+        Error = RunService(hScm, Name, "NT AUTHORITY\\NetworkService", SERVICE_SID_TYPE_RESTRICTED, NULL, &Dump);
+        ok(Error == ERROR_SUCCESS, "network restricted: StartService failed with %lu\n", Error);
+        if (Dump.Valid)
+        {
+            ok(!strcmp(Dump.User, "S-1-5-20"), "network restricted: user %s\n", Dump.User);
+            CheckServiceSid(Name, &Dump, "S-1-5-20");
+            CheckRestrictedToken(Name, &Dump, TRUE);
+            if (Acls)
+                CheckWrites(Name, &Dump, TRUE, FALSE);
+        }
+        if (Acls)
+            RemoveWriteTargets(Name);
     }
 
-    /* 9. LocalSystem with a service SID: Windows gives the process a token with the service SID */
-    StringCbPrintfA(Name, sizeof(Name), "%si", Base);
-    Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_UNRESTRICTED, NULL, &Dump);
-    ok(Error == ERROR_SUCCESS, "system: StartService failed with %lu\n", Error);
-    if (Dump.Valid)
+    /* 9. LocalSystem: UNRESTRICTED has the service SID (0xe) and no WRITE RESTRICTED, NONE has none; RESTRICTED is restricted.
+     * The SYSTEM token keeps the privileges it had. */
     {
-        ok(!strcmp(Dump.User, "S-1-5-18"), "system: user %s\n", Dump.User);
-        todo_ros ok(FindServiceGroup(&Dump) >= 0, "system: no service SID\n");
+        BOOL Acls = FileSystemKeepsAcls(OutDir);
+        TOKEN_DUMP System;
+
+        StringCbPrintfA(Name, sizeof(Name), "%sm", Base);
+        Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_NONE, NULL, &System);
+        ok(Error == ERROR_SUCCESS, "system none: StartService failed with %lu\n", Error);
+        ok(System.Valid, "system none: no dump\n");
+        ok(!strcmp(System.User, "S-1-5-18"), "system none: user %s\n", System.User);
+        ok(FindServiceGroup(&System) < 0, "system none: unexpected service SID\n");
+        CheckNotRestricted(Name, &System);
+
+        StringCbPrintfA(Name, sizeof(Name), "%si", Base);
+        if (Acls)
+            MakeWriteTargets(Name, "SY");
+        Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_UNRESTRICTED, NULL, &Dump);
+        ok(Error == ERROR_SUCCESS, "system: StartService failed with %lu\n", Error);
+        ok(Dump.Valid, "system: no dump\n");
+        if (Dump.Valid)
+        {
+            INT g = FindServiceGroup(&Dump);
+            CHAR Expected[128];
+
+            ok(!strcmp(Dump.User, "S-1-5-18"), "system: user %s\n", Dump.User);
+            ok(g >= 0, "system: no service SID\n");
+            if (g >= 0 && ServiceSidString(Name, Expected, sizeof(Expected)))
+            {
+                ok(!_stricmp(Dump.Groups[g], Expected), "system: service SID %s, expected %s\n", Dump.Groups[g], Expected);
+                ok(Dump.GroupAttrs[g] == (SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_OWNER),
+                   "system: service SID attributes 0x%lx, expected 0xe\n", Dump.GroupAttrs[g]);
+            }
+            CheckNotRestricted(Name, &Dump);
+            ok(Dump.PrivCount == System.PrivCount, "system: %lu privileges, without a service SID %lu\n",
+               Dump.PrivCount, System.PrivCount);
+            ok(FindPriv(&Dump, "SeTcbPrivilege") >= 0, "system: no SeTcbPrivilege\n");
+            if (Acls)
+                CheckWrites(Name, &Dump, FALSE, TRUE);
+        }
+        if (Acls)
+            RemoveWriteTargets(Name);
+
+        StringCbPrintfA(Name, sizeof(Name), "%sn", Base);
+        if (Acls)
+            MakeWriteTargets(Name, "SY");
+        Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_RESTRICTED, NULL, &Dump);
+        ok(Error == ERROR_SUCCESS, "system restricted: StartService failed with %lu\n", Error);
+        ok(Dump.Valid, "system restricted: no dump\n");
+        if (Dump.Valid)
+        {
+            INT g = FindServiceGroup(&Dump);
+            CHAR Expected[128];
+
+            ok(!strcmp(Dump.User, "S-1-5-18"), "system restricted: user %s\n", Dump.User);
+            ok(g >= 0, "system restricted: no service SID\n");
+            if (g >= 0 && ServiceSidString(Name, Expected, sizeof(Expected)))
+            {
+                ok(!_stricmp(Dump.Groups[g], Expected), "system restricted: service SID %s, expected %s\n", Dump.Groups[g], Expected);
+                ok(Dump.GroupAttrs[g] == (SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_OWNER),
+                   "system restricted: service SID attributes 0x%lx, expected 0xe\n", Dump.GroupAttrs[g]);
+            }
+            CheckRestrictedToken(Name, &Dump, FALSE);
+            ok(Dump.PrivCount == System.PrivCount, "system restricted: %lu privileges, without a service SID %lu\n",
+               Dump.PrivCount, System.PrivCount);
+            if (Acls)
+                CheckWrites(Name, &Dump, TRUE, TRUE);
+        }
+        if (Acls)
+            RemoveWriteTargets(Name);
     }
 
     /* 10. NT SERVICE\<name> names and SIDs of an existing service */

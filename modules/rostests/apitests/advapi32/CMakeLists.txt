@@ -104,6 +104,7 @@ list(APPEND SOURCE
     TokenElevation.c
     TokenIntegrity.c
     TokenLogonSid.c
+    WriteRestrictedToken.c
     TokenQueryParity.c
     ServiceAccessCheck.c
     ServiceArgs.c

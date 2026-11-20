@@ -151,6 +151,66 @@ SepDaclHasOwnerRightsAce(
 
 /**
  * @brief
+ * Tells which restricting SIDs pass a token needs for an access check, and for
+ * which rights.
+ *
+ * A token with restricting SIDs gets, for every right, only what both the
+ * normal and the restricting SIDs are granted. A write restricted token (see
+ * SEP_TOKEN_WRITE_RESTRICTED) compares the restricting SIDs only for write
+ * access, also when it has none (then no write access is granted). Measured on
+ * Windows Server 2022 with files, directories, registry keys and events, and
+ * with generic mappings of their own, for tokens from
+ * CreateRestrictedToken(WRITE_RESTRICTED): the restricting SIDs have to grant
+ * the rights of GenericMapping->GenericWrite that GenericRead and GenericExecute
+ * do not hold (so READ_CONTROL and SYNCHRONIZE of a file, a key or an event are
+ * not compared, a right that the write and the read mapping share is not, and
+ * READ_CONTROL or SYNCHRONIZE that only the write mapping holds is), and DELETE,
+ * WRITE_DAC and WRITE_OWNER always; every other right (the file rights
+ * FILE_DELETE_CHILD, FILE_EXECUTE, the key rights KEY_NOTIFY and KEY_CREATE_LINK)
+ * stays with the normal pass.
+ *
+ * @param[in] Token
+ * The token the access check is for.
+ *
+ * @param[in] GenericMapping
+ * The generic mapping of the object.
+ *
+ * @param[out] RestrictedMask
+ * The rights the restricting SIDs have to grant: all of them for a restricted
+ * token, the write rights for a write restricted one, none for another token.
+ *
+ * @return
+ * TRUE if the restricting SIDs pass has to be done for some right.
+ */
+static
+BOOLEAN
+SepGetRestrictedAccessMask(
+    _In_ PACCESS_TOKEN Token,
+    _In_ PGENERIC_MAPPING GenericMapping,
+    _Out_ PACCESS_MASK RestrictedMask)
+{
+    PAGED_CODE();
+
+    if (((PTOKEN)Token)->TokenFlags & SEP_TOKEN_WRITE_RESTRICTED)
+    {
+        *RestrictedMask = (GenericMapping->GenericWrite &
+                           ~(GenericMapping->GenericRead | GenericMapping->GenericExecute)) |
+                          DELETE | WRITE_DAC | WRITE_OWNER;
+        return TRUE;
+    }
+
+    if (SeTokenIsRestricted(Token))
+    {
+        *RestrictedMask = 0xFFFFFFFF;
+        return TRUE;
+    }
+
+    *RestrictedMask = 0;
+    return FALSE;
+}
+
+/**
+ * @brief
  * Checks if the token gets the implicit owner rights (READ_CONTROL and
  * WRITE_DAC) on an object: it is the owner, and the DACL of the object
  * has no OWNER RIGHTS ACE that applies to the object.
@@ -491,6 +551,7 @@ SepAccessCheckObjectTypeList(
     _In_ ULONG ObjectTypeListLength)
 {
     PACCESS_MASK NormalGranted;
+    ACCESS_MASK RestrictedMask;
     ULONG Index;
 
     PAGED_CODE();
@@ -509,7 +570,7 @@ SepAccessCheckObjectTypeList(
                                     ObjectTypeList,
                                     ObjectTypeListLength);
 
-    if (!SeTokenIsRestricted(AccessToken))
+    if (!SepGetRestrictedAccessMask(AccessToken, GenericMapping, &RestrictedMask))
         return STATUS_SUCCESS;
 
     /* The length was bounded when the list was captured */
@@ -534,10 +595,16 @@ SepAccessCheckObjectTypeList(
                                     ObjectTypeList,
                                     ObjectTypeListLength);
 
-    /* Only what both the normal and the restricting SIDs are granted */
+    /*
+     * Only what both the normal and the restricting SIDs are granted; of the
+     * rights the restricting SIDs are not compared for (a write restricted
+     * token), what the normal SIDs are granted.
+     */
     for (Index = 0; Index < ObjectTypeListLength; Index++)
     {
-        ObjectTypeList[Index].ObjectAccessRights.GrantedAccessRights &= NormalGranted[Index];
+        ObjectTypeList[Index].ObjectAccessRights.GrantedAccessRights =
+            NormalGranted[Index] &
+            (ObjectTypeList[Index].ObjectAccessRights.GrantedAccessRights | ~RestrictedMask);
     }
 
     ExFreePoolWithTag(NormalGranted, TAG_SE);
@@ -856,6 +923,7 @@ SepAccessCheckWorker(
     NTSTATUS Status;
     PACCESS_TOKEN Token = NULL;
     ACCESS_CHECK_RIGHTS AccessCheckRights = {0};
+    ACCESS_MASK RestrictedMask;
     BOOLEAN ResultListFilled = FALSE;
 
     PAGED_CODE();
@@ -1163,7 +1231,7 @@ SepAccessCheckWorker(
          * union, e.g. the rights of an allow ACE for a SID that is not
          * in the restricting list (Windows 10 grants nothing there).
          */
-        if (SeTokenIsRestricted(Token))
+        if (SepGetRestrictedAccessMask(Token, GenericMapping, &RestrictedMask))
         {
             ACCESS_CHECK_RIGHTS RestrictedRights = {0};
 
@@ -1178,7 +1246,8 @@ SepAccessCheckWorker(
                                    GenericMapping,
                                    &RestrictedRights);
 
-            AccessCheckRights.GrantedAccessRights &= RestrictedRights.GrantedAccessRights;
+            /* A write restricted token keeps what the normal SIDs grant of the rights that are not write rights */
+            AccessCheckRights.GrantedAccessRights &= (RestrictedRights.GrantedAccessRights | ~RestrictedMask);
         }
 
         /* Fail if some rights have not been granted */
@@ -1232,10 +1301,11 @@ SepAccessCheckWorker(
      * Perform further access checks if this token
      * has restricted SIDs.
      */
-    if (SeTokenIsRestricted(Token))
+    if (SepGetRestrictedAccessMask(Token, GenericMapping, &RestrictedMask) &&
+        (RemainingAccess & RestrictedMask) != 0)
     {
         SepAnalyzeAcesFromDacl(AccessCheckRegular,
-                               RemainingAccess,
+                               RemainingAccess & RestrictedMask,
                                Dacl,
                                Token,
                                PrimaryAccessToken,

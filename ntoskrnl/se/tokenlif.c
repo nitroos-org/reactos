@@ -812,9 +812,12 @@ Quit:
     return Status;
 }
 
-/* The headers declare the flag for NT 6 and newer only; NtFilterToken takes it whatever this kernel is built for */
+/* The headers declare the flags for NT 6 and newer only; NtFilterToken takes them whatever this kernel is built for */
 #ifndef LUA_TOKEN
 #define LUA_TOKEN 0x4
+#endif
+#ifndef WRITE_RESTRICTED
+#define WRITE_RESTRICTED 0x8
 #endif
 
 /**
@@ -1001,6 +1004,19 @@ SepPerformTokenFiltering(
     ASSERT(Token);
     SepAcquireTokenLockShared(Token);
 
+    /*
+     * A restricted token can only be narrowed (measured on Windows Server 2022, CreateRestrictedToken, also for a
+     * write restricted source): WRITE_RESTRICTED is refused, so is a call without a list of restricting SIDs when the
+     * token has some, and the new token has the SIDs the list and the token have in common (the list is not
+     * allowed to take the place of the token's own, that would loosen it); see the intersection below.
+     */
+    if (((PrivilegeFlags & WRITE_RESTRICTED) && (Token->TokenFlags & TOKEN_IS_RESTRICTED)) ||
+        (RestrictedSidsIntoToken == NULL && Token->RestrictedSidCount != 0))
+    {
+        SepReleaseTokenLock(Token);
+        return STATUS_INVALID_PARAMETER;
+    }
+
     /* Assume the caller doesn't want privileges disabled */
     WantPrivilegesDisabled = FALSE;
 
@@ -1100,7 +1116,13 @@ SepPerformTokenFiltering(
 
     /* Copy the mutable fields */
     AccessToken->SessionId = Token->SessionId;
-    AccessToken->TokenFlags = Token->TokenFlags & ~TOKEN_SESSION_NOT_REFERENCED;
+
+    /*
+     * A filtered token is not write restricted because its source was (measured on Windows Server 2022: filtering
+     * a write restricted token gives a restricted one, which is the stricter, the reads as well); only the
+     * WRITE_RESTRICTED flag of this call makes one. TOKEN_IS_RESTRICTED stays, as on Windows.
+     */
+    AccessToken->TokenFlags = Token->TokenFlags & ~(TOKEN_SESSION_NOT_REFERENCED | SEP_TOKEN_WRITE_RESTRICTED);
 
     /* Every token NtFilterToken makes is a filtered one, restricting SIDs or not (TokenHasRestrictions reports it) */
     AccessToken->TokenFlags |= TOKEN_IS_FILTERED;
@@ -1241,37 +1263,76 @@ SepPerformTokenFiltering(
             }
         }
 
-        /*
-         * Ensure that the token can hold the restricted SIDs
-         * (the variable length is calculated at the beginning
-         * of the routine call).
-         */
-        ASSERT(VariableLength >= RestrictedSidsLength);
-
-        /*
-         * Now let's begin inserting the restricted SIDs into the filtered
-         * access token from the list the caller gave us.
-         */
-        AccessToken->RestrictedSidCount = RestrictedSidsCount;
-        AccessToken->RestrictedSids = EndMem;
-        EndMem = (PVOID)((ULONG_PTR)EndMem + RestrictedSidsLength);
-        VariableLength -= RestrictedSidsLength;
-
-        /*
-         * Copy the SIDs themselves, not only the array: the caller's list
-         * (NtFilterToken's captured copy) is freed when the call returns.
-         */
-        Status = RtlCopySidAndAttributesArray(RestrictedSidsCount,
-                                              RestrictedSidsIntoToken,
-                                              RestrictedSidsLength - RestrictedSidsCount * sizeof(SID_AND_ATTRIBUTES),
-                                              AccessToken->RestrictedSids,
-                                              &AccessToken->RestrictedSids[RestrictedSidsCount],
-                                              &RestrictedSidsEnd,
-                                              &RestrictedSidsRemaining);
-        if (!NT_SUCCESS(Status))
+        if (Token->RestrictedSidCount != 0)
         {
-            DPRINT1("SepPerformTokenFiltering(): Failed to copy the requested restricted SIDs (Status 0x%lx)\n", Status);
-            goto Quit;
+            /*
+             * The token has restricting SIDs (copied above): the new one keeps those of them that
+             * are in the list, in the order of the list; none in common is an error (measured on
+             * Windows Server 2022). Only the entries of the array move, the SIDs stay where they are.
+             */
+            RestrictedSidsInToken = 0;
+            for (RestrictedSidsInList = 0; RestrictedSidsInList < RestrictedSidsCount; RestrictedSidsInList++)
+            {
+                ULONG Candidate;
+
+                for (Candidate = RestrictedSidsInToken; Candidate < AccessToken->RestrictedSidCount; Candidate++)
+                {
+                    if (RtlEqualSid(AccessToken->RestrictedSids[Candidate].Sid,
+                                    RestrictedSidsIntoToken[RestrictedSidsInList].Sid))
+                    {
+                        SID_AND_ATTRIBUTES Kept = AccessToken->RestrictedSids[Candidate];
+
+                        AccessToken->RestrictedSids[Candidate] = AccessToken->RestrictedSids[RestrictedSidsInToken];
+                        AccessToken->RestrictedSids[RestrictedSidsInToken] = Kept;
+                        RestrictedSidsInToken++;
+                        break;
+                    }
+                }
+            }
+
+            if (RestrictedSidsInToken == 0)
+            {
+                DPRINT1("SepPerformTokenFiltering(): No restricting SID of the list is in the token!\n");
+                Status = STATUS_INVALID_PARAMETER;
+                goto Quit;
+            }
+
+            AccessToken->RestrictedSidCount = RestrictedSidsInToken;
+        }
+        else
+        {
+            /*
+             * Ensure that the token can hold the restricted SIDs
+             * (the variable length is calculated at the beginning
+             * of the routine call).
+             */
+            ASSERT(VariableLength >= RestrictedSidsLength);
+
+            /*
+             * Now let's begin inserting the restricted SIDs into the filtered
+             * access token from the list the caller gave us.
+             */
+            AccessToken->RestrictedSidCount = RestrictedSidsCount;
+            AccessToken->RestrictedSids = EndMem;
+            EndMem = (PVOID)((ULONG_PTR)EndMem + RestrictedSidsLength);
+            VariableLength -= RestrictedSidsLength;
+
+            /*
+             * Copy the SIDs themselves, not only the array: the caller's list
+             * (NtFilterToken's captured copy) is freed when the call returns.
+             */
+            Status = RtlCopySidAndAttributesArray(RestrictedSidsCount,
+                                                  RestrictedSidsIntoToken,
+                                                  RestrictedSidsLength - RestrictedSidsCount * sizeof(SID_AND_ATTRIBUTES),
+                                                  AccessToken->RestrictedSids,
+                                                  &AccessToken->RestrictedSids[RestrictedSidsCount],
+                                                  &RestrictedSidsEnd,
+                                                  &RestrictedSidsRemaining);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("SepPerformTokenFiltering(): Failed to copy the requested restricted SIDs (Status 0x%lx)\n", Status);
+                goto Quit;
+            }
         }
 
         /*
@@ -1361,6 +1422,17 @@ SepPerformTokenFiltering(
     {
         /* The caller wants an inert token, store the TOKEN_SANDBOX_INERT flag now */
         AccessToken->TokenFlags |= TOKEN_SANDBOX_INERT;
+    }
+
+    /*
+     * The restricting SIDs of the new token are compared for write access only. As on Windows the token is
+     * a restricted one also when it has no restricting SIDs (TokenIsRestricted, TOKEN_ACCESS_INFORMATION): what
+     * a write restricted token without SIDs is refused is every write right. A restricted source never gets
+     * here (refused above).
+     */
+    if (PrivilegeFlags & WRITE_RESTRICTED)
+    {
+        AccessToken->TokenFlags |= (SEP_TOKEN_WRITE_RESTRICTED | TOKEN_IS_RESTRICTED);
     }
 
     /*
