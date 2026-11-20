@@ -2320,6 +2320,93 @@ static WCHAR *get_install_location( MSIPACKAGE *package )
     return path;
 }
 
+#ifdef __REACTOS__
+/*
+ * A product that is installed keeps its components where they were installed: the key path registered
+ * for a component (UserData\<SID>\Components) names the directory the component lives in, whatever
+ * TARGETDIR or another directory property was given when it was installed. Costing a later run of the
+ * same product (a removal, a repair) from the properties of that run alone looked in the default place
+ * (TARGETDIR = ROOTDRIVE) and left every file of a package that was installed with TARGETDIR behind.
+ * For every component of this product that has a registered file or folder path, the directory of the
+ * component and, as far as the directory names of the Directory table match the registered path, its
+ * parents up to TARGETDIR are taken from that path. A directory that a component already settled keeps
+ * that value. Administrative images and products that are not registered are not touched.
+ */
+static BOOL derived_dir_seen( WCHAR **seen, UINT count, const WCHAR *dir )
+{
+    UINT i;
+
+    for (i = 0; i < count; i++) if (!wcscmp( seen[i], dir )) return TRUE;
+    return FALSE;
+}
+
+static void set_installed_component_dirs( MSIPACKAGE *package )
+{
+    MSICOMPONENT *comp;
+    WCHAR **seen = NULL;
+    UINT count = 0, size = 0;
+
+    if (!package->ProductCode || is_admin_install( package )) return;
+
+    LIST_FOR_EACH_ENTRY( comp, &package->components, MSICOMPONENT, entry )
+    {
+        WCHAR buf[MAX_PATH], *path, *end;
+        DWORD len = ARRAY_SIZE(buf);
+        INSTALLSTATE state;
+        MSIFOLDER *folder;
+
+        if (!comp->ComponentId || !comp->Directory) continue;
+        if (comp->Attributes & msidbComponentAttributesRegistryKeyPath) continue;
+        state = MsiGetComponentPathW( package->ProductCode, comp->ComponentId, buf, &len );
+        if (state != INSTALLSTATE_LOCAL && state != INSTALLSTATE_ABSENT) continue;
+        /* a file path has a drive or a UNC prefix; registry key paths and empty paths do not */
+        if (!((buf[0] && buf[1] == ':' && buf[2] == '\\') || (buf[0] == '\\' && buf[1] == '\\'))) continue;
+
+        /* the registered path is the key file, or the folder itself when the component has no key path */
+        if (comp->KeyPath && (end = wcsrchr( buf, '\\' ))) end[1] = 0;
+        if (!(path = msi_normalize_path( buf ))) continue;
+
+        folder = msi_get_loaded_folder( package, comp->Directory );
+        while (folder && !derived_dir_seen( seen, count, folder->Directory ))
+        {
+            WCHAR *parent_path = NULL;
+            MSIFOLDER *parent = NULL;
+            UINT len_path = wcslen( path ), len_name = wcslen( folder->TargetDefault );
+
+            if (count == size)
+            {
+                WCHAR **tmp = realloc( seen, (size ? size * 2 : 8) * sizeof(*seen) );
+                if (!tmp) break;
+                seen = tmp;
+                size = size ? size * 2 : 8;
+            }
+            if (!(seen[count] = wcsdup( folder->Directory ))) break;
+            count++;
+            msi_set_property( package->db, folder->Directory, path, -1 );
+
+            if (!folder->Parent || !wcscmp( folder->Directory, folder->Parent )) break;
+            if (!(parent = msi_get_loaded_folder( package, folder->Parent ))) break;
+            if (!len_name)
+                parent_path = wcsdup( path );
+            else if (len_path > len_name + 1 && path[len_path - 1] == '\\' &&
+                     !wcsnicmp( path + len_path - 1 - len_name, folder->TargetDefault, len_name ) &&
+                     path[len_path - 2 - len_name] == '\\')
+            {
+                parent_path = wcsdup( path );
+                if (parent_path) parent_path[len_path - len_name - 1] = 0;
+            }
+            free( path );
+            path = parent_path;
+            if (!path) break;
+            folder = parent;
+        }
+        free( path );
+    }
+    while (count) free( seen[--count] );
+    free( seen );
+}
+#endif
+
 void msi_resolve_target_folder( MSIPACKAGE *package, const WCHAR *name, BOOL load_prop )
 {
     FolderList *fl;
@@ -2391,6 +2478,9 @@ static UINT ACTION_CostFinalize(MSIPACKAGE *package)
     UINT rc;
 
     TRACE("Building directory properties\n");
+#ifdef __REACTOS__
+    set_installed_component_dirs( package );
+#endif
     msi_resolve_target_folder( package, L"TARGETDIR", TRUE );
 
     TRACE("Evaluating component conditions\n");
