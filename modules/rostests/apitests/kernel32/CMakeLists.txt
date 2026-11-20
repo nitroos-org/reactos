@@ -236,6 +236,7 @@ list(APPEND SOURCE
     SetWaitableTimerEx.c
     SleepNeverEarly.c
     SystemFirmware.c
+    PhysicallyInstalledMemory.c
     Toolhelp32.c
     TerminateProcess.c
     ThreadContextNpx.c

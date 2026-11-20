@@ -198,6 +198,7 @@ extern void func_PartialContext(void);
 extern void func_Placeholder(void);
 extern void func_PageTargetsFlag(void);
 extern void func_PerformanceCounter(void);
+extern void func_PhysicallyInstalledMemory(void);
 extern void func_Pipes(void);
 extern void func_PipeSqos(void);
 extern void func_PreferredUILanguages(void);
@@ -481,6 +482,7 @@ const struct test winetest_testlist[] =
     { "Placeholder",                func_Placeholder },
     { "PageTargetsFlag",            func_PageTargetsFlag },
     { "PerformanceCounter",          func_PerformanceCounter },
+    { "PhysicallyInstalledMemory",  func_PhysicallyInstalledMemory },
     { "Pipes",                       func_Pipes },
     { "PipeSqos",                    func_PipeSqos },
     { "PreferredUILanguages",        func_PreferredUILanguages },
