@@ -21,6 +21,7 @@
 #include <ntsecapi.h>
 #include <svcsid.h>
 #include <ndk/iofuncs.h>
+#include <ndk/sefuncs.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -455,9 +456,17 @@ LogonUserExExW(
  * - RequiredPrivileges: every privilege of the account that is not listed is removed from the token,
  *   except SeChangeNotifyPrivilege; the listed ones keep their attributes. A listed privilege the
  *   account does not hold: the start fails with ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE.
- * A service that sets neither gets the token it got before. Applied to own-process services of
- * accounts the SCM logs on (not LocalSystem: its processes use the SCM's own token; not shared
- * processes: Windows merges the settings of all services of the process, not done here).
+ * - SID type RESTRICTED: the token also has the group NT AUTHORITY\WRITE RESTRICTED (S-1-5-33, attributes
+ *   0x7), and the process runs with a write restricted copy of it: IsTokenRestricted = 1, the restricting
+ *   SIDs the service SID, Everyone, the logon session SID and WRITE RESTRICTED (attributes 0x7). Writes
+ *   to an object need an ACE for one of them as well, reads are not restricted (ScmMakeRestrictedToken).
+ * - LocalSystem (own-process): with SID type UNRESTRICTED or RESTRICTED the token has the service SID too
+ *   (SID type NONE: the token the SCM itself has), and the same restricting SIDs for RESTRICTED (the
+ *   restricting logon session SID is that of the SCM's own token, the SYSTEM logon session here;
+ *   ScmCreateSystemServiceToken).
+ * A service that sets neither gets the token it got before. Applied to own-process services (not shared
+ * processes: Windows merges the settings of all services of the process, not done here). The privilege
+ * list is not applied to LocalSystem services (not measured).
  */
 typedef struct _SCM_TOKEN_CONFIG
 {
@@ -482,6 +491,7 @@ static
 DWORD
 ScmReadTokenConfig(
     _In_ PSERVICE pService,
+    _In_ BOOL bSidOnly,
     _Out_ PSCM_TOKEN_CONFIG pConfig)
 {
     SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
@@ -503,6 +513,9 @@ ScmReadTokenConfig(
     {
         pConfig->dwSidType = dwValue;
     }
+
+    if (bSidOnly)
+        goto sid;
 
     dwSize = 0;
     dwType = REG_NONE;
@@ -534,6 +547,7 @@ ScmReadTokenConfig(
         }
     }
 
+sid:
     RegCloseKey(hServiceKey);
 
     if (pConfig->dwSidType != SERVICE_SID_TYPE_NONE)
@@ -557,17 +571,276 @@ ScmReadTokenConfig(
         *RtlSubAuthoritySid(pConfig->pServiceSid, 0) = SECURITY_SERVICE_ID_BASE_RID;
         for (i = 0; i < 5; i++)
             *RtlSubAuthoritySid(pConfig->pServiceSid, i + 1) = SubAuthorities[i];
-
-        if (pConfig->dwSidType == SERVICE_SID_TYPE_RESTRICTED)
-        {
-            /* Windows makes the token write-restricted (restricted SIDs: the service SID, Everyone, the logon
-             * SID, WRITE RESTRICTED). The kernel has no write-restricted tokens yet: the service gets the
-             * service SID as for UNRESTRICTED and keeps write access its account has. */
-            DPRINT1("Service %S: SERVICE_SID_TYPE_RESTRICTED is applied as UNRESTRICTED\n", pService->lpServiceName);
-        }
     }
 
     return ERROR_SUCCESS;
+}
+
+
+#ifndef WRITE_RESTRICTED
+#define WRITE_RESTRICTED 0x8
+#endif
+#define SCM_GROUP_ENABLED_ALL (SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED)
+
+/* The SID NT AUTHORITY\WRITE RESTRICTED (S-1-5-33), in a buffer of SECURITY_MAX_SID_SIZE bytes */
+static
+VOID
+ScmInitWriteRestrictedSid(
+    _Out_ PSID pSid)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+
+    RtlInitializeSid(pSid, &NtAuthority, 1);
+    *RtlSubAuthoritySid(pSid, 0) = SECURITY_WRITE_RESTRICTED_CODE_RID;
+}
+
+/* Reads one class of token information into a heap block the caller frees */
+static
+PVOID
+ScmQueryTokenAlloc(
+    _In_ HANDLE hToken,
+    _In_ TOKEN_INFORMATION_CLASS InformationClass)
+{
+    PVOID pBuffer;
+    DWORD dwSize = 0;
+
+    GetTokenInformation(hToken, InformationClass, NULL, 0, &dwSize);
+    if (dwSize == 0)
+        return NULL;
+
+    pBuffer = HeapAlloc(GetProcessHeap(), 0, dwSize);
+    if (pBuffer == NULL)
+        return NULL;
+
+    if (!GetTokenInformation(hToken, InformationClass, pBuffer, dwSize, &dwSize))
+    {
+        HeapFree(GetProcessHeap(), 0, pBuffer);
+        return NULL;
+    }
+
+    return pBuffer;
+}
+
+/*
+ * The write restricted token of a service with ServiceSidType RESTRICTED. Measured on Windows Server 2022
+ * (LocalService, NetworkService and LocalSystem own-process services): IsTokenRestricted = 1 and the restricting
+ * SIDs, in this order, the service SID, Everyone, the logon session SID and WRITE RESTRICTED, all with the
+ * attributes 0x7. The logon session SID is the one of the token's logon group; a token without such a group
+ * (the SYSTEM token of the SCM) uses the SID of its logon session, S-1-5-5-<high>-<low>.
+ */
+static
+DWORD
+ScmMakeRestrictedToken(
+    _In_ HANDLE hToken,
+    _In_ PSID pServiceSid,
+    _Out_ PHANDLE phRestrictedToken)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
+    ULONG WorldSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    ULONG LogonSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    ULONG WriteRestrictedSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    PSID pWorldSid = (PSID)WorldSidBuffer, pLogonSid = NULL, pWriteRestrictedSid = (PSID)WriteRestrictedSidBuffer;
+    SID_AND_ATTRIBUTES Restricting[4];
+    PTOKEN_GROUPS pGroups;
+    TOKEN_STATISTICS Statistics;
+    DWORD dwSize, dwError = ERROR_SUCCESS, i;
+
+    *phRestrictedToken = NULL;
+
+    RtlInitializeSid(pWorldSid, &WorldAuthority, 1);
+    *RtlSubAuthoritySid(pWorldSid, 0) = SECURITY_WORLD_RID;
+    ScmInitWriteRestrictedSid(pWriteRestrictedSid);
+
+    pGroups = ScmQueryTokenAlloc(hToken, TokenGroups);
+    if (pGroups == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    for (i = 0; i < pGroups->GroupCount; i++)
+    {
+        if ((pGroups->Groups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
+        {
+            pLogonSid = pGroups->Groups[i].Sid;
+            break;
+        }
+    }
+
+    if (pLogonSid == NULL)
+    {
+        if (!GetTokenInformation(hToken, TokenStatistics, &Statistics, sizeof(Statistics), &dwSize))
+        {
+            dwError = GetLastError();
+            goto done;
+        }
+
+        pLogonSid = (PSID)LogonSidBuffer;
+        RtlInitializeSid(pLogonSid, &NtAuthority, 3);
+        *RtlSubAuthoritySid(pLogonSid, 0) = SECURITY_LOGON_IDS_RID;
+        *RtlSubAuthoritySid(pLogonSid, 1) = Statistics.AuthenticationId.HighPart;
+        *RtlSubAuthoritySid(pLogonSid, 2) = Statistics.AuthenticationId.LowPart;
+    }
+
+    /* The kernel gives the restricting SIDs their attributes (0x7); it refuses a list that has some */
+    Restricting[0].Sid = pServiceSid;
+    Restricting[1].Sid = pWorldSid;
+    Restricting[2].Sid = pLogonSid;
+    Restricting[3].Sid = pWriteRestrictedSid;
+    for (i = 0; i < 4; i++)
+        Restricting[i].Attributes = 0;
+
+    if (!CreateRestrictedToken(hToken, WRITE_RESTRICTED, 0, NULL, 0, NULL, 4, Restricting, phRestrictedToken))
+    {
+        dwError = GetLastError();
+        *phRestrictedToken = NULL;
+    }
+
+done:
+    HeapFree(GetProcessHeap(), 0, pGroups);
+    return dwError;
+}
+
+/*
+ * The token of a LocalSystem own-process service that has a service SID: a copy of the SCM's own token (it runs as
+ * SYSTEM: same user, groups, privileges, owner, default DACL and logon session) with the group NT SERVICE\<name>
+ * (attributes 0xe) and, for ServiceSidType RESTRICTED, the group WRITE RESTRICTED (attributes 0x7). Measured on
+ * Windows Server 2022: both groups are in the token of such a service, which is made with its own logon there; this
+ * token stays in the logon session of the SCM. Needs SeCreateTokenPrivilege, which the SYSTEM token has (disabled): it
+ * is enabled on a copy of the SCM's token that this thread impersonates while the token is made.
+ */
+static
+DWORD
+ScmCreateSystemServiceToken(
+    _In_ PSID pServiceSid,
+    _In_ BOOL bRestricted,
+    _Out_ PHANDLE phToken)
+{
+    ULONG WriteRestrictedSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    HANDLE hSelf = NULL, hImpersonation = NULL;
+    PTOKEN_USER pUser = NULL;
+    PTOKEN_GROUPS pGroups = NULL, pNewGroups = NULL;
+    PTOKEN_PRIVILEGES pPrivileges = NULL;
+    PTOKEN_OWNER pOwner = NULL;
+    PTOKEN_PRIMARY_GROUP pPrimaryGroup = NULL;
+    PTOKEN_DEFAULT_DACL pDefaultDacl = NULL;
+    PTOKEN_SOURCE pSource = NULL;
+    PTOKEN_STATISTICS pStatistics = NULL;
+    TOKEN_PRIVILEGES CreateToken;
+    SECURITY_QUALITY_OF_SERVICE Qos;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    DWORD dwError = ERROR_SUCCESS, dwExtra = bRestricted ? 2 : 1, i;
+    BOOL bImpersonating = FALSE;
+    NTSTATUS Status;
+
+    *phToken = NULL;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_QUERY_SOURCE | TOKEN_DUPLICATE, &hSelf))
+        return GetLastError();
+
+    pUser = ScmQueryTokenAlloc(hSelf, TokenUser);
+    pGroups = ScmQueryTokenAlloc(hSelf, TokenGroups);
+    pPrivileges = ScmQueryTokenAlloc(hSelf, TokenPrivileges);
+    pOwner = ScmQueryTokenAlloc(hSelf, TokenOwner);
+    pPrimaryGroup = ScmQueryTokenAlloc(hSelf, TokenPrimaryGroup);
+    pDefaultDacl = ScmQueryTokenAlloc(hSelf, TokenDefaultDacl);
+    pSource = ScmQueryTokenAlloc(hSelf, TokenSource);
+    pStatistics = ScmQueryTokenAlloc(hSelf, TokenStatistics);
+    if (pUser == NULL || pGroups == NULL || pPrivileges == NULL || pOwner == NULL ||
+        pPrimaryGroup == NULL || pDefaultDacl == NULL || pSource == NULL || pStatistics == NULL)
+    {
+        dwError = ERROR_NOT_ENOUGH_MEMORY;
+        goto done;
+    }
+
+    pNewGroups = HeapAlloc(GetProcessHeap(), 0, FIELD_OFFSET(TOKEN_GROUPS, Groups[pGroups->GroupCount + dwExtra]));
+    if (pNewGroups == NULL)
+    {
+        dwError = ERROR_NOT_ENOUGH_MEMORY;
+        goto done;
+    }
+    pNewGroups->GroupCount = pGroups->GroupCount;
+    for (i = 0; i < pGroups->GroupCount; i++)
+        pNewGroups->Groups[i] = pGroups->Groups[i];
+
+    pNewGroups->Groups[pNewGroups->GroupCount].Sid = pServiceSid;
+    pNewGroups->Groups[pNewGroups->GroupCount].Attributes = SCM_GROUP_ENABLED_ALL & ~SE_GROUP_MANDATORY;
+    pNewGroups->Groups[pNewGroups->GroupCount].Attributes |= SE_GROUP_OWNER;
+    pNewGroups->GroupCount++;
+    if (bRestricted)
+    {
+        ScmInitWriteRestrictedSid((PSID)WriteRestrictedSidBuffer);
+        pNewGroups->Groups[pNewGroups->GroupCount].Sid = (PSID)WriteRestrictedSidBuffer;
+        pNewGroups->Groups[pNewGroups->GroupCount].Attributes = SCM_GROUP_ENABLED_ALL;
+        pNewGroups->GroupCount++;
+    }
+
+    /* SeCreateTokenPrivilege, on an impersonation copy of the token of the controller */
+    if (!DuplicateTokenEx(hSelf, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenImpersonation, &hImpersonation))
+    {
+        dwError = GetLastError();
+        goto done;
+    }
+    CreateToken.PrivilegeCount = 1;
+    CreateToken.Privileges[0].Luid.LowPart = SE_CREATE_TOKEN_PRIVILEGE;
+    CreateToken.Privileges[0].Luid.HighPart = 0;
+    CreateToken.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    if (!AdjustTokenPrivileges(hImpersonation, FALSE, &CreateToken, 0, NULL, NULL) ||
+        GetLastError() != ERROR_SUCCESS)
+    {
+        dwError = GetLastError();
+        if (dwError == ERROR_SUCCESS)
+            dwError = ERROR_PRIVILEGE_NOT_HELD;
+        goto done;
+    }
+    if (!SetThreadToken(NULL, hImpersonation))
+    {
+        dwError = GetLastError();
+        goto done;
+    }
+    bImpersonating = TRUE;
+
+    /* the kernel reads the quality of service of the attributes, also for a primary token */
+    Qos.Length = sizeof(Qos);
+    Qos.ImpersonationLevel = SecurityAnonymous;
+    Qos.ContextTrackingMode = SECURITY_STATIC_TRACKING;
+    Qos.EffectiveOnly = FALSE;
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    ObjectAttributes.SecurityQualityOfService = &Qos;
+    Status = NtCreateToken(phToken,
+                           TOKEN_ALL_ACCESS,
+                           &ObjectAttributes,
+                           TokenPrimary,
+                           &pStatistics->AuthenticationId,
+                           &pStatistics->ExpirationTime,
+                           pUser,
+                           pNewGroups,
+                           pPrivileges,
+                           pOwner,
+                           pPrimaryGroup,
+                           pDefaultDacl,
+                           pSource);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("NtCreateToken() failed (Status 0x%08lx)\n", Status);
+        *phToken = NULL;
+        dwError = RtlNtStatusToDosError(Status);
+    }
+
+done:
+    if (bImpersonating)
+        SetThreadToken(NULL, NULL);
+    if (hImpersonation != NULL)
+        CloseHandle(hImpersonation);
+    if (hSelf != NULL)
+        CloseHandle(hSelf);
+    HeapFree(GetProcessHeap(), 0, pUser);
+    HeapFree(GetProcessHeap(), 0, pGroups);
+    HeapFree(GetProcessHeap(), 0, pNewGroups);
+    HeapFree(GetProcessHeap(), 0, pPrivileges);
+    HeapFree(GetProcessHeap(), 0, pOwner);
+    HeapFree(GetProcessHeap(), 0, pPrimaryGroup);
+    HeapFree(GetProcessHeap(), 0, pDefaultDacl);
+    HeapFree(GetProcessHeap(), 0, pSource);
+    HeapFree(GetProcessHeap(), 0, pStatistics);
+    return dwError;
 }
 
 static
@@ -825,6 +1098,55 @@ done:
     return dwError;
 }
 
+/*
+ * A LocalSystem own-process service whose ServiceSidType is not NONE runs with a token that has its service SID
+ * (see SCM_TOKEN_CONFIG). Its image has no logon token (hToken stays NULL, the controller's account is used for the
+ * environment and the failure actions); hProcessToken is the token of its process.
+ */
+static
+DWORD
+ScmLogonLocalSystemService(
+    IN PSERVICE pService,
+    IN PSERVICE_IMAGE pImage)
+{
+    SCM_TOKEN_CONFIG TokenConfig;
+    HANDLE hToken = NULL;
+    DWORD dwError;
+
+    dwError = ScmReadTokenConfig(pService, TRUE, &TokenConfig);
+    if (dwError != ERROR_SUCCESS)
+    {
+        DPRINT1("ScmReadTokenConfig() failed (Error %lu)\n", dwError);
+        return dwError;
+    }
+
+    if (TokenConfig.pServiceSid != NULL)
+    {
+        dwError = ScmCreateSystemServiceToken(TokenConfig.pServiceSid,
+                                              TokenConfig.dwSidType == SERVICE_SID_TYPE_RESTRICTED,
+                                              &hToken);
+        if (dwError != ERROR_SUCCESS)
+        {
+            DPRINT1("ScmCreateSystemServiceToken() failed (Error %lu)\n", dwError);
+        }
+        else if (TokenConfig.dwSidType == SERVICE_SID_TYPE_RESTRICTED)
+        {
+            dwError = ScmMakeRestrictedToken(hToken, TokenConfig.pServiceSid, &pImage->hProcessToken);
+            CloseHandle(hToken);
+            if (dwError != ERROR_SUCCESS)
+                DPRINT1("ScmMakeRestrictedToken() failed (Error %lu)\n", dwError);
+        }
+        else
+        {
+            pImage->hProcessToken = hToken;
+        }
+    }
+
+    ScmFreeTokenConfig(&TokenConfig);
+    return dwError;
+}
+
+
 static
 DWORD
 ScmLogonService(
@@ -838,19 +1160,27 @@ ScmLogonService(
     PWSTR ptr;
     DWORD dwError = ERROR_SUCCESS;
     SCM_TOKEN_CONFIG TokenConfig;
-    TOKEN_GROUPS ServiceGroups;
+    struct
+    {
+        DWORD GroupCount;
+        SID_AND_ATTRIBUTES Groups[2];
+    } ServiceGroups;
+    ULONG WriteRestrictedSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
 
     DPRINT("ScmLogonService(%p %p)\n", pService, pImage);
     DPRINT("Service %S\n", pService->lpServiceName);
 
-    if (ScmIsLocalSystemAccount(pImage->pszAccountName) || ScmLiveSetup || ScmSetupInProgress)
+    if (ScmLiveSetup || ScmSetupInProgress)
         return ERROR_SUCCESS;
+
+    if (ScmIsLocalSystemAccount(pImage->pszAccountName))
+        return pImage->bSharedProcess ? ERROR_SUCCESS : ScmLogonLocalSystemService(pService, pImage);
 
     /* The service SID and the required privileges: own-process services only (see SCM_TOKEN_CONFIG) */
     RtlZeroMemory(&TokenConfig, sizeof(TokenConfig));
     if (!pImage->bSharedProcess)
     {
-        dwError = ScmReadTokenConfig(pService, &TokenConfig);
+        dwError = ScmReadTokenConfig(pService, FALSE, &TokenConfig);
         if (dwError != ERROR_SUCCESS)
         {
             DPRINT1("ScmReadTokenConfig() failed (Error %lu)\n", dwError);
@@ -891,12 +1221,20 @@ ScmLogonService(
     ServiceGroups.GroupCount = 1;
     ServiceGroups.Groups[0].Sid = TokenConfig.pServiceSid;
     ServiceGroups.Groups[0].Attributes = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_OWNER;
+    if (TokenConfig.dwSidType == SERVICE_SID_TYPE_RESTRICTED)
+    {
+        /* the group WRITE RESTRICTED, as in the token of such a service on Windows */
+        ScmInitWriteRestrictedSid((PSID)WriteRestrictedSidBuffer);
+        ServiceGroups.GroupCount = 2;
+        ServiceGroups.Groups[1].Sid = (PSID)WriteRestrictedSidBuffer;
+        ServiceGroups.Groups[1].Attributes = SCM_GROUP_ENABLED_ALL;
+    }
     if (!LogonUserExExW(pszUserName,
                         pszDomainName,
                         pszPassword,
                         LOGON32_LOGON_SERVICE,
                         LOGON32_PROVIDER_DEFAULT,
-                        (TokenConfig.pServiceSid != NULL) ? &ServiceGroups : NULL,
+                        (TokenConfig.pServiceSid != NULL) ? (PTOKEN_GROUPS)&ServiceGroups : NULL,
                         &pImage->hToken,
                         NULL,
                         NULL,
@@ -946,6 +1284,15 @@ ScmLogonService(
     if (dwError == ERROR_SUCCESS && TokenConfig.pszPrivileges != NULL)
         dwError = ScmApplyRequiredPrivileges(pService, pImage->hToken, TokenConfig.pszPrivileges);
 
+    /* The process of a service with SID type RESTRICTED gets a write restricted copy of the token (made last: it
+     * has the default DACL and privileges of the token; the profile is unloaded with the token of the logon) */
+    if (dwError == ERROR_SUCCESS && TokenConfig.dwSidType == SERVICE_SID_TYPE_RESTRICTED)
+    {
+        dwError = ScmMakeRestrictedToken(pImage->hToken, TokenConfig.pServiceSid, &pImage->hProcessToken);
+        if (dwError != ERROR_SUCCESS)
+            DPRINT1("ScmMakeRestrictedToken() failed (Error %lu)\n", dwError);
+    }
+
     if (dwError != ERROR_SUCCESS)
     {
         ScmEnableBackupRestorePrivileges(pImage->hToken, TRUE);
@@ -959,6 +1306,11 @@ done:
     {
         CloseHandle(pImage->hToken);
         pImage->hToken = NULL;
+    }
+    if (dwError != ERROR_SUCCESS && pImage->hProcessToken != NULL)
+    {
+        CloseHandle(pImage->hProcessToken);
+        pImage->hProcessToken = NULL;
     }
 
     ScmFreeTokenConfig(&TokenConfig);
@@ -1092,6 +1444,8 @@ ScmCreateOrReferenceServiceImage(PSERVICE pService)
             /* Close the logon token */
             if (pServiceImage->hToken != NULL)
                 CloseHandle(pServiceImage->hToken);
+            if (pServiceImage->hProcessToken != NULL)
+                CloseHandle(pServiceImage->hProcessToken);
 
             /* Release the service image */
             HeapFree(GetProcessHeap(), 0, pServiceImage);
@@ -1784,6 +2138,8 @@ ScmRemoveServiceImage(PSERVICE_IMAGE pServiceImage)
     /* Close the logon token */
     if (pServiceImage->hToken != NULL)
         CloseHandle(pServiceImage->hToken);
+    if (pServiceImage->hProcessToken != NULL)
+        CloseHandle(pServiceImage->hProcessToken);
 
     /* Release the service image */
     HeapFree(GetProcessHeap(), 0, pServiceImage);
@@ -3159,7 +3515,8 @@ ScmStartUserModeService(PSERVICE Service,
         if (Result)
         {
             /* Launch the process in the user's logon session */
-            Result = CreateProcessAsUserW(Service->lpImage->hToken,
+            Result = CreateProcessAsUserW((Service->lpImage->hProcessToken != NULL) ?
+                                              Service->lpImage->hProcessToken : Service->lpImage->hToken,
                                           NULL,
                                           Service->lpImage->pszImagePath,
                                           Service->lpImage->bServiceSid ? &ProcessSa : NULL,
@@ -3204,16 +3561,34 @@ ScmStartUserModeService(PSERVICE Service,
 
         if (!ScmIsSecurityService(Service->lpImage))
         {
-            Result = CreateProcessW(NULL,
-                                    Service->lpImage->pszImagePath,
-                                    NULL,
-                                    NULL,
-                                    FALSE,
-                                    CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS | CREATE_SUSPENDED,
-                                    lpEnvironment,
-                                    NULL,
-                                    &StartupInfo,
-                                    &ProcessInformation);
+            if (Service->lpImage->hProcessToken != NULL)
+            {
+                /* A service with a service SID: its own token (the controller is SYSTEM already, no impersonation) */
+                Result = CreateProcessAsUserW(Service->lpImage->hProcessToken,
+                                              NULL,
+                                              Service->lpImage->pszImagePath,
+                                              NULL,
+                                              NULL,
+                                              FALSE,
+                                              CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS | CREATE_SUSPENDED,
+                                              lpEnvironment,
+                                              NULL,
+                                              &StartupInfo,
+                                              &ProcessInformation);
+            }
+            else
+            {
+                Result = CreateProcessW(NULL,
+                                        Service->lpImage->pszImagePath,
+                                        NULL,
+                                        NULL,
+                                        FALSE,
+                                        CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS | CREATE_SUSPENDED,
+                                        lpEnvironment,
+                                        NULL,
+                                        &StartupInfo,
+                                        &ProcessInformation);
+            }
             if (!Result)
                 dwError = GetLastError();
         }
