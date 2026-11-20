@@ -839,8 +839,10 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
         // are not set by userenv.dll in Windows... See r68284 / CORE-9875
         // FIXME2: This is done by msgina.dll !!
 
-        /* At least <drive letter>:<path> */
-        if (Length > MinLen)
+        /* At least <drive letter>:<path>. LocalSystem has no HOMEDRIVE and HOMEPATH, as before this
+         * block named its own profile and as on Windows (measured on Windows Server 2022: unset for
+         * a LocalSystem service and task and for CreateEnvironmentBlock with the LocalSystem token) */
+        if (Length > MinLen && !IsLocalSystemToken(hToken))
         {
             /* Set 'HOMEDRIVE' variable */
             StringCchCopyNW(szValue, ARRAYSIZE(Buffer), Buffer, MinLen);
