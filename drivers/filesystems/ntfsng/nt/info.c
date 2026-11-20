@@ -159,7 +159,7 @@ static NTSTATUS NgNormalizedName(PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb, PFILE_NA
         int Err;
 
         if (Depth == 0)
-            Err = ngc_long_name_in(Cur, Dir, Names, &Len);
+            Err = ngc_long_name_in(Cur, Dir, Ccb->Name, Ccb->NameLength, Names, &Len);
         else
             Err = ngc_parent_name(Cur, &Parent, Names, &Len);
         if (Err || !Len || Len >= 256 || Pos < Len + 1)
