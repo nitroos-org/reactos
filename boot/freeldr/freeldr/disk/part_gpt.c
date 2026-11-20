@@ -655,7 +655,11 @@ GptBootPartitionCallback(
     BOOLEAN SameRange = (Entry->StartingLba == Search->Start &&
                          Entry->EndingLba - Entry->StartingLba + 1 == Search->Size);
 
-    if (RtlEqualMemory(&Entry->UniquePartitionGuid, Search->Signature, sizeof(GUID)))
+    static const UCHAR ZeroGuid[sizeof(GUID)] = {0};
+
+    /* A zero signature (firmware that gave none) identifies nothing: it must not match an entry that has no GUID either */
+    if (!RtlEqualMemory(Search->Signature, ZeroGuid, sizeof(GUID)) &&
+        RtlEqualMemory(&Entry->UniquePartitionGuid, Search->Signature, sizeof(GUID)))
     {
         if (Search->GuidMatches++ == 0)
             Search->GuidNumber = Number;
