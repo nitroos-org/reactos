@@ -674,6 +674,32 @@ IgmpScheduleAnswer(PIGMP_GROUP G, ULONGLONG Now, ULONG MaxMs, BOOLEAN WithSource
         G->AnswerDue = Due;
 }
 
+/* Whether the IPv4 header carries the Router Alert option (RFC 2113: type 148, length 4); a malformed option list ends
+   the walk */
+static BOOLEAN
+IgmpHasRouterAlert(PIP_PACKET IPPacket)
+{
+    const UCHAR *O = (const UCHAR *)IPPacket->Header;
+    ULONG i = sizeof(IPv4_HEADER), End = IPPacket->HeaderSize;
+
+    while (i < End)
+    {
+        if (O[i] == 0)              /* end of the list */
+            break;
+        if (O[i] == 1)              /* no operation */
+        {
+            i++;
+            continue;
+        }
+        if (i + 1 >= End || O[i + 1] < 2 || O[i + 1] > End - i)
+            break;
+        if (O[i] == 0x94 && O[i + 1] == 4)
+            return TRUE;
+        i += O[i + 1];
+    }
+    return FALSE;
+}
+
 VOID
 IGMPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
 {
@@ -709,8 +735,10 @@ IGMPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
     else
         return;
 
-    /* a querier's messages stay on the link */
-    if (H->Ttl != 1)
+    /* Which queries are taken, as Windows Server 2022 takes them (peer rows): an IGMPv3 query only with the Router Alert
+       option (RFC 3376 9.1: hosts SHOULD ignore queries without it), whatever its TTL; an IGMPv2 or IGMPv1 one with the
+       option or with TTL 1 (Windows answered a v2 query without it at TTL 1, not at TTL 64) */
+    if (!IgmpHasRouterAlert(IPPacket) && (Version == 3 || H->Ttl != 1))
         return;
 
     RtlCopyMemory(&Group, &M[4], sizeof(Group));
@@ -744,8 +772,9 @@ IGMPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
         goto Done;
     if (Version == 1)
         IF->V1Until = Now + MS(IGMP_OLDER_QUERIER_MS);
-    else if (Version == 2)
-        IF->V2Until = Now + MS(IGMP_OLDER_QUERIER_MS);
+    else if (Version == 2 && Group == 0)
+        IF->V2Until = Now + MS(IGMP_OLDER_QUERIER_MS);  /* a v2 General Query only (RFC 3376 7.2.1; Windows answered
+                                                           a v3 query in v3 right after a v2 group query) */
 
     if (Group == 0)
     {
