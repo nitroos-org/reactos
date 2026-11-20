@@ -1311,10 +1311,11 @@ cmdUser(
     {
         if (_wcsnicmp(argv[j], L"/active:", 8) == 0)
         {
-            p = &argv[i][8];
+            p = &argv[j][8];
             if (_wcsicmp(p, L"yes") == 0)
             {
-                pUserInfo->usri4_flags &= ~UF_ACCOUNTDISABLE;
+                /* Also ends a lockout (measured on Windows Server 2022: /active:no keeps it) */
+                pUserInfo->usri4_flags &= ~(UF_ACCOUNTDISABLE | UF_LOCKOUT);
             }
             else if (_wcsicmp(p, L"no") == 0)
             {

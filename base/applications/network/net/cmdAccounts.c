@@ -24,11 +24,12 @@ cmdAccounts(
     ULONG value;
     INT i;
     BOOL Modified = FALSE;
+    BOOL Modified3 = FALSE;
 #if 0
     BOOL Domain = FALSE;
 #endif
     const DWORD nPaddedLength = 58;
-    NET_API_STATUS Status;
+    NET_API_STATUS Status = NERR_Success;
     INT result = 0;
 
     for (i = 2; i < argc; i++)
@@ -107,7 +108,7 @@ cmdAccounts(
         {
             p = &argv[i][10];
 
-            if (_wcsicmp(p, L"unlimited"))
+            if (_wcsicmp(p, L"unlimited") == 0)
             {
                 Info0->usrmod0_max_passwd_age = ULONG_MAX;
                 Modified = TRUE;
@@ -154,13 +155,58 @@ cmdAccounts(
             Info0->usrmod0_password_hist_len = value;
             Modified = TRUE;
         }
+        else if (_wcsnicmp(argv[i], L"/lockoutthreshold:", 18) == 0 ||
+                 _wcsnicmp(argv[i], L"/lockoutduration:", 17) == 0 ||
+                 _wcsnicmp(argv[i], L"/lockoutwindow:", 15) == 0)
+        {
+            /* Account lockout (NetUserModalsSet level 3): the threshold in attempts, the duration and the
+               observation window in minutes, as on Windows ("net accounts /lockoutduration:0" sets 0) */
+            if (Info3 == NULL)
+            {
+                Status = NetUserModalsGet(NULL, 3, (LPBYTE*)&Info3);
+                if (Status != NERR_Success)
+                    goto done;
+            }
+
+            p = wcschr(argv[i], L':') + 1;
+            value = wcstoul(p, &endptr, 10);
+            if (*p == UNICODE_NULL || *endptr != 0)
+            {
+                if (_wcsnicmp(argv[i], L"/lockoutthreshold:", 18) == 0)
+                    PrintMessageStringV(3952, L"/LOCKOUTTHRESHOLD");
+                else if (_wcsnicmp(argv[i], L"/lockoutduration:", 17) == 0)
+                    PrintMessageStringV(3952, L"/LOCKOUTDURATION");
+                else
+                    PrintMessageStringV(3952, L"/LOCKOUTWINDOW");
+                result = 1;
+                goto done;
+            }
+
+            if (_wcsnicmp(argv[i], L"/lockoutthreshold:", 18) == 0)
+                Info3->usrmod3_lockout_threshold = value;
+            else if (_wcsnicmp(argv[i], L"/lockoutduration:", 17) == 0)
+                Info3->usrmod3_lockout_duration = (value >= ULONG_MAX / 60) ? TIMEQ_FOREVER : value * 60;
+            else
+                Info3->usrmod3_lockout_observation_window = (value >= ULONG_MAX / 60) ? TIMEQ_FOREVER : value * 60;
+            Modified3 = TRUE;
+        }
     }
 
-    if (Modified == TRUE)
+    if (Modified == TRUE || Modified3 == TRUE)
     {
-        Status = NetUserModalsSet(NULL, 0, (LPBYTE)Info0, &ParamErr);
-        if (Status != NERR_Success)
-            goto done;
+        if (Modified == TRUE)
+        {
+            Status = NetUserModalsSet(NULL, 0, (LPBYTE)Info0, &ParamErr);
+            if (Status != NERR_Success)
+                goto done;
+        }
+
+        if (Modified3 == TRUE)
+        {
+            Status = NetUserModalsSet(NULL, 3, (LPBYTE)Info3, &ParamErr);
+            if (Status != NERR_Success)
+                goto done;
+        }
     }
     else
     {
@@ -204,11 +250,20 @@ cmdAccounts(
             ConPrintf(StdOut, L"%lu", Info3->usrmod3_lockout_threshold);
         ConPuts(StdOut, L"\n");
 
+        /* TIMEQ_FOREVER (until an administrator unlocks) reads "Never", as on Windows */
         PrintPaddedMessageString(4579, nPaddedLength);
-        ConPrintf(StdOut, L"%lu\n", Info3->usrmod3_lockout_duration / 60);
+        if (Info3->usrmod3_lockout_duration == TIMEQ_FOREVER)
+            PrintMessageString(4305);
+        else
+            ConPrintf(StdOut, L"%lu", Info3->usrmod3_lockout_duration / 60);
+        ConPuts(StdOut, L"\n");
 
         PrintPaddedMessageString(4580, nPaddedLength);
-        ConPrintf(StdOut, L"%lu\n", Info3->usrmod3_lockout_observation_window / 60);
+        if (Info3->usrmod3_lockout_observation_window == TIMEQ_FOREVER)
+            PrintMessageString(4305);
+        else
+            ConPrintf(StdOut, L"%lu", Info3->usrmod3_lockout_observation_window / 60);
+        ConPuts(StdOut, L"\n");
 
         PrintPaddedMessageString(4576, nPaddedLength);
         if (Info1->usrmod1_role == UAS_ROLE_PRIMARY)
@@ -234,6 +289,10 @@ cmdAccounts(
     }
 
 done:
+    /* "The command completed successfully." or the error ("System error 5 has occurred.", exit 2), as on Windows */
+    if (result == 0)
+        result = PrintCommandStatus(Status);
+
     if (Info3 != NULL)
         NetApiBufferFree(Info3);
 
