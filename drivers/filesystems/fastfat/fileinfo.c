@@ -17,6 +17,12 @@ Abstract:
 #include "fatprocs.h"
 
 //
+//  FileNormalizedNameInformation (Vista and later) is not in the DDK this driver is built with.
+//
+
+#define FAT_FILE_NORMALIZED_NAME_INFORMATION ((FILE_INFORMATION_CLASS)48)
+
+//
 //  The Bug check file id for this module
 //
 
@@ -486,9 +492,7 @@ Return Value:
             //
 
             if (FileInformationClass == FileNameInformation ||
-#if (NTDDI_VERSION >= NTDDI_VISTA)
-                FileInformationClass == FileNormalizedNameInformation ||
-#endif
+                FileInformationClass == FAT_FILE_NORMALIZED_NAME_INFORMATION ||
                 FileInformationClass == FileAllInformation ) {
 
                 if (!FatAcquireExclusiveVcb( IrpContext, Vcb )) {
@@ -549,7 +553,7 @@ Return Value:
             //  testing a return status value for each call.
             //
 
-            switch (FileInformationClass) {
+            switch ((ULONG)FileInformationClass) {
 
             case FileAllInformation:
 
@@ -603,12 +607,10 @@ Return Value:
                 FatQueryNameInfo( IrpContext, Fcb, Ccb, FALSE, Buffer, &Length );
                 break;
 
-#if (NTDDI_VERSION >= NTDDI_VISTA)
-            case FileNormalizedNameInformation:
+            case FAT_FILE_NORMALIZED_NAME_INFORMATION:
 
                 FatQueryNameInfo( IrpContext, Fcb, Ccb, TRUE, Buffer, &Length );
                 break;
-#endif
 
             case FileAlternateNameInformation:
 

@@ -162,6 +162,8 @@ int ngc_links(ngc_node *n);
 /* True when @n's file has no name left (its record is freed with the last reference): ngc_stat's nlink == 0, cheaply. */
 int ngc_unlinked(ngc_node *n);
 int ngc_parent_name(ngc_node *n, unsigned long long *parent, unsigned short *out, unsigned int *len);
+/* The long name of @n in directory @parent_mref (0: in any); -ENOENT when it has none there. */
+int ngc_long_name_in(ngc_node *n, unsigned long long parent_mref, unsigned short *out, unsigned int *len);
 int ngc_get_security(ngc_vol *v, ngc_node *n, void **out, unsigned int *len);
 int ngc_set_security(ngc_vol *v, ngc_node *n, const void *sd, unsigned int len);
 /* Volume size (under the caller's volume lock).  Sectors are of the volume's sector size. */

@@ -68,10 +68,12 @@ UCHAR IopQueryOperationLength[] =
     0,
     sizeof(FILE_NETWORK_PHYSICAL_NAME_INFORMATION),
 #endif
-    /* 42-58 are not passed on yet (STATUS_INVALID_INFO_CLASS, as before) */
+    /* 42-47 and 49-58 are not passed on yet (STATUS_INVALID_INFO_CLASS, as before) */
+    0, 0, 0, 0, 0, 0,
+    /* 48 FileNormalizedNameInformation: FILE_NAME_INFORMATION, answered by the file system (GetFileInformationByHandleEx) */
+    sizeof(FILE_NAME_INFORMATION),
     0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0,
+    0, 0,
     /* 59 FileIdInformation: FILE_ID_INFORMATION (ULONGLONG VolumeSerialNumber + FILE_ID_128 FileId), any
        handle as on Windows; std::filesystem::equivalent reads it (GetFileInformationByHandleEx(FileIdInfo)) */
     sizeof(ULONGLONG) + 16,

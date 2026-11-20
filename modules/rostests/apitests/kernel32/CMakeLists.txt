@@ -6,6 +6,7 @@ add_subdirectory(tlsdyn)
 add_message_headers(ANSI FormatMessage.mc)
 
 list(APPEND SOURCE
+    GetFileInformationByHandleEx.c
     VirtualAlloc2.c
     VirtualAllocLarge.c
     Placeholder.c

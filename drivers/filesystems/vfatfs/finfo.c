@@ -11,6 +11,9 @@
 
 #include "vfat.h"
 
+/* FileNormalizedNameInformation (Vista+) is not in the DDK this driver is built with */
+#define VFAT_FILE_NORMALIZED_NAME_INFORMATION ((FILE_INFORMATION_CLASS)48)
+
 #define NDEBUG
 #include <debug.h>
 
@@ -1495,6 +1498,8 @@ VfatQueryInformation(
             break;
 
         case FileNameInformation:
+        case VFAT_FILE_NORMALIZED_NAME_INFORMATION:
+            /* the name of an FCB is built from the long names of the directory entries: it is already normalized */
             Status = VfatGetNameInformation(IrpContext->FileObject,
                                             FCB,
                                             IrpContext->DeviceExt,
