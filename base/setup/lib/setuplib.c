@@ -16,6 +16,7 @@
 #include "inicache.h"
 
 #include "setuplib.h"
+#include "components.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -548,6 +549,9 @@ InstallSetupInfFile(
     /* The installation directory exists now: write the text-mode setup log
      * the graphical stage appends to (<installation directory>\Panther\unattend.log) */
     (void)SetupLogWrite(pSetupData->DestinationPath.Buffer);
+    (void)ComponentsWriteManifest((PCOMPONENTS_STATE)pSetupData->Components,
+                                  pSetupData->DestinationPath.Buffer,
+                                  pSetupData->SourcePath.Buffer);
 
     /* Create a $winnt$.inf file with default entries */
     IniCache = IniCacheCreate();
@@ -1783,6 +1787,9 @@ DoUpdate:
 
         PGENERIC_LIST_ENTRY Entry;
         PCWSTR LanguageId; // LocaleID;
+
+        /* The registry lines of the components that are left out, and the record of the selection */
+        (void)ComponentsApplyRegistry((PCOMPONENTS_STATE)pSetupData->Components);
 
         Entry = GetCurrentListEntry(pSetupData->DisplayList);
         ASSERT(Entry);

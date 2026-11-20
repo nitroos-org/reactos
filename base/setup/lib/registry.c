@@ -559,6 +559,50 @@ ImportRegistryFile(
 }
 
 
+/* Apply the AddReg-style lines of one named section of an open INF (component registry lines) */
+BOOLEAN
+ImportRegistrySection(
+    IN PVOID hInf, // HINF
+    IN PCWSTR Section)
+{
+    return registry_callback(hInf, Section, FALSE);
+}
+
+/* Set one value in the setup registry (the mounted hives); creates the key. RootName: "HKLM", ... */
+BOOLEAN
+SetRegistryValue(
+    IN PCWSTR RootName,
+    IN PCWSTR KeyName,
+    IN PCWSTR ValueName OPTIONAL,
+    IN ULONG Type,
+    IN PVOID Data,
+    IN ULONG Size)
+{
+    NTSTATUS Status;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UNICODE_STRING Name, Value;
+    HANDLE RootKeyHandle, KeyHandle;
+
+    RootKeyHandle = GetRootKeyByName(RootName, NULL);
+    if (!RootKeyHandle)
+        return FALSE;
+
+    RtlInitUnicodeString(&Name, KeyName);
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, RootKeyHandle, NULL);
+    Status = CreateNestedKey(&KeyHandle, KEY_ALL_ACCESS, &ObjectAttributes, REG_OPTION_NON_VOLATILE);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("CreateNestedKey(%wZ) failed (Status %lx)\n", &Name, Status);
+        return FALSE;
+    }
+
+    RtlInitUnicodeString(&Value, ValueName ? ValueName : L"");
+    Status = NtSetValueKey(KeyHandle, &Value, 0, Type, Data, Size);
+    NtClose(KeyHandle);
+    return NT_SUCCESS(Status);
+}
+
+
 typedef enum _HIVE_UPDATE_STATE
 {
     Create, // Create a new hive file and save possibly existing old one with a .old extension.

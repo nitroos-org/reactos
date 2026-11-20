@@ -919,6 +919,98 @@ ApplyNetworkConfiguration(VOID)
                 szGw[0] ? szGw : L"none", szDns[0] ? szDns : L"none");
 }
 
+/* COMPONENTS ***************************************************************/
+
+#define COMPONENTS_KEY  L"SOFTWARE\\ReactOS\\Nitro\\Components"
+
+/* TRUE when the registry says that the component is not installed (nothing recorded: installed) */
+BOOL
+ComponentIsLeftOut(
+    _In_ PCWSTR pszComponent)
+{
+    WCHAR szKey[160];
+    HKEY hKey;
+    DWORD dwInstalled = 1, cb = sizeof(dwInstalled), dwType;
+
+    StringCchPrintfW(szKey, _countof(szKey), COMPONENTS_KEY L"\\%s", pszComponent);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szKey, 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+        return FALSE;
+    if (RegQueryValueExW(hKey, L"Installed", NULL, &dwType, (LPBYTE)&dwInstalled, &cb) != ERROR_SUCCESS || dwType != REG_DWORD)
+        dwInstalled = 1;
+    RegCloseKey(hKey);
+    return dwInstalled == 0;
+}
+
+/* TRUE when setup left at least one component out */
+BOOL
+ComponentAnyLeftOut(VOID)
+{
+    HKEY hKey;
+    DWORD dwAny = 0, cb = sizeof(dwAny), dwType;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, COMPONENTS_KEY, 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+        return FALSE;
+    if (RegQueryValueExW(hKey, L"AnyOff", NULL, &dwType, (LPBYTE)&dwAny, &cb) != ERROR_SUCCESS || dwType != REG_DWORD)
+        dwAny = 0;
+    RegCloseKey(hKey);
+    return dwAny != 0;
+}
+
+BOOL
+FeatureBlockedByComponent(
+    _In_ PCWSTR pszFeature,
+    _Out_writes_(cchComponent) PWSTR pszComponent,
+    _In_ DWORD cchComponent)
+{
+    HKEY hKey, hSub;
+    DWORD i, cchName;
+    WCHAR szName[64];
+
+    pszComponent[0] = UNICODE_NULL;
+    if (!ComponentAnyLeftOut() ||
+        RegOpenKeyExW(HKEY_LOCAL_MACHINE, COMPONENTS_KEY, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return FALSE;
+
+    for (i = 0; ; i++)
+    {
+        WCHAR szList[256], *p;
+        DWORD cb = sizeof(szList) - sizeof(WCHAR), dwType;
+
+        cchName = _countof(szName);
+        if (RegEnumKeyExW(hKey, i, szName, &cchName, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        if (!ComponentIsLeftOut(szName))
+            continue;
+        if (RegOpenKeyExW(hKey, szName, 0, KEY_QUERY_VALUE, &hSub) != ERROR_SUCCESS)
+            continue;
+        if (RegQueryValueExW(hSub, L"FeaturesNeed", NULL, &dwType, (LPBYTE)szList, &cb) == ERROR_SUCCESS && dwType == REG_SZ)
+        {
+            size_t cbName = wcslen(pszFeature);
+
+            szList[cb / sizeof(WCHAR)] = UNICODE_NULL;
+            for (p = szList; *p; )
+            {
+                PWSTR pEnd = wcschr(p, L',');
+                size_t n = pEnd ? (size_t)(pEnd - p) : wcslen(p);
+
+                if (n == cbName && !_wcsnicmp(p, pszFeature, n))
+                {
+                    StringCchCopyW(pszComponent, cchComponent, szName);
+                    RegCloseKey(hSub);
+                    RegCloseKey(hKey);
+                    return TRUE;
+                }
+                p += n;
+                if (*p == L',')
+                    p++;
+            }
+        }
+        RegCloseKey(hSub);
+    }
+    RegCloseKey(hKey);
+    return FALSE;
+}
+
 /* FEATURES *****************************************************************/
 
 /* TRUE when the output of the feature manager (Panther\feature-<name>.log) says the download could not reach

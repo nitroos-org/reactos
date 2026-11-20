@@ -152,6 +152,21 @@ UnattendGetAdminPassword(VOID);
 VOID
 UnattendForgetSecrets(VOID);
 
+/* Optional components: what setup recorded in HKLM\SOFTWARE\ReactOS\Nitro\Components (nothing recorded = all installed) */
+BOOL
+ComponentIsLeftOut(
+    _In_ PCWSTR pszComponent);
+
+BOOL
+ComponentAnyLeftOut(VOID);
+
+/* A component that is left out and that the feature needs (FeaturesNeed); FALSE if none */
+BOOL
+FeatureBlockedByComponent(
+    _In_ PCWSTR pszFeature,
+    _Out_writes_(cchComponent) PWSTR pszComponent,
+    _In_ DWORD cchComponent);
+
 VOID
 ProcessUnattendedExtras(VOID);
 

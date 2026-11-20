@@ -14,6 +14,7 @@
 #include "infsupp.h"
 
 #include "setuplib.h" // HACK for USETUP_DATA
+#include "components.h"
 
 #include "install.h"
 
@@ -347,6 +348,33 @@ AddSectionToCopyQueueCab(
             INF_FreeData(TargetFileName);
             INF_FreeData(SourceFileName);
             break;
+        }
+
+        /*
+         * A file of a component that is left out (answer file [Components]) is not
+         * copied: matched on its destination path relative to the installation
+         * directory. Without [Components] pSetupData->Components is NULL and every
+         * file is queued, as always.
+         */
+        if (pSetupData->Components)
+        {
+            WCHAR RelPath[MAX_PATH];
+            PCWSTR Dir = TargetDir;
+
+            while (*Dir == L'\\')
+                ++Dir;
+            if (*Dir)
+                RtlStringCchPrintfW(RelPath, ARRAYSIZE(RelPath), L"%s\\%s", Dir, TargetFileName ? TargetFileName : SourceFileName);
+            else
+                RtlStringCchCopyW(RelPath, ARRAYSIZE(RelPath), TargetFileName ? TargetFileName : SourceFileName);
+
+            if (ComponentsIsFileOmitted((PCOMPONENTS_STATE)pSetupData->Components, RelPath))
+            {
+                INF_FreeData(TargetDir);
+                INF_FreeData(TargetFileName);
+                INF_FreeData(SourceFileName);
+                continue;
+            }
         }
 
         DPRINT("GetSourceTargetFromCab(%S) = "
@@ -826,6 +854,13 @@ PrepareFileCopy(
         SpInfCloseInfFile(InfHandle);
 #endif
     } while (SpInfFindNextLine(&CabinetsContext, &CabinetsContext));
+
+    if (pSetupData->Components)
+    {
+        PCOMPONENTS_STATE Components = (PCOMPONENTS_STATE)pSetupData->Components;
+        SetupLogFormat("components: %lu of %lu files of the cabinet are left out of the copy",
+                       Components->SkippedFiles, Components->TotalFiles);
+    }
 
     return TRUE;
 }

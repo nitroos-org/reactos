@@ -103,6 +103,54 @@ static BOOL IsAdmin(void)
     return is;
 }
 
+/* Setup recorded the components it left out (answer file [Components]) under HKLM\SOFTWARE\ReactOS\Nitro\Components\<id>:
+ * Installed=0, FeaturesNeed / FeaturesOwn = comma lists of feature ids. A feature of such a list is not installed by
+ * itself at first start: it needs a component that is not there, or it is the installed form of one that was left out.
+ * Nothing recorded (a default installation): never true. */
+static BOOL BlockedByLeftOutComponent(LPCWSTR featureId, LPWSTR comp, DWORD cchComp)
+{
+    HKEY hKey, hSub;
+    DWORD i, any = 0, cb = sizeof(any), type;
+    WCHAR name[64];
+    BOOL found = FALSE;
+    static const WCHAR *const lists[] = { L"FeaturesNeed", L"FeaturesOwn" };
+
+    comp[0] = L'\0';
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ReactOS\\Nitro\\Components", 0, KEY_READ, &hKey) != ERROR_SUCCESS) return FALSE;
+    if (RegQueryValueExW(hKey, L"AnyOff", NULL, &type, (LPBYTE)&any, &cb) != ERROR_SUCCESS || type != REG_DWORD || !any)
+    {
+        RegCloseKey(hKey);
+        return FALSE;
+    }
+    for (i = 0; !found; i++)
+    {
+        DWORD cchName = ARRAYSIZE(name), installed = 1, l;
+        if (RegEnumKeyExW(hKey, i, name, &cchName, NULL, NULL, NULL, NULL) != ERROR_SUCCESS) break;
+        if (RegOpenKeyExW(hKey, name, 0, KEY_QUERY_VALUE, &hSub) != ERROR_SUCCESS) continue;
+        cb = sizeof(installed);
+        if (RegQueryValueExW(hSub, L"Installed", NULL, &type, (LPBYTE)&installed, &cb) != ERROR_SUCCESS || type != REG_DWORD) installed = 1;
+        for (l = 0; !installed && !found && l < ARRAYSIZE(lists); l++)
+        {
+            WCHAR list[256], *p;
+            cb = sizeof(list) - sizeof(WCHAR);
+            if (RegQueryValueExW(hSub, lists[l], NULL, &type, (LPBYTE)list, &cb) != ERROR_SUCCESS || type != REG_SZ) continue;
+            list[cb / sizeof(WCHAR)] = L'\0';
+            for (p = list; *p && !found; )
+            {
+                WCHAR *e = wcschr(p, L',');
+                size_t n = e ? (size_t)(e - p) : wcslen(p);
+                if (n == wcslen(featureId) && !_wcsnicmp(p, featureId, n)) found = TRUE;
+                p += n;
+                if (*p == L',') p++;
+            }
+        }
+        if (found) StringCchCopyW(comp, cchComp, name);
+        RegCloseKey(hSub);
+    }
+    RegCloseKey(hKey);
+    return found;
+}
+
 /* the default components this machine still lacks, as jobs; first URL for the network probe */
 static int NeededJobs(FM_JOB *jobs, int max, LPWSTR probeUrl, DWORD cch, LPCWSTR logFile)
 {
@@ -110,6 +158,7 @@ static int NeededJobs(FM_JOB *jobs, int max, LPWSTR probeUrl, DWORD cch, LPCWSTR
     FM_FEATURE *feats;
     WCHAR hostProbe[512];
     int n, i, k = 0, nf = FmEnumFeatures(&feats);
+    WCHAR leftOut[64];
     probeUrl[0] = L'\0';
     hostProbe[0] = L'\0';
     /* catalog entries that ask for it ([Feature] FirstBootDefault=1: the AAC decoder, a hosted pack): first, they are small.
@@ -117,6 +166,11 @@ static int NeededJobs(FM_JOB *jobs, int max, LPWSTR probeUrl, DWORD cch, LPCWSTR
     for (i = 0; i < nf && k < max; i++)
     {
         if (!feats[i].FirstBootDefault) continue;
+        if (BlockedByLeftOutComponent(feats[i].Id, leftOut, ARRAYSIZE(leftOut)))
+        {
+            FmLogLine(logFile, L"%s: the component \"%s\" was left out at setup, skipped", feats[i].Id, leftOut);
+            continue;
+        }
         if (feats[i].State == FM_STATE_ENABLED) { FmLogLine(logFile, L"%s: already installed", feats[i].Id); continue; }
         if (feats[i].State == FM_STATE_DISABLED) { FmLogLine(logFile, L"%s: turned off by the user, left off", feats[i].Id); continue; }
         if (!feats[i].PayloadAvailable)
@@ -137,6 +191,11 @@ static int NeededJobs(FM_JOB *jobs, int max, LPWSTR probeUrl, DWORD cch, LPCWSTR
     {
         FM_FEATURE f;
         if (!arr[i].Default || !arr[i].ArchOk) continue;
+        if (BlockedByLeftOutComponent(arr[i].Id, leftOut, ARRAYSIZE(leftOut)))
+        {
+            FmLogLine(logFile, L"%s: the component \"%s\" was left out at setup, skipped", arr[i].Id, leftOut);
+            continue;
+        }
         if (FmCompDetect(&arr[i])) { FmLogLine(logFile, L"%s: already installed", arr[i].Id); continue; }
         if (!FmFindFeature(arr[i].Id, &f)) { FmLogLine(logFile, L"%s: no catalog entry, skipped", arr[i].Id); continue; }
         ZeroMemory(&jobs[k], sizeof(jobs[k]));

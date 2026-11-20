@@ -162,6 +162,9 @@ typedef struct _USETUP_DATA
 
     ULONG RequiredPartitionDiskSpace;
     WCHAR InstallationDirectory[MAX_PATH];
+
+    /* Optional components of the answer file's [Components] section (components.c); NULL = install everything */
+    PVOID Components; // PCOMPONENTS_STATE
 } USETUP_DATA, *PUSETUP_DATA;
 
 
