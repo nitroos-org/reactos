@@ -36,6 +36,7 @@ list(APPEND SOURCE
     sec/sec.c
     sec/trustee.c
     service/eventlog.c
+    service/notify.c
     service/rpc.c
     service/scm.c
     service/sctrl.c

@@ -636,3 +636,81 @@ RtlAllocateAndInitializeSidEx(
     *Sid = NewSid;
     return STATUS_SUCCESS;
 }
+
+/* PORTABLE OPERATING SYSTEM ************************************************/
+
+/*
+ * The Windows To Go state is the DWORD value PortableOperatingSystem of
+ * HKLM\SYSTEM\CurrentControlSet\Control. Measured on Windows Server 2022:
+ * - Check: absent value: STATUS_NOT_FOUND; a value that is not a DWORD:
+ *   STATUS_OBJECT_TYPE_MISMATCH; otherwise the BOOLEAN is (value != 0).
+ * - Set: writes the DWORD 0 or 1 from the low byte of the argument.
+ */
+static NTSTATUS
+RtlpOpenPortableOsKey(
+    _In_ ACCESS_MASK DesiredAccess,
+    _Out_ PHANDLE KeyHandle)
+{
+    UNICODE_STRING KeyName =
+        RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+
+    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    return NtOpenKey(KeyHandle, DesiredAccess, &ObjectAttributes);
+}
+
+NTSTATUS
+NTAPI
+RtlCheckPortableOperatingSystem(
+    _Out_ PBOOLEAN IsPortable)
+{
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"PortableOperatingSystem");
+    ULONG Buffer[16];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    ULONG ResultLength;
+    HANDLE KeyHandle;
+    NTSTATUS Status;
+
+    Status = RtlpOpenPortableOsKey(KEY_QUERY_VALUE, &KeyHandle);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtQueryValueKey(KeyHandle,
+                             &ValueName,
+                             KeyValuePartialInformation,
+                             Info,
+                             sizeof(Buffer),
+                             &ResultLength);
+    NtClose(KeyHandle);
+
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+        return STATUS_NOT_FOUND;
+    if (Status == STATUS_BUFFER_OVERFLOW)
+        return STATUS_OBJECT_TYPE_MISMATCH;
+    if (!NT_SUCCESS(Status))
+        return Status;
+    if (Info->Type != REG_DWORD || Info->DataLength != sizeof(ULONG))
+        return STATUS_OBJECT_TYPE_MISMATCH;
+
+    *IsPortable = (*(PULONG)Info->Data != 0);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+RtlSetPortableOperatingSystem(
+    _In_ BOOLEAN IsPortable)
+{
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"PortableOperatingSystem");
+    HANDLE KeyHandle;
+    ULONG Value = IsPortable ? 1 : 0;
+    NTSTATUS Status;
+
+    Status = RtlpOpenPortableOsKey(KEY_SET_VALUE, &KeyHandle);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtSetValueKey(KeyHandle, &ValueName, 0, REG_DWORD, &Value, sizeof(Value));
+    NtClose(KeyHandle);
+    return Status;
+}

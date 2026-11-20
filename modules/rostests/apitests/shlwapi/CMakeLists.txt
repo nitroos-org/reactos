@@ -22,6 +22,7 @@ list(APPEND SOURCE
     PathIsUNCServerShare.c
     PathUnExpandEnvStrings.c
     PathUnExpandEnvStringsForUser.c
+    QISearch.c
     QuerySourceCreateFromKey.cpp
     SHAreIconsEqual.c
     SHGetFileDescription.c

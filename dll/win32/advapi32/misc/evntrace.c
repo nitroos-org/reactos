@@ -81,3 +81,42 @@ EnableTraceEx2(
     SetLastError(Status);
     return Status;
 }
+
+/*
+ * No provider registry is kept by this implementation: nothing registered
+ * with RegisterTraceGuids is tracked, so the list of providers is empty and
+ * no provider GUID is known. The parameter rows follow the measurements of
+ * Windows Server 2022: a class beyond TraceGuidQueryProcess, a missing
+ * ReturnLength and (for TraceGuidQueryInfo) an input buffer shorter than a
+ * GUID are invalid parameters; an unknown provider is ERROR_WMI_GUID_NOT_FOUND.
+ */
+ULONG
+WINAPI
+EnumerateTraceGuidsEx(
+    IN TRACE_QUERY_INFO_CLASS TraceQueryInfoClass,
+    IN PVOID InBuffer OPTIONAL,
+    IN ULONG InBufferSize,
+    OUT PVOID OutBuffer OPTIONAL,
+    IN ULONG OutBufferSize,
+    OUT PULONG ReturnLength)
+{
+    if (ReturnLength == NULL)
+        return ERROR_INVALID_PARAMETER;
+
+    switch ((ULONG)TraceQueryInfoClass)
+    {
+        case TraceGuidQueryList:
+        case TraceGuidQueryProcess:
+            *ReturnLength = 0;
+            return ERROR_SUCCESS;
+
+        case TraceGuidQueryInfo:
+            if (InBuffer == NULL || InBufferSize < sizeof(GUID))
+                return ERROR_INVALID_PARAMETER;
+            *ReturnLength = 0;
+            return ERROR_WMI_GUID_NOT_FOUND;
+
+        default:
+            return ERROR_INVALID_PARAMETER;
+    }
+}
