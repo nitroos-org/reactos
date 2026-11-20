@@ -28,6 +28,7 @@ list(APPEND SOURCE
     utils/volutil.c
     bootcode.c
     bootsup.c
+    components.c
     fsutil.c
     install.c
     mui.c

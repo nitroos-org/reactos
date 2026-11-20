@@ -45,6 +45,20 @@ ImportRegistryFile(
     IN LCID LocaleId,
     IN BOOLEAN Delete);
 
+BOOLEAN
+ImportRegistrySection(
+    IN PVOID hInf, // HINF
+    IN PCWSTR Section);
+
+BOOLEAN
+SetRegistryValue(
+    IN PCWSTR RootName,
+    IN PCWSTR KeyName,
+    IN PCWSTR ValueName OPTIONAL,
+    IN ULONG Type,
+    IN PVOID Data,
+    IN ULONG Size);
+
 NTSTATUS
 VerifyRegistryHives(
     IN PUNICODE_STRING NtSystemRoot,

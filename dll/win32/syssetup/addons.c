@@ -25,6 +25,7 @@ typedef struct _ADDON_INSTALL_DATA
     PCWSTR CreateProcessFormatString;
     PCWSTR FeatmgrPkg;     /* RAPPS catalog package the feature manager installs when the local file is missing or failed */
     DWORD Flags;
+    PCWSTR Component;      /* optional component (components.inf id): not installed when setup left it out */
 } ADDON_INSTALL_DATA, *PADDON_INSTALL_DATA;
 typedef const ADDON_INSTALL_DATA* PCADDON_INSTALL_DATA;
 
@@ -45,9 +46,9 @@ static const ADDON_INSTALL_DATA Addons[] = {
      * (powershell-7.txt), and records the install so that it shows as installed and can be repaired or removed.
      * The format string has no %s: the path is only the "is the MSI in this image" test. */
     {L"PowerShell 7", L"%SystemRoot%\\Featmgr\\Payload\\powershell-7\\PowerShell-x64.msi",
-     L"featmgr.exe /enable powershell-7", NULL, ADDON_KEEP_FILE_QUIET},
+     L"featmgr.exe /enable powershell-7", NULL, ADDON_KEEP_FILE_QUIET, L"powershell7"},
 #endif
-    {NULL, NULL, NULL, NULL, 0}
+    {NULL, NULL, NULL, NULL, 0, NULL}
 };
 
 HRESULT
@@ -100,6 +101,15 @@ InstallAddon(
     ExpandEnvironmentStringsW(pInstallData->AddonPath,
                               ExpandedAddonPath,
                               ARRAYSIZE(ExpandedAddonPath));
+
+    /* The answer file left the component out: nothing of it is installed, locally or by download */
+    if (pInstallData->Component && ComponentIsLeftOut(pInstallData->Component))
+    {
+        UnattendLog(L"addon \"%s\" is not installed: the component \"%s\" is left out", pInstallData->Title,
+                    pInstallData->Component);
+        hr = S_OK;
+        goto done;
+    }
 
     /* Attempt to install addon from local installer. */
     if (!DoesFileExist(ExpandedAddonPath))

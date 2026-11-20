@@ -16,6 +16,7 @@
 #include "inicache.h"
 
 #include "setuplib.h"
+#include "components.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -506,6 +507,21 @@ CheckUnattendedSetup(
         }
     }
 
+    /*
+     * [Components]: Profile and per-component yes/no. Only a file with this section
+     * opens components.inf; without it (and in an interactive setup) nothing changes
+     * and nothing is logged.
+     */
+    if (SpInfFindFirstLine(UnattendInf, L"Components", NULL, &Context))
+    {
+        PCOMPONENTS_STATE Components = ComponentsLoad(pSetupData->SourcePath.Buffer, pSetupData->LanguageId);
+        if (Components)
+            ComponentsApplyAnswerFile(Components, UnattendInf);
+        else
+            SetupLogLine("[Components] ignored: components.inf is missing, unreadable or lists no component on the installation medium: everything is installed");
+        pSetupData->Components = Components;
+    }
+
     SetupLogFormat("answer file read: disk %ld partition %ld, AutoPartition %ld, FormatPartition %ld, FsType %ld,"
                    " QuickFormat %ld, PartitionSizeMB %lu, BootLoaderLocation %ld, LocaleID %S",
                    pSetupData->DestinationDiskNumber, pSetupData->DestinationPartitionNumber,
@@ -548,6 +564,9 @@ InstallSetupInfFile(
     /* The installation directory exists now: write the text-mode setup log
      * the graphical stage appends to (<installation directory>\Panther\unattend.log) */
     (void)SetupLogWrite(pSetupData->DestinationPath.Buffer);
+    (void)ComponentsWriteManifest((PCOMPONENTS_STATE)pSetupData->Components,
+                                  pSetupData->DestinationPath.Buffer,
+                                  pSetupData->SourcePath.Buffer);
 
     /* Create a $winnt$.inf file with default entries */
     IniCache = IniCacheCreate();
@@ -1783,6 +1802,9 @@ DoUpdate:
 
         PGENERIC_LIST_ENTRY Entry;
         PCWSTR LanguageId; // LocaleID;
+
+        /* The registry lines of the components that are left out, and the record of the selection */
+        (void)ComponentsApplyRegistry((PCOMPONENTS_STATE)pSetupData->Components);
 
         Entry = GetCurrentListEntry(pSetupData->DisplayList);
         ASSERT(Entry);

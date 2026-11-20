@@ -233,6 +233,20 @@ CreateShortcutsFromSection(
         if (dwFieldCount < 6 || !SetupGetStringFieldW(&Context, 6, szArgs, ARRAYSIZE(szArgs), NULL))
             szArgs[0] = L'\0';
 
+        /* Components that setup left out: no Start menu entry that points to a program that is not there */
+        if (ComponentAnyLeftOut())
+        {
+            WCHAR szExpanded[MAX_PATH];
+
+            if (ExpandEnvironmentStringsW(szCommand, szExpanded, ARRAYSIZE(szExpanded)) &&
+                GetFileAttributesW(szExpanded) == INVALID_FILE_ATTRIBUTES)
+            {
+                UnattendLog(L"shortcut \"%s\" is not created: %s is not installed", szName, szExpanded);
+                SendMessage(pItemsData->hwndDlg, PM_STEP_END, 0, (LPARAM)pNotify);
+                continue;
+            }
+        }
+
         wcscat(szName, L".lnk");
 
         CreateShortcut(pszFolder, szName, szCommand, szDescription, iIconNr, szDirectory, szArgs);

@@ -2784,8 +2784,9 @@ RegisterDlls(
 
 #if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
 #ifdef REGISTER_SYSWOW64
-    /* Without a SysWOW64 tree there is no 32-bit regsvr32 to run (CreateProcess fails with ERROR_PATH_NOT_FOUND) */
-    if (Error == ERROR_SUCCESS)
+    /* Without a SysWOW64 tree there is no 32-bit regsvr32 to run (CreateProcess fails with ERROR_PATH_NOT_FOUND):
+     * the answer file may have left the 32-bit side out (component wow64), then there is nothing to register */
+    if (Error == ERROR_SUCCESS && !ComponentIsLeftOut(L"wow64"))
         Error = RegisterWow64Dlls();
 #endif
     if (Error == ERROR_SUCCESS)
