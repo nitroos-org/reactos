@@ -33,6 +33,10 @@ typedef struct _LSA_SAM_PWD_DATA
        restrictions are those of a logon without credentials */
     BOOL IsS4U;
     BOOL CheckLogonHours;
+
+    /* The interactive logon of the logon dialog on the console (winlogon of the console session): the only
+       logon that a blank password may be used for while Lsa\LimitBlankPasswordUse is on */
+    BOOL IsConsole;
 } LSA_SAM_PWD_DATA, *PLSA_SAM_PWD_DATA;
 
 /**

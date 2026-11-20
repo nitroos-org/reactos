@@ -96,6 +96,77 @@ IsTrustedClient(
 }
 
 
+/*
+ * Is this the logon of the logon dialog on the console? Measured on Windows Server 2022 (evidence samlock-20261120):
+ * a blank-password account logs on through the logon dialog on the console, while every LogonUser type, also from a
+ * process in the console session and from LocalSystem (LsaRegisterLogonProcess, SeTcbPrivilege, Interactive, any token
+ * source or origin name), CreateProcessWithLogonW and NTLM are refused. Here: an interactive (or unlock) logon whose
+ * client holds SeTcbPrivilege and is %SystemRoot%\system32\winlogon.exe of the active console session (msgina runs in
+ * winlogon). A remote session's winlogon (another session) is not the console.
+ */
+static
+BOOL
+MsvpIsConsoleLogonClient(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _In_ SECURITY_LOGON_TYPE LogonType)
+{
+    union
+    {
+        UNICODE_STRING String;
+        BYTE Buffer[sizeof(UNICODE_STRING) + (MAX_PATH + 64) * sizeof(WCHAR)];
+    } ImageName;
+    PROCESS_SESSION_INFORMATION SessionInfo;
+    WCHAR SystemDir[MAX_PATH], Device[MAX_PATH], Expected[2 * MAX_PATH + 32];
+    UNICODE_STRING ExpectedString;
+    HANDLE ProcessHandle = NULL;
+    WCHAR Drive[3];
+    ULONG Length;
+    UINT Chars;
+    NTSTATUS Status;
+
+    if (LogonType != Interactive && LogonType != Unlock)
+        return FALSE;
+
+    if (!IsTrustedClient(ClientRequest) || DispatchTable.GetClientProcess == NULL)
+        return FALSE;
+
+    Status = DispatchTable.GetClientProcess(ClientRequest, &ProcessHandle);
+    if (!NT_SUCCESS(Status) || ProcessHandle == NULL)
+        return FALSE;
+
+    /* The session of the client is the console session */
+    Status = NtQueryInformationProcess(ProcessHandle, ProcessSessionInformation,
+                                       &SessionInfo, sizeof(SessionInfo), NULL);
+    if (!NT_SUCCESS(Status) || SessionInfo.SessionId != SharedUserData->ActiveConsoleId)
+        return FALSE;
+
+    /* The client is winlogon.exe of the system directory: compare the NT names */
+    Status = NtQueryInformationProcess(ProcessHandle, ProcessImageFileName,
+                                       &ImageName, sizeof(ImageName), &Length);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    Chars = GetSystemDirectoryW(SystemDir, ARRAYSIZE(SystemDir));
+    if (Chars < 3 || Chars >= ARRAYSIZE(SystemDir) || SystemDir[1] != L':')
+        return FALSE;
+
+    Drive[0] = SystemDir[0];
+    Drive[1] = L':';
+    Drive[2] = UNICODE_NULL;
+    if (!QueryDosDeviceW(Drive, Device, ARRAYSIZE(Device)))
+        return FALSE;
+
+    if (wcslen(Device) + wcslen(SystemDir + 2) + wcslen(L"\\winlogon.exe") >= ARRAYSIZE(Expected))
+        return FALSE;
+    wcscpy(Expected, Device);
+    wcscat(Expected, SystemDir + 2);
+    wcscat(Expected, L"\\winlogon.exe");
+
+    RtlInitUnicodeString(&ExpectedString, Expected);
+    return RtlEqualUnicodeString(&ImageName.String, &ExpectedString, TRUE);
+}
+
+
 static
 NTSTATUS
 BuildInteractiveProfileBuffer(IN PLSA_CLIENT_REQUEST ClientRequest,
@@ -2249,6 +2320,7 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
         LogonPwdData.IsNetwork = FALSE;
         LogonPwdData.PlainPwd = &LogonInfo->Password;
         LogonPwdData.ComputerName = &ComputerName;
+        LogonPwdData.IsConsole = MsvpIsConsoleLogonClient(ClientRequest, LogonType);
 
         TRACE("Domain: %wZ\n", &LogonInfo->LogonDomainName);
         TRACE("User: %wZ\n", &LogonInfo->UserName);
