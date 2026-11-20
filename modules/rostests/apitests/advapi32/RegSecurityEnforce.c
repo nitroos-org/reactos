@@ -15,7 +15,9 @@
  *
  * The NitroOS kernel enforces key descriptors only in registry ACL mode 2 (boot option /REGACL=ENFORCE or
  * Configuration Manager\RegistryAclMode). In mode 1 (audit) and 0 (legacy) every open the rows make
- * succeeds, and that is what the rows assert there. On Windows the rows always use the enforced values.
+ * succeeds, and that is what the rows assert there, except the opens of the restricted tokens (restricting
+ * SIDs): in mode 1 their opens are decided by the key's descriptor too, as on Windows. On Windows the rows
+ * always use the enforced values.
  *
  * The "standard user" is the process itself when it does not run as an administrator; otherwise a thread
  * token made from the process token with Administrators deny-only and no privileges. The restricted tokens
@@ -35,6 +37,7 @@
 /* ------------------------------------------------------------------------ mode */
 
 static BOOL Enforced;   /* the kernel enforces key descriptors (or this is Windows) */
+static DWORD AclMode;   /* registry ACL mode of the kernel (this system): 0 legacy, 1 audit, 2 enforce */
 
 static DWORD ReadAclMode(void)
 {
@@ -540,7 +543,8 @@ static void RestrictedChild(const WCHAR *Kind, const WCHAR *Expect)
         }
         if (Error == ERROR_SUCCESS)
             RegCloseKey(Key);
-        Wanted = (!Enforced || Expect[i] == L'1') ? ERROR_SUCCESS : ERROR_ACCESS_DENIED;
+        /* a restricted token is decided by the descriptor in audit mode too, not in legacy mode */
+        Wanted = (((!Enforced && AclMode != 1) || Expect[i] == L'1')) ? ERROR_SUCCESS : ERROR_ACCESS_DENIED;
         ok(Error == Wanted, "%ls child: %ls 0x%lx: error %ld, expected %ld (the descriptor %s it)\n", Kind,
            RRows[i].Path, (ULONG)RRows[i].Sam, Error, Wanted, Expect[i] == L'1' ? "grants" : "denies");
     }
@@ -826,6 +830,7 @@ START_TEST(RegSecurityEnforce)
     DWORD Mode = ReadAclMode();
     WCHAR Child[16], Expect[32];
 
+    AclMode = Mode;
     Enforced = !is_reactos() || Mode == 2;
     if (GetEnvironmentVariableW(L"REGACL_ENFORCE_CHILD", Child, RTL_NUMBER_OF(Child)) &&
         GetEnvironmentVariableW(L"REGACL_ENFORCE_EXPECT", Expect, RTL_NUMBER_OF(Expect)))

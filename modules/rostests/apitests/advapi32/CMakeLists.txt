@@ -118,6 +118,7 @@ list(APPEND SOURCE
     SetEntriesInAclOld.c
     SetSecurityInfoKey.c
     SetSecurityInfoKeyInherit.c
+    RegistryRestrictedOpen.c
     SetNamedSecurityInfoInherit.c
     SddlRights.c
     SddlSids.c
