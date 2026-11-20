@@ -27,6 +27,9 @@
 
 #define COMPONENT_GLOB_MAX  256
 
+/* Lines of the answer file's [Components] that are logged one by one when they cannot be used */
+#define COMPONENT_LOG_PROBLEMS  12
+
 static PCWSTR ProfileNames[COMPONENT_PROFILE_COUNT] = { L"standard", L"minimal", L"core" };
 
 /* The patterns of the components that are left out, built once after the resolution */
@@ -397,7 +400,7 @@ ComponentsApplyAnswerFile(
     PCWSTR Key, Value;
     WCHAR Names[400];
     BOOLEAN Ok;
-    ULONG i;
+    ULONG i, Problems = 0;
 
     RtlFillMemory(State->Explicit, sizeof(State->Explicit), (UCHAR)COMPONENT_UNSET);
     State->Profile = COMPONENT_PROFILE_STANDARD;
@@ -416,26 +419,34 @@ ComponentsApplyAnswerFile(
             if (!ComponentParseProfile(Value, &State->Profile))
             {
                 State->Profile = COMPONENT_PROFILE_STANDARD;
-                SetupLogLine("bad value for Profile in [Components] (standard, minimal or core expected): using standard");
+                if (Problems++ < COMPONENT_LOG_PROBLEMS)
+                    SetupLogLine("bad value for Profile in [Components] (standard, minimal or core expected): using standard");
             }
             continue;
         }
 
+        /* The setup log is a small buffer that drops what does not fit: a long list of bad lines must not push out
+         * the summary below, so only the first few problems are logged one by one */
         switch (ComponentSetAnswer(State->Count, State->Desc, State->Explicit, Key, Value))
         {
             case COMPONENT_ANSWER_UNKNOWN:
-                SetupLogFormat("unknown component id \"%S\" in [Components]: ignored", Key);
+                if (Problems++ < COMPONENT_LOG_PROBLEMS)
+                    SetupLogFormat("unknown component id \"%S\" in [Components]: ignored", Key);
                 break;
             case COMPONENT_ANSWER_NOT_HERE:
-                SetupLogFormat("component \"%S\" does not exist in this edition: ignored", Key);
+                if (Problems++ < COMPONENT_LOG_PROBLEMS)
+                    SetupLogFormat("component \"%S\" does not exist in this edition: ignored", Key);
                 break;
             case COMPONENT_ANSWER_BAD:
-                SetupLogFormat("bad value for component %S (yes or no expected): ignored", Key);
+                if (Problems++ < COMPONENT_LOG_PROBLEMS)
+                    SetupLogFormat("bad value for component %S (yes or no expected): ignored", Key);
                 break;
             default:
                 break;
         }
     }
+    if (Problems > COMPONENT_LOG_PROBLEMS)
+        SetupLogFormat("[Components]: %lu more lines were ignored (not logged one by one)", Problems - COMPONENT_LOG_PROBLEMS);
 
     State->Selected = ComponentsResolve(State->Count, State->Desc, State->Profile, State->Explicit);
     State->Resolved = TRUE;
