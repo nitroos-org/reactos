@@ -420,6 +420,33 @@ SampSetUserPassword(IN PSAM_DB_OBJECT UserObject,
                     IN PENCRYPTED_LM_OWF_PASSWORD LmPassword,
                     IN BOOLEAN LmPasswordPresent);
 
+/* Account lockout. The caller holds SampResource (exclusively for the functions that change the user) */
+
+/* The lockout duration of the domain that never ends by itself (NetUserModals TIMEQ_FOREVER) */
+#define SAMP_LOCKOUT_FOREVER ((LONGLONG)0x8000000000000000ULL)
+
+BOOLEAN
+SampIsUserLockedOut(IN PSAM_DB_OBJECT UserObject,
+                    IN PLARGE_INTEGER CurrentTime);
+
+VOID
+SampReportLockoutState(IN PSAM_DB_OBJECT UserObject,
+                       IN OUT PSAM_USER_FIXED_DATA FixedData);
+
+NTSTATUS
+SampRegisterBadPassword(IN PSAM_DB_OBJECT UserObject,
+                        IN OUT PSAM_USER_FIXED_DATA FixedData,
+                        IN PLARGE_INTEGER CurrentTime);
+
+NTSTATUS
+SampClearLockout(IN PSAM_DB_OBJECT UserObject,
+                 IN OUT PSAM_USER_FIXED_DATA FixedData);
+
+NTSTATUS
+SampApplyAccountControlLockout(IN PSAM_DB_OBJECT UserObject,
+                               IN OUT PSAM_USER_FIXED_DATA FixedData,
+                               IN ULONG NewUserAccountControl);
+
 NTSTATUS
 SampGetLogonHoursAttribute(IN PSAM_DB_OBJECT UserObject,
                            IN OUT PSAMPR_LOGON_HOURS LogonHours);

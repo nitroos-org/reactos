@@ -65,11 +65,14 @@ done:
 
 
 /*
- * Lsa\LimitBlankPasswordUse (default 1 when absent): a network logon to an account with a blank password is refused
- * unless the value is 0. Interactive logons are not affected.
+ * Lsa\LimitBlankPasswordUse (default 1 when absent; read at every logon, no restart needed, as measured): while it is
+ * on, an account with a blank password can be logged on only by the logon dialog on the console. Every other logon
+ * that gives the blank password (LogonUser of every type that checks a password, also from a process in the console
+ * session or from LocalSystem with SeTcbPrivilege, CreateProcessWithLogonW, NTLM) fails with STATUS_ACCOUNT_RESTRICTION
+ * (substatus the same), measured on Windows Server 2022. Documented: "Accounts: Limit
+ * local account use of blank passwords to console logon only".
  */
-static
-bool
+BOOL
 MsvpLimitBlankPasswordUse(VOID)
 {
     UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Lsa");
@@ -105,7 +108,8 @@ static
 NTSTATUS
 MsvpCheckNetworkPassword(
     _In_ PLSA_SAM_PWD_DATA UserPwdData,
-    _In_ PSAMPR_USER_INFO_BUFFER UserInfo)
+    _In_ PSAMPR_USER_INFO_BUFFER UserInfo,
+    _Out_ PBOOLEAN BlankPassword)
 {
     PMSV1_0_LM20_LOGON LogonInfo = UserPwdData->LogonInfo;
     UCHAR NtOwf[16];
@@ -113,6 +117,7 @@ MsvpCheckNetworkPassword(
     UNICODE_STRING EmptyPassword = RTL_CONSTANT_STRING(L"");
     NTSTATUS Status;
 
+    *BlankPassword = FALSE;
     RtlZeroMemory(&UserPwdData->UserSessionKey, sizeof(UserPwdData->UserSessionKey));
     RtlZeroMemory(&UserPwdData->LanmanSessionKey, sizeof(UserPwdData->LanmanSessionKey));
     UserPwdData->LogonType = NetLogonNtKey;
@@ -163,109 +168,101 @@ MsvpCheckNetworkPassword(
     if (!NT_SUCCESS(Status))
         return Status;
 
-    /* Blank password: refused over the network by default (checked after the response, so a wrong
-       response still reports the wrong password). VERIFY ON ORACLE: status Windows returns */
-    if (Blank && MsvpLimitBlankPasswordUse())
-    {
-        ERR("Network logon to an account with a blank password refused\n");
-        RtlSecureZeroMemory(&UserPwdData->UserSessionKey, sizeof(UserPwdData->UserSessionKey));
-        return STATUS_ACCOUNT_RESTRICTION;
-    }
-
+    /* The blank-password policy is applied by the caller (after the response was found right: a wrong response
+       reports the wrong password) */
+    *BlankPassword = Blank;
     return STATUS_SUCCESS;
 }
 
+/*
+ * Checks the password of a logon. An account without a stored password (never set, "net user x /add") has the
+ * blank password: only the empty password matches it, exactly like an account whose stored hash is the one of the
+ * empty password ("net user x "" /add"). *BlankPassword tells the caller that the account's password is blank,
+ * for Lsa\LimitBlankPasswordUse. The UF_PASSWD_NOTREQD flag does not change the check (measured: an account with a
+ * password and the flag refuses a wrong and the empty password with 1326).
+ */
 static
 NTSTATUS
 MsvpCheckPassword(
     _In_ PLSA_SAM_PWD_DATA UserPwdData,
-    _In_ PSAMPR_USER_INFO_BUFFER UserInfo)
+    _In_ PSAMPR_USER_INFO_BUFFER UserInfo,
+    _Out_ PBOOLEAN BlankPassword)
 {
+    UNICODE_STRING EmptyPassword = RTL_CONSTANT_STRING(L"");
     ENCRYPTED_NT_OWF_PASSWORD UserNtPassword;
+    ENCRYPTED_NT_OWF_PASSWORD BlankNtPassword;
     ENCRYPTED_LM_OWF_PASSWORD UserLmPassword;
-    BOOLEAN UserLmPasswordPresent = FALSE;
-    BOOLEAN UserNtPasswordPresent = FALSE;
     OEM_STRING LmPwdString;
     CHAR LmPwdBuffer[15];
     NTSTATUS Status;
 
     TRACE("(%p %p)\n", UserPwdData, UserInfo);
 
+    *BlankPassword = FALSE;
+
     /* A network logon carries a challenge response, not the password */
     if (UserPwdData->IsNetwork)
-        return MsvpCheckNetworkPassword(UserPwdData, UserInfo);
+        return MsvpCheckNetworkPassword(UserPwdData, UserInfo, BlankPassword);
 
-    /* Calculate the LM password and hash for the users password */
-    LmPwdString.Length = 15;
-    LmPwdString.MaximumLength = 15;
-    LmPwdString.Buffer = LmPwdBuffer;
-    ZeroMemory(LmPwdString.Buffer, LmPwdString.MaximumLength);
+    if (UserPwdData->PlainPwd == NULL)
+        return STATUS_WRONG_PASSWORD;
 
-    Status = RtlUpcaseUnicodeStringToOemString(&LmPwdString,
-                                               UserPwdData->PlainPwd,
-                                               FALSE);
-    if (NT_SUCCESS(Status))
-    {
-        /* Calculate the LM hash value of the users password */
-        Status = SystemFunction006(LmPwdString.Buffer,
-                                   (LPSTR)&UserLmPassword);
-        if (NT_SUCCESS(Status))
-        {
-            UserLmPasswordPresent = TRUE;
-        }
-    }
+    /* The NT hash of the password given and of the blank password */
+    Status = SystemFunction007(UserPwdData->PlainPwd, (LPBYTE)&UserNtPassword);
+    if (!NT_SUCCESS(Status))
+        return STATUS_WRONG_PASSWORD;
 
-    /* Calculate the NT hash of the users password */
-    Status = SystemFunction007(UserPwdData->PlainPwd,
-                               (LPBYTE)&UserNtPassword);
-    if (NT_SUCCESS(Status))
-    {
-        UserNtPasswordPresent = TRUE;
-    }
+    Status = SystemFunction007(&EmptyPassword, (LPBYTE)&BlankNtPassword);
+    if (!NT_SUCCESS(Status))
+        return Status;
 
     Status = STATUS_WRONG_PASSWORD;
 
-    /* Succeed, if no password has been set */
-    if (UserInfo->All.NtPasswordPresent == FALSE &&
-        UserInfo->All.LmPasswordPresent == FALSE)
+    if (UserInfo->All.NtPasswordPresent &&
+        UserInfo->All.NtOwfPassword.Buffer != NULL &&
+        UserInfo->All.NtOwfPassword.Length >= sizeof(ENCRYPTED_NT_OWF_PASSWORD))
     {
-        TRACE("No password check!\n");
-        Status = STATUS_SUCCESS;
-        goto done;
-    }
-
-    /* Succeed, if NT password matches */
-    if (UserNtPasswordPresent && UserInfo->All.NtPasswordPresent)
-    {
-        TRACE("Check NT password hashes:\n");
-        if (RtlEqualMemory(&UserNtPassword,
-                           UserInfo->All.NtOwfPassword.Buffer,
-                           sizeof(ENCRYPTED_NT_OWF_PASSWORD)))
+        /* The NT hash decides */
+        if (RtlEqualMemory(&UserNtPassword, UserInfo->All.NtOwfPassword.Buffer, sizeof(ENCRYPTED_NT_OWF_PASSWORD)))
         {
-            TRACE("  success!\n");
+            *BlankPassword = RtlEqualMemory(UserInfo->All.NtOwfPassword.Buffer, &BlankNtPassword,
+                                            sizeof(ENCRYPTED_NT_OWF_PASSWORD));
             Status = STATUS_SUCCESS;
-            goto done;
+        }
+    }
+    else if (UserInfo->All.LmPasswordPresent &&
+             UserInfo->All.LmOwfPassword.Buffer != NULL &&
+             UserInfo->All.LmOwfPassword.Length >= sizeof(ENCRYPTED_LM_OWF_PASSWORD))
+    {
+        /* Only an LM hash is stored (an old database): the LM hash of the password given decides */
+        LmPwdString.Length = 0;
+        LmPwdString.MaximumLength = sizeof(LmPwdBuffer);
+        LmPwdString.Buffer = LmPwdBuffer;
+        RtlZeroMemory(LmPwdBuffer, sizeof(LmPwdBuffer));
+
+        if (UserPwdData->PlainPwd->Length <= 14 * sizeof(WCHAR) &&
+            NT_SUCCESS(RtlUpcaseUnicodeStringToOemString(&LmPwdString, UserPwdData->PlainPwd, FALSE)) &&
+            NT_SUCCESS(SystemFunction006(LmPwdBuffer, (LPSTR)&UserLmPassword)) &&
+            RtlEqualMemory(&UserLmPassword, UserInfo->All.LmOwfPassword.Buffer, sizeof(ENCRYPTED_LM_OWF_PASSWORD)))
+        {
+            *BlankPassword = (UserPwdData->PlainPwd->Length == 0);
+            Status = STATUS_SUCCESS;
         }
 
-        TRACE("  failed!\n");
+        RtlSecureZeroMemory(LmPwdBuffer, sizeof(LmPwdBuffer));
+        RtlSecureZeroMemory(&UserLmPassword, sizeof(UserLmPassword));
     }
-
-    /* Succeed, if LM password matches */
-    if (UserLmPasswordPresent && UserInfo->All.LmPasswordPresent)
+    else
     {
-        TRACE("Check LM password hashes:\n");
-        if (RtlEqualMemory(&UserLmPassword,
-                           UserInfo->All.LmOwfPassword.Buffer,
-                           sizeof(ENCRYPTED_LM_OWF_PASSWORD)))
+        /* No password stored: the password is blank, only the empty password matches */
+        if (RtlEqualMemory(&UserNtPassword, &BlankNtPassword, sizeof(ENCRYPTED_NT_OWF_PASSWORD)))
         {
-            TRACE("  success!\n");
+            *BlankPassword = TRUE;
             Status = STATUS_SUCCESS;
-            goto done;
         }
-        TRACE("  failed!\n");
     }
 
-done:
+    RtlSecureZeroMemory(&UserNtPassword, sizeof(UserNtPassword));
     return Status;
 }
 
@@ -456,15 +453,51 @@ SamValidateNormalUser(
 
     TRACE("UserName: %wZ\n", &UserInfo->All.UserName);
 
-    /* Check the password (an S4U logon has none) */
-    if (!PwdData->IsS4U &&
-        (PwdData->IsNetwork ||
-         (UserInfo->All.UserAccountControl & USER_PASSWORD_NOT_REQUIRED) == 0))
+    /* Check the password (an S4U logon has none). USER_PASSWORD_NOT_REQUIRED only allows a blank password to be
+       set: the password is checked all the same (measured) */
+    if (!PwdData->IsS4U)
     {
-        Status = MsvpCheckPassword(PwdData, UserInfo);
+        BOOLEAN BlankPassword = FALSE;
+
+        /* A locked account: every logon with a password fails with STATUS_ACCOUNT_LOCKED_OUT, the right
+           password as well, and the attempt is not counted (measured). The built-in Administrator is not
+           locked out (documented: "Account lockout threshold"; measured: count and flag, but its logons work) */
+        if (RelativeIds.Element[0] != DOMAIN_USER_RID_ADMIN &&
+            (UserInfo->All.UserAccountControl & USER_ACCOUNT_AUTO_LOCKED))
+        {
+            ERR("Account locked out\n");
+            Status = STATUS_ACCOUNT_LOCKED_OUT;
+            goto done;
+        }
+
+        Status = MsvpCheckPassword(PwdData, UserInfo, &BlankPassword);
+        if (Status == STATUS_WRONG_PASSWORD)
+        {
+            SAMPR_USER_INFO_BUFFER InternalInfo;
+            NTSTATUS CountStatus;
+
+            /* Count the bad password (SAM locks the account at the threshold) through the trusted handle */
+            RtlZeroMemory(&InternalInfo, sizeof(InternalInfo));
+            InternalInfo.Internal2.Flags = USER_LOGON_BAD_PASSWORD;
+            CountStatus = SamrSetInformationUser(UserHandle, UserInternal2Information, &InternalInfo);
+            if (!NT_SUCCESS(CountStatus))
+                ERR("Cannot count the bad password (Status %08lx)\n", CountStatus);
+        }
         if (!NT_SUCCESS(Status))
         {
             ERR("MsvpCheckPassword failed (Status %08lx)\n", Status);
+            goto done;
+        }
+
+        /* A blank password is good for the logon dialog on the console only, unless the policy is off. The
+           refusal comes before the logon right and the account checks, and is not a bad password (measured) */
+        if (BlankPassword && !PwdData->IsConsole && MsvpLimitBlankPasswordUse())
+        {
+            TRACE("Blank password refused for a logon that is not the console logon\n");
+            RtlSecureZeroMemory(&PwdData->UserSessionKey, sizeof(PwdData->UserSessionKey));
+            RtlSecureZeroMemory(&PwdData->LanmanSessionKey, sizeof(PwdData->LanmanSessionKey));
+            *SubStatus = STATUS_ACCOUNT_RESTRICTION;
+            Status = STATUS_ACCOUNT_RESTRICTION;
             goto done;
         }
     }

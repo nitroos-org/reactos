@@ -96,6 +96,149 @@ IsTrustedClient(
 }
 
 
+/*
+ * Is this the logon of the logon dialog on the console? Measured on Windows Server 2022:
+ * a blank-password account logs on through the logon dialog on the console, while every LogonUser type, also from a
+ * process in the console session and from LocalSystem (LsaRegisterLogonProcess, SeTcbPrivilege, Interactive, any token
+ * source or origin name), CreateProcessWithLogonW and NTLM are refused. Here: an interactive (or unlock) logon whose
+ * client holds SeTcbPrivilege and is %SystemRoot%\system32\winlogon.exe of the active console session (msgina runs in
+ * winlogon). A remote session's winlogon (another session) is not the console.
+ */
+static
+BOOL
+MsvpIsConsoleLogonClient(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _In_ SECURITY_LOGON_TYPE LogonType)
+{
+    union
+    {
+        UNICODE_STRING String;
+        BYTE Buffer[sizeof(UNICODE_STRING) + (MAX_PATH + 64) * sizeof(WCHAR)];
+    } ImageName;
+    PROCESS_SESSION_INFORMATION SessionInfo;
+    WCHAR SystemDir[MAX_PATH], Device[MAX_PATH], Expected[2 * MAX_PATH + 32];
+    UNICODE_STRING ExpectedString;
+    HANDLE ProcessHandle = NULL;
+    WCHAR Drive[3];
+    ULONG Length;
+    UINT Chars;
+    NTSTATUS Status;
+
+    if (LogonType != Interactive && LogonType != Unlock)
+        return FALSE;
+
+    if (!IsTrustedClient(ClientRequest) || DispatchTable.GetClientProcess == NULL)
+        return FALSE;
+
+    Status = DispatchTable.GetClientProcess(ClientRequest, &ProcessHandle);
+    if (!NT_SUCCESS(Status) || ProcessHandle == NULL)
+        return FALSE;
+
+    /* The session of the client is the console session */
+    Status = NtQueryInformationProcess(ProcessHandle, ProcessSessionInformation,
+                                       &SessionInfo, sizeof(SessionInfo), NULL);
+    if (!NT_SUCCESS(Status) || SessionInfo.SessionId != SharedUserData->ActiveConsoleId)
+        return FALSE;
+
+    /* The client is winlogon.exe of the system directory: compare the NT names */
+    Status = NtQueryInformationProcess(ProcessHandle, ProcessImageFileName,
+                                       &ImageName, sizeof(ImageName), &Length);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    Chars = GetSystemDirectoryW(SystemDir, ARRAYSIZE(SystemDir));
+    if (Chars < 3 || Chars >= ARRAYSIZE(SystemDir) || SystemDir[1] != L':')
+        return FALSE;
+
+    Drive[0] = SystemDir[0];
+    Drive[1] = L':';
+    Drive[2] = UNICODE_NULL;
+    if (!QueryDosDeviceW(Drive, Device, ARRAYSIZE(Device)))
+        return FALSE;
+
+    if (wcslen(Device) + wcslen(SystemDir + 2) + wcslen(L"\\winlogon.exe") >= ARRAYSIZE(Expected))
+        return FALSE;
+    wcscpy(Expected, Device);
+    wcscat(Expected, SystemDir + 2);
+    wcscat(Expected, L"\\winlogon.exe");
+
+    RtlInitUnicodeString(&ExpectedString, Expected);
+    return RtlEqualUnicodeString(&ImageName.String, &ExpectedString, TRUE);
+}
+
+
+/*
+ * Could the client of the request reset the password of the user (USER_FORCE_PASSWORD_CHANGE granted to its token by
+ * the user object's security descriptor, as an administrator)? The password change below runs on a trusted SAM
+ * handle, so this is the access check SAM would have made on an untrusted one.
+ */
+static
+BOOL
+MsvpClientMayResetPassword(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _In_ SAMPR_HANDLE UserHandle)
+{
+    static GENERIC_MAPPING UserMapping = { USER_READ, USER_WRITE, USER_EXECUTE, USER_ALL_ACCESS };
+    SECURITY_QUALITY_OF_SERVICE Qos = { sizeof(Qos), SecurityIdentification, SECURITY_STATIC_TRACKING, FALSE };
+    PSAMPR_SR_SECURITY_DESCRIPTOR Sd = NULL;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Token = NULL, Identification = NULL;
+    /* NtAccessCheck probes the privilege set for ULONG alignment: not a byte array */
+    union
+    {
+        PRIVILEGE_SET Set;
+        UCHAR Buffer[sizeof(PRIVILEGE_SET) + 4 * sizeof(LUID_AND_ATTRIBUTES)];
+    } Privileges;
+    ULONG PrivilegeLength = sizeof(Privileges);
+    ACCESS_MASK Granted = 0;
+    NTSTATUS AccessStatus = STATUS_ACCESS_DENIED;
+    NTSTATUS Status;
+    BOOL Result = FALSE;
+
+    if (DispatchTable.OpenClientToken == NULL)
+        return FALSE;
+
+    Status = SamrQuerySecurityObject(UserHandle,
+                                     OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                                     &Sd);
+    if (!NT_SUCCESS(Status) || Sd == NULL || Sd->SecurityDescriptor == NULL)
+        goto done;
+
+    Status = DispatchTable.OpenClientToken(ClientRequest, &Token);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    ObjectAttributes.SecurityQualityOfService = &Qos;
+    Status = NtDuplicateToken(Token, TOKEN_QUERY, &ObjectAttributes, FALSE, TokenImpersonation, &Identification);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    Status = NtAccessCheck(Sd->SecurityDescriptor,
+                           Identification,
+                           USER_FORCE_PASSWORD_CHANGE,
+                           &UserMapping,
+                           &Privileges.Set,
+                           &PrivilegeLength,
+                           &Granted,
+                           &AccessStatus);
+    Result = NT_SUCCESS(Status) && NT_SUCCESS(AccessStatus) && (Granted & USER_FORCE_PASSWORD_CHANGE);
+
+done:
+    if (Identification != NULL)
+        NtClose(Identification);
+    if (Token != NULL)
+        NtClose(Token);
+    if (Sd != NULL)
+    {
+        if (Sd->SecurityDescriptor != NULL)
+            SamIFreeVoid(Sd->SecurityDescriptor);
+        SamIFreeVoid(Sd);
+    }
+    return Result;
+}
+
+
 static
 NTSTATUS
 BuildInteractiveProfileBuffer(IN PLSA_CLIENT_REQUEST ClientRequest,
@@ -770,13 +913,46 @@ MsvpChangePassword(IN PLSA_CLIENT_REQUEST ClientRequest,
 
     /* Open the user object */
     Status = SamrOpenUser(DomainHandle,
-                          USER_CHANGE_PASSWORD,
+                          USER_CHANGE_PASSWORD | USER_READ_GENERAL | READ_CONTROL,
                           RelativeIds.Element[0],
                           &UserHandle);
     if (!NT_SUCCESS(Status))
     {
         TRACE("SamrOpenUser failed (Status %08lx)\n", Status);
         goto done;
+    }
+
+    /*
+     * The password of an account with a blank password is a use of that blank password: while
+     * Lsa\LimitBlankPasswordUse is on, only the console (winlogon's change dialog) and a caller that could reset the
+     * password anyway (an administrator) may change it. Measured on Windows Server 2022: a standard user's
+     * NetUserChangePassword of a blank account is 5 with the empty and with a wrong old password (not counted as a
+     * bad password), 0 with LimitBlankPasswordUse 0; the Administrator's is 0. Without this, any local user could
+     * give the blank built-in Administrator a password of his choice and log on with it.
+     */
+    {
+        PSAMPR_USER_INFO_BUFFER UserInfo = NULL;
+        BOOLEAN Blank = FALSE;
+
+        /* SAM reports a stored hash of the empty password as "not present", like no hash at all */
+        Status = SamrQueryInformationUser(UserHandle, UserAllInformation, &UserInfo);
+        if (!NT_SUCCESS(Status))
+        {
+            TRACE("SamrQueryInformationUser failed (Status %08lx)\n", Status);
+            goto done;
+        }
+        Blank = !UserInfo->All.NtPasswordPresent && !UserInfo->All.LmPasswordPresent;
+        SamIFree_SAMPR_USER_INFO_BUFFER(UserInfo, UserAllInformation);
+
+        if (Blank &&
+            MsvpLimitBlankPasswordUse() &&
+            !MsvpIsConsoleLogonClient(ClientRequest, Interactive) &&
+            !MsvpClientMayResetPassword(ClientRequest, UserHandle))
+        {
+            TRACE("Change of a blank password refused for a caller that is not the console\n");
+            Status = STATUS_ACCESS_DENIED;
+            goto done;
+        }
     }
 
 
@@ -2249,6 +2425,7 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
         LogonPwdData.IsNetwork = FALSE;
         LogonPwdData.PlainPwd = &LogonInfo->Password;
         LogonPwdData.ComputerName = &ComputerName;
+        LogonPwdData.IsConsole = MsvpIsConsoleLogonClient(ClientRequest, LogonType);
 
         TRACE("Domain: %wZ\n", &LogonInfo->LogonDomainName);
         TRACE("User: %wZ\n", &LogonInfo->UserName);
@@ -2410,18 +2587,15 @@ done:
         RtlEraseUnicodeString(ErasePassword);
     }
 
-    /* Update the logon time/count or the bad password time/count */
-    if ((UserHandle != NULL) &&
-        (Status == STATUS_SUCCESS || Status == STATUS_WRONG_PASSWORD))
+    /* Update the logon time/count and clear the bad password count (a bad password is counted where the
+       password is checked, SamValidateUser). An S4U logon proves no password: it must not reset the count of
+       an account somebody is guessing the password of */
+    if (UserHandle != NULL && Status == STATUS_SUCCESS && !LogonPwdData.IsS4U)
     {
         SAMPR_USER_INFO_BUFFER InternalInfo;
 
         RtlZeroMemory(&InternalInfo, sizeof(InternalInfo));
-
-        if (Status == STATUS_SUCCESS)
-            InternalInfo.Internal2.Flags = USER_LOGON_SUCCESS;
-        else
-            InternalInfo.Internal2.Flags = USER_LOGON_BAD_PASSWORD;
+        InternalInfo.Internal2.Flags = USER_LOGON_SUCCESS;
 
         SamrSetInformationUser(UserHandle,
                                UserInternal2Information,
@@ -2498,10 +2672,13 @@ done:
     if (AccountDomainSid != NULL)
         RtlFreeHeap(RtlGetProcessHeap(), 0, AccountDomainSid);
 
+    /* An unknown user and a wrong password are the same failure to every caller, trusted or not: the substatus
+       does not tell them apart (measured on Windows Server 2022: STATUS_LOGON_FAILURE, substatus 0, for both;
+       before, the substatus told a caller whether the account exists) */
     if (Status == STATUS_NO_SUCH_USER ||
         Status == STATUS_WRONG_PASSWORD)
     {
-        *SubStatus = Status;
+        *SubStatus = STATUS_SUCCESS;
         Status = STATUS_LOGON_FAILURE;
     }
 

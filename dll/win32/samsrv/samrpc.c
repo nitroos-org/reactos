@@ -282,12 +282,53 @@ SampAddRelativeTimeToTime(IN LARGE_INTEGER AbsoluteTime,
 {
     LARGE_INTEGER NewTime;
 
+    /* A relative time is not positive. 0x8000000000000000 (NetUserModals TIMEQ_FOREVER) and every sum that does not
+       fit are "never": 0x7FFFFFFFFFFFFFFF ([MS-ADTS] msDS-UserPasswordExpiryTimeComputed). Without this the sum
+       overflowed to a negative time, clamped to 0: "net accounts /maxpwage:unlimited" expired every password */
+    if (RelativeTime.QuadPart > 0)
+        RelativeTime.QuadPart = 0;
+
+    if (RelativeTime.QuadPart == MINLONGLONG ||
+        AbsoluteTime.QuadPart > MAXLONGLONG + RelativeTime.QuadPart)
+    {
+        NewTime.QuadPart = MAXLONGLONG;
+        return NewTime;
+    }
+
     NewTime.QuadPart = AbsoluteTime.QuadPart - RelativeTime.QuadPart;
 
     if (NewTime.QuadPart < 0)
         NewTime.QuadPart = 0;
 
     return NewTime;
+}
+
+
+/*
+ * [MS-SAMR] 3.1.5.14.4 PasswordMustChange Generation: never (0x7FFFFFFFFFFFFFFF) for an account whose password does
+ * not expire (UF_DONT_EXPIRE_PASSWD, UF_SMARTCARD_REQUIRED, trust accounts); 0 when the password was never set
+ * (PasswordLastSet 0: must change); never when the maximum password age is 0; else PasswordLastSet plus the age.
+ */
+static
+LARGE_INTEGER
+SampGetPasswordMustChange(IN PSAM_USER_FIXED_DATA UserFixedData,
+                          IN PSAM_DOMAIN_FIXED_DATA DomainFixedData)
+{
+    LARGE_INTEGER Never = {.QuadPart = MAXLONGLONG};
+    LARGE_INTEGER Zero = {.QuadPart = 0};
+
+    if (UserFixedData->UserAccountControl & (USER_DONT_EXPIRE_PASSWORD | USER_SMARTCARD_REQUIRED |
+                                             USER_INTERDOMAIN_TRUST_ACCOUNT | USER_WORKSTATION_TRUST_ACCOUNT |
+                                             USER_SERVER_TRUST_ACCOUNT))
+        return Never;
+
+    if (UserFixedData->PasswordLastSet.QuadPart == 0)
+        return Zero;
+
+    if (DomainFixedData->MaxPasswordAge.QuadPart == 0)
+        return Never;
+
+    return SampAddRelativeTimeToTime(UserFixedData->PasswordLastSet, DomainFixedData->MaxPasswordAge);
 }
 
 
@@ -2005,6 +2046,16 @@ SampSetDomainLockout(PSAM_DB_OBJECT DomainObject,
                                     &Length);
     if (!NT_SUCCESS(Status))
         goto done;
+
+    /* Relative (not positive) times; the duration is at least the observation window (measured with
+       NetUserModalsSet level 3: a shorter duration is ERROR_INVALID_PARAMETER) */
+    if (Buffer->Lockout.LockoutDuration.QuadPart > 0 ||
+        Buffer->Lockout.LockoutObservationWindow.QuadPart > 0 ||
+        Buffer->Lockout.LockoutDuration.QuadPart > Buffer->Lockout.LockoutObservationWindow.QuadPart)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto done;
+    }
 
     FixedData.LockoutDuration = Buffer->Lockout.LockoutDuration;
     FixedData.LockoutObservationWindow = Buffer->Lockout.LockoutObservationWindow;
@@ -5993,6 +6044,8 @@ SampQueryUserLogon(PSAM_DB_OBJECT UserObject,
     if (!NT_SUCCESS(Status))
         goto done;
 
+    SampReportLockoutState(UserObject, &FixedData);
+
     InfoBuffer->Logon.UserId = FixedData.UserId;
     InfoBuffer->Logon.PrimaryGroupId = FixedData.PrimaryGroupId;
     InfoBuffer->Logon.LastLogon.LowPart = FixedData.LastLogon.LowPart;
@@ -6010,8 +6063,7 @@ SampQueryUserLogon(PSAM_DB_OBJECT UserObject,
     InfoBuffer->Logon.PasswordCanChange.LowPart = PasswordCanChange.LowPart;
     InfoBuffer->Logon.PasswordCanChange.HighPart = PasswordCanChange.HighPart;
 
-    PasswordMustChange = SampAddRelativeTimeToTime(FixedData.PasswordLastSet,
-                                                   DomainFixedData.MaxPasswordAge);
+    PasswordMustChange = SampGetPasswordMustChange(&FixedData, &DomainFixedData);
     InfoBuffer->Logon.PasswordMustChange.LowPart = PasswordMustChange.LowPart;
     InfoBuffer->Logon.PasswordMustChange.HighPart = PasswordMustChange.HighPart;
 
@@ -6157,6 +6209,8 @@ SampQueryUserAccount(PSAM_DB_OBJECT UserObject,
                                     &Length);
     if (!NT_SUCCESS(Status))
         goto done;
+
+    SampReportLockoutState(UserObject, &FixedData);
 
     InfoBuffer->Account.UserId = FixedData.UserId;
     InfoBuffer->Account.PrimaryGroupId = FixedData.PrimaryGroupId;
@@ -6770,6 +6824,8 @@ SampQueryUserControl(PSAM_DB_OBJECT UserObject,
     if (!NT_SUCCESS(Status))
         goto done;
 
+    SampReportLockoutState(UserObject, &FixedData);
+
     InfoBuffer->Control.UserAccountControl = FixedData.UserAccountControl;
 
     *Buffer = InfoBuffer;
@@ -6949,6 +7005,8 @@ SampQueryUserInternal2(PSAM_DB_OBJECT UserObject,
     if (!NT_SUCCESS(Status))
         goto done;
 
+    SampReportLockoutState(UserObject, &FixedData);
+
     InfoBuffer->Internal2.Flags = 0;
     InfoBuffer->Internal2.LastLogon.LowPart = FixedData.LastLogon.LowPart;
     InfoBuffer->Internal2.LastLogon.HighPart = FixedData.LastLogon.HighPart;
@@ -7050,6 +7108,8 @@ SampQueryUserAll(PSAM_DB_OBJECT UserObject,
                                     &Length);
     if (!NT_SUCCESS(Status))
         goto done;
+
+    SampReportLockoutState(UserObject, &FixedData);
 
     /* Set the fields to be returned */
     if (UserObject->Trusted)
@@ -7263,8 +7323,7 @@ SampQueryUserAll(PSAM_DB_OBJECT UserObject,
     /* Get the PasswordMustChange attribute */
     if (InfoBuffer->All.WhichFields & USER_ALL_PASSWORDMUSTCHANGE)
     {
-        PasswordMustChange = SampAddRelativeTimeToTime(FixedData.PasswordLastSet,
-                                                       DomainFixedData.MaxPasswordAge);
+        PasswordMustChange = SampGetPasswordMustChange(&FixedData, &DomainFixedData);
         InfoBuffer->All.PasswordMustChange.LowPart = PasswordMustChange.LowPart;
         InfoBuffer->All.PasswordMustChange.HighPart = PasswordMustChange.HighPart;
     }
@@ -7720,7 +7779,9 @@ SampSetUserControl(PSAM_DB_OBJECT UserObject,
     if (!NT_SUCCESS(Status))
         goto done;
 
-    FixedData.UserAccountControl = Buffer->Control.UserAccountControl;
+    Status = SampApplyAccountControlLockout(UserObject, &FixedData, Buffer->Control.UserAccountControl);
+    if (!NT_SUCCESS(Status))
+        goto done;
 
     Status = SampSetObjectAttribute(UserObject,
                                     L"F",
@@ -7846,18 +7907,31 @@ SampSetUserInternal2(PSAM_DB_OBJECT UserObject,
             goto done;
 
         FixedData.LogonCount++;
-        FixedData.BadPasswordCount = 0;
-    }
 
-    if ((Buffer->Internal2.Flags & USER_LOGON_BAD_PASSWORD) &&
-        ((Buffer->Internal2.Flags & ~USER_LOGON_BAD_PASSWORD) == 0))
+        /* A successful logon: count 0, a lock that has ended (or the one of the built-in Administrator, whose
+           logons are not refused for it) is gone */
+        Status = SampClearLockout(UserObject, &FixedData);
+        if (!NT_SUCCESS(Status))
+            goto done;
+    }
+    else if ((Buffer->Internal2.Flags & USER_LOGON_BAD_PASSWORD) &&
+             ((Buffer->Internal2.Flags & ~USER_LOGON_BAD_PASSWORD) == 0))
     {
-        /* Update the LastBadPasswordTime */
-        Status = NtQuerySystemTime(&FixedData.LastBadPasswordTime);
+        LARGE_INTEGER Now;
+
+        /* A wrong password: count it, lock the account at the threshold (under the exclusive SampResource) */
+        Status = NtQuerySystemTime(&Now);
         if (!NT_SUCCESS(Status))
             goto done;
 
-        FixedData.BadPasswordCount++;
+        Status = SampRegisterBadPassword(UserObject, &FixedData, &Now);
+        if (!NT_SUCCESS(Status))
+            goto done;
+    }
+    else
+    {
+        /* Nothing else is known: nothing to write */
+        goto done;
     }
 
     /* Set the fixed user attributes */
@@ -8010,7 +8084,9 @@ SampSetUserAll(PSAM_DB_OBJECT UserObject,
 
     if (WhichFields & USER_ALL_USERACCOUNTCONTROL)
     {
-        FixedData.UserAccountControl = Buffer->All.UserAccountControl;
+        Status = SampApplyAccountControlLockout(UserObject, &FixedData, Buffer->All.UserAccountControl);
+        if (!NT_SUCCESS(Status))
+            goto done;
         WriteFixedData = TRUE;
     }
 
@@ -8251,6 +8327,16 @@ SamrChangePasswordUser(IN SAMPR_HANDLE UserHandle,
     }
 
     /*
+     * No stored hash (an account whose password was never set, "net user x /add") is the blank password, as for a
+     * logon: decrypt and compare with the hash of the empty password. The buffers were used uninitialized here: such an
+     * account's empty old password was refused (and counted as a bad password) while Windows accepts it.
+     */
+    if (!StoredLmPresent)
+        RtlCopyMemory(&StoredLmPassword, &EmptyLmHash, sizeof(StoredLmPassword));
+    if (!StoredNtPresent)
+        RtlCopyMemory(&StoredNtPassword, &EmptyNtHash, sizeof(StoredNtPassword));
+
+    /*
      * An account without a stored LM hash (NetUserAdd and the change path store none) cannot
      * be checked against the LM half of the request, which a client always sends for an old
      * password of up to 14 characters. Verify the NT hash alone then, and do not store an LM
@@ -8269,6 +8355,15 @@ SamrChangePasswordUser(IN SAMPR_HANDLE UserHandle,
     if (!NT_SUCCESS(Status))
     {
         TRACE("SampGetObjectAttribute failed to retrieve the fixed user data (Status 0x%08lx)\n", Status);
+        goto done;
+    }
+
+    /* A locked account cannot change its password (measured: NetUserChangePassword 1909 with the right old
+       password), and the attempt does not count. The built-in Administrator is not locked out */
+    if (UserObject->RelativeId != DOMAIN_USER_RID_ADMIN &&
+        SampIsUserLockedOut(UserObject, &SystemTime))
+    {
+        Status = STATUS_ACCOUNT_LOCKED_OUT;
         goto done;
     }
 
@@ -8421,9 +8516,10 @@ SamrChangePasswordUser(IN SAMPR_HANDLE UserHandle,
     {
         NTSTATUS UpdateStatus;
 
-        /* Update BadPasswordCount and LastBadPasswordTime */
-        UserFixedData.BadPasswordCount++;
-        UserFixedData.LastBadPasswordTime.QuadPart = SystemTime.QuadPart;
+        /* A wrong old password counts like a wrong logon password (measured), up to the lockout */
+        UpdateStatus = SampRegisterBadPassword(UserObject, &UserFixedData, &SystemTime);
+        if (!NT_SUCCESS(UpdateStatus))
+            TRACE("SampRegisterBadPassword failed (Status 0x%08lx)\n", UpdateStatus);
 
         /* Set the fixed size user data. The caller still gets STATUS_WRONG_PASSWORD:
            returning the status of this write told it the password had been changed. */
