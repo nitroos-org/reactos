@@ -90,6 +90,7 @@ START_TEST(addrchange6)
     ULONG index;
     DWORD err;
     LONG added, deleted;
+    int quiet;
     PCSTR end;
 
     ok(WSAStartup(MAKEWORD(2, 2), &wd) == 0, "WSAStartup\n");
@@ -128,7 +129,18 @@ START_TEST(addrchange6)
     row.OnLinkPrefixLength = 64;
 
     thread = CreateThread(NULL, 0, waiter, (LPVOID)(ULONG_PTR)s, 0, NULL);
-    Sleep(1500);    /* the waiter is queued, and whatever was settling has settled */
+    /* the waiter is queued; then wait for the stack to be quiet (3 s without a change, at most 30 s): right after boot
+       the link-local address, router advertisements and temporary addresses still change the table, and each of those
+       would count below */
+    Sleep(1500);
+    for (quiet = 0; quiet < 10; quiet++)
+    {
+        InterlockedExchange(&g_Count, 0);
+        Sleep(3000);
+        if (g_Count == 0)
+            break;
+    }
+    ok(quiet < 10, "the IPv6 table kept changing for 30 s before the test\n");
     InterlockedExchange(&g_Count, 0);
 
     err = pCreateUnicastIpAddressEntry(&row);
