@@ -716,6 +716,58 @@ GetTokenInfo(
 
 
 /*
+ * What was typed at the unlock dialog names the user of the session or it does not. The accepted forms are the
+ * ones the logon of Windows takes for a local account: the name alone, DOMAIN\name and .\name, whatever the case.
+ * DOMAIN is the domain of the session, the name of this computer or ".", and on a stand-alone computer (the domain
+ * of the session is the name of the computer) any domain name, as the logon of Windows ignores a domain name it does
+ * not know there. Not accepted: name@host (a user principal name) and anything else that is not the name of the
+ * session's user.
+ *
+ * Returns the part of Typed that is the account name, or NULL when Typed does not name the session's user. The
+ * logon that follows is made for that name in the domain of the session, so the account that is checked is the
+ * session's user in every case.
+ */
+PCWSTR
+GetUnlockUserName(
+    IN PGINA_CONTEXT pgContext,
+    IN PCWSTR Typed)
+{
+    WCHAR ComputerName[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD Size = _countof(ComputerName);
+    PCWSTR Name = Typed;
+    PCWSTR Separator;
+    SIZE_T DomainLength;
+
+    Separator = wcschr(Typed, L'\\');
+    if (Separator != NULL)
+    {
+        DomainLength = Separator - Typed;
+        Name = Separator + 1;
+
+        if (DomainLength == 0)
+            return NULL;
+
+        if (!(DomainLength == 1 && Typed[0] == L'.') &&
+            !(_wcsnicmp(Typed, pgContext->DomainName, DomainLength) == 0 &&
+              pgContext->DomainName[DomainLength] == UNICODE_NULL))
+        {
+            /* Another domain: only a stand-alone computer takes it (and logs the local account on) */
+            if (!GetComputerNameW(ComputerName, &Size) ||
+                _wcsicmp(pgContext->DomainName, ComputerName) != 0)
+            {
+                return NULL;
+            }
+        }
+    }
+
+    if (*Name == UNICODE_NULL || _wcsicmp(Name, pgContext->UserName) != 0)
+        return NULL;
+
+    return Name;
+}
+
+
+/*
  * The logon of the unlock dialog: the LSA decides (an Unlock logon, like the logon of the logon dialog), so that a
  * wrong password is counted by the account lockout, a locked out account cannot unlock, a password that was changed
  * meanwhile is the one that counts, and no copy of the password is kept for the comparison.

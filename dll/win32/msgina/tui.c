@@ -243,6 +243,7 @@ TUILockedSAS(
 {
     WCHAR UserName[256];
     WCHAR Password[256];
+    PCWSTR AccountName;
     BOOL IsSessionUser;
     NTSTATUS SubStatus;
     NTSTATUS Status;
@@ -262,9 +263,10 @@ TUILockedSAS(
     /* Only the user of the session unlocks. The name of another account is refused without a logon attempt (no
        password is checked, nothing is counted against any account); the LSA checks the password of the session's
        user (an Unlock logon) */
-    if (_wcsicmp(UserName, pgContext->UserName) == 0)
+    AccountName = GetUnlockUserName(pgContext, UserName);
+    if (AccountName != NULL)
     {
-        Status = DoUnlockLogon(pgContext, UserName, Password, &IsSessionUser, &SubStatus);
+        Status = DoUnlockLogon(pgContext, (PWSTR)AccountName, Password, &IsSessionUser, &SubStatus);
         if (NT_SUCCESS(Status))
         {
             if (IsSessionUser)

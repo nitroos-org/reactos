@@ -133,6 +133,11 @@ MyUnlockUser(
 
 /* msgina.c */
 
+PCWSTR
+GetUnlockUserName(
+    IN PGINA_CONTEXT pgContext,
+    IN PCWSTR Typed);
+
 NTSTATUS
 DoUnlockLogon(
     IN PGINA_CONTEXT pgContext,

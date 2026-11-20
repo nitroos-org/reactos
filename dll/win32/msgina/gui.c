@@ -1666,6 +1666,7 @@ DoUnlock(
     WCHAR Buffer2[512];
     LPWSTR UserName = NULL;
     LPWSTR Password = NULL;
+    PCWSTR AccountName;
     BOOL res = FALSE;
     BOOL IsSessionUser = FALSE;
     NTSTATUS Status, SubStatus = STATUS_SUCCESS;
@@ -1678,7 +1679,8 @@ DoUnlock(
 
     if (GetTextboxText(hwndDlg, IDC_UNLOCK_PASSWORD, &Password) && UserName != NULL && Password != NULL)
     {
-        if (_wcsicmp(UserName, pgContext->UserName) != 0)
+        AccountName = GetUnlockUserName(pgContext, UserName);
+        if (AccountName == NULL)
         {
             /* Only the user of the session can unlock the workstation. The name of another account is refused
                without a logon attempt: no password is checked and nothing is counted against any account */
@@ -1691,7 +1693,7 @@ DoUnlock(
         {
             /* The LSA checks the password of the session's user: a wrong password is counted by the account
                lockout and a locked out account does not unlock */
-            Status = DoUnlockLogon(pgContext, UserName, Password, &IsSessionUser, &SubStatus);
+            Status = DoUnlockLogon(pgContext, (PWSTR)AccountName, Password, &IsSessionUser, &SubStatus);
             if (NT_SUCCESS(Status) && IsSessionUser)
             {
                 *Action = WLX_SAS_ACTION_UNLOCK_WKSTA;
@@ -1713,6 +1715,21 @@ DoUnlock(
                     LoadStringW(pgContext->hDllInstance, IDS_ACCOUNTLOCKED, Buffer2, _countof(Buffer2));
                 }
                 MessageBoxW(hwndDlg, Buffer2, Buffer1, MB_OK | MB_ICONERROR);
+            }
+            else if (Status == STATUS_ACCOUNT_RESTRICTION &&
+                     (SubStatus == STATUS_ACCOUNT_DISABLED || SubStatus == STATUS_ACCOUNT_EXPIRED ||
+                      SubStatus == STATUS_INVALID_LOGON_HOURS || SubStatus == STATUS_INVALID_WORKSTATION))
+            {
+                /* The password is right but the account may not log on: the texts of the logon dialog. They
+                   come after the password was verified, so they tell nothing to someone who guesses */
+                ResourceMessageBox(pgContext,
+                                   hwndDlg,
+                                   MB_OK | MB_ICONEXCLAMATION,
+                                   IDS_COMPUTERLOCKED,
+                                   (SubStatus == STATUS_ACCOUNT_DISABLED) ? IDS_LOGONUSERDISABLED :
+                                   (SubStatus == STATUS_ACCOUNT_EXPIRED) ? IDS_ACCOUNTEXPIRED :
+                                   (SubStatus == STATUS_INVALID_LOGON_HOURS) ? IDS_INVALIDLOGONHOURS :
+                                   IDS_INVALIDWORKSTATION);
             }
             else if (Status == STATUS_ACCOUNT_RESTRICTION &&
                      (SubStatus == STATUS_PASSWORD_EXPIRED || SubStatus == STATUS_PASSWORD_MUST_CHANGE))
