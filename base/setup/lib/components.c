@@ -330,6 +330,16 @@ ComponentsLoad(
         State->Count++;
     }
 
+    /* A file without a component list (empty, or not a components.inf) is as good as none: nothing is left out,
+     * nothing is recorded */
+    if (!State->Count)
+    {
+        DPRINT1("components.inf: '%S' lists no component\n", Path);
+        SpInfCloseInfFile(State->Inf);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, State);
+        return NULL;
+    }
+
     for (i = 0; i < State->Count; ++i)
     {
         PCOMPONENT_DESC Desc = &State->Desc[i];

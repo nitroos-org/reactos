@@ -518,7 +518,7 @@ CheckUnattendedSetup(
         if (Components)
             ComponentsApplyAnswerFile(Components, UnattendInf);
         else
-            SetupLogLine("[Components] ignored: there is no components.inf on the installation medium");
+            SetupLogLine("[Components] ignored: components.inf is missing, unreadable or lists no component on the installation medium: everything is installed");
         pSetupData->Components = Components;
     }
 
