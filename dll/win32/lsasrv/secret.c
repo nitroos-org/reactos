@@ -286,36 +286,95 @@ LsapKeyFileChecksum(PLSAP_KEY_FILE File, PUCHAR Check)
     SymCryptSha256((PCBYTE)File, FIELD_OFFSET(LSAP_KEY_FILE, Check), Check);
 }
 
+/* The volume of the file keeps file descriptors: NTFS (ntfsng enforces them without reporting FILE_PERSISTENT_ACLS) */
+static BOOLEAN
+LsapVolumeKeepsSecurity(HANDLE FileHandle)
+{
+    static const WCHAR Ntfs[] = L"NTFS";
+    union
+    {
+        FILE_FS_ATTRIBUTE_INFORMATION Info;
+        UCHAR Bytes[sizeof(FILE_FS_ATTRIBUTE_INFORMATION) + 32 * sizeof(WCHAR)];
+    } Buffer;
+    IO_STATUS_BLOCK Iosb;
+
+    RtlZeroMemory(&Buffer, sizeof(Buffer));
+    if (!NT_SUCCESS(NtQueryVolumeInformationFile(FileHandle, &Iosb, &Buffer, sizeof(Buffer),
+                                                 FileFsAttributeInformation)))
+    {
+        /* Unknown: treated as keeping security, so a key file of the wrong owner is refused */
+        return TRUE;
+    }
+    if (Buffer.Info.FileSystemAttributes & FILE_PERSISTENT_ACLS)
+        return TRUE;
+    return Buffer.Info.FileSystemNameLength == sizeof(Ntfs) - sizeof(WCHAR) &&
+           RtlCompareMemory(Buffer.Info.FileSystemName, Ntfs, sizeof(Ntfs) - sizeof(WCHAR)) == sizeof(Ntfs) - sizeof(WCHAR);
+}
+
 /*
- * The file system keeps the key file's descriptor (SYSTEM alone), else other users can read the key: said once
- * per start. Asked of the file itself: a volume's FILE_PERSISTENT_ACLS flag is not reliable (ntfsng enforces
- * descriptors without reporting it).
+ * Whether a key file can be trusted: owned by SYSTEM or the administrators, and no access granted to anyone else
+ * (lsass makes it SYSTEM-only). A file that anyone else made or can read is not used: its key could be known to another user, and every secret
+ * written under it would be readable by him. On a volume that keeps no file security (FAT) every file fails
+ * this; there the file is used and the exposure is said once per start (the key is readable by every user).
+ * Asked of the file itself: a volume's FILE_PERSISTENT_ACLS flag is not reliable (ntfsng enforces descriptors
+ * without reporting it).
  */
-static VOID
+static BOOLEAN
 LsapCheckKeyFileSecurity(HANDLE FileHandle)
 {
     ULONG_PTR Buffer[128];
     PSECURITY_DESCRIPTOR Sd = (PSECURITY_DESCRIPTOR)Buffer;
     PACCESS_ALLOWED_ACE Ace;
     PACL Dacl = NULL;
+    PSID Owner = NULL;
     BOOLEAN Present = FALSE, Defaulted = FALSE, Sound = FALSE;
-    ULONG Needed = 0;
+    ULONG Needed = 0, i;
     NTSTATUS Status;
 
-    Status = NtQuerySecurityObject(FileHandle, DACL_SECURITY_INFORMATION, Sd, sizeof(Buffer), &Needed);
+    Status = NtQuerySecurityObject(FileHandle, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                                   Sd, sizeof(Buffer), &Needed);
+    if (NT_SUCCESS(Status))
+        Status = RtlGetOwnerSecurityDescriptor(Sd, &Owner, &Defaulted);
     if (NT_SUCCESS(Status))
         Status = RtlGetDaclSecurityDescriptor(Sd, &Present, &Dacl, &Defaulted);
-    if (NT_SUCCESS(Status) && Present && Dacl != NULL && Dacl->AceCount == 1 &&
-        NT_SUCCESS(RtlGetAce(Dacl, 0, (PVOID *)&Ace)) &&
-        Ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE &&
-        RtlEqualSid((PSID)&Ace->SidStart, LsapLocalSystemSid))
+    if (NT_SUCCESS(Status) && Owner != NULL &&
+        (RtlEqualSid(Owner, LsapLocalSystemSid) || RtlEqualSid(Owner, LsapAdministratorsSid)) &&
+        Present && Dacl != NULL && Dacl->AceCount != 0)
     {
+        /* Every ACE that grants access names SYSTEM or the administrators (a copy an administrator restored
+           inherits both from config\; both are inside the trust boundary) */
         Sound = TRUE;
+        for (i = 0; i < Dacl->AceCount; i++)
+        {
+            if (!NT_SUCCESS(RtlGetAce(Dacl, i, (PVOID *)&Ace)))
+            {
+                Sound = FALSE;
+                break;
+            }
+            if (Ace->Header.AceType == ACCESS_DENIED_ACE_TYPE)
+                continue;
+            if (Ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE ||
+                (!RtlEqualSid((PSID)&Ace->SidStart, LsapLocalSystemSid) &&
+                 !RtlEqualSid((PSID)&Ace->SidStart, LsapAdministratorsSid)))
+            {
+                Sound = FALSE;
+                break;
+            }
+        }
     }
 
-    if (!Sound)
-        ERR("The LSA secret key file does not have its SYSTEM-only descriptor (Status 0x%08lx): "
-            "on this file system other users may read the key\n", Status);
+    if (Sound)
+        return TRUE;
+
+    if (!LsapVolumeKeepsSecurity(FileHandle))
+    {
+        ERR("The LSA secret key file is on a volume without file security: every user can read the key\n");
+        return TRUE;
+    }
+
+    ERR("The LSA secret key file is not owned by SYSTEM or the administrators, or grants access to others "
+        "(Status 0x%08lx): it is not used\n", Status);
+    return FALSE;
 }
 
 /* Reads and checks a key file: success (the key in File), not found, or STATUS_INTERNAL_DB_CORRUPTION */
@@ -355,8 +414,8 @@ LsapReadKeyFile(LPCWSTR Path, PLSAP_KEY_FILE File)
     if (NT_SUCCESS(Status) && Iosb.Information != sizeof(*File))
         Status = STATUS_INTERNAL_DB_CORRUPTION;
 
-    if (NT_SUCCESS(Status))
-        LsapCheckKeyFileSecurity(FileHandle);
+    if (NT_SUCCESS(Status) && !LsapCheckKeyFileSecurity(FileHandle))
+        Status = STATUS_INTERNAL_DB_CORRUPTION;
 
     NtClose(FileHandle);
 
@@ -586,7 +645,8 @@ LsapCreateKey(VOID)
         return Status;
     }
 
-    LsapCheckKeyFileSecurity(FileHandle);
+    /* Made now with its descriptor: only the FAT notice can come of this */
+    (VOID)LsapCheckKeyFileSecurity(FileHandle);
     NtClose(FileHandle);
 
     LsapLoadKey(&File);
