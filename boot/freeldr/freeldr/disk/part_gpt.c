@@ -770,6 +770,7 @@ typedef struct _GPT_NUMBER_SEARCH
     ULONGLONG First;
     ULONGLONG Last;
     BOOLEAN Found;
+    BOOLEAN DataType;       /* the entry is of the Microsoft basic data type (what Setup gives a system partition) */
 } GPT_NUMBER_SEARCH;
 
 static BOOLEAN
@@ -784,9 +785,13 @@ GptNumberCallback(
 
     if (Number != Search->Number)
         return FALSE;
+    static const GUID BasicDataGuid =
+        {0xEBD0A0A2, 0xB9E5, 0x4433, {0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7}};
+
     Search->Found = TRUE;
     Search->First = Entry->StartingLba;
     Search->Last = Entry->EndingLba;
+    Search->DataType = RtlEqualMemory(&Entry->PartitionTypeGuid, &BasicDataGuid, sizeof(GUID));
     return TRUE;
 }
 
@@ -935,7 +940,7 @@ GptResolveSystemPartition(
             RtlZeroMemory(&Search, sizeof(Search));
             Search.Number = StoredNumber;
             if (DiskGptScan((UCHAR)(0x80 + SameDisk), GptNumberCallback, &Search, NULL) &&
-                Search.Found && Search.First == First && Search.Last == Last)
+                Search.Found && Search.First == First && Search.Last == Last && Search.DataType)
             {
                 if (!GptBuildArcPath(NewPath, NewPathSize, SameDisk, StoredNumber, Rest))
                 {
