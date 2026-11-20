@@ -818,6 +818,13 @@ LRESULT co_UserFreeWindow(PWND Window,
       GreDeleteObject(Window->hrgnClip);
       Window->hrgnClip = NULL;
    }
+   /* A region SetWindowRgn had not applied yet (the window went while its SetWindowPos ran) */
+   if (Window->hrgnNewFrame > HRGN_WINDOW)
+   {
+      IntGdiSetRegionOwner(Window->hrgnNewFrame, GDI_OBJ_HMGR_POWNED);
+      GreDeleteObject(Window->hrgnNewFrame);
+   }
+   Window->hrgnNewFrame = NULL;
    Window->head.pti->cWindows--;
 
 //   ASSERT(Window != NULL);

@@ -15,6 +15,10 @@
  *
  * Each row repeats a call and compares the GDI object count of the process
  * before and after: none of them may keep anything.
+ *
+ * test_DestroyedDuringSetWindowRgn took the whole system down before the fix
+ * (bugcheck in win32k: SetWindowPos went on with the window its thread had
+ * destroyed in the message the call sent it).
  */
 
 #include "precomp.h"
@@ -40,6 +44,162 @@ static void Pump(void)
     Pump(); After = GdiCount(); \
     ok(After == Before, "%s: %lu GDI objects before, %lu after %d rounds\n", what, Before, After, ROUNDS); \
 } while (0)
+
+/*
+ * Another thread sets the region of a window, and the window's own thread
+ * destroys the window in a message that this SetWindowRgn sends it
+ * (WM_WINDOWPOSCHANGING, WM_NCCALCSIZE, WM_WINDOWPOSCHANGED). win32k went on
+ * with the freed window: a bugcheck in win32k (0x50 on a Debug build) within
+ * seconds. The call must return and the window be gone.
+ */
+#define TEST_CLASS L"WindowRgnHandlesClass"
+
+static HWND g_hVictim;
+static UINT g_uDestroyIn;
+static HANDLE g_hGo, g_hDone;
+static volatile LONG g_bQuit;
+
+static LRESULT CALLBACK DestroyingProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    if (hWnd == g_hVictim && uMsg == g_uDestroyIn && InSendMessage())
+    {
+        g_uDestroyIn = 0;
+        DestroyWindow(hWnd);
+        return 0;
+    }
+    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+}
+
+static DWORD WINAPI SetRgnThread(LPVOID Param)
+{
+    UNREFERENCED_PARAMETER(Param);
+    while (WaitForSingleObject(g_hGo, 30000) == WAIT_OBJECT_0 && !g_bQuit)
+    {
+        HRGN hRgn = CreateEllipticRgn(0, 0, 90, 70);
+        if (!SetWindowRgn(g_hVictim, hRgn, TRUE))
+            DeleteObject(hRgn);
+        SetEvent(g_hDone);
+    }
+    return 0;
+}
+
+static void WaitPumping(HANDLE hEvent)
+{
+    while (MsgWaitForMultipleObjects(1, &hEvent, FALSE, 10000, QS_ALLINPUT) == WAIT_OBJECT_0 + 1)
+        Pump();
+}
+
+static void test_DestroyedDuringSetWindowRgn(void)
+{
+    static const UINT Messages[] = { WM_WINDOWPOSCHANGING, WM_NCCALCSIZE, WM_WINDOWPOSCHANGED };
+    WNDCLASSW wc;
+    HANDLE hThread;
+    DWORD Before, After;
+    ULONG i, Gone = 0;
+
+    ZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc = DestroyingProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = TEST_CLASS;
+    RegisterClassW(&wc);
+
+    g_hGo = CreateEventW(NULL, FALSE, FALSE, NULL);
+    g_hDone = CreateEventW(NULL, FALSE, FALSE, NULL);
+    g_bQuit = FALSE;
+    hThread = CreateThread(NULL, 0, SetRgnThread, NULL, 0, NULL);
+    ok(g_hGo && g_hDone && hThread, "Setup failed with %lu\n", GetLastError());
+    if (!g_hGo || !g_hDone || !hThread)
+        return;
+
+    /* The first rounds (one per message) only warm up what windows of this
+       class create once per process; counting starts after them */
+    Before = 0;
+    for (i = 0; i < 3 * 101; i++)
+    {
+        HWND hWnd;
+
+        if (i == 3)
+        {
+            Pump();
+            Before = GdiCount();
+        }
+        hWnd = CreateWindowExW(0, TEST_CLASS, L"victim", WS_POPUP | WS_VISIBLE | WS_CAPTION,
+                               20, 20, 150, 120, NULL, NULL, NULL, NULL);
+        if (!hWnd)
+            continue;
+        g_hVictim = hWnd;
+        g_uDestroyIn = Messages[i % _countof(Messages)];
+        SetEvent(g_hGo);
+        WaitPumping(g_hDone);
+        if (!IsWindow(hWnd))
+            Gone++;
+        else
+            DestroyWindow(hWnd);
+        g_uDestroyIn = 0;
+    }
+    Pump();
+    After = GdiCount();
+    ok(Gone > 0, "The window was never destroyed during SetWindowRgn\n");
+    ok(After == Before, "Destroyed during SetWindowRgn: %lu GDI objects before, %lu after\n", Before, After);
+
+    g_bQuit = TRUE;
+    SetEvent(g_hGo);
+    WaitForSingleObject(hThread, 10000);
+    CloseHandle(hThread);
+    CloseHandle(g_hGo);
+    CloseHandle(g_hDone);
+    UnregisterClassW(TEST_CLASS, GetModuleHandleW(NULL));
+}
+
+/* Two threads set the region of the same window: none of the regions stays behind */
+static HWND g_hShared;
+
+static DWORD WINAPI SetRgnLoopThread(LPVOID Param)
+{
+    int i;
+    UNREFERENCED_PARAMETER(Param);
+    for (i = 0; i < ROUNDS; i++)
+    {
+        HRGN hRgn = CreateRectRgn(0, 0, 40 + i % 40, 60);
+        if (!SetWindowRgn(g_hShared, hRgn, TRUE))
+            DeleteObject(hRgn);
+    }
+    return 0;
+}
+
+static void test_TwoThreads(void)
+{
+    HANDLE hThread;
+    DWORD Before, After;
+    int i;
+
+    g_hShared = CreateWindowExW(0, L"STATIC", L"shared", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                                40, 40, 200, 160, NULL, NULL, NULL, NULL);
+    ok(g_hShared != NULL, "CreateWindowEx failed with %lu\n", GetLastError());
+    if (!g_hShared)
+        return;
+    Pump();
+    Before = GdiCount();
+    hThread = CreateThread(NULL, 0, SetRgnLoopThread, NULL, 0, NULL);
+    for (i = 0; i < ROUNDS; i++)
+    {
+        HRGN hRgn = CreateEllipticRgn(0, 0, 50 + i % 30, 50);
+        if (!SetWindowRgn(g_hShared, hRgn, TRUE))
+            DeleteObject(hRgn);
+        Pump();
+    }
+    if (hThread)
+    {
+        while (MsgWaitForMultipleObjects(1, &hThread, FALSE, 30000, QS_ALLINPUT) == WAIT_OBJECT_0 + 1)
+            Pump();
+        CloseHandle(hThread);
+    }
+    SetWindowRgn(g_hShared, NULL, TRUE);
+    Pump();
+    After = GdiCount();
+    ok(After == Before, "Two threads: %lu GDI objects before, %lu after\n", Before, After);
+    DestroyWindow(g_hShared);
+}
 
 START_TEST(WindowRgnHandles)
 {
@@ -100,4 +260,7 @@ START_TEST(WindowRgnHandles)
 
     DestroyWindow(hHidden);
     DestroyWindow(hTop);
+
+    test_TwoThreads();
+    test_DestroyedDuringSetWindowRgn();
 }
