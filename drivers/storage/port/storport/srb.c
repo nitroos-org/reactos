@@ -224,10 +224,19 @@ PortHandRequestToMiniport(
      * calls on several processors are serialized, and a miniport's DPC routine can exclude them
      * by taking the same lock. HwBuildIo above runs without it, as documented. The caller may
      * hold the flow control lock, which comes first in the lock order.
+     * Physical miniports only: a virtual miniport's HwStartIo runs without it and may take it
+     * itself (StorPortAcquireSpinLock: "StartIo can be acquired in a virtual miniport driver").
      */
-    PortAcquireStartIoLock(FdoExtension, &StartIoLockHandle);
-    HwInitData->HwStartIo(MiniportExtension, MiniportSrb);
-    PortReleaseStartIoLock(FdoExtension, &StartIoLockHandle);
+    if (FdoExtension->Miniport.IsVirtual)
+    {
+        HwInitData->HwStartIo(MiniportExtension, MiniportSrb);
+    }
+    else
+    {
+        PortAcquireStartIoLock(FdoExtension, &StartIoLockHandle);
+        HwInitData->HwStartIo(MiniportExtension, MiniportSrb);
+        PortReleaseStartIoLock(FdoExtension, &StartIoLockHandle);
+    }
 
     PortTimeoutStartIoReturned(FdoExtension, Generation);
 }
