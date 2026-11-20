@@ -438,6 +438,73 @@ PNEIGHBOR_CACHE_ENTRY RouteGetRouteToDestination(PIP_ADDRESS Destination)
     return NCE;
 }
 
+/* The interface with this index (referenced), or NULL */
+static
+PIP_INTERFACE
+RouteReferenceInterfaceByIndex(ULONG IfIndex)
+{
+    PIP_INTERFACE Found = NULL;
+    KIRQL OldIrql;
+    IF_LIST_ITER(CurrentIF);
+
+    TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
+    ForEachInterface(CurrentIF) {
+        if (CurrentIF->Index == IfIndex)
+        {
+            IPReferenceInterface(CurrentIF);
+            Found = CurrentIF;
+            break;
+        }
+    } EndFor(CurrentIF);
+    TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
+
+    return Found;
+}
+
+/*
+ * The neighbour an IPv4 datagram to a multicast group goes to: the group itself on one interface (its Ethernet address,
+ * NBFindOrCreateNeighbor), never a router. The interface is the one the socket chose (IP_MULTICAST_IF: IfIndex), else
+ * that of the socket's own unicast address (Bound), else that of the route to the group (the default route), else
+ * the default interface. Referenced for the caller (NBDereferenceNeighbor); NULL when there is no such interface.
+ */
+PNEIGHBOR_CACHE_ENTRY RouteGetMulticastNeighbor(PIP_ADDRESS Group, ULONG IfIndex, PIP_ADDRESS Bound)
+{
+    PIP_INTERFACE Interface = NULL;
+    PNEIGHBOR_CACHE_ENTRY NCE;
+
+    if (IfIndex)
+    {
+        Interface = RouteReferenceInterfaceByIndex(IfIndex);
+        if (!Interface)
+            return NULL;
+    }
+    else if (Bound && Bound->Type == IP_ADDRESS_V4 && !AddrIsUnspecified(Bound))
+    {
+        Interface = AddrLocateInterface(Bound);
+    }
+
+    if (!Interface)
+    {
+        NCE = RouterGetRoute(Group);
+        if (NCE)
+        {
+            Interface = NCE->Interface;
+            IPReferenceInterface(Interface);
+            NBDereferenceNeighbor(NCE);
+        }
+        else
+        {
+            Interface = IPReferenceDefaultInterface();
+        }
+    }
+    if (!Interface)
+        return NULL;
+
+    NCE = NBFindOrCreateNeighbor(Interface, Group, TRUE);
+    IPDereferenceInterface(Interface);
+    return NCE;
+}
+
 VOID RouterRemoveRoutesForInterface(PIP_INTERFACE Interface)
 {
     KIRQL OldIrql;

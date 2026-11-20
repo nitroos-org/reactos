@@ -74,13 +74,50 @@ TDI_STATUS SetAddressFileInfo(TDIObjectID *ID,
 
       /* The IPv6 options of a UDP socket (IPV6_MULTICAST_HOPS, _LOOP, _IF, IPV6_ADD_MEMBERSHIP, _DROP_): a LONG
          from the Winsock helper, -1 for the default hop limit; the groups as struct ipv6_mreq */
+      /* The IPv4 ones of a UDP or raw IPv4 socket (IP_MULTICAST_TTL, _LOOP: a LONG from the Winsock helper;
+         IP_MULTICAST_IF: AO_OPTION_MCASTIF, an address of the interface, or its index as 0.0.0.x, network order;
+         0.0.0.0 for the default), kept in the same fields (udp.c, rawip.c) */
+      case AO_OPTION_MCASTIF:
+      {
+         ULONG Interface, IfIndex = 0;
+
+         if (AddrFile->Family != TDI_ADDRESS_TYPE_IP || AddrFile->Protocol == IPPROTO_TCP)
+             return TDI_INVALID_REQUEST;
+         if (BufferSize < sizeof(ULONG))
+             return TDI_INVALID_PARAMETER;
+         Interface = *(PULONG)Buffer;
+
+         if (Interface && (Interface & 0xFF))
+         {
+             IP_ADDRESS Address;
+             PIP_INTERFACE IF;
+
+             AddrInitIPv4(&Address, Interface);
+             IF = AddrLocateInterface(&Address);
+             if (!IF)
+                 return STATUS_INVALID_ADDRESS;
+             IfIndex = IF->Index;
+             IPDereferenceInterface(IF);
+         }
+         else if (Interface)
+         {
+             IfIndex = RtlUlongByteSwap(Interface);
+         }
+
+         LockObject(AddrFile);
+         AddrFile->McastIf = IfIndex;
+         UnlockObject(AddrFile);
+         return TDI_SUCCESS;
+      }
+
       case AO_OPTION_MCASTTTL:
       case AO_OPTION_MCASTLOOP:
       case AO_OPTION_INDEX_MCASTIF:
       {
          LONG Value;
 
-         if (AddrFile->Family != TDI_ADDRESS_TYPE_IP6 || AddrFile->Protocol != IPPROTO_UDP)
+         if (AddrFile->Family == TDI_ADDRESS_TYPE_IP6 ? AddrFile->Protocol != IPPROTO_UDP :
+             (AddrFile->Protocol == IPPROTO_TCP || ID->toi_id == AO_OPTION_INDEX_MCASTIF))
              return TDI_INVALID_REQUEST;
          if (BufferSize < sizeof(LONG))
              return TDI_INVALID_PARAMETER;

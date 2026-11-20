@@ -38,6 +38,7 @@ typedef struct NEIGHBOR_CACHE_ENTRY {
     struct NEIGHBOR_CACHE_ENTRY *Next;  /* Pointer to next entry */
     volatile LONG RefCount;             /* See above */
     BOOLEAN Unlinked;                   /* Out of the cache (bucket lock) */
+    BOOLEAN GroupEntry;                 /* A cached IPv4 group entry, counted (NBFindOrCreateNeighbor) */
     UCHAR State;                        /* State of NCE */
     UINT EventTimer;                    /* Ticks since last event */
     UINT EventCount;                    /* Number of events */
@@ -52,6 +53,9 @@ typedef struct NEIGHBOR_CACHE_ENTRY {
 #define NUD_INCOMPLETE 0x01
 #define NUD_PERMANENT  0x02
 #define NUD_STALE      0x04
+
+/* The most IPv4 group entries kept in the cache (NBFindOrCreateNeighbor) */
+#define NB_MAX_GROUP_ENTRIES 256
 
 /* Timeout for incomplete NCE ARP requests */
 #define ARP_INCOMPLETE_TIMEOUT 3

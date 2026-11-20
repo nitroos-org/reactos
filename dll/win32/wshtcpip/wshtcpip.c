@@ -8,6 +8,7 @@
  *   CSH 01/09-2000 Created
  */
 #include "wshtcpip.h"
+#include <iphlpapi.h>
 #define NDEBUG
 #include <debug.h>
 
@@ -373,6 +374,7 @@ WSHGetSockaddrType(
 #define WSH_SET_USENDSZ 0x80
 #define WSH_SET_URECVSZ 0x100
 #define WSH_SET_MTUD    0x200
+#define WSH_SET_MIF     0x400
 
 /* Finds the kept value of an option; Boolean is TRUE when it is a switch, Default what an unset one reads */
 static
@@ -400,6 +402,7 @@ WshKeptOption(
             case WSH_IP_RECVECN:    *Bit = WSH_SET_RECVECN; *Boolean = TRUE; return &Context->IpRecvEcn;
             case IP_MULTICAST_LOOP: *Bit = WSH_SET_MLOOP; *Default = 1; *Boolean = TRUE; return &Context->IpMulticastLoop;
             case IP_MULTICAST_TTL:  *Bit = WSH_SET_MTTL; *Default = 1; return &Context->IpMulticastTtl;
+            case IP_MULTICAST_IF:   *Bit = WSH_SET_MIF; return &Context->IpMulticastIf;
             default: break;
         }
     }
@@ -489,6 +492,52 @@ WshInterfaceExists(
     return IndexToName(Index, Name) != NULL;
 }
 
+/* An IPv4 address (network order) of this machine (IP_MULTICAST_IF: WSAEADDRNOTAVAIL for another, as on Windows) */
+static
+BOOLEAN
+WshIpv4AddressIsLocal(
+    _In_ ULONG Address)
+{
+    typedef DWORD (WINAPI *PGET_IP_ADDR_TABLE)(PMIB_IPADDRTABLE, PULONG, BOOL);
+    static PGET_IP_ADDR_TABLE GetTable;
+    PMIB_IPADDRTABLE Table = NULL;
+    ULONG Size = 0, i;
+    DWORD Error;
+    BOOLEAN Found = FALSE;
+
+    if (!GetTable)
+    {
+        HMODULE Iphlpapi = LoadLibraryW(L"iphlpapi.dll");
+
+        if (Iphlpapi)
+            GetTable = (PGET_IP_ADDR_TABLE)GetProcAddress(Iphlpapi, "GetIpAddrTable");
+        if (!GetTable)
+            return TRUE;    /* cannot tell: taken (the stack checks it as well) */
+    }
+
+    for (i = 0; i < 3; i++)
+    {
+        Error = GetTable(Table, &Size, FALSE);
+        if (Error != ERROR_INSUFFICIENT_BUFFER)
+            break;
+        HeapFree(GetProcessHeap(), 0, Table);
+        Table = HeapAlloc(GetProcessHeap(), 0, Size);
+        if (!Table)
+            return TRUE;
+    }
+    if (Error == NO_ERROR && Table)
+    {
+        for (i = 0; i < Table->dwNumEntries && !Found; i++)
+            Found = (Table->table[i].dwAddr == Address);
+    }
+    else
+    {
+        Found = TRUE;   /* cannot tell */
+    }
+    HeapFree(GetProcessHeap(), 0, Table);
+    return Found;
+}
+
 /*
  * The IPPROTO_IPV6 options of an AF_INET6 socket, kept with the socket (a datagram socket's hop limits, multicast
  * loop and interface also go to the stack; IPV6_V6ONLY and the others do not reach it): what was set reads back, an
@@ -575,6 +624,10 @@ GetTdiTypeId(
              case IP_HDRINCL:
                  *TdiId = AO_OPTION_IP_HDRINCL;
                  return;
+
+             case IP_MULTICAST_TTL:  *TdiId = AO_OPTION_MCASTTTL; return;
+             case IP_MULTICAST_LOOP: *TdiId = AO_OPTION_MCASTLOOP; return;
+             case IP_MULTICAST_IF:   *TdiId = AO_OPTION_MCASTIF; return;
 
              default:
                 break;
@@ -723,6 +776,13 @@ WSHGetSocketInformation(
         if (Context->SocketType != SOCK_DGRAM && Context->SocketType != SOCK_RAW &&
             (Level == IPPROTO_UDP || OptionName == WSH_IP_RECVTOS || OptionName == WSH_IP_RECVECN))
             return WSAEINVAL;
+        /* and so are the multicast ones (Windows Server 2022: WSAEINVAL, length 0) */
+        if (Context->SocketType == SOCK_STREAM && Level == IPPROTO_IP &&
+            (OptionName == IP_MULTICAST_TTL || OptionName == IP_MULTICAST_LOOP || OptionName == IP_MULTICAST_IF))
+        {
+            if (OptionLength) *OptionLength = 0;
+            return WSAEINVAL;
+        }
 
         if (!OptionLength || !OptionValue || *OptionLength < (INT)sizeof(CHAR))
         {
@@ -1379,12 +1439,39 @@ WSHSetSocketInformation(
                         (OptionName == WSH_IP_RECVTOS || OptionName == WSH_IP_RECVECN))
                         return WSAEINVAL;
 
+                    /* The multicast options are an IPv4 datagram socket's: WSAEINVAL on a stream socket and on an
+                       AF_INET6 one (Windows Server 2022, peer probe) */
+                    if ((OptionName == IP_MULTICAST_TTL || OptionName == IP_MULTICAST_LOOP ||
+                         OptionName == IP_MULTICAST_IF) &&
+                        (Context->SocketType == SOCK_STREAM || Context->AddressFamily != AF_INET))
+                        return WSAEINVAL;
+
                     Value = (OptionLength >= (INT)sizeof(LONG)) ? *(PLONG)OptionValue : *(PUCHAR)OptionValue;
                     if (Boolean)
                         Value = (Value != 0);
 
                     switch (OptionName)
                     {
+                        case IP_MULTICAST_TTL:
+                            /* 0 to 255 (0: this computer only); -1 changes nothing; WSAEINVAL otherwise */
+                            if (Value == -1)
+                                return NO_ERROR;
+                            if (Value < 0 || Value > 255)
+                                return WSAEINVAL;
+                            break;
+
+                        case IP_MULTICAST_IF:
+                            /* An address of the interface (WSAEADDRNOTAVAIL for one this machine does not have), its
+                               index as 0.0.0.x (WSAEINVAL for one that does not exist), or 0.0.0.0 for the default;
+                               four bytes (WSAEFAULT otherwise). It reads back as it was set */
+                            if (OptionLength < (INT)sizeof(LONG))
+                                return WSAEFAULT;
+                            if (Value != 0 && (Value & 0xFF) && !WshIpv4AddressIsLocal((ULONG)Value))
+                                return WSAEADDRNOTAVAIL;
+                            if (Value != 0 && !(Value & 0xFF) && !WshInterfaceExists(ntohl((ULONG)Value)))
+                                return WSAEINVAL;
+                            break;
+
                         case IP_TTL:
                             /* A byte; -1 changes nothing */
                             if (Value == -1)
@@ -1416,8 +1503,16 @@ WSHSetSocketInformation(
                     *Kept = Value;
                     Context->OptionsSet |= Bit;
 
-                    /* Only these two have an effect in the driver */
-                    if (OptionName != IP_TTL && OptionName != IP_DONTFRAGMENT)
+                    /* The multicast TTL, loop and interface of a datagram socket go to the stack as a LONG
+                       (AO_OPTION_MCASTTTL, _MCASTLOOP, _MCASTIF) */
+                    if (OptionName == IP_MULTICAST_TTL || OptionName == IP_MULTICAST_LOOP ||
+                        OptionName == IP_MULTICAST_IF)
+                    {
+                        OptionValue = (PCHAR)Kept;
+                        OptionLength = sizeof(LONG);
+                    }
+                    /* Only these have an effect in the driver */
+                    else if (OptionName != IP_TTL && OptionName != IP_DONTFRAGMENT)
                         return NO_ERROR;
                 }
             }
@@ -1427,6 +1522,9 @@ WSHSetSocketInformation(
                 case IP_TTL:
                 case IP_DONTFRAGMENT:
                 case IP_HDRINCL:
+                case IP_MULTICAST_TTL:
+                case IP_MULTICAST_LOOP:
+                case IP_MULTICAST_IF:
                     /* Send these to TCPIP */
                     break;
 

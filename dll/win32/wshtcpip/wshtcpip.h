@@ -61,6 +61,7 @@ typedef struct _SOCKET_CONTEXT {
     LONG IpRecvEcn;
     LONG IpMulticastLoop;
     LONG IpMulticastTtl;
+    LONG IpMulticastIf;         /* as set: an address of the interface, or its index as 0.0.0.x (network order) */
     LONG IpMtuDiscover;
     LONG UdpSendMsgSize;
     LONG UdpRecvMaxCoalescedSize;

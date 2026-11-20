@@ -31,6 +31,7 @@ VOID AddrChangeInitialize(VOID);
    Windows */
 VOID AddrChangeNotifyFamilies(ULONG Families);
 VOID RouteChangeNotifyFamilies(ULONG Families);
+VOID AddrChangeShutdown(VOID);
 #define AddrChangeNotify4()   AddrChangeNotifyFamilies(TCP_CHANGE_FAMILY_IPV4)
 #define AddrChangeNotify6()   AddrChangeNotifyFamilies(TCP_CHANGE_FAMILY_IPV6)
 #define AddrChangeNotifyAll() AddrChangeNotifyFamilies(TCP_CHANGE_FAMILY_IPV4 | TCP_CHANGE_FAMILY_IPV6)

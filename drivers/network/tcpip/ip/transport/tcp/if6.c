@@ -309,7 +309,11 @@ TCPInterfaceMulticast4(PIP_INTERFACE IF)
 {
     LOCK_TCPIP_CORE();
     if (IF->TCPContext && UDP4HasGroups())
+    {
         TCP6UpdateMulticast(IF->TCPContext);
+        /* and IGMP reports them there */
+        UDP4IgmpInterface(IF->Index);
+    }
     UNLOCK_TCPIP_CORE();
 }
 
@@ -327,13 +331,27 @@ TCP6NetifEvent(struct netif *netif, netif_nsc_reason_t Reason, const netif_ext_c
 
     if (Reason & (LWIP_NSC_IPV6_SET | LWIP_NSC_IPV6_ADDR_STATE_CHANGED))
     {
+        BOOLEAN Visible = TRUE;
+
         TCP6UpdateMulticast(netif);
+
+        /* Duplicate address detection counts its probes in the tentative state (TENTATIVE, TENTATIVE_1, ...): a
+           step from one to the next changes nothing a table shows, so nobody is woken for it */
+        if (Reason == LWIP_NSC_IPV6_ADDR_STATE_CHANGED && Args &&
+            Args->ipv6_addr_state_changed.addr_index >= 0 &&
+            Args->ipv6_addr_state_changed.addr_index < LWIP_IPV6_NUM_ADDRESSES &&
+            ip6_addr_istentative(Args->ipv6_addr_state_changed.old_state) &&
+            ip6_addr_istentative(netif_ip6_addr_state(netif, Args->ipv6_addr_state_changed.addr_index)))
+            Visible = FALSE;
 
         /* An address came, went or changed its state: users of NotifyUnicastIpAddressChange and
            NotifyIpInterfaceChange look again (their snapshots tell what changed), and so do those of
            NotifyRouteChange2, as the host routes and the link-local prefix route follow the addresses */
-        AddrChangeNotify6();
-        RouteChangeNotify6();
+        if (Visible)
+        {
+            AddrChangeNotify6();
+            RouteChangeNotify6();
+        }
     }
 }
 

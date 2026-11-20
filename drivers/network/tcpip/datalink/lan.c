@@ -14,6 +14,7 @@
 #include <receive.h>
 #include <wait.h>
 #include <reactos/nitrofw.h>
+#include <igmp.h>
 #include "fwiftype.h"
 
 UINT TransferDataCalled = 0;
@@ -1255,6 +1256,9 @@ VOID ReconfigureAdapterWorker(PVOID Context)
             Success = ReconfigureAdapter(&ReconfigureContext);
             /* the link went up or down: the usable addresses changed */
             AddrChangeNotifyAll();
+            /* a link that came up announces its IPv4 groups again (Windows Server 2022 does at once, peer capture) */
+            if (Success && ReconfigureContext.State == LAN_STATE_STARTED && Adapter->Context)
+                IGMPInterfaceRefresh(((PIP_INTERFACE)Adapter->Context)->Index);
         }
 
         TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);

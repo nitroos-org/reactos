@@ -31,6 +31,7 @@ extern void func_getaddrinfo6(void);
 extern void func_getaddrinfocanon(void);
 extern void func_GetHostNameW(void);
 extern void func_addresschange(void);
+extern void func_addrchange6(void);
 extern void func_asyncselect(void);
 extern void func_gethostname(void);
 extern void func_getnameinfo(void);
@@ -57,6 +58,7 @@ extern void func_shortname(void);
 extern void func_listen(void);
 extern void func_udpconnreset(void);
 extern void func_manysockets(void);
+extern void func_mcast4send(void);
 extern void func_mcastfilter(void);
 extern void func_memleak(void);
 extern void func_nbconnect(void);
@@ -154,6 +156,7 @@ const struct test winetest_testlist[] =
     { "routinectx", func_routinectx },
     { "notconn", func_notconn },
     { "addresschange", func_addresschange },
+    { "addrchange6", func_addrchange6 },
     { "asyncselect", func_asyncselect },
     { "tcpnodelay", func_tcpnodelay },
     { "tcpchurn", func_tcpchurn },
@@ -168,6 +171,7 @@ const struct test winetest_testlist[] =
     { "listen", func_listen },
     { "udpconnreset", func_udpconnreset },
     { "manysockets", func_manysockets },
+    { "mcast4send", func_mcast4send },
     { "mcastfilter", func_mcastfilter },
     { "memleak", func_memleak },
     { "nbconnect", func_nbconnect },

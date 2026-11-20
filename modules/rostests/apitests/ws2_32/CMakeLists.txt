@@ -8,6 +8,7 @@ list(APPEND SOURCE
     acceptname.c
     loopbackalias.c
     addresschange.c
+    addrchange6.c
     asyncselect.c
     backlog.c
     basehandle.c
@@ -53,6 +54,7 @@ list(APPEND SOURCE
     listen.c
     udpconnreset.c
     manysockets.c
+    mcast4send.c
     mcastfilter.c
     memleak.c
     nbconnect.c

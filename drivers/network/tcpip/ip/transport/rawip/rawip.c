@@ -210,6 +210,7 @@ NTSTATUS RawIPSendDatagram(
     USHORT RemotePort;
     NTSTATUS Status;
     PNEIGHBOR_CACHE_ENTRY NCE;
+    BOOLEAN Multicast;
 
     if (!RawIpUnprivilegedMaySend(AddrFile, BufferData, DataSize))
         return STATUS_ACCESS_DENIED;
@@ -236,7 +237,22 @@ NTSTATUS RawIPSendDatagram(
     TI_DbgPrint(MID_TRACE,("About to get route to destination\n"));
 
     LocalAddress = AddrFile->Address;
-    if (AddrIsUnspecified(&LocalAddress))
+    Multicast = IPV4_IS_MULTICAST(RemoteAddress.Address.IPv4Address);
+    if (Multicast)
+    {
+        /* A group: its Ethernet address on the chosen interface (udp.c does the same), never a router */
+        if (!(NCE = RouteGetMulticastNeighbor(&RemoteAddress, AddrFile->McastIf, &LocalAddress))) {
+            UnlockObject(AddrFile);
+            return AddrFile->McastIf ? STATUS_INVALID_ADDRESS : STATUS_NETWORK_UNREACHABLE;
+        }
+        if (AddrIsUnspecified(&LocalAddress))
+        {
+            LocalAddress = NCE->Interface->Unicast;
+            LocalAddress.Address.IPv4Address = IFSelectSourceAddress(NCE->Interface,
+                                                                     RemoteAddress.Address.IPv4Address);
+        }
+    }
+    else if (AddrIsUnspecified(&LocalAddress))
     {
         /* If the local address is unspecified (0),
          * then use the unicast address of the
@@ -267,12 +283,24 @@ NTSTATUS RawIPSendDatagram(
                                BufferData,
                                DataSize );
 
+    /* A group's datagram has the multicast TTL (IP_MULTICAST_TTL); 0 sends nothing on the wire */
+    if (NT_SUCCESS(Status) && Multicast)
+        ((PIPv4_HEADER)Packet.Header)->Ttl = AddrFile->McastHops;
+
     UnlockObject(AddrFile);
 
     if( !NT_SUCCESS(Status) )
     {
         NBDereferenceNeighbor(NCE);
         return Status;
+    }
+
+    if (Multicast && ((PIPv4_HEADER)Packet.Header)->Ttl == 0)
+    {
+        Packet.Free(&Packet);
+        NBDereferenceNeighbor(NCE);
+        *DataUsed = DataSize;
+        return STATUS_SUCCESS;
     }
 
     TI_DbgPrint(MID_TRACE,("About to send datagram\n"));

@@ -95,6 +95,10 @@ NTSTATUS UDP4SetFilter(PADDRESS_FILE AddrFile, ULONG IfIndex, ULONG Group, UCHAR
                        const UCHAR (*Sources)[16], BOOLEAN MustBeNew);
 BOOLEAN UDP4FilterAccepts(PADDRESS_FILE AddrFile, ULONG Group, ULONG Source, ULONG IfIndex);
 VOID UDP4LeaveAll(PADDRESS_FILE AddrFile);
+/* Whether some socket joined an IPv4 group (a hint without the core lock) */
+BOOLEAN UDP4HasGroups(VOID);
+/* IGMP is told the groups of an interface that registered (core lock held) */
+VOID UDP4IgmpInterface(ULONG IfIndex);
 VOID UDP6Startup(VOID);
 /* The row of an IPv6 UDP socket (IP_UDP6_ROW_ENTRY_ID) */
 VOID UDP6BuildRow(PADDRESS_FILE AddrFile, PUDP6_ROW_OWNER_PID Row);

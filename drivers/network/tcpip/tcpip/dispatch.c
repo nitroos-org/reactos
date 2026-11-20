@@ -10,6 +10,7 @@
  */
 
 #include "precomp.h"
+#include <igmp.h>
 
 #include <datagram.h>
 #include <pseh/pseh2.h>
@@ -1837,6 +1838,8 @@ NTSTATUS DispTdiSetIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
             Irp->IoStatus.Information = min(sizeof(IP_SET_ADDRESS),
                                             IrpSp->Parameters.DeviceIoControl.OutputBufferLength);
             AddrChangeNotify4();
+            /* the groups of the interface are announced again, from the new address */
+            IGMPInterfaceRefresh(IF->Index);
         }
 
         IPDereferenceInterface(Target);

@@ -323,12 +323,18 @@ VOID ARPReceive(
 
     AddrInitIPv4(&SrcAddress, *((PULONG)SenderProtoAddress));
 
+    /* A sender address no neighbour can have (0.0.0.0 of an address probe, a broadcast, a multicast group) leaves the
+       cache alone: an entry for it would send our broadcast or group datagrams to the sender's unicast address. The
+       request is still answered. A permanent entry (a group, a broadcast, one set by hand) is not changed by ARP */
+    if (SrcAddress.Address.IPv4Address == 0 || SrcAddress.Address.IPv4Address == 0xFFFFFFFF ||
+        IPV4_IS_MULTICAST(SrcAddress.Address.IPv4Address) || AddrIsEqual(&SrcAddress, &Interface->Broadcast))
+        NCE = NULL;
     /* Check if we know the sender */
-    NCE = NBLocateNeighbor(&SrcAddress, Interface);
-    if (NCE) {
+    else if ((NCE = NBLocateNeighbor(&SrcAddress, Interface)) != NULL) {
         /* We know the sender. Update the hardware address
            and state in our neighbor address cache */
-        NBUpdateNeighbor(NCE, SenderHWAddress, 0);
+        if (!(NCE->State & NUD_PERMANENT))
+            NBUpdateNeighbor(NCE, SenderHWAddress, 0);
     } else {
         /* The packet had our protocol address as target. The sender
            may want to communicate with us soon, so add his address

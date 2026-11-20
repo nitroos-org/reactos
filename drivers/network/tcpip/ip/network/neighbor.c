@@ -12,6 +12,10 @@
 
 NEIGHBOR_CACHE_TABLE NeighborCache[NB_HASHMASK + 1];
 
+/* Group entries in the cache (GroupEntry), at most NB_MAX_GROUP_ENTRIES (Windows: 256 neighbour entries per
+   interface, netsh interface ipv4 show global) */
+static volatile LONG NBGroupEntries;
+
 VOID NBCompleteSend( PVOID Context,
 		     PNDIS_PACKET NdisPacket,
 		     NDIS_STATUS Status ) {
@@ -126,6 +130,9 @@ VOID NBDereferenceNeighbor(
     ASSERT(NCE->Unlinked);
 
     NBFlushPacketQueue(NCE, NDIS_STATUS_REQUEST_ABORTED);
+
+    if (NCE->GroupEntry)
+        InterlockedDecrement(&NBGroupEntries);
 
     IPDereferenceInterface(NCE->Interface);
 
@@ -371,6 +378,7 @@ PNEIGHBOR_CACHE_ENTRY NBAddNeighbor(
 
   NCE->RefCount = 2; /* The cache's and the caller's */
   NCE->Unlinked = FALSE;
+  NCE->GroupEntry = FALSE;
   NCE->Interface = Interface;
   NCE->Address = InternalAddress;
   NCE->LinkAddressLength = LinkAddressLength;
@@ -577,6 +585,45 @@ PNEIGHBOR_CACHE_ENTRY NBLocateNeighbor(
   return NCE;
 }
 
+/*
+ * An entry of a neighbour whose link address is known without asking (a group), not put in the cache: referenced
+ * once for the caller and freed with that reference (NBDereferenceNeighbor). It holds a reference to its interface.
+ * The send paths use it within the caller's reference (LANTransmit copies the link address; fragments are sent
+ * synchronously), and nothing can find it, so no lock is needed.
+ */
+static
+PNEIGHBOR_CACHE_ENTRY
+NBCreateUncachedNeighbor(
+  PIP_INTERFACE Interface,
+  PIP_ADDRESS Address,
+  PVOID LinkAddress,
+  UINT LinkAddressLength,
+  UCHAR State)
+{
+  PNEIGHBOR_CACHE_ENTRY NCE;
+
+  if (Interface->Unbound)
+      return NULL;
+  NCE = ExAllocatePoolWithTag(NonPagedPool, sizeof(NEIGHBOR_CACHE_ENTRY) + LinkAddressLength, NCE_TAG);
+  if (NCE == NULL)
+      return NULL;
+  RtlZeroMemory(NCE, sizeof(NEIGHBOR_CACHE_ENTRY));
+  NCE->RefCount = 1;
+  NCE->Unlinked = TRUE;
+  NCE->Interface = Interface;
+  NCE->Address = *Address;
+  NCE->LinkAddressLength = LinkAddressLength;
+  NCE->LinkAddress = (PVOID)&NCE[1];
+  if (LinkAddress)
+      RtlCopyMemory(NCE->LinkAddress, LinkAddress, LinkAddressLength);
+  else
+      memset(NCE->LinkAddress, 0xff, LinkAddressLength);
+  NCE->State = State;
+  InitializeListHead(&NCE->PacketQueue);
+  IPReferenceInterface(Interface);
+  return NCE;
+}
+
 PNEIGHBOR_CACHE_ENTRY NBFindOrCreateNeighbor(
   PIP_INTERFACE Interface,
   PIP_ADDRESS Address,
@@ -601,7 +648,30 @@ PNEIGHBOR_CACHE_ENTRY NBFindOrCreateNeighbor(
   if (NCE == NULL)
     {
         TI_DbgPrint(MID_TRACE,("BCAST: %s\n", A2S(&Interface->Broadcast)));
-        if( AddrIsEqual(Address, &Interface->Broadcast) ||
+        if (Address->Type == IP_ADDRESS_V4 && IPV4_IS_MULTICAST(Address->Address.IPv4Address)) {
+            /* An IPv4 group: its Ethernet address (RFC 1112 6.4: 01:00:5e and the low 23 bits of the group), a
+               permanent entry, as Windows lists one ("static") for each group it sent to; no ARP. Permanent entries
+               never time out and any user can send to 2^28 groups: past NB_MAX_GROUP_ENTRIES cached ones, a group
+               gets an entry of its own that is not in the cache and goes with its last reference */
+            const UCHAR *Group = (const UCHAR *)&Address->Address.IPv4Address;
+            UCHAR Mac[6];
+
+            Mac[0] = 0x01; Mac[1] = 0x00; Mac[2] = 0x5E;
+            Mac[3] = Group[1] & 0x7F; Mac[4] = Group[2]; Mac[5] = Group[3];
+            if (InterlockedIncrement(&NBGroupEntries) <= NB_MAX_GROUP_ENTRIES) {
+                NCE = NBAddNeighbor(Interface, Address, (Interface->AddressLength == sizeof(Mac)) ? Mac : NULL,
+                                    Interface->AddressLength, NUD_PERMANENT, 0);
+                if (NCE)
+                    NCE->GroupEntry = TRUE;
+                else
+                    InterlockedDecrement(&NBGroupEntries);
+            } else {
+                InterlockedDecrement(&NBGroupEntries);
+                NCE = NBCreateUncachedNeighbor(Interface, Address,
+                                               (Interface->AddressLength == sizeof(Mac)) ? Mac : NULL,
+                                               Interface->AddressLength, NUD_PERMANENT);
+            }
+        } else if( AddrIsEqual(Address, &Interface->Broadcast) ||
             AddrIsUnspecified(Address) ) {
             TI_DbgPrint(MID_TRACE,("Packet targeted at broadcast addr\n"));
             NCE = NBAddNeighbor(Interface, Address, NULL,
