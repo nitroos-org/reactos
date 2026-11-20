@@ -77,6 +77,7 @@ list(APPEND SOURCE
     IsDialogMessage.c
     IsServerSideWindow.c
     IsWindowArranged.c
+    JobUIRestrictions.c
     KbdLayout.c
     ForegroundQuantumShare.c
     keybd_event.c

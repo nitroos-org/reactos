@@ -840,8 +840,7 @@ PspNestProcessInJob(
 {
     PEJOB Leaf, Walk, Parent;
     NTSTATUS Status = STATUS_SUCCESS;
-    NTSTATUS CalloutStatus = STATUS_SUCCESS;
-    BOOLEAN Attach = FALSE, Moved = FALSE, UIAlreadyEnforced = FALSE;
+    BOOLEAN Attach = FALSE, Moved = FALSE;
 
     if (!ExAcquireRundownProtection(&Process->RundownProtect))
     {
@@ -942,6 +941,25 @@ PspNestProcessInJob(
         goto Exit;
     }
 
+    /* Jobs nest only if neither sets UI limits, and a process that is already
+       in a job cannot join one that has them (MSDN: Nested Jobs;
+       AssignProcessToJobObject). The UI limits of a job are only changed under
+       its own lock; those of the jobs above Leaf are read unlocked, which is
+       enough to refuse: a process under UI limits stays under them. */
+    if (Target->UIRestrictionsClass != 0)
+    {
+        Status = STATUS_ACCESS_DENIED;
+        goto Exit;
+    }
+    for (Walk = Leaf; Walk != NULL; Walk = Walk->ParentJob)
+    {
+        if (Walk->UIRestrictionsClass != 0)
+        {
+            Status = STATUS_ACCESS_DENIED;
+            goto Exit;
+        }
+    }
+
     if (Target->ParentJob == Leaf)
     {
         /* Already nested directly under the process's job */
@@ -1004,26 +1022,7 @@ PspNestProcessInJob(
                                       FALSE);
     }
 
-    /* A process already under UI restrictions of an outer job is enforced by
-       win32k through that job. Combining the restrictions of several jobs is
-       not implemented, so the outer ones win. */
-    for (Walk = Leaf; Walk != NULL; Walk = Walk->ParentJob)
-    {
-        if (Walk->UIRestrictionsClass != 0)
-        {
-            UIAlreadyEnforced = TRUE;
-            break;
-        }
-    }
-
-    if (Target->UIRestrictionsClass != 0 &&
-        !UIAlreadyEnforced &&
-        Process->Win32Process != NULL)
-    {
-        CalloutStatus = PspInvokeW32JobCallout(Target,
-                                               PsW32JobCalloutAddProcess,
-                                               Process->Win32Process);
-    }
+    /* Neither job has UI limits (checked above), so win32k has nothing to learn */
 
 Exit:
     ExReleaseResourceAndLeaveCriticalRegion(&Target->JobLock);
@@ -1034,15 +1033,6 @@ Exit:
     {
         /* Leaf stays referenced by Target's reference on its parent */
         ObDereferenceObject(Leaf);
-    }
-
-    if (!NT_SUCCESS(CalloutStatus))
-    {
-        DPRINT1("Failed to apply the UI restrictions of job %p to process %p: 0x%lx\n",
-                Target, Process, CalloutStatus);
-
-        (VOID)PsTerminateProcess(Process, CalloutStatus);
-        Status = CalloutStatus;
     }
 
     return Status;
@@ -1573,7 +1563,7 @@ PspDeleteJob(_In_ PVOID ObjectBody)
     PAGED_CODE();
 
     /* Let win32k tear down any per-job state it keeps for UI restrictions */
-    if (Job->UIRestrictionsClass != 0)
+    if (Job->UIRestrictionsClass != 0 || FlagOn(Job->JobFlags, PSP_JOB_WIN32_STATE))
     {
         (VOID)PspInvokeW32JobCallout(Job, PsW32JobCalloutTerminate, NULL);
         Job->UIRestrictionsClass = 0;
@@ -2415,7 +2405,11 @@ PspSetJobUIRestrictions(
                                         UlongToPtr(UIRestrictionsClass));
         if (NT_SUCCESS(Status))
         {
-            Job->UIRestrictionsClass = UIRestrictionsClass;
+            /* win32k keeps the state of the job (its atom table, granted handles)
+               until the job goes, also once its UI limits are cleared again */
+            if (UIRestrictionsClass != 0)
+                InterlockedOr((PLONG)&Job->JobFlags, PSP_JOB_WIN32_STATE);
+            InterlockedExchange((PLONG)&Job->UIRestrictionsClass, (LONG)UIRestrictionsClass);
         }
     }
 

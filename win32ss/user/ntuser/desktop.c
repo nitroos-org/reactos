@@ -3236,6 +3236,11 @@ NtUserCreateDesktop(
     TRACE("Enter NtUserCreateDesktop\n");
     UserEnterExclusive();
 
+    /* MSDN (JOBOBJECT_BASIC_UI_RESTRICTIONS): JOB_OBJECT_UILIMIT_DESKTOP
+       prevents creating desktops */
+    if (UserJobDenies(JOB_OBJECT_UILIMIT_DESKTOP))
+        goto Exit; // Return NULL
+
     Status = IntCreateDesktop(&hDesk,
                               ObjectAttributes,
                               UserMode,
@@ -3646,6 +3651,11 @@ NtUserSwitchDesktop(HDESK hdesk)
 
     UserEnterExclusive();
     TRACE("Enter NtUserSwitchDesktop(0x%p)\n", hdesk);
+
+    /* MSDN (JOBOBJECT_BASIC_UI_RESTRICTIONS): JOB_OBJECT_UILIMIT_DESKTOP
+       prevents switching desktops */
+    if (UserJobDenies(JOB_OBJECT_UILIMIT_DESKTOP))
+        goto Exit;
 
     Status = IntValidateDesktopHandle(hdesk, UserMode, DESKTOP_SWITCHDESKTOP, &pdesk);
     if (!NT_SUCCESS(Status))

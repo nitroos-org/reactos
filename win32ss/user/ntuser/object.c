@@ -482,13 +482,61 @@ HANDLE UserAllocHandle(
 }
 
 /* return a pointer to a user object from its handle without setting an error */
+/* The process that owns the object of a handle entry; NULL for the objects of no
+   process (monitors, timers, keyboard layouts, window positions, clipboard data) */
+static PPROCESSINFO
+UserGetEntryOwner(PUSER_HANDLE_ENTRY entry)
+{
+   switch (entry->type)
+   {
+      /* Owned by a thread (see the allocators in ObjectCallbacks) */
+      case TYPE_WINDOW:
+      case TYPE_HOOK:
+      case TYPE_WINEVENTHOOK:
+      case TYPE_INPUTCONTEXT:
+         return entry->pi ? ((PTHREADINFO)entry->pi)->ppi : NULL;
+
+      /* Owned by a process */
+      case TYPE_MENU:
+      case TYPE_CALLPROC:
+      case TYPE_ACCELTABLE:
+         return (PPROCESSINFO)entry->pi;
+
+      /* Cursors and icons are shared between processes (the system cursors and
+         LR_SHARED ones), and so are the objects of no process */
+      default:
+         return NULL;
+   }
+}
+
+/* The owner process of the object of a handle, NULL if none or not a handle */
+PPROCESSINFO FASTCALL
+UserGetHandleOwner(HANDLE h)
+{
+   PUSER_HANDLE_ENTRY entry = handle_to_entry(gHandleTable, h);
+
+   return entry ? UserGetEntryOwner(entry) : NULL;
+}
+
+/* JOB_OBJECT_UILIMIT_HANDLES: a process in such a job does not see the objects of
+   processes outside it. A process in no job pays one read. */
+static BOOL
+UserEntryUsable(PUSER_HANDLE_TABLE ht, PUSER_HANDLE_ENTRY entry)
+{
+   if (PsGetProcessJob(PsGetCurrentProcess()) == NULL)
+      return TRUE;
+
+   return UserJobCanUseObject(UserGetEntryOwner(entry), entry_to_handle(ht, entry));
+}
+
 PVOID UserGetObjectNoErr(PUSER_HANDLE_TABLE ht, HANDLE handle, HANDLE_TYPE type )
 {
    PUSER_HANDLE_ENTRY entry;
 
    ASSERT(ht);
 
-   if (!(entry = handle_to_entry(ht, handle )) || entry->type != type)
+   if (!(entry = handle_to_entry(ht, handle )) || entry->type != type ||
+       !UserEntryUsable(ht, entry))
    {
       return NULL;
    }
@@ -502,7 +550,8 @@ PVOID UserGetObject(PUSER_HANDLE_TABLE ht, HANDLE handle, HANDLE_TYPE type )
 
    ASSERT(ht);
 
-   if (!(entry = handle_to_entry(ht, handle )) || entry->type != type)
+   if (!(entry = handle_to_entry(ht, handle )) || entry->type != type ||
+       !UserEntryUsable(ht, entry))
    {
       EngSetLastError(ERROR_INVALID_HANDLE);
       return NULL;
@@ -839,14 +888,13 @@ NtUserValidateHandleSecure(
    {
        case TYPE_WINDOW:
        case TYPE_INPUTCONTEXT:
-          ppi = ((PTHREADINFO)entry->pi)->ppi;
+       case TYPE_HOOK:
+          ppi = entry->pi ? ((PTHREADINFO)entry->pi)->ppi : NULL;
           break;
        case TYPE_MENU:
        case TYPE_ACCELTABLE:
        case TYPE_CURSOR:
-       case TYPE_HOOK:
        case TYPE_CALLPROC:
-       case TYPE_SETWINDOWPOS:
           ppi = entry->pi;
           break;
        default:
@@ -857,8 +905,9 @@ NtUserValidateHandleSecure(
    if (!ppi)
        goto Exit; // Return FALSE
 
-   // Same process job returns TRUE.
-   if (gptiCurrent->ppi->pW32Job == ppi->pW32Job) Ret = TRUE;
+   /* Whether the caller may use it: always, unless a job of the caller
+      restricts USER handles (JOB_OBJECT_UILIMIT_HANDLES) */
+   Ret = UserJobCanUseObject(uType == TYPE_CURSOR ? NULL : ppi, entry_to_handle(gHandleTable, entry));
 
 Exit:
    UserLeave();

@@ -24,6 +24,9 @@
  */
 PRTL_ATOM_TABLE GlobalAtomTable;
 
+/* win32k: the private table of a job with JOB_OBJECT_UILIMIT_GLOBALATOMS, NULL for everyone else */
+PKWIN32_GLOBALATOMTABLE_CALLOUT ExpWin32GlobalAtomTableCallout;
+
 /* PRIVATE FUNCTIONS *********************************************************/
 
 /*++
@@ -42,6 +45,15 @@ NTAPI
 ExpGetGlobalAtomTable(VOID)
 {
     NTSTATUS Status;
+    PKWIN32_GLOBALATOMTABLE_CALLOUT Callout = ExpWin32GlobalAtomTableCallout;
+
+    /* A process in a job with UI limits on global atoms has the job's own table (MSDN:
+       JOBOBJECT_BASIC_UI_RESTRICTIONS). It lives as long as the job, which the process keeps. */
+    if (Callout)
+    {
+        PRTL_ATOM_TABLE JobTable = Callout();
+        if (JobTable) return JobTable;
+    }
 
     /* Return it if we have one */
     if (GlobalAtomTable) return GlobalAtomTable;

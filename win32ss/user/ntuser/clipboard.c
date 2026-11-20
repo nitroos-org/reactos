@@ -1306,7 +1306,12 @@ NtUserEmptyClipboard(VOID)
     TRACE("NtUserEmptyClipboard()\n");
 
     UserEnterExclusive();
-    bRet = UserEmptyClipboard();
+    /* MSDN (JOBOBJECT_BASIC_UI_RESTRICTIONS): JOB_OBJECT_UILIMIT_WRITECLIPBOARD
+       prevents writing data to the clipboard; emptying it destroys what is there */
+    if (UserJobDenies(JOB_OBJECT_UILIMIT_WRITECLIPBOARD))
+        bRet = FALSE;
+    else
+        bRet = UserEmptyClipboard();
     UserLeave();
 
     return bRet;
@@ -1517,6 +1522,11 @@ NtUserGetClipboardData(UINT fmt, PGETCLIPBDATA pgcd)
         goto cleanup;
     }
 
+    /* MSDN (JOBOBJECT_BASIC_UI_RESTRICTIONS): JOB_OBJECT_UILIMIT_READCLIPBOARD
+       prevents reading data from the clipboard */
+    if (UserJobDenies(JOB_OBJECT_UILIMIT_READCLIPBOARD))
+        goto cleanup;
+
     pElement = IntGetFormatElement(pWinStaObj, fmt);
     if (!pElement)
         goto cleanup;
@@ -1725,8 +1735,12 @@ NtUserSetClipboardData(UINT fmt, HANDLE hData, PSETCLIPBDATA pUnsafeScd)
 
     UserEnterExclusive();
 
-    /* Call internal function */
-    hRet = UserSetClipboardData(fmt, hData, &scd);
+    /* MSDN (JOBOBJECT_BASIC_UI_RESTRICTIONS): JOB_OBJECT_UILIMIT_WRITECLIPBOARD
+       prevents writing data to the clipboard */
+    if (UserJobDenies(JOB_OBJECT_UILIMIT_WRITECLIPBOARD))
+        hRet = NULL;
+    else
+        hRet = UserSetClipboardData(fmt, hData, &scd);
 
     UserLeave();
 

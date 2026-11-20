@@ -1121,7 +1121,7 @@ DriverEntry(
     /* Register Object Manager Callbacks */
     CalloutData.ProcessCallout = Win32kProcessCallback;
     CalloutData.ThreadCallout = Win32kThreadCallback;
-    // CalloutData.GlobalAtomTableCallout = NULL;
+    CalloutData.GlobalAtomTableCallout = UserGetJobAtomTable;
     CalloutData.PowerEventCallout = IntHandlePowerEvent;
     CalloutData.PowerStateCallout = IntHandlePowerState;
     CalloutData.JobCallout = Win32kJobCallout;

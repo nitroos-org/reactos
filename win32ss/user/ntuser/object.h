@@ -17,6 +17,7 @@ PVOID UserGetObjectNoErr(PUSER_HANDLE_TABLE, HANDLE, HANDLE_TYPE);
 BOOL FASTCALL UserCreateHandleTable(VOID);
 BOOL FASTCALL UserObjectInDestroy(HANDLE);
 BOOL FASTCALL UserMarkHandleGranted(HANDLE);
+PPROCESSINFO FASTCALL UserGetHandleOwner(HANDLE);
 void DbgUserDumpHandleTable();
 PVOID FASTCALL ValidateHandle(HANDLE handle, HANDLE_TYPE type);
 BOOLEAN UserDestroyObjectsForOwner(PUSER_HANDLE_TABLE Table, PVOID Owner);

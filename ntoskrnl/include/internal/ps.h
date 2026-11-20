@@ -119,6 +119,8 @@
 //
 #define PSP_JOB_CLOSE_DONE      0x00000001
 #define PSP_JOB_TERMINATING     0x00000080
+/* ReactOS: win32k keeps state for this job (it had UI limits), to be released when the job goes */
+#define PSP_JOB_WIN32_STATE     0x00010000
 
 //
 // Maximum depth of a job hierarchy (nested jobs), the root job included

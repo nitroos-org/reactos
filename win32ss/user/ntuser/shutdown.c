@@ -226,6 +226,14 @@ UserInitiateShutdown(IN PETHREAD Thread,
             return STATUS_INVALID_HANDLE;
         }
 
+        /* A process in a job with JOB_OBJECT_UILIMIT_EXITWINDOWS cannot call
+           ExitWindows(Ex) (MSDN: JOBOBJECT_BASIC_UI_RESTRICTIONS) */
+        if (UserJobDeniesThread(Thread, JOB_OBJECT_UILIMIT_EXITWINDOWS))
+        {
+            ERR("UserInitiateShutdown: the job of the caller forbids it\n");
+            return STATUS_ACCESS_DENIED;
+        }
+
         /* Check whether the window station of the current process can send exit requests */
         if (!RtlAreAllAccessesGranted(ppi->amwinsta, WINSTA_EXITWINDOWS))
         {
