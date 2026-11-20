@@ -85,6 +85,6 @@
 @ stdcall DoFileCopy(ptr ptr ptr)
 
 ;; bootsup
-@ stdcall InstallBootManagerAndBootEntries(long ptr ptr ptr ptr)
+@ stdcall InstallBootManagerAndBootEntries(long ptr ptr ptr ptr ptr)
 @ stdcall AddPartitionBootEntry(ptr long long ptr ptr)
 @ stdcall InstallBootcodeToRemovable(long ptr ptr ptr)

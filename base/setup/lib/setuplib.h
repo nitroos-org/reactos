@@ -123,6 +123,9 @@ typedef struct _USETUP_DATA
     UNICODE_STRING DestinationPath;     /** Equivalent of 'NTOS_INSTALLATION::SystemNtPath' **/
     UNICODE_STRING DestinationRootPath;
 
+    /* UEFI, GPT: the GUIDs and range of the destination partition (see InitDestinationPaths) */
+    BOOT_TARGET_IDENTITY DestinationIdentity;
+
     // FIXME: This is only temporary!! Must be removed later!
     UNICODE_STRING InstallPath;
 

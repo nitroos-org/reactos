@@ -1405,6 +1405,185 @@ SetBootStoreOptions(
 }
 
 
+/* TRUE if two SystemPath values are the same path (a value may be quoted, as freeldr.ini allows) */
+static BOOLEAN
+SystemPathsEqual(
+    _In_ PCWSTR Path1,
+    _In_ PCWSTR Path2)
+{
+    SIZE_T Length1 = wcslen(Path1), Length2 = wcslen(Path2);
+
+    if (Length1 >= 2 && Path1[0] == L'"' && Path1[Length1 - 1] == L'"')
+    {
+        Path1++;
+        Length1 -= 2;
+    }
+    if (Length2 >= 2 && Path2[0] == L'"' && Path2[Length2 - 1] == L'"')
+    {
+        Path2++;
+        Length2 -= 2;
+    }
+    return (Length1 == Length2) && (_wcsnicmp(Path1, Path2, Length1) == 0);
+}
+
+/* The text after the "partition(N)" of an ARC path (NULL when there is none); *PrefixLength: characters up to there */
+static PCWSTR
+ArcPathAfterPartition(
+    _In_ PCWSTR Path,
+    _Out_ PSIZE_T PrefixLength)
+{
+    PCWSTR p = Path;
+
+    while (*p)
+    {
+        if (_wcsnicmp(p, L"partition(", 10) == 0)
+        {
+            PCWSTR Close = wcschr(p, L')');
+            if (!Close)
+                return NULL;
+            *PrefixLength = (Close + 1) - Path;
+            return Close + 1;
+        }
+        ++p;
+    }
+    return NULL;
+}
+
+static VOID
+SetUniqueKey(
+    _In_ PINI_SECTION Section,
+    _In_ PCWSTR Name,
+    _In_ PCWSTR Value)
+{
+    PCWSTR Data;
+    PINI_KEYWORD Key;
+
+    /* Replace, not add another one: the loader reads the first */
+    while ((Key = IniGetKey(Section, Name, &Data)) != NULL)
+        IniRemoveKey(Section, Key);
+    IniAddKey(Section, Name, Value);
+}
+
+NTSTATUS
+FreeLdrRebaseEntriesInCache(
+    _In_ PINICACHE IniCache,
+    _In_ PINI_SECTION OsIniSection_,
+    _In_ PCWSTR ArcPath,
+    _In_ PCWSTR PartitionGuid)
+{
+    PINICACHEITERATOR Iterator;
+    PCWSTR SectionName, KeyData;
+    SIZE_T NewPrefix;
+
+    if (!IniCache || !OsIniSection_ || !ArcPath || !PartitionGuid)
+        return STATUS_INVALID_PARAMETER;
+    if (!ArcPathAfterPartition(ArcPath, &NewPrefix))
+        return STATUS_INVALID_PARAMETER;
+
+    Iterator = IniFindFirstValue(OsIniSection_, &SectionName, &KeyData);
+    if (!Iterator)
+        return STATUS_SUCCESS;
+    do
+    {
+        PINI_SECTION OsIniSection = IniGetSection(IniCache, SectionName);
+        PCWSTR Guid, OldPath, OldTail;
+        SIZE_T OldPrefix;
+        WCHAR NewPath[MAX_PATH];
+
+        if (!OsIniSection || !IniGetKey(OsIniSection, L"SystemPathPartitionGuid", &Guid) || !Guid)
+            continue;
+        if (_wcsicmp(Guid, PartitionGuid) != 0)
+            continue;
+
+        if (!IniGetKey(OsIniSection, L"SystemPath", &OldPath) || !OldPath)
+            continue;
+        OldTail = ArcPathAfterPartition(OldPath, &OldPrefix);
+        if (!OldTail || *OldPath == L'"' /* quoted: left as it is */)
+            continue;
+
+        /* Our position (as ArcPath has it) in front of the entry's own rest of the path */
+        if (NewPrefix + wcslen(OldTail) + 1 > ARRAYSIZE(NewPath))
+            continue;
+        RtlCopyMemory(NewPath, ArcPath, NewPrefix * sizeof(WCHAR));
+        wcscpy(NewPath + NewPrefix, OldTail);
+        if (_wcsicmp(NewPath, OldPath) == 0)
+            continue;
+
+        /* IniAddKey changes the data of a key that already exists: the key keeps its place in the entry */
+        DPRINT1("Boot entry '%S': SystemPath '%S' -> '%S'\n", SectionName, OldPath, NewPath);
+        IniAddKey(OsIniSection, L"SystemPath", NewPath);
+    } while (IniFindNextValue(Iterator, &SectionName, &KeyData));
+    IniFindClose(Iterator);
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+FreeLdrMarkEntriesInCache(
+    _In_ PINICACHE IniCache,
+    _In_ PINI_SECTION OsIniSection_,
+    _In_ PCWSTR ArcPath,
+    _In_ PCWSTR PartitionGuid,
+    _In_ PCWSTR DiskGuid,
+    _In_ PCWSTR Range)
+{
+    PINICACHEITERATOR Iterator;
+    PCWSTR SectionName, KeyData;
+
+    if (!IniCache || !OsIniSection_ || !ArcPath || !PartitionGuid || !DiskGuid || !Range)
+        return STATUS_INVALID_PARAMETER;
+
+    Iterator = IniFindFirstValue(OsIniSection_, &SectionName, &KeyData);
+    if (!Iterator)
+        return STATUS_SUCCESS;
+    do
+    {
+        PINI_SECTION OsIniSection = IniGetSection(IniCache, SectionName);
+        PCWSTR OldPath;
+
+        if (!OsIniSection || !IniGetKey(OsIniSection, L"SystemPath", &OldPath) || !OldPath ||
+            !SystemPathsEqual(OldPath, ArcPath))
+            continue;
+
+        DPRINT1("Boot entry '%S' names its system partition by GUID %S\n", SectionName, PartitionGuid);
+        SetUniqueKey(OsIniSection, L"SystemPathPartitionGuid", PartitionGuid);
+        SetUniqueKey(OsIniSection, L"SystemPathDiskGuid", DiskGuid);
+        SetUniqueKey(OsIniSection, L"SystemPathPartitionRange", Range);
+    } while (IniFindNextValue(Iterator, &SectionName, &KeyData));
+    IniFindClose(Iterator);
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+FreeLdrRebaseEntriesByPartitionGuid(
+    _In_ PVOID Handle,
+    _In_ PCWSTR ArcPath,
+    _In_ PCWSTR PartitionGuid)
+{
+    PBOOT_STORE_INI_CONTEXT BootStore = (PBOOT_STORE_INI_CONTEXT)Handle;
+
+    if (!BootStore || BootStore->Header.Type != FreeLdr)
+        return STATUS_INVALID_PARAMETER;
+    return FreeLdrRebaseEntriesInCache(BootStore->IniCache, BootStore->OsIniSection, ArcPath, PartitionGuid);
+}
+
+NTSTATUS
+FreeLdrMarkEntriesWithIdentity(
+    _In_ PVOID Handle,
+    _In_ PCWSTR ArcPath,
+    _In_ PCWSTR PartitionGuid,
+    _In_ PCWSTR DiskGuid,
+    _In_ PCWSTR Range)
+{
+    PBOOT_STORE_INI_CONTEXT BootStore = (PBOOT_STORE_INI_CONTEXT)Handle;
+
+    if (!BootStore || BootStore->Header.Type != FreeLdr)
+        return STATUS_INVALID_PARAMETER;
+    return FreeLdrMarkEntriesInCache(BootStore->IniCache, BootStore->OsIniSection, ArcPath,
+                                     PartitionGuid, DiskGuid, Range);
+}
+
 static NTSTATUS
 FreeLdrEnumerateBootEntries(
     IN PBOOT_STORE_INI_CONTEXT BootStore,

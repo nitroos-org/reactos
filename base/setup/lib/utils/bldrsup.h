@@ -10,6 +10,8 @@
 
 #pragma once
 
+#include "inicache.h"
+
 typedef enum _BOOT_STORE_TYPE
 {
     FreeLdr,    // ReactOS' FreeLoader
@@ -127,6 +129,46 @@ FindBootStore( // By handle
     IN BOOT_STORE_TYPE Type,
     OUT PULONG VersionNumber OPTIONAL);
 
+
+/*
+ * UEFI (FreeLdr store only): the keys that name the system partition of a boot entry by its GPT unique GUID,
+ * its disk GUID and its range, so that the loader finds it again after a change of the partition table.
+ *
+ * FreeLdrRebaseEntriesByPartitionGuid: every boot entry that already carries the GUID PartitionGuid is
+ * the entry of this installation even if the position in its SystemPath is out of date: its SystemPath
+ * takes the partition position of ArcPath (the rest of the path is kept).
+ * FreeLdrMarkEntriesWithIdentity: every boot entry whose SystemPath is ArcPath gets (or is changed to)
+ * the three keys. Entries of other installations are not touched.
+ */
+NTSTATUS
+FreeLdrRebaseEntriesInCache(
+    _In_ PINICACHE IniCache,
+    _In_ PINI_SECTION OsIniSection,
+    _In_ PCWSTR ArcPath,
+    _In_ PCWSTR PartitionGuid);
+
+NTSTATUS
+FreeLdrMarkEntriesInCache(
+    _In_ PINICACHE IniCache,
+    _In_ PINI_SECTION OsIniSection,
+    _In_ PCWSTR ArcPath,
+    _In_ PCWSTR PartitionGuid,
+    _In_ PCWSTR DiskGuid,
+    _In_ PCWSTR Range);
+
+NTSTATUS
+FreeLdrRebaseEntriesByPartitionGuid(
+    _In_ PVOID Handle,
+    _In_ PCWSTR ArcPath,
+    _In_ PCWSTR PartitionGuid);
+
+NTSTATUS
+FreeLdrMarkEntriesWithIdentity(
+    _In_ PVOID Handle,
+    _In_ PCWSTR ArcPath,
+    _In_ PCWSTR PartitionGuid,
+    _In_ PCWSTR DiskGuid,
+    _In_ PCWSTR Range);
 
 typedef enum _BOOT_STORE_OPENMODE
 {

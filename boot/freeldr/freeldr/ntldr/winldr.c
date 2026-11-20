@@ -1266,6 +1266,23 @@ LoadAndBootWindows(
     if (!*BootPath || BootPath[strlen(BootPath) - 1] != '\\')
         RtlStringCbCatA(BootPath, sizeof(BootPath), "\\");
 
+#ifdef UEFIBOOT
+    /*
+     * A UEFI install names its system partition also by GUID: the numbers in BootPath are those of the
+     * time of the install, the partition table may have changed since (see UefiResolveSystemPath).
+     */
+    {
+        CHAR ResolveMessage[640];
+
+        if (!UefiResolveSystemPath(Argc, Argv, BootPath, sizeof(BootPath),
+                                   ResolveMessage, sizeof(ResolveMessage)))
+        {
+            UiMessageBox("%s", ResolveMessage);
+            return ENOENT;
+        }
+    }
+#endif
+
     TRACE("BootPath: '%s'\n", BootPath);
 
     /* Retrieve the boot options */
