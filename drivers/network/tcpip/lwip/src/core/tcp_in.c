@@ -917,6 +917,11 @@ tcp_process(struct tcp_pcb *pcb)
         pcb->snd_wnd_max = pcb->snd_wnd;
         pcb->snd_wl1 = seqno - 1; /* initialise to seqno - 1 to force window update */
         pcb->state = ESTABLISHED;
+#ifdef NITRO_TCP_SYN_RTO_MS
+        /* NitroOS: the 1 s RTO and its backoff were the SYN's (lwipopts.h): data starts from the initial RTO it had
+           before, until an RTT sample (RFC 6298 5.7 after a SYN retransmission) */
+        pcb->rto = (s16_t)(LWIP_TCP_RTO_TIME / TCP_SLOW_INTERVAL);
+#endif
 
 #if TCP_CALCULATE_EFF_SEND_MSS
         pcb->mss = tcp_eff_send_mss(pcb->mss, &pcb->local_ip, &pcb->remote_ip);

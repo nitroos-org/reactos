@@ -1182,6 +1182,10 @@ tcp_connect(struct tcp_pcb *pcb, const ip_addr_t *ipaddr, u16_t port,
   if (ret == ERR_OK) {
     /* SYN segment was enqueued, changed the pcbs state now */
     pcb->state = SYN_SENT;
+#ifdef NITRO_TCP_SYN_RTO_MS
+    /* NitroOS: the first SYN is sent again after NITRO_TCP_SYN_RTO_MS (lwipopts.h) */
+    pcb->rto = (s16_t)(NITRO_TCP_SYN_RTO_MS / TCP_SLOW_INTERVAL);
+#endif
     if (old_local_port != 0) {
       TCP_RMV(&tcp_bound_pcbs, pcb);
     }
@@ -1207,6 +1211,7 @@ tcp_slowtmr(void)
   tcpwnd_size_t eff_wnd;
   u8_t pcb_remove;      /* flag if a PCB should be removed */
   u8_t pcb_reset;       /* flag if a RST should be sent when removing */
+  err_t remove_err;     /* NitroOS: the error a removed PCB reports (a connection attempt that timed out: ERR_TIMEOUT) */
   err_t err;
 
   err = ERR_OK;
@@ -1236,9 +1241,21 @@ tcp_slowtmr_start:
 
     pcb_remove = 0;
     pcb_reset = 0;
+    remove_err = ERR_ABRT;
 
     if (pcb->state == SYN_SENT && pcb->nrtx >= TCP_SYNMAXRTX) {
+#ifdef NITRO_TCP_SYN_LAST_WAIT_MS
+      /* NitroOS: the last SYN gets its answer time too, then the attempt times out (lwipopts.h) */
+      if ((pcb->rtime >= 0) && (pcb->rtime < 0x7FFF)) {
+        ++pcb->rtime;
+      }
+      if (pcb->rtime >= NITRO_TCP_SYN_LAST_WAIT_MS / TCP_SLOW_INTERVAL) {
+        ++pcb_remove;
+        remove_err = ERR_TIMEOUT;
+      }
+#else
       ++pcb_remove;
+#endif
       LWIP_DEBUGF(TCP_DEBUG, ("tcp_slowtmr: max SYN retries reached\n"));
     } else if (pcb->nrtx >= TCP_MAXRTX) {
       ++pcb_remove;
@@ -1300,6 +1317,12 @@ tcp_slowtmr_start:
               int calc_rto = ((pcb->sa >> 3) + pcb->sv) << tcp_backoff[backoff_idx];
               pcb->rto = (s16_t)LWIP_MIN(calc_rto, 0x7FFF);
             }
+#ifdef NITRO_TCP_SYN_RTO_MS
+            else {
+              /* NitroOS: each SYN retransmission doubles the wait (1, 2, 4, 8 s; nrtx counts the earlier ones) */
+              pcb->rto = (s16_t)((NITRO_TCP_SYN_RTO_MS / TCP_SLOW_INTERVAL) << LWIP_MIN(pcb->nrtx + 1, 6));
+            }
+#endif
 
             /* Reset the retransmission timer. */
             pcb->rtime = 0;
@@ -1418,7 +1441,7 @@ tcp_slowtmr_start:
       tcp_free(pcb2);
 
       tcp_active_pcbs_changed = 0;
-      TCP_EVENT_ERR(last_state, err_fn, err_arg, ERR_ABRT);
+      TCP_EVENT_ERR(last_state, err_fn, err_arg, remove_err);
       if (tcp_active_pcbs_changed) {
         goto tcp_slowtmr_start;
       }

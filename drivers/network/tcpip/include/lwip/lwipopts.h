@@ -189,6 +189,13 @@
 
 #define TCP_SYNMAXRTX                   4
 
+/* NitroOS: connection setup times as Windows Server 2022 has them (measured 2026-11-20 on a dual-stack link whose
+   IPv6 path is dead): the SYN is sent again after 1 s, each retransmission doubles the wait (SYNs at 0, 1, 3, 7 and
+   15 s: the 4 retransmissions of TCP_SYNMAXRTX), and connect() fails 6 s after the last one, 21 s after the first,
+   with WSAETIMEDOUT (lwIP: ERR_TIMEOUT); an application that tries the next address of the name does so then */
+#define NITRO_TCP_SYN_RTO_MS            1000
+#define NITRO_TCP_SYN_LAST_WAIT_MS      6000
+
 #define TCP_LISTEN_BACKLOG              1
 
 /* thousands of connections sit in TIME-WAIT while a client loop runs: find them by hash, not by walking the list */
