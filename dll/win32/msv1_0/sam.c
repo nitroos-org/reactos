@@ -64,6 +64,37 @@ done:
 }
 
 
+/* A DWORD value of HKLM\SYSTEM\CurrentControlSet\Control\Lsa, read at every call; Default when it is absent or not a DWORD */
+static
+ULONG
+MsvpReadLsaDword(
+    _In_ PCWSTR Name,
+    _In_ ULONG Default)
+{
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Lsa");
+    UNICODE_STRING ValueName;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UCHAR Buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    HANDLE KeyHandle;
+    ULONG Length;
+    ULONG Value = Default;
+    NTSTATUS Status;
+
+    RtlInitUnicodeString(&ValueName, Name);
+    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenKey(&KeyHandle, KEY_QUERY_VALUE, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+        return Default;
+
+    Status = NtQueryValueKey(KeyHandle, &ValueName, KeyValuePartialInformation, Buffer, sizeof(Buffer), &Length);
+    if (NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+        Value = *(PULONG)Info->Data;
+
+    NtClose(KeyHandle);
+    return Value;
+}
+
 /*
  * Lsa\LimitBlankPasswordUse (default 1 when absent; read at every logon, no restart needed, as measured): while it is
  * on, an account with a blank password can be logged on only by the logon dialog on the console. Every other logon
@@ -75,27 +106,21 @@ done:
 BOOL
 MsvpLimitBlankPasswordUse(VOID)
 {
-    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Lsa");
-    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"LimitBlankPasswordUse");
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    UCHAR Buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + sizeof(ULONG)];
-    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
-    HANDLE KeyHandle;
-    ULONG Length;
-    bool Limit = true;
-    NTSTATUS Status;
+    return MsvpReadLsaDword(L"LimitBlankPasswordUse", 1) != 0;
+}
 
-    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE, NULL, NULL);
-    Status = NtOpenKey(&KeyHandle, KEY_QUERY_VALUE, &ObjectAttributes);
-    if (!NT_SUCCESS(Status))
-        return true;
-
-    Status = NtQueryValueKey(KeyHandle, &ValueName, KeyValuePartialInformation, Buffer, sizeof(Buffer), &Length);
-    if (NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
-        Limit = (*(PULONG)Info->Data != 0);
-
-    NtClose(KeyHandle);
-    return Limit;
+/*
+ * Lsa\AllowAdministratorLockout (default 0 = off; read at every logon, no restart needed): while it is on, the
+ * built-in Administrator (RID 500) is locked out like any other account, but only for the logons that do not come from
+ * the console (see IsRemoteLogon in sam.h). The name and the scope follow the policy "Allow Administrator account
+ * lockout" of KB5020282 (Microsoft: it "only affects network logons, such as RDP attempts"; console logons stay
+ * possible). Where Windows keeps that policy is not public: this registry value is this system's own storage and
+ * makes no claim to be the same place.
+ */
+BOOL
+MsvpAllowAdministratorLockout(VOID)
+{
+    return MsvpReadLsaDword(L"AllowAdministratorLockout", 0) != 0;
 }
 
 /*
@@ -461,9 +486,12 @@ SamValidateNormalUser(
 
         /* A locked account: every logon with a password fails with STATUS_ACCOUNT_LOCKED_OUT, the right
            password as well, and the attempt is not counted (measured). The built-in Administrator is not
-           locked out (documented: "Account lockout threshold"; measured: count and flag, but its logons work) */
-        if (RelativeIds.Element[0] != DOMAIN_USER_RID_ADMIN &&
-            (UserInfo->All.UserAccountControl & USER_ACCOUNT_AUTO_LOCKED))
+           locked out (documented: "Account lockout threshold"; measured: count and flag, but its logons work),
+           unless Lsa\AllowAdministratorLockout is on: then it is locked out for the network logons only
+           (KB5020282), the console logons stay possible */
+        if ((UserInfo->All.UserAccountControl & USER_ACCOUNT_AUTO_LOCKED) &&
+            (RelativeIds.Element[0] != DOMAIN_USER_RID_ADMIN ||
+             (PwdData->IsRemoteLogon && MsvpAllowAdministratorLockout())))
         {
             ERR("Account locked out\n");
             Status = STATUS_ACCOUNT_LOCKED_OUT;
@@ -714,6 +742,11 @@ SamValidateUser(
     *SpecialAccount = FALSE;
     *UserInfoPtr = NULL;
     *SubStatus = STATUS_SUCCESS;
+
+    /* The logons that do not come from the console: the ones the opt-in lockout of the built-in Administrator applies to */
+    LogonPwdData->IsRemoteLogon = (LogonType == Network ||
+                                   LogonType == NetworkCleartext ||
+                                   LogonType == RemoteInteractive);
 
     /* Check for special accounts */
     // FIXME: Windows does not do this that way!! (msv1_0 does not contain these hardcoded values)
