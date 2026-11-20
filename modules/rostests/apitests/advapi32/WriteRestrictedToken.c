@@ -283,6 +283,190 @@ TestRows(VOID)
     }
 }
 
+#define TOKEN_ACCESS_INFORMATION_CLASS ((TOKEN_INFORMATION_CLASS)22)
+
+/* The start of TOKEN_ACCESS_INFORMATION (the header of an older PSDK does not declare it) */
+typedef struct _WR_TOKEN_ACCESS_INFORMATION
+{
+    PVOID SidHash;
+    PVOID RestrictedSidHash;
+    PVOID Privileges;
+    LUID AuthenticationId;
+    DWORD TokenType;
+    DWORD ImpersonationLevel;
+    DWORD MandatoryPolicy;
+    DWORD Flags;
+} WR_TOKEN_ACCESS_INFORMATION, *PWR_TOKEN_ACCESS_INFORMATION;
+#define TOKEN_IS_RESTRICTED_CLASS ((TOKEN_INFORMATION_CLASS)40)
+
+/* TOKEN_ACCESS_INFORMATION.Flags, TokenIsRestricted and the restricting SIDs (up to 4) of a token */
+static VOID
+QueryToken(
+    _In_ HANDLE hToken,
+    _Out_ PDWORD AccessFlags,
+    _Out_ PDWORD IsRestricted,
+    _Out_ PDWORD SidCount,
+    _Out_writes_(4) PSID *Sids)
+{
+    BYTE Buffer[2048];
+    DWORD Length, i;
+    PTOKEN_GROUPS Groups = (PTOKEN_GROUPS)Buffer;
+    static BYTE Copies[4][SECURITY_MAX_SID_SIZE];
+
+    *AccessFlags = 0xdeadbeef;
+    *IsRestricted = 0xdeadbeef;
+    *SidCount = 0xdeadbeef;
+    Length = 0;
+    if (GetTokenInformation(hToken, TOKEN_ACCESS_INFORMATION_CLASS, Buffer, sizeof(Buffer), &Length))
+        *AccessFlags = ((PWR_TOKEN_ACCESS_INFORMATION)Buffer)->Flags;
+    else
+        ok(0, "TokenAccessInformation failed with %lu\n", GetLastError());
+    Length = 0;
+    if (!GetTokenInformation(hToken, TOKEN_IS_RESTRICTED_CLASS, IsRestricted, sizeof(*IsRestricted), &Length))
+        ok(0, "TokenIsRestricted failed with %lu\n", GetLastError());
+    if (GetTokenInformation(hToken, TokenRestrictedSids, Buffer, sizeof(Buffer), &Length))
+    {
+        *SidCount = Groups->GroupCount;
+        for (i = 0; i < Groups->GroupCount && i < 4; i++)
+        {
+            CopySid(SECURITY_MAX_SID_SIZE, Copies[i], Groups->Groups[i].Sid);
+            Sids[i] = Copies[i];
+            ok(Groups->Groups[i].Attributes == 0x7, "restricting SID %lu has attributes 0x%lx\n", i, Groups->Groups[i].Attributes);
+        }
+    }
+    else
+        ok(0, "TokenRestrictedSids failed with %lu\n", GetLastError());
+}
+
+/* Windows Server 2022: TokenIsRestricted and TOKEN_ACCESS_INFORMATION.Flags (0x8 write restricted, 0x10 restricted) */
+static VOID
+TestTokenReports(VOID)
+{
+    static const struct { INT Token; DWORD Flags; DWORD IsRestricted; DWORD Sids; } Expected[] =
+    {
+        { TOK_NORMAL, 0, 0, 0 },
+        { TOK_RESTRICTED, 0x10, 1, 1 },
+        { TOK_WRITE_RESTRICTED, 0x18, 1, 1 },
+        { TOK_WRITE_RESTRICTED_NO_SIDS, 0x18, 1, 0 },
+        { TOK_WRITE_RESTRICTED_2, 0x18, 1, 2 },
+    };
+    DWORD i, Flags, IsRestricted, Count;
+    PSID Sids[4];
+
+    for (i = 0; i < ARRAYSIZE(Expected); i++)
+    {
+        QueryToken(Tokens[Expected[i].Token], &Flags, &IsRestricted, &Count, Sids);
+        ok((Flags & 0x18) == Expected[i].Flags, "token %d: access information flags 0x%lx, expected 0x%lx in 0x18\n",
+           Expected[i].Token, Flags, Expected[i].Flags);
+        ok(IsRestricted == Expected[i].IsRestricted, "token %d: TokenIsRestricted %lu, expected %lu\n",
+           Expected[i].Token, IsRestricted, Expected[i].IsRestricted);
+        ok(Count == Expected[i].Sids, "token %d: %lu restricting SIDs, expected %lu\n", Expected[i].Token, Count, Expected[i].Sids);
+    }
+}
+
+static BOOL
+CanOpen(HANDLE hToken, DWORD Desired)
+{
+    PRIVILEGE_SET Ps;
+    DWORD Psl = sizeof(Ps), Granted = 0;
+    BOOL Status = FALSE;
+    PGENERIC_MAPPING Map = &Maps[FILE_KIND];
+
+    MapGenericMask(&Desired, Map);
+    return AccessCheck(Sds[FILE_KIND][SD_A], hToken, Desired, Map, &Ps, &Psl, &Granted, &Status) && Status;
+}
+
+/*
+ * Windows Server 2022, CreateRestrictedToken on a token that is restricted already: it needs a list of restricting SIDs
+ * (also without WRITE_RESTRICTED, DISABLE_MAX_PRIVILEGE or deny-only SIDs on their own: ERROR_INVALID_PARAMETER), WRITE_RESTRICTED
+ * is refused, the new token has the SIDs the list and the token have in common in the order of the list (none: refused),
+ * and it is a plain restricted token (no 0x8, the reads are compared too). A write restricted token without restricting SIDs
+ * is restricted too: filtered it gives a token that is granted nothing (and one that takes a list, which makes it restricted).
+ */
+static VOID
+TestFiltering(VOID)
+{
+    static const struct
+    {
+        INT Source;
+        DWORD Flags;
+        INT List[3];          /* 0 for 33, 1 for Everyone, -1 ends the list */
+        DWORD Error;          /* 0: it works */
+        INT Result[3];        /* the restricting SIDs of the new token, -1 ends */
+    } Cases[] =
+    {
+        { TOK_RESTRICTED, 0, { -1 }, ERROR_INVALID_PARAMETER },
+        { TOK_RESTRICTED, DISABLE_MAX_PRIVILEGE, { -1 }, ERROR_INVALID_PARAMETER },
+        { TOK_RESTRICTED, WRITE_RESTRICTED, { -1 }, ERROR_INVALID_PARAMETER },
+        { TOK_RESTRICTED, WRITE_RESTRICTED, { 0, -1 }, ERROR_INVALID_PARAMETER },
+        { TOK_RESTRICTED, 0, { 1, -1 }, ERROR_INVALID_PARAMETER },
+        { TOK_RESTRICTED, 0, { 0, -1 }, 0, { 0, -1 } },
+        { TOK_RESTRICTED, 0, { 1, 0, -1 }, 0, { 0, -1 } },
+        { TOK_RESTRICTED, DISABLE_MAX_PRIVILEGE, { 0, -1 }, 0, { 0, -1 } },
+        { TOK_WRITE_RESTRICTED, 0, { -1 }, ERROR_INVALID_PARAMETER },
+        { TOK_WRITE_RESTRICTED, 0, { 1, -1 }, ERROR_INVALID_PARAMETER },
+        { TOK_WRITE_RESTRICTED, WRITE_RESTRICTED, { 0, -1 }, ERROR_INVALID_PARAMETER },
+        { TOK_WRITE_RESTRICTED, 0, { 0, -1 }, 0, { 0, -1 } },
+        { TOK_WRITE_RESTRICTED_2, 0, { -1 }, ERROR_INVALID_PARAMETER },
+        { TOK_WRITE_RESTRICTED_2, 0, { 1, -1 }, 0, { 1, -1 } },
+        { TOK_WRITE_RESTRICTED_2, 0, { 1, 0, -1 }, 0, { 1, 0, -1 } },
+        { TOK_WRITE_RESTRICTED_2, 0, { 0, 1, -1 }, 0, { 0, 1, -1 } },
+        { TOK_WRITE_RESTRICTED_NO_SIDS, WRITE_RESTRICTED, { -1 }, ERROR_INVALID_PARAMETER },
+        { TOK_WRITE_RESTRICTED_NO_SIDS, WRITE_RESTRICTED, { 1, -1 }, ERROR_INVALID_PARAMETER },
+        { TOK_WRITE_RESTRICTED_NO_SIDS, 0, { -1 }, 0, { -1 } },
+        { TOK_WRITE_RESTRICTED_NO_SIDS, DISABLE_MAX_PRIVILEGE, { -1 }, 0, { -1 } },
+        { TOK_WRITE_RESTRICTED_NO_SIDS, 0, { 1, -1 }, 0, { 1, -1 } },
+        { TOK_WRITE_RESTRICTED_NO_SIDS, 0, { 1, 0, -1 }, 0, { 1, 0, -1 } },
+    };
+    BYTE Sid33[SECURITY_MAX_SID_SIZE], SidWd[SECURITY_MAX_SID_SIZE];
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    DWORD cb = sizeof(SidWd), c, i, n, Flags, IsRestricted, Count;
+    SID_AND_ATTRIBUTES List[3];
+    PSID Sids[4];
+    HANDLE hNew;
+
+    RtlInitializeSid((PSID)Sid33, &NtAuthority, 1);
+    *RtlSubAuthoritySid((PSID)Sid33, 0) = 33;
+    CreateWellKnownSid(WinWorldSid, NULL, SidWd, &cb);
+
+    for (c = 0; c < ARRAYSIZE(Cases); c++)
+    {
+        for (n = 0; Cases[c].List[n] != -1; n++)
+        {
+            List[n].Sid = Cases[c].List[n] ? SidWd : Sid33;
+            List[n].Attributes = 0;
+        }
+
+        hNew = NULL;
+        SetLastError(0xdeadbeef);
+        if (!CreateRestrictedToken(Tokens[Cases[c].Source], Cases[c].Flags, 0, NULL, 0, NULL, n, n ? List : NULL, &hNew))
+        {
+            ok(Cases[c].Error != 0, "case %lu: failed with %lu, expected to work\n", c, GetLastError());
+            ok(Cases[c].Error == 0 || GetLastError() == Cases[c].Error, "case %lu: error %lu, expected %lu\n",
+               c, GetLastError(), Cases[c].Error);
+            continue;
+        }
+
+        ok(Cases[c].Error == 0, "case %lu: worked, expected error %lu\n", c, Cases[c].Error);
+        QueryToken(hNew, &Flags, &IsRestricted, &Count, Sids);
+        for (i = 0; Cases[c].Result[i] != -1; i++)
+            ;
+        ok(Count == i, "case %lu: %lu restricting SIDs, expected %lu\n", c, Count, i);
+        ok((Flags & 0x18) == 0x10, "case %lu: access information flags 0x%lx, expected 0x10 in 0x18\n", c, Flags);
+        ok(IsRestricted == 1, "case %lu: TokenIsRestricted %lu\n", c, IsRestricted);
+        for (n = 0; n < i && n < Count; n++)
+            ok(EqualSid(Sids[n], Cases[c].Result[n] ? SidWd : Sid33), "case %lu: restricting SID %lu is not the expected one\n", c, n);
+
+        /* a restricted token, no longer a write restricted one: the descriptor of the Administrators only is not read */
+        ok(!CanOpen(hNew, GENERIC_READ), "case %lu: the new token can read\n", c);
+        CloseHandle(hNew);
+    }
+
+    /* the write restricted token itself reads and does not write (the descriptor grants the Administrators) */
+    ok(CanOpen(Tokens[TOK_WRITE_RESTRICTED_NO_SIDS], GENERIC_READ), "write restricted token without SIDs cannot read\n");
+    ok(!CanOpen(Tokens[TOK_WRITE_RESTRICTED_NO_SIDS], GENERIC_WRITE), "write restricted token without SIDs can write\n");
+}
+
 START_TEST(WriteRestrictedToken)
 {
     INT i;
@@ -300,43 +484,9 @@ START_TEST(WriteRestrictedToken)
     ok(!IsTokenRestricted(Tokens[TOK_WRITE_RESTRICTED_NO_SIDS]), "write restricted token without SIDs restricted\n");
     ok(IsTokenRestricted(Tokens[TOK_WRITE_RESTRICTED_2]), "write restricted token with two SIDs not restricted\n");
 
-    /*
-     * Windows Server 2022: a token that has restricting SIDs cannot be filtered again with a list of restricting SIDs
-     * (ERROR_INVALID_PARAMETER), restricted or write restricted, with or without the flag. A list would replace the
-     * restricting SIDs of the token.
-     */
-    {
-        static const INT Sources[] = { TOK_RESTRICTED, TOK_WRITE_RESTRICTED, TOK_WRITE_RESTRICTED_2 };
-        static const DWORD Flags[] = { 0, WRITE_RESTRICTED };
-        BYTE SidWd[SECURITY_MAX_SID_SIZE];
-        DWORD cb = sizeof(SidWd), a, b;
-        SID_AND_ATTRIBUTES Restrict;
-        HANDLE hNew;
-
-        CreateWellKnownSid(WinWorldSid, NULL, SidWd, &cb);
-        Restrict.Sid = SidWd;
-        Restrict.Attributes = 0;
-        for (a = 0; a < ARRAYSIZE(Sources); a++)
-        {
-            for (b = 0; b < ARRAYSIZE(Flags); b++)
-            {
-                hNew = NULL;
-                SetLastError(0xdeadbeef);
-                if (CreateRestrictedToken(Tokens[Sources[a]], Flags[b], 0, NULL, 0, NULL, 1, &Restrict, &hNew))
-                {
-                    ok(0, "source %d, flags 0x%lx: a restricted token was filtered with restricting SIDs\n", Sources[a], Flags[b]);
-                    CloseHandle(hNew);
-                }
-                else
-                {
-                    ok(GetLastError() == ERROR_INVALID_PARAMETER, "source %d, flags 0x%lx: error %lu, expected %d\n",
-                       Sources[a], Flags[b], GetLastError(), ERROR_INVALID_PARAMETER);
-                }
-            }
-        }
-    }
-
     MakeSds();
+    TestTokenReports();
+    TestFiltering();
     TestRows();
 
     /* Windows Server 2022: a copy of a write restricted token (primary, then impersonation again) is write restricted too */
