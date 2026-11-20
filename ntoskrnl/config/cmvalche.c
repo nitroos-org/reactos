@@ -670,7 +670,7 @@ CmpQueryKeyValueData(IN PCM_KEY_CONTROL_BLOCK Kcb,
     PCELL_DATA CellData;
     USHORT NameSize;
     ULONG Size, MinimumSize, SizeLeft, KeySize, AlignedData = 0, DataOffset;
-    PVOID Buffer;
+    PVOID Buffer = NULL;
     BOOLEAN IsSmall, BufferAllocated = FALSE;
     HCELL_INDEX CellToRelease = HCELL_NIL;
     VALUE_SEARCH_RETURN_TYPE Result = SearchSuccess;
@@ -848,9 +848,13 @@ CmpQueryKeyValueData(IN PCM_KEY_CONTROL_BLOCK Kcb,
                     /* Then the data is directly into the cell */
                     Buffer = &CellData->u.KeyValue.Data;
                 }
-                else
+                else if (Length > AlignedData)
                 {
-                    /* Otherwise, we must retrieve it from the value cache */
+                    /*
+                     * Otherwise, we must retrieve it from the value cache; only
+                     * if a byte of it will be copied: big data is put together
+                     * in a buffer of the whole length
+                     */
                     Result = CmpGetValueDataFromCache(Kcb,
                                                       CachedValue,
                                                       CellData,
@@ -864,6 +868,7 @@ CmpQueryKeyValueData(IN PCM_KEY_CONTROL_BLOCK Kcb,
                         ASSERT(Buffer == NULL);
                         ASSERT(BufferAllocated == FALSE);
                         *Status = STATUS_INSUFFICIENT_RESOURCES;
+                        break;
                     }
                 }
 
@@ -967,9 +972,9 @@ CmpQueryKeyValueData(IN PCM_KEY_CONTROL_BLOCK Kcb,
                     /* Then the data is directly into the cell */
                     Buffer = &CellData->u.KeyValue.Data;
                 }
-                else
+                else if (Length > MinimumSize)
                 {
-                    /* Otherwise, we must retrieve it from the value cache */
+                    /* Otherwise, we must retrieve it from the value cache (only if a byte of it will be copied) */
                     Result = CmpGetValueDataFromCache(Kcb,
                                                       CachedValue,
                                                       CellData,
@@ -983,6 +988,7 @@ CmpQueryKeyValueData(IN PCM_KEY_CONTROL_BLOCK Kcb,
                         ASSERT(Buffer == NULL);
                         ASSERT(BufferAllocated == FALSE);
                         *Status = STATUS_INSUFFICIENT_RESOURCES;
+                        break;
                     }
                 }
 
