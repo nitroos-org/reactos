@@ -50,7 +50,11 @@ typedef struct
     /* Information to be filled during logon */
     WCHAR UserName[256];
     WCHAR DomainName[256];
+    /* The password lives here only while the logon dialog is working (bLogonInProgress): a stored automatic logon
+       password is read into it, the password typed is copied into it for the retry after a password change; it
+       is wiped when the logon attempt is over. Nothing compares against it (the unlock dialog asks the LSA). */
     WCHAR Password[256];
+    BOOL bLogonInProgress;
     SYSTEMTIME LogonTime;
     HANDLE UserToken;
     PLUID pAuthenticationId;
@@ -116,14 +120,26 @@ MyLogonUser(
     PHANDLE phToken,
     PNTSTATUS SubStatus);
 
+NTSTATUS
+MyUnlockUser(
+    HANDLE LsaHandle,
+    ULONG AuthenticationPackage,
+    LPWSTR lpszUsername,
+    LPWSTR lpszDomain,
+    LPWSTR lpszPassword,
+    PHANDLE phToken,
+    PNTSTATUS SubStatus);
+
 /* msgina.c */
 
-BOOL
-DoAdminUnlock(
+NTSTATUS
+DoUnlockLogon(
     IN PGINA_CONTEXT pgContext,
     IN PWSTR UserName,
-    IN PWSTR Domain,
-    IN PWSTR Password);
+    IN PWSTR Password,
+    OUT PBOOL IsSessionUser,
+    OUT PBOOL IsAdmin,
+    OUT PNTSTATUS SubStatus);
 
 NTSTATUS
 DoLoginTasks(
