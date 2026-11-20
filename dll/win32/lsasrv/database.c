@@ -716,6 +716,10 @@ LsapInitDatabase(VOID)
         }
     }
 
+    /* Secret values are stored encrypted: a new database is marked so, plaintext left by earlier versions is
+       converted now, before the RPC server starts */
+    LsapInitSecretProtection(LsapDatabaseCreated);
+
     Status = LsapGetDomainInfo();
     if (!NT_SUCCESS(Status))
     {

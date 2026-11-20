@@ -21,6 +21,7 @@ list(APPEND SOURCE
     policy.c
     privileges.c
     registry.c
+    secret.c
     security.c
     service.c
     session.c
@@ -37,7 +38,7 @@ add_library(lsasrv MODULE
     ${CMAKE_CURRENT_BINARY_DIR}/lsasrv.def)
 
 set_module_type(lsasrv win32dll UNICODE)
-target_link_libraries(lsasrv wine ${PSEH_LIB})
+target_link_libraries(lsasrv wine symcrypt ${PSEH_LIB})
 add_importlibs(lsasrv samsrv rpcrt4 msvcrt kernel32 advapi32 ntdll)
 add_pch(lsasrv lsasrv.h SOURCE)
 add_cd_file(TARGET lsasrv DESTINATION reactos/system32 FOR all)

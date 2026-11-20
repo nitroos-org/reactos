@@ -197,6 +197,29 @@ LsapDeleteObjectAttribute(PLSA_DB_OBJECT DbObject,
 VOID
 DsSetupInit(VOID);
 
+/* secret.c */
+VOID
+LsapInitSecretProtection(BOOLEAN NewDatabase);
+
+NTSTATUS
+LsapSetSecretValue(PLSA_DB_OBJECT SecretObject,
+                   LPWSTR AttributeName,
+                   PVOID Data,
+                   ULONG DataLength);
+
+NTSTATUS
+LsapGetSecretValue(PLSA_DB_OBJECT SecretObject,
+                   LPWSTR AttributeName,
+                   PVOID *Data,
+                   PULONG DataLength);
+
+VOID
+LsapFreeSecretValue(PVOID Value,
+                    ULONG Length);
+
+VOID
+LsapWipeCipherValue(PLSAPR_CR_CIPHER_VALUE Value);
+
 /* lookup.c */
 NTSTATUS
 LsapInitSids(VOID);

@@ -345,6 +345,16 @@ void __RPC_FAR * __RPC_USER midl_user_allocate(SIZE_T len)
 
 void __RPC_USER midl_user_free(void __RPC_FAR * ptr)
 {
+    SIZE_T Size;
+
+    /* Replies can carry secret values: nothing the server allocated for RPC stays readable in freed memory */
+    if (ptr != NULL)
+    {
+        Size = RtlSizeHeap(RtlGetProcessHeap(), 0, ptr);
+        if (Size != (SIZE_T)-1)
+            RtlSecureZeroMemory(ptr, Size);
+    }
+
     RtlFreeHeap(RtlGetProcessHeap(), 0, ptr);
 }
 
