@@ -3592,6 +3592,8 @@ typedef struct _SYSTEM_BOOT_ENVIRONMENT_INFORMATION
 } SYSTEM_BOOT_ENVIRONMENT_INFORMATION, *PSYSTEM_BOOT_ENVIRONMENT_INFORMATION;
 #endif
 
+extern BOOLEAN ExpBootedViaEfi;
+
 /* Class 90 - Boot Environment Information */
 QSI_DEF(SystemBootEnvironmentInformation)
 {
@@ -3616,14 +3618,12 @@ QSI_DEF(SystemBootEnvironmentInformation)
     RtlZeroMemory(BootInfo, Size);
 
     /*
-     * ReactOS does not yet propagate the real firmware type from the boot
-     * loader into the kernel. The supported nitro target boots via SeaBIOS
-     * under QEMU, i.e. legacy BIOS, so report FirmwareTypeBios. This is the
-     * value Windows' GetFirmwareType() would return on the same platform.
-     * TODO: detect UEFI from the loader parameter block once it carries the
-     * firmware type, and return FirmwareTypeUefi accordingly.
+     * The loader tells whether the system was started by UEFI firmware
+     * (LOADER_PARAMETER_BLOCK, see ExpInitializeExecutive); otherwise the
+     * machine booted through the legacy BIOS. This is the value that
+     * GetFirmwareType() returns.
      */
-    BootInfo->FirmwareType = FirmwareTypeBios;
+    BootInfo->FirmwareType = (ExpBootedViaEfi ? FirmwareTypeUefi : FirmwareTypeBios);
 
     return STATUS_SUCCESS;
 }

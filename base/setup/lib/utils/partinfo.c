@@ -818,19 +818,17 @@ LookupPartitionTypeString(
             }
         }
     }
-#if 0 // TODO: GPT support!
     else if (PartitionStyle == PARTITION_STYLE_GPT)
     {
         for (i = 0; i < _countof(GptPartitionTypes); ++i)
         {
-            if (IsEqualPartitionType((PGUID)PartitionType,
-                                     &GptPartitionTypes[i].Guid))
+            if (RtlCompareMemory(PartitionType, &GptPartitionTypes[i].Guid,
+                                 sizeof(GUID)) == sizeof(GUID))
             {
                 return GptPartitionTypes[i].Description;
             }
         }
     }
-#endif
 
     /* The partition type is unknown */
     return NULL;

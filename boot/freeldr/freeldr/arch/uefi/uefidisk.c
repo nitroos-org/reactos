@@ -701,11 +701,51 @@ GetHarddiskInformation(
     TRACE("Identifier: %s\n", Identifier);
 }
 
+/*
+ * TRUE if the device path of the Parent handle is a prefix of the one of
+ * the Child handle, i.e. the child is a partition of the parent disk.
+ */
+static
+BOOLEAN
+UefiHandleIsParentOf(
+    _In_ EFI_HANDLE Parent,
+    _In_ EFI_HANDLE Child)
+{
+    EFI_GUID DevicePathGuid = EFI_DEVICE_PATH_PROTOCOL_GUID;
+    EFI_DEVICE_PATH_PROTOCOL* ParentPath = NULL;
+    EFI_DEVICE_PATH_PROTOCOL* ChildPath = NULL;
+
+    if (Parent == Child)
+        return FALSE;
+    if (EFI_ERROR(GlobalSystemTable->BootServices->HandleProtocol(Parent, &DevicePathGuid, (VOID**)&ParentPath)) ||
+        EFI_ERROR(GlobalSystemTable->BootServices->HandleProtocol(Child, &DevicePathGuid, (VOID**)&ChildPath)) ||
+        !ParentPath || !ChildPath)
+    {
+        return FALSE;
+    }
+
+    for (; !IsDevicePathEnd(ParentPath); ParentPath = NextDevicePathNode(ParentPath),
+                                         ChildPath = NextDevicePathNode(ChildPath))
+    {
+        if (IsDevicePathEnd(ChildPath))
+            return FALSE;
+        if (DevicePathNodeLength(ParentPath) < sizeof(EFI_DEVICE_PATH_PROTOCOL) ||
+            DevicePathNodeLength(ParentPath) != DevicePathNodeLength(ChildPath) ||
+            !RtlEqualMemory(ParentPath, ChildPath, DevicePathNodeLength(ParentPath)))
+        {
+            return FALSE;
+        }
+    }
+    /* The child has more nodes than the parent: a media (partition) node */
+    return !IsDevicePathEnd(ChildPath);
+}
+
 static
 VOID
 UefiSetupBlockDevices(VOID)
 {
     ULONG BlockDeviceIndex;
+    ULONG Pass;
     ULONG SystemHandleCount;
     EFI_STATUS Status;
     ULONG i;
@@ -799,10 +839,18 @@ UefiSetupBlockDevices(VOID)
         }
     }
 
-    /* Step 6: Enumerate root block devices (skip logical partitions) */
+    /*
+     * Step 6: Enumerate root block devices (skip logical partitions).
+     * Hard disks are numbered first and optical drives after them, so that
+     * the rdisk() number of a hard disk (it ends up in freeldr.ini and in the
+     * hardware tree) does not change when a CD-ROM is attached or removed.
+     */
     BlockDeviceIndex = 0;
-    for (i = 0; i < SystemHandleCount; i++)
+    for (Pass = 0; Pass < 2 * SystemHandleCount; Pass++)
     {
+        BOOLEAN WantOptical = (Pass >= SystemHandleCount);
+        i = Pass % SystemHandleCount;
+
         Status = GlobalSystemTable->BootServices->HandleProtocol(
             handles[i],
             &BlockIoGuid,
@@ -848,6 +896,10 @@ UefiSetupBlockDevices(VOID)
             TRACE("Skipping logical partition handle %lu\n", i);
             continue;
         }
+
+        /* Optical drives (2048-byte blocks) take the second pass */
+        if ((BlockIo->Media->RemovableMedia && BlockIo->Media->BlockSize == 2048) != WantOptical)
+            continue;
 
         /* This is a root block device */
         TRACE("Found root block device at index %lu: BlockSize=%lu, LastBlock=%llu\n",
@@ -903,7 +955,24 @@ UefiSetupBlockDevices(VOID)
             /* For CD-ROMs: match BlockSize=2048 and RemovableMedia=TRUE */
             /* For hard disks: match BlockSize and find the root device before this partition */
             BOOLEAN FoundBootDevice = FALSE;
-            for (i = 0; i < BlockDeviceIndex; i++)
+
+            /* A hard disk partition belongs to the root device whose device path starts its own */
+            if (!(BlockIo->Media->BlockSize == 2048 && BlockIo->Media->RemovableMedia))
+            {
+                for (i = 0; i < BlockDeviceIndex; i++)
+                {
+                    if (UefiHandleIsParentOf(InternalUefiDisk[i].Handle, handles[UefiBootRootIndex]))
+                    {
+                        PublicBootArcDisk = i;
+                        InternalUefiDisk[i].IsThisTheBootDrive = TRUE;
+                        FoundBootDevice = TRUE;
+                        TRACE("Boot partition belongs to the root device at ARC drive index %lu\n", i);
+                        break;
+                    }
+                }
+            }
+
+            for (i = 0; i < BlockDeviceIndex && !FoundBootDevice; i++)
             {
                 EFI_BLOCK_IO* RootBlockIo;
                 Status = GlobalSystemTable->BootServices->HandleProtocol(
@@ -1322,6 +1391,37 @@ UefiDiskGetDriveGeometry(UCHAR DriveNumber, PGEOMETRY Geometry)
     Geometry->Sectors = BlockIo->Media->LastBlock + 1;
 
     return TRUE;
+}
+
+/*
+ * The hard disks are numbered first (see UefiSetupBlockDevices): this is
+ * their number, for the DiskPeripheral keys of the hardware tree, and the
+ * 'checksum-signature' identifier of each (the same as on the BIOS machines).
+ */
+ULONG
+UefiGetHarddiskCount(VOID)
+{
+    ULONG Count;
+    EFI_BLOCK_IO* BlockIo;
+
+    if (InternalUefiDisk == NULL)
+        return 0;
+
+    for (Count = 0; Count < PcBiosDiskCount && Count < 32; Count++)
+    {
+        if (EFI_ERROR(GlobalSystemTable->BootServices->HandleProtocol(
+                InternalUefiDisk[Count].Handle, &BlockIoGuid, (VOID**)&BlockIo)) || !BlockIo)
+            break;
+        if (BlockIo->Media->RemovableMedia && BlockIo->Media->BlockSize == 2048)
+            break; /* The optical drives follow the hard disks */
+    }
+    return Count;
+}
+
+PCSTR
+UefiGetHarddiskIdentifier(ULONG Index)
+{
+    return InternalUefiDisk[Index].DiskIdentifier;
 }
 
 ULONG

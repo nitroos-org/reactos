@@ -23,6 +23,9 @@ extern ULONG_PTR VramAddress;
 extern ULONG VramSize;
 extern PCM_FRAMEBUF_DEVICE_DATA FrameBufferData;
 
+/* The disk numbering of uefidisk.c: the first hard disk is drive 0x80 */
+#define FIRST_BIOS_DISK 0x80
+
 BOOLEAN AcpiPresent = FALSE;
 static EFI_EVENT IdleTimerEvent = NULL;
 
@@ -285,6 +288,102 @@ DetectDisplayController(
     // We should use EDID data for it.
 }
 
+/*
+ * The hard disks of the firmware as DiskPeripheral keys of a disk controller,
+ * as the BIOS loader reports them: the identifier ("checksum-signature-A") and
+ * a CHS geometry. Setup uses them to tell which disks the firmware can start from,
+ * and the number of a disk in them is the rdisk() number of its ARC name.
+ */
+static
+VOID
+DetectUefiDisks(
+    _In_ PCONFIGURATION_COMPONENT_DATA SystemKey,
+    _In_ PCONFIGURATION_COMPONENT_DATA BusKey)
+{
+    PCONFIGURATION_COMPONENT_DATA ControllerKey, DiskKey;
+    PCM_PARTIAL_RESOURCE_LIST PartialResourceList;
+    PCM_INT13_DRIVE_PARAMETER Int13Drives;
+    PCM_DISK_GEOMETRY_DEVICE_DATA DiskGeometry;
+    GEOMETRY Geometry;
+    ULONG DiskCount, i, Size;
+    ULONGLONG Sectors;
+
+    DiskCount = UefiGetHarddiskCount();
+
+    /* The disk controller */
+    Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors);
+    PartialResourceList = FrLdrHeapAlloc(Size, TAG_HW_RESOURCE_LIST);
+    if (!PartialResourceList)
+        return;
+    RtlZeroMemory(PartialResourceList, Size);
+    PartialResourceList->Version = 1;
+    PartialResourceList->Revision = 1;
+    FldrCreateComponentKey(BusKey, ControllerClass, DiskController,
+                           Output | Input, 0x0, 0xFFFFFFFF, NULL,
+                           PartialResourceList, Size, &ControllerKey);
+
+    /* The INT13h-style parameters of the 'System' key */
+    Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors[1]) +
+           sizeof(CM_INT13_DRIVE_PARAMETER) * DiskCount;
+    PartialResourceList = FrLdrHeapAlloc(Size, TAG_HW_RESOURCE_LIST);
+    if (!PartialResourceList)
+        return;
+    RtlZeroMemory(PartialResourceList, Size);
+    PartialResourceList->Version = 1;
+    PartialResourceList->Revision = 1;
+    PartialResourceList->Count = 1;
+    PartialResourceList->PartialDescriptors[0].Type = CmResourceTypeDeviceSpecific;
+    PartialResourceList->PartialDescriptors[0].u.DeviceSpecificData.DataSize =
+        sizeof(CM_INT13_DRIVE_PARAMETER) * DiskCount;
+    Int13Drives = (PCM_INT13_DRIVE_PARAMETER)&PartialResourceList->PartialDescriptors[1];
+    for (i = 0; i < DiskCount; i++)
+    {
+        Int13Drives[i].DriveSelect = 0x80 + i;
+        Int13Drives[i].MaxCylinders = 0;
+        if (MachDiskGetDriveGeometry(FIRST_BIOS_DISK + i, &Geometry))
+        {
+            Sectors = Geometry.Sectors;
+            Int13Drives[i].MaxCylinders = (Sectors / (255 * 63)) ? (Sectors / (255 * 63)) - 1 : 0;
+        }
+        Int13Drives[i].SectorsPerTrack = 63;
+        Int13Drives[i].MaxHeads = 254;
+        Int13Drives[i].NumberDrives = DiskCount;
+    }
+    FldrSetConfigurationData(SystemKey, PartialResourceList, Size);
+
+    /* One DiskPeripheral per hard disk */
+    for (i = 0; i < DiskCount; i++)
+    {
+        Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors[1]) + sizeof(*DiskGeometry);
+        PartialResourceList = FrLdrHeapAlloc(Size, TAG_HW_RESOURCE_LIST);
+        if (!PartialResourceList)
+            return;
+        RtlZeroMemory(PartialResourceList, Size);
+        PartialResourceList->Version = 1;
+        PartialResourceList->Revision = 1;
+        PartialResourceList->Count = 1;
+        PartialResourceList->PartialDescriptors[0].Type = CmResourceTypeDeviceSpecific;
+        PartialResourceList->PartialDescriptors[0].u.DeviceSpecificData.DataSize = sizeof(*DiskGeometry);
+
+        DiskGeometry = (PCM_DISK_GEOMETRY_DEVICE_DATA)&PartialResourceList->PartialDescriptors[1];
+        DiskGeometry->BytesPerSector = 512;
+        DiskGeometry->NumberOfCylinders = 1;
+        DiskGeometry->SectorsPerTrack = 63;
+        DiskGeometry->NumberOfHeads = 255;
+        if (MachDiskGetDriveGeometry(FIRST_BIOS_DISK + i, &Geometry))
+        {
+            DiskGeometry->BytesPerSector = Geometry.BytesPerSector;
+            Sectors = Geometry.Sectors;
+            DiskGeometry->NumberOfCylinders = (ULONG)max(1, Sectors / (255 * 63));
+        }
+
+        FldrCreateComponentKey(ControllerKey, PeripheralClass, DiskPeripheral,
+                               Output | Input, i, 0xFFFFFFFF,
+                               UefiGetHarddiskIdentifier(i),
+                               PartialResourceList, Size, &DiskKey);
+    }
+}
+
 static
 VOID
 DetectInternal(PCONFIGURATION_COMPONENT_DATA SystemKey, ULONG *BusNumber)
@@ -325,6 +424,7 @@ DetectInternal(PCONFIGURATION_COMPONENT_DATA SystemKey, ULONG *BusNumber)
 
     /* Detect devices that do not belong to "standard" buses */
     DetectDisplayController(BusKey);
+    DetectUefiDisks(SystemKey, BusKey);
 
     /* FIXME: Detect more devices */
 }

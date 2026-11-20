@@ -4,6 +4,7 @@ PROJECT(setuplib_unittest)
 include_directories(${REACTOS_SOURCE_DIR}/modules/rostests/apitests/include)
 
 list(APPEND SOURCE
+    GptLayout.c
     IsValidInstallDirectory.c
     UnattendParse.c
     testlist.c

@@ -2026,6 +2026,65 @@ CreateInstallPartition:
     ASSERT(CurrentPartition);
     ASSERT(!IsContainerPartition(CurrentPartition->PartitionType));
 
+    /* UEFI firmware boots from GPT disks only; an MBR disk that still holds partitions cannot be used */
+    if (IsMbrDiskUnusableForUefi(CurrentPartition->DiskEntry))
+    {
+        if (IsUnattendedSetup)
+        {
+            UnattendedFatal("the disk is MBR-partitioned and holds partitions",
+                            "This UEFI computer cannot start from it: delete its partitions, or",
+                            "name a disk that is blank or GPT-partitioned.");
+            return QUIT_PAGE;
+        }
+        PopupError("The disk you have selected uses the MBR partition style,\n"
+                   "which this UEFI computer cannot start " BRAND_PRODUCT_NAME " from.\n"
+                   "Delete all its partitions to let Setup convert it to GPT,\n"
+                   "or select another disk.\n"
+                   "Press ENTER to continue.",
+                   MUIGetString(STRING_CONTINUE),
+                   Ir, POPUP_WAIT_ENTER);
+        return SELECT_PARTITION_PAGE;
+    }
+
+    /* UEFI: never onto the boot files of the computer, nor onto a disk that Setup cannot finish on */
+    switch (GetUefiInstallRefusal(CurrentPartition))
+    {
+        case UEFI_INSTALL_SPECIAL_PARTITION:
+            if (IsUnattendedSetup)
+            {
+                UnattendedFatal("the partition is the EFI system, reserved or recovery one",
+                                "Partitions are counted in table order: the EFI system one is 1.",
+                                "Name the system partition, or use AutoPartition on a blank disk.");
+                return QUIT_PAGE;
+            }
+            PopupError("The selected partition is the EFI system partition, the reserved\n"
+                       "or the recovery partition of this computer. It holds the files that\n"
+                       "start the operating systems and cannot be used for the installation.\n"
+                       "Select another partition or unpartitioned space.\n"
+                       "Press ENTER to continue.",
+                       MUIGetString(STRING_CONTINUE),
+                       Ir, POPUP_WAIT_ENTER);
+            return SELECT_PARTITION_PAGE;
+
+        case UEFI_INSTALL_SECTOR_SIZE:
+            if (IsUnattendedSetup)
+            {
+                UnattendedFatal("the disk has sectors of other than 512 bytes",
+                                "The file system drivers cannot yet format such a disk.", NULL);
+                return QUIT_PAGE;
+            }
+            PopupError("The selected disk has sectors of other than 512 bytes.\n"
+                       "The file system drivers cannot yet format such a disk, so\n"
+                       "nothing has been written to it. Select another disk.\n"
+                       "Press ENTER to continue.",
+                       MUIGetString(STRING_CONTINUE),
+                       Ir, POPUP_WAIT_ENTER);
+            return SELECT_PARTITION_PAGE;
+
+        default:
+            break;
+    }
+
     /* Create the partition if the selected region is empty */
     if (!CurrentPartition->IsPartitioned)
     {
@@ -2329,6 +2388,13 @@ CreatePartitionPage(PINPUT_RECORD Ir)
     CONSOLE_SetStatusText(MUIGetString(STRING_CREATEPARTITION));
 
     MaxPartSize = GetPartEntrySizeInBytes(PartEntry);
+
+    /* UEFI: the EFI system and the reserved partitions are created first, out of this space */
+    {
+        ULONGLONG Overhead = GetEfiPartitionsOverhead(PartEntry);
+        if (Overhead && MaxPartSize > Overhead + MB)
+            MaxPartSize -= Overhead;
+    }
 
     while (TRUE)
     {
@@ -3744,6 +3810,13 @@ BootLoaderSelectPage(PINPUT_RECORD Ir)
         goto Quit;
     }
 
+    /* UEFI: the loader is a file on the EFI system partition, there is nothing to choose */
+    if (USetupData.ArchType == ARCH_Efi)
+    {
+        USetupData.BootLoaderLocation = 3;
+        goto Quit;
+    }
+
     /* For unattended setup, skip MBR installation or install on removable disk if needed */
     if (IsUnattendedSetup)
     {
@@ -3963,6 +4036,23 @@ BootLoaderHardDiskPage(PINPUT_RECORD Ir)
                                                      L"Windows", L"\"Microsoft Windows\"");
         if (!NT_SUCCESS(EntryStatus))
             DPRINT1("AddPartitionBootEntry() failed: Status 0x%lx\n", EntryStatus);
+    }
+    if (Status == STATUS_SUCCESS && USetupData.ArchType == ARCH_Efi && WasEfiFallbackLoaderKept())
+    {
+        /* Another system's loader is at \EFI\BOOT\BOOTX64.EFI: ours is only in its own directory */
+        SetupLogFormat("The boot loader of another system was found at \\EFI\\BOOT and kept; "
+                       BRAND_PRODUCT_NAME " was installed to \\EFI\\NITROOS: add that file to the firmware boot menu");
+        if (!IsUnattendedSetup)
+        {
+            PopupError("The EFI system partition holds the boot loader of another\n"
+                       "operating system in \\EFI\\BOOT, which was left as it is.\n"
+                       BRAND_PRODUCT_NAME " was installed to \\EFI\\NITROOS: add the file\n"
+                       "BOOTX64.EFI there as a boot option in the firmware menu of\n"
+                       "your computer to start it.\n"
+                       "Press ENTER to continue.",
+                       MUIGetString(STRING_CONTINUE),
+                       Ir, POPUP_WAIT_ENTER);
+        }
     }
     if (Status == STATUS_SUCCESS)
         return TRUE; /* Successful installation */

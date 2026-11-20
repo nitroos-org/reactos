@@ -7,6 +7,10 @@
 
 #pragma once
 
+/* UEFI: TRUE if the last install found another system's loader at \EFI\BOOT and left it there */
+BOOLEAN
+WasEfiFallbackLoaderKept(VOID);
+
 NTSTATUS
 NTAPI
 InstallBootManagerAndBootEntries(

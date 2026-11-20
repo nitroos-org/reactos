@@ -1634,6 +1634,142 @@ InstallBootManagerAndBootEntriesWorker(
 }
 
 
+/* Set when the loader of another system was found at the removable-media path and left alone */
+static BOOLEAN EfiFallbackLoaderKept = FALSE;
+
+BOOLEAN
+WasEfiFallbackLoaderKept(VOID)
+{
+    return EfiFallbackLoaderKept;
+}
+
+/* TRUE if the two files exist and have the same content */
+static
+BOOLEAN
+AreFilesIdentical(
+    _In_ PCWSTR Path1,
+    _In_ PCWSTR Path2)
+{
+    HANDLE Section1, Section2;
+    PVOID Base1, Base2;
+    ULONG Size1, Size2;
+    BOOLEAN Same = FALSE;
+
+    if (!NT_SUCCESS(OpenAndMapFile(NULL, Path1, NULL, &Size1, &Section1, &Base1, FALSE)))
+        return FALSE;
+    if (NT_SUCCESS(OpenAndMapFile(NULL, Path2, NULL, &Size2, &Section2, &Base2, FALSE)))
+    {
+        Same = (Size1 == Size2 && RtlCompareMemory(Base1, Base2, Size1) == Size1);
+        UnMapFile(Section2, Base2);
+    }
+    UnMapFile(Section1, Base1);
+    return Same;
+}
+
+/*
+ * UEFI computers: put the UEFI boot loader on the EFI system partition, in
+ * its own directory \EFI\NITROOS, and at \EFI\BOOT\BOOTX64.EFI, the
+ * removable-media path that every firmware tries when it has no boot entry
+ * for the disk (UEFI 2.10, section 3.5.1.1). A loader that is already at the
+ * removable-media path and is not ours belongs to another system, which may
+ * rely on it: it is left alone (WasEfiFallbackLoaderKept() tells Setup to say
+ * so). 'freeldr.ini' is written at the partition root, where our loader
+ * looks for it.
+ */
+static
+NTSTATUS
+InstallEfiBootFiles(
+    _In_ PCUNICODE_STRING SystemRootPath,
+    _In_ PCUNICODE_STRING SourceRootPath,
+    _In_ PCUNICODE_STRING DestinationArcPath)
+{
+#if defined(_M_AMD64)
+#define EFI_BOOT_FILE_SRC L"\\efi\\boot\\bootx64.efi"
+#define EFI_BOOT_FILE_DST L"EFI\\BOOT\\BOOTX64.EFI"
+#define EFI_OWN_FILE_DST  L"EFI\\NITROOS\\BOOTX64.EFI"
+#elif defined(_M_IX86)
+#define EFI_BOOT_FILE_SRC L"\\efi\\boot\\bootia32.efi"
+#define EFI_BOOT_FILE_DST L"EFI\\BOOT\\BOOTIA32.EFI"
+#define EFI_OWN_FILE_DST  L"EFI\\NITROOS\\BOOTIA32.EFI"
+#endif
+
+#ifdef EFI_BOOT_FILE_SRC
+    NTSTATUS Status;
+    WCHAR SrcPath[MAX_PATH];
+    WCHAR DstPath[MAX_PATH];
+    WCHAR OwnPath[MAX_PATH];
+    BOOLEAN KeepFallback;
+
+    EfiFallbackLoaderKept = FALSE;
+
+    CombinePaths(SrcPath, ARRAYSIZE(SrcPath), 2, SourceRootPath->Buffer, EFI_BOOT_FILE_SRC);
+    CombinePaths(DstPath, ARRAYSIZE(DstPath), 2, SystemRootPath->Buffer, EFI_BOOT_FILE_DST);
+    CombinePaths(OwnPath, ARRAYSIZE(OwnPath), 2, SystemRootPath->Buffer, EFI_OWN_FILE_DST);
+
+    /*
+     * A loader at the removable-media path is ours if it is the file we put
+     * there before (same as our own copy) or the one we are about to install.
+     */
+    KeepFallback = DoesFileExist(NULL, DstPath) &&
+                   !AreFilesIdentical(DstPath, OwnPath) &&
+                   !AreFilesIdentical(DstPath, SrcPath);
+
+    /* Our own directory first: it holds our loader whatever else is on the partition */
+    CombinePaths(DstPath, ARRAYSIZE(DstPath), 2, SystemRootPath->Buffer, L"EFI");
+    SetupCreateDirectory(DstPath);
+    CombinePaths(DstPath, ARRAYSIZE(DstPath), 2, SystemRootPath->Buffer, L"EFI\\NITROOS");
+    Status = SetupCreateDirectory(DstPath);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("SetupCreateDirectory(%S) failed (Status 0x%08lx)\n", DstPath, Status);
+        return Status;
+    }
+    DPRINT1("Copy: %S ==> %S\n", SrcPath, OwnPath);
+    Status = SetupCopyFile(SrcPath, OwnPath, FALSE);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("SetupCopyFile() failed (Status 0x%08lx)\n", Status);
+        return Status;
+    }
+
+    /* The removable-media path: where nobody else has a loader, or where ours is */
+    CombinePaths(DstPath, ARRAYSIZE(DstPath), 2, SystemRootPath->Buffer, EFI_BOOT_FILE_DST);
+    if (KeepFallback)
+    {
+        DPRINT1("The loader of another system is at %S: kept\n", DstPath);
+        EfiFallbackLoaderKept = TRUE;
+    }
+    else
+    {
+        CombinePaths(OwnPath, ARRAYSIZE(OwnPath), 2, SystemRootPath->Buffer, L"EFI\\BOOT");
+        SetupCreateDirectory(OwnPath);
+        DPRINT1("Copy: %S ==> %S\n", SrcPath, DstPath);
+        Status = SetupCopyFile(SrcPath, DstPath, FALSE);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("SetupCopyFile() failed (Status 0x%08lx)\n", Status);
+            return Status;
+        }
+    }
+
+    if (DoesFileExist_2(SystemRootPath->Buffer, L"freeldr.ini"))
+    {
+        DPRINT1("Update existing 'freeldr.ini'\n");
+        Status = UpdateFreeLoaderIni(SystemRootPath->Buffer, DestinationArcPath->Buffer);
+    }
+    else
+    {
+        DPRINT1("Create new 'freeldr.ini'\n");
+        Status = CreateFreeLoaderIniForReactOS(SystemRootPath->Buffer, DestinationArcPath->Buffer);
+    }
+    if (!NT_SUCCESS(Status))
+        DPRINT1("Writing 'freeldr.ini' failed (Status 0x%08lx)\n", Status);
+    return Status;
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
+}
+
 NTSTATUS
 GetDeviceInfo_UStr(
     _In_opt_ PCUNICODE_STRING DeviceName,
@@ -1742,6 +1878,10 @@ InstallBootManagerAndBootEntries(
     ULONG DiskNumber;
     PARTITION_STYLE PartitionStyle;
     BOOLEAN IsSuperFloppy;
+
+    /* UEFI: no MBR or volume boot record, the loader is a file on the EFI system partition */
+    if (ArchType == ARCH_Efi)
+        return InstallEfiBootFiles(SystemRootPath, SourceRootPath, DestinationArcPath);
     WCHAR FileSystem[MAX_PATH+1];
 
     /* Remove any trailing backslash if needed */
