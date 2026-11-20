@@ -299,8 +299,9 @@ TerminateScreenSaverThread(
 /*
  * The grace period: the time, in milliseconds, between the start of a password protected screen saver
  * and the moment its end locks the workstation (HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon,
- * ScreenSaverGracePeriod, in seconds, at most 24 hours; missing = no grace period).
+ * ScreenSaverGracePeriod, in seconds, at most 24 hours; missing = 5 seconds, as on Windows).
  */
+#define DEFAULT_SCREENSAVER_GRACE_PERIOD 5 /* seconds */
 static
 DWORD
 GetScreenSaverGracePeriod(VOID)
@@ -308,7 +309,7 @@ GetScreenSaverGracePeriod(VOID)
     HKEY hKey;
     DWORD Buffer[8]; /* Aligned room for a DWORD or for a string of up to 15 characters */
     PWCHAR pwszBuffer = (PWCHAR)Buffer;
-    DWORD dwType, cbData, Seconds = 0;
+    DWORD dwType, cbData, Seconds = DEFAULT_SCREENSAVER_GRACE_PERIOD;
 
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                       L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
@@ -316,7 +317,7 @@ GetScreenSaverGracePeriod(VOID)
                       KEY_QUERY_VALUE,
                       &hKey) != ERROR_SUCCESS)
     {
-        return 0;
+        return DEFAULT_SCREENSAVER_GRACE_PERIOD * 1000;
     }
 
     ZeroMemory(Buffer, sizeof(Buffer));
