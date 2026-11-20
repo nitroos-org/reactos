@@ -548,8 +548,10 @@ SepTokenIsOwner(
 
     /* Check if the owner SID is found, handling restricted case as well */
     Result = SepSidInToken(Token, Sid);
-    if ((Result) && (Token->TokenFlags & TOKEN_IS_RESTRICTED))
+    if ((Result) && (Token->TokenFlags & TOKEN_IS_RESTRICTED) &&
+        (Token->RestrictedSidCount != 0 || !(Token->TokenFlags & SEP_TOKEN_WRITE_RESTRICTED)))
     {
+        /* (a write restricted token without restricting SIDs is the owner as any token, as on Windows) */
         Result = SepSidInTokenEx(Token, NULL, Sid, FALSE, TRUE);
     }
 

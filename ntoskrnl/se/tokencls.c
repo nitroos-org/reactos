@@ -129,7 +129,12 @@ typedef struct _SEP_TOKEN_ACCESS_INFORMATION
     PVOID SecurityAttributes;
 } SEP_TOKEN_ACCESS_INFORMATION, *PSEP_TOKEN_ACCESS_INFORMATION;
 
-/* The TokenFlags Windows 10 reports in TOKEN_ACCESS_INFORMATION.Flags (measured: the privilege summary bits stay out; TOKEN_WRITE_RESTRICTED shares its value with this kernel's TOKEN_HAS_ADMIN_GROUP and is not reported) */
+/*
+ * The TokenFlags Windows 10 reports in TOKEN_ACCESS_INFORMATION.Flags (measured: the privilege summary bits stay out).
+ * TOKEN_WRITE_RESTRICTED shares its value with this kernel's TOKEN_HAS_ADMIN_GROUP, so it is not in the mask: it is
+ * reported for a token that has SEP_TOKEN_WRITE_RESTRICTED (measured on Windows Server 2022: 0x18 with the restricting
+ * SIDs or without)
+ */
 #define SEP_ACCESS_INFORMATION_FLAGS \
     (TOKEN_IS_RESTRICTED | TOKEN_SANDBOX_INERT | TOKEN_VIRTUALIZE_ALLOWED | \
      TOKEN_VIRTUALIZE_ENABLED | TOKEN_IS_FILTERED | TOKEN_UIACCESS | TOKEN_NOT_LOW | TOKEN_LOWBOX)
@@ -298,6 +303,8 @@ SepBuildTokenAccessInformation(
     Info->ImpersonationLevel = Token->ImpersonationLevel;
     Info->MandatoryPolicy.Policy = SEP_MANDATORY_POLICY_DEFAULT;
     Info->Flags = Token->TokenFlags & SEP_ACCESS_INFORMATION_FLAGS;
+    if (Token->TokenFlags & SEP_TOKEN_WRITE_RESTRICTED)
+        Info->Flags |= TOKEN_WRITE_RESTRICTED;  /* not the kernel's own bit of that value: the report differs from the token's flags */
     if (Token->IntegrityLevel > SECURITY_MANDATORY_LOW_RID)
         Info->Flags |= TOKEN_NOT_LOW;
 
