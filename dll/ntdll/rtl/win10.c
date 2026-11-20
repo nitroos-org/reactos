@@ -713,4 +713,108 @@ RtlSetPortableOperatingSystem(
     Status = NtSetValueKey(KeyHandle, &ValueName, 0, REG_DWORD, &Value, sizeof(Value));
     NtClose(KeyHandle);
     return Status;
+/* USER STACKS **************************************************************/
+
+/*
+ * RtlCreateUserStack and RtlFreeUserStack. Rows measured on Windows Server 2022 (x64, and x86 under WoW64):
+ * - PageSize and ReserveAlignment of 0 are STATUS_INVALID_PARAMETER and leave InitialTeb alone;
+ * - a zero commit or reserve takes the value of the image (the current process);
+ * - the commit is rounded up to PageSize, the reserve up to ReserveAlignment; a commit that is not below
+ *   the reserve makes the reserve the commit rounded up to 1 MiB;
+ * - the stack is reserved at once, the top Commit bytes are committed read/write and StackLimit is their
+ *   start. Below them, when at least a page more than the guard remains reserved, comes a guard region of
+ *   three pages (one on 32-bit systems) of PageSize, committed with PAGE_GUARD;
+ * - InitialTeb is written completely: the old stack base and limit are zero, the allocation base is the
+ *   base of the reservation.
+ */
+#define RTLP_ROUND_UP(x, a) ((((x) + (a) - 1) / (a)) * (a))
+
+#ifdef _M_AMD64
+#define RTLP_USER_STACK_GUARD_PAGES 3
+#else
+#define RTLP_USER_STACK_GUARD_PAGES 1
+#endif
+
+NTSTATUS
+NTAPI
+RtlCreateUserStack(
+    _In_ SIZE_T CommittedStackSize,
+    _In_ SIZE_T MaximumStackSize,
+    _In_ ULONG_PTR ZeroBits,
+    _In_ SIZE_T PageSize,
+    _In_ ULONG_PTR ReserveAlignment,
+    _Out_ PINITIAL_TEB InitialTeb)
+{
+    SIZE_T Commit, Reserve, Guard, Remaining, Size;
+    ULONG_PTR Base = 0;
+    PVOID Address;
+    NTSTATUS Status;
+    ULONG OldProtect;
+
+    if (PageSize == 0 || ReserveAlignment == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    Commit = CommittedStackSize;
+    Reserve = MaximumStackSize;
+    if (!Commit || !Reserve)
+    {
+        PIMAGE_NT_HEADERS Headers = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
+
+        if (!Headers)
+            return STATUS_INVALID_IMAGE_FORMAT;
+        if (!Commit)
+            Commit = Headers->OptionalHeader.SizeOfStackCommit;
+        if (!Reserve)
+            Reserve = Headers->OptionalHeader.SizeOfStackReserve;
+    }
+
+    if (Commit >= Reserve)
+        Reserve = RTLP_ROUND_UP(Commit, (SIZE_T)(1024 * 1024));
+    Commit = RTLP_ROUND_UP(Commit, PageSize);
+    Reserve = RTLP_ROUND_UP(Reserve, (SIZE_T)ReserveAlignment);
+    if (Commit > Reserve)
+        return STATUS_INVALID_PARAMETER;
+
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), (PVOID *)&Base, ZeroBits, &Reserve, MEM_RESERVE, PAGE_READWRITE);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Guard = RTLP_USER_STACK_GUARD_PAGES * PageSize;
+    Remaining = Reserve - Commit;
+    if (Remaining < Guard + PageSize)
+        Guard = 0;
+
+    Address = (PVOID)(Base + Reserve - Commit - Guard);
+    Size = Commit + Guard;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &Size, MEM_COMMIT, PAGE_READWRITE);
+    if (NT_SUCCESS(Status) && Guard)
+    {
+        Address = (PVOID)(Base + Reserve - Commit - Guard);
+        Size = Guard;
+        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Address, &Size, PAGE_READWRITE | PAGE_GUARD, &OldProtect);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        Size = 0;
+        Address = (PVOID)Base;
+        NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, MEM_RELEASE);
+        return Status;
+    }
+
+    InitialTeb->PreviousStackBase = NULL;
+    InitialTeb->PreviousStackLimit = NULL;
+    InitialTeb->StackBase = (PVOID)(Base + Reserve);
+    InitialTeb->StackLimit = (PVOID)(Base + Reserve - Commit);
+    InitialTeb->AllocatedStackBase = (PVOID)Base;
+    return STATUS_SUCCESS;
+}
+
+VOID
+NTAPI
+RtlFreeUserStack(
+    _In_ PVOID AllocationBase)
+{
+    SIZE_T Size = 0;
+
+    NtFreeVirtualMemory(NtCurrentProcess(), &AllocationBase, &Size, MEM_RELEASE);
 }

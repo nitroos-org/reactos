@@ -48,6 +48,7 @@ list(APPEND SOURCE
     PortableOperatingSystem.c
     RtlBitmapRanges.c
     RtlCrc64.c
+    RtlCreateUserStack.c
     RtlExtractBitMap.c
     RtlGetPreciseTime.c
     RtlFlsValue.c
