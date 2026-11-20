@@ -434,11 +434,18 @@ static void test_blank_password(CredHandle *sc)
         g_expect_user = NULL;
         FreeCredentialsHandle(&cc);
     }
-    /* the interactive logon of the account does not depend on the value */
-    ok(set_limit_blank(1, NULL, NULL), "cannot set the value\n");
+    /* LogonUser INTERACTIVE is not the console logon: refused with the value 1 as well (measured on Windows Server
+       2022: 1327, from session 0, LocalSystem and the console session alike); allowed with the value 0 */
     token = NULL;
     ok(LogonUserW(blank, L".", L"", LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &token),
-       "interactive logon of the blank account failed (%lu)\n", GetLastError());
+       "interactive logon of the blank account with the policy off failed (%lu)\n", GetLastError());
+    if (token) CloseHandle(token);
+    ok(set_limit_blank(1, NULL, NULL), "cannot set the value\n");
+    token = NULL;
+    SetLastError(0xdeadbeef);
+    ok(!LogonUserW(blank, L".", L"", LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &token) &&
+       GetLastError() == ERROR_ACCOUNT_RESTRICTION,
+       "interactive logon of the blank account with the policy on: %lu, expected 1327\n", GetLastError());
     if (token) CloseHandle(token);
 
     /* the account with a password is not affected by the policy */
