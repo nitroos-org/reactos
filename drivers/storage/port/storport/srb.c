@@ -463,6 +463,8 @@ StorpNeedsSystemBuffer(
         case STOR_MAP_NON_READ_WRITE_BUFFERS:
             return (Srb->Function != SRB_FUNCTION_EXECUTE_SCSI) ||
                    !StorpIsReadWriteCdb(Srb->Cdb[0]);
+        case STOR_MAP_ALL_BUFFERS_INCLUDING_READ_WRITE:
+            return TRUE;
         default:
             return FALSE;
     }
@@ -686,15 +688,14 @@ PortPdoScheduleRequestFlowControlled(
     {
         /* Check PDO flow control conditions */
 
-        /* Sanity check */
-        NT_ASSERT(FlowControl->OutstandingRequestCount <= PdoExtension->OutstandingRequestMax);
-
-        /* If PDO is not suitable to receive a request, make it wait */
-        if (FlowControl->IsBusy || FlowControl->IsPaused ||
+        /* If PDO is not suitable to receive a request, make it wait. The unit's limit can drop below
+           what is outstanding (StorPortSetDeviceQueueDepth): nothing more starts until it is under it */
+        if (FdoExtension->FlowControl.IsBusy || FdoExtension->FlowControl.IsPaused ||
+            FlowControl->IsBusy || FlowControl->IsPaused ||
             (FlowControl->IsFrozen && !TEST_FLAG(Srb->SrbFlags, SRB_FLAGS_BYPASS_FROZEN_QUEUE)) ||
             (FlowControl->IsLocked && !TEST_FLAG(Srb->SrbFlags, SRB_FLAGS_BYPASS_LOCKED_QUEUE)) ||
             FlowControl->StrongOrderedCount ||
-            FlowControl->OutstandingRequestCount == PdoExtension->OutstandingRequestMax ||
+            FlowControl->OutstandingRequestCount >= PdoExtension->OutstandingRequestMax ||
             (!IsListEmpty(&FlowControl->AwaitingRequestsListHead)))
         {
             InsertHeadList(&FlowControl->AwaitingRequestsListHead,
@@ -742,9 +743,11 @@ PortPdoScheduleRequestFlowControlled(
 
         /* Check FDO flow control status. */
 
-        /* If the FDO can't handle more requests, then the request should be queued. */
+        /* If the FDO can't handle more requests, then the request should be queued: the adapter's
+           count against the adapter's limit (the unit's count against it let more through than the
+           adapter takes with several units, and parked a request of a single unit one early) */
         if (FlowControl->IsBusy || FlowControl->IsPaused ||
-            FlowControl->OutstandingRequestCount == FdoExtension->OutstandingRequestMax)
+            FdoExtension->FlowControl.OutstandingRequestCount >= FdoExtension->OutstandingRequestMax)
         {
             /* Put into FDO queue */
             InsertHeadList(&FdoExtension->FlowControl.FdoBlockedRequestsListHead,
@@ -817,9 +820,16 @@ PortPdoScsi(
     Miniport = &FdoExtension->Miniport;
 
     switch (Srb->Function) {
-        /* Both of these should be sent to device and let themselves process this */
+        /*
+         * Sent to the device through the unit's queue. FLUSH and SHUTDOWN too: they take a slot of
+         * the miniport like any request (viostor and vioscsi put them on their ring, which the queue
+         * depth sizes; sent past the limit they found the ring full and failed, and FlushFileBuffers
+         * with them), and as untagged requests they wait for the requests before them to complete.
+         */
         case SRB_FUNCTION_IO_CONTROL:
         case SRB_FUNCTION_EXECUTE_SCSI:
+        case SRB_FUNCTION_FLUSH:
+        case SRB_FUNCTION_SHUTDOWN:
         {
             PQUEUED_REQUEST_REFERENCE RequestReference;
             BOOLEAN IssueRequest;
@@ -859,38 +869,6 @@ PortPdoScsi(
             } else {
                 Status = STATUS_PENDING;
             }
-
-            break;
-        }
-
-        /*
-         * These requests are actually sent to adapters and are not outstanding requests for devices
-         * so we simply pass them down to miniport
-         */
-        case SRB_FUNCTION_FLUSH:
-        case SRB_FUNCTION_SHUTDOWN:
-        {
-            PQUEUED_REQUEST_REFERENCE RequestReference;
-
-            /* Mark IRP as pending */
-            IoMarkIrpPending(Irp);
-
-            /* Allocate private contexts */
-            Status = PortPdoSrbAllocatePrivateContexts(Srb, PdoExtension, FdoExtension);
-            if (Status != STATUS_SUCCESS)
-            {
-                break;
-            }
-            RequestReference = (PQUEUED_REQUEST_REFERENCE)Srb->OriginalRequest;
-
-            /*
-             * Call the non-flow-controlled scheduling function (it does nothing but the model is
-             * preserved for consistency)
-             */
-            PortPdoScheduleRequestNoFlowControl(FdoExtension, RequestReference);
-
-            /* Fire up the request immediately */
-            Status = PortPdoIssueRequest(PdoExtension, RequestReference);
 
             break;
         }
@@ -941,6 +919,10 @@ PortScheduleComingRequestsOnCompletion(
     PLIST_ENTRY Entry;
     PQUEUED_REQUEST_REFERENCE RequestReference;
 
+    /* A busy or paused adapter issues nothing: PortFdoKickRequests does when it is ready again */
+    if (FdoExtension->FlowControl.IsBusy || FdoExtension->FlowControl.IsPaused)
+        return;
+
     /* Sanity check again whether FDO has resource to handle the request */
     NT_ASSERT(FdoExtension->FlowControl.OutstandingRequestCount <
               FdoExtension->OutstandingRequestMax);
@@ -968,13 +950,11 @@ PortScheduleComingRequestsOnCompletion(
         return;
     }
 
-    /* FDO's got no request, check the PDO of the just-finished request for awaiting requests */
-    if (!IsListEmpty(&PdoExtension->FlowControl.AwaitingRequestsListHead))
+    /* FDO's got no request, check the PDO of the just-finished request for awaiting requests,
+       as far as the unit's limit allows (it may have been lowered with requests outstanding) */
+    if (!IsListEmpty(&PdoExtension->FlowControl.AwaitingRequestsListHead) &&
+        PdoExtension->FlowControl.OutstandingRequestCount < PdoExtension->OutstandingRequestMax)
     {
-        /* Sanity check */
-        NT_ASSERT(PdoExtension->FlowControl.OutstandingRequestCount <
-                  PdoExtension->OutstandingRequestMax);
-
         /* Take one request */
         Entry = RemoveTailList(&PdoExtension->FlowControl.AwaitingRequestsListHead);
         RequestReference = CONTAINING_RECORD(Entry, QUEUED_REQUEST_REFERENCE, PdoEntry);
@@ -982,8 +962,9 @@ PortScheduleComingRequestsOnCompletion(
         /* This one goes to active list */
         InsertHeadList(&PdoExtension->FlowControl.ActiveRequestsListHead, Entry);
 
-        /* Increment PDO request counter */
+        /* Increment PDO request counter, and the adapter's: completion takes both back */
         ++PdoExtension->FlowControl.OutstandingRequestCount;
+        ++FdoExtension->FlowControl.OutstandingRequestCount;
         NT_ASSERT(PdoExtension->FlowControl.OutstandingRequestCount <=
                   PdoExtension->OutstandingRequestMax);
 
@@ -999,6 +980,137 @@ PortScheduleComingRequestsOnCompletion(
         /* Our task is done */
         return;
     }
+}
+
+
+/**
+ * @brief Issues the requests held back while the adapter was Busy or Paused, oldest first, as far
+ * as the adapter and each unit allow. Any IRQL up to DISPATCH_LEVEL; takes the flow control lock.
+ *
+ * The requests are counted and moved to the active lists under the lock and handed to the miniport
+ * after it is released, so a miniport that calls Storport from HwStartIo cannot deadlock on it.
+ */
+VOID
+PortFdoKickRequests(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension)
+{
+    KLOCK_QUEUE_HANDLE LockHandle, ListHandle;
+    LIST_ENTRY Ready;
+    PLIST_ENTRY PdoEntry, Entry;
+    PPDO_DEVICE_EXTENSION PdoExtension;
+    PQUEUED_REQUEST_REFERENCE RequestReference;
+    PSCSI_REQUEST_BLOCK Srb;
+    BOOLEAN Strong;
+
+    InitializeListHead(&Ready);
+
+    KeAcquireInStackQueuedSpinLock(&FdoExtension->FlowControl.Lock, &LockHandle);
+
+    /* Cleared first: a state change after this point asks for another pass */
+    InterlockedExchange(&FdoExtension->FlowControl.KickNeeded, 0);
+
+    if (!FdoExtension->FlowControl.IsBusy && !FdoExtension->FlowControl.IsPaused)
+    {
+        /*
+         * First the requests a unit admitted but the adapter had no room for, oldest first. Only
+         * a completion issued them before; when every request outstanding completed while the
+         * adapter was paused or busy, none is left to complete, and they would wait forever
+         * (they are not armed, so no timeout runs for them either).
+         */
+        while (!IsListEmpty(&FdoExtension->FlowControl.FdoBlockedRequestsListHead) &&
+               FdoExtension->FlowControl.OutstandingRequestCount < FdoExtension->OutstandingRequestMax)
+        {
+            Entry = RemoveTailList(&FdoExtension->FlowControl.FdoBlockedRequestsListHead);
+            RequestReference = CONTAINING_RECORD(Entry, QUEUED_REQUEST_REFERENCE, FdoEntry);
+            ++FdoExtension->FlowControl.OutstandingRequestCount;
+            InsertTailList(&Ready, &RequestReference->FdoEntry);
+        }
+
+        KeAcquireInStackQueuedSpinLock(&FdoExtension->PdoListLock, &ListHandle);
+
+        for (PdoEntry = FdoExtension->PdoListHead.Flink;
+             PdoEntry != &FdoExtension->PdoListHead;
+             PdoEntry = PdoEntry->Flink)
+        {
+            PdoExtension = CONTAINING_RECORD(PdoEntry, PDO_DEVICE_EXTENSION, PdoListEntry);
+
+            /* An ordered request that is running has the unit to itself */
+            for (Entry = PdoExtension->FlowControl.ActiveRequestsListHead.Flink;
+                 Entry != &PdoExtension->FlowControl.ActiveRequestsListHead;
+                 Entry = Entry->Flink)
+            {
+                RequestReference = CONTAINING_RECORD(Entry, QUEUED_REQUEST_REFERENCE, PdoEntry);
+                if (RequestReference->StrongOrdered)
+                    break;
+            }
+            if (Entry != &PdoExtension->FlowControl.ActiveRequestsListHead)
+                continue;
+
+            while (!IsListEmpty(&PdoExtension->FlowControl.AwaitingRequestsListHead) &&
+                   !PdoExtension->FlowControl.IsBusy &&
+                   !PdoExtension->FlowControl.IsPaused &&
+                   PdoExtension->FlowControl.OutstandingRequestCount < PdoExtension->OutstandingRequestMax &&
+                   FdoExtension->FlowControl.OutstandingRequestCount < FdoExtension->OutstandingRequestMax)
+            {
+                /* The oldest one is at the tail */
+                Entry = PdoExtension->FlowControl.AwaitingRequestsListHead.Blink;
+                RequestReference = CONTAINING_RECORD(Entry, QUEUED_REQUEST_REFERENCE, PdoEntry);
+                Srb = RequestReference->Srb;
+
+                Strong = !TEST_FLAG(Srb->SrbFlags, SRB_FLAGS_QUEUE_ACTION_ENABLE) ||
+                         (Srb->QueueAction == SRB_ORDERED_QUEUE_TAG_REQUEST);
+
+                /* An ordered request starts alone */
+                if (Strong && !IsListEmpty(&PdoExtension->FlowControl.ActiveRequestsListHead))
+                    break;
+
+                RemoveEntryList(Entry);
+                if (Strong && !RequestReference->StrongOrdered)
+                {
+                    RequestReference->StrongOrdered = TRUE;
+                    ++PdoExtension->FlowControl.StrongOrderedCount;
+                }
+
+                InsertHeadList(&PdoExtension->FlowControl.ActiveRequestsListHead, Entry);
+                ++PdoExtension->FlowControl.OutstandingRequestCount;
+                ++FdoExtension->FlowControl.OutstandingRequestCount;
+
+                /* FdoEntry is free for a request that is not on the adapter's blocked list */
+                InsertTailList(&Ready, &RequestReference->FdoEntry);
+
+                /* Nothing starts after an ordered request until it is done */
+                if (Strong)
+                    break;
+            }
+        }
+
+        KeReleaseInStackQueuedSpinLock(&ListHandle);
+    }
+
+    KeReleaseInStackQueuedSpinLock(&LockHandle);
+
+    while (!IsListEmpty(&Ready))
+    {
+        Entry = RemoveHeadList(&Ready);
+        RequestReference = CONTAINING_RECORD(Entry, QUEUED_REQUEST_REFERENCE, FdoEntry);
+        PortPdoIssueRequest(RequestReference->PdoExtension, RequestReference);
+    }
+}
+
+
+VOID
+NTAPI
+PortFdoFlowKickDpc(
+    _In_ PKDPC Dpc,
+    _In_opt_ PVOID DeferredContext,
+    _In_opt_ PVOID SystemArgument1,
+    _In_opt_ PVOID SystemArgument2)
+{
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    PortFdoKickRequests((PFDO_DEVICE_EXTENSION)DeferredContext);
 }
 
 
@@ -1081,6 +1193,7 @@ PortCompleteRequest(
                 FdoExtension->FlowControl.RemainingBusyRequests == 0)
             {
                 FdoExtension->FlowControl.IsBusy = FALSE;
+                FdoExtension->FlowControl.KickNeeded = 1;
             }
         }
 
@@ -1114,6 +1227,10 @@ PortCompleteRequest(
         /* We're done, release flow control lock */
         StorpCheckFlowControl(FdoExtension);
         KeReleaseInStackQueuedSpinLock(&LockHandle);
+
+        /* The adapter just left Busy (or Pause ended): held requests of every unit start now */
+        if (FdoExtension->FlowControl.KickNeeded)
+            PortFdoKickRequests(FdoExtension);
 
     }
     else

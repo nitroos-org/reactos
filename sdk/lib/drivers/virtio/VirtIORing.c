@@ -207,12 +207,24 @@ static inline u16 get_unused_desc(struct virtqueue_split *vq)
 static inline void put_unused_desc_chain(struct virtqueue_split *vq, u16 idx)
 {
     u16 start = idx;
+#ifdef __REACTOS__
+    unsigned int steps = 0;
+#endif
 
     vq->opaque[idx] = NULL;
+#ifdef __REACTOS__
+    /* The descriptor table is in memory the device can write: keep the walk inside the ring
+       and finite whatever next and flags hold now */
+    while ((vq->vring.desc[idx].flags & VIRTQ_DESC_F_NEXT) && ++steps < vq->vring.num) {
+        idx = DESC_INDEX(vq->vring.num, vq->vring.desc[idx].next);
+        vq->num_unused++;
+    }
+#else
     while (vq->vring.desc[idx].flags & VIRTQ_DESC_F_NEXT) {
         idx = vq->vring.desc[idx].next;
         vq->num_unused++;
     }
+#endif
 
     vq->vring.desc[idx].flags = VIRTQ_DESC_F_NEXT;
     vq->vring.desc[idx].next = vq->first_unused;
@@ -307,6 +319,11 @@ static void *virtqueue_get_buf_split(
     struct virtqueue_split *vq = splitvq(_vq);
     void *opaque;
     u16 idx;
+#ifdef __REACTOS__
+    u32 id;
+
+next:
+#endif
 
     if (vq->last_used == (int)vq->vring.used->idx) {
         /* No descriptor index in the used ring */
@@ -317,8 +334,21 @@ static void *virtqueue_get_buf_split(
     idx = DESC_INDEX(vq->vring.num, vq->last_used);
     *len = vq->vring.used->ring[idx].len;
 
+#ifdef __REACTOS__
+    /* The id comes from the device: it must name the head of a chain the driver made available.
+       Anything else is skipped (consumed, so the caller's drain loop still ends) */
+    id = vq->vring.used->ring[idx].id;
+    if (id >= vq->vring.num || vq->opaque[id] == NULL) {
+        DPrintf(0, "%s: queue %d: used id %u is not an outstanding buffer, skipped\n",
+                __FUNCTION__, _vq->index, id);
+        vq->last_used++;
+        goto next;
+    }
+    idx = (u16)id;
+#else
     /* Get the first used descriptor */
     idx = (u16)vq->vring.used->ring[idx].id;
+#endif
     opaque = vq->opaque[idx];
 
     /* Put all descriptors back to the free list */

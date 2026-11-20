@@ -1,0 +1,9 @@
+; VirtIO block storport miniport (boot start: setup and the first boot find VirtIO block disks)
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\viostor","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\viostor","Group",0x00000000,"SCSI Miniport"
+HKLM,"SYSTEM\CurrentControlSet\Services\viostor","ImagePath",0x00020000,"system32\drivers\viostor.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\viostor","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\viostor","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\viostor\Parameters","BusType",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\viostor\Parameters\PnpInterface","5",0x00010001,0x00000001

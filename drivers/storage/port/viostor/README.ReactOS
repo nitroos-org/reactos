@@ -1,0 +1,29 @@
+VirtIO block Storport miniport (viostor)
+
+Origin
+  Project:  virtio-win/kvm-guest-drivers-windows
+  URL:      https://github.com/virtio-win/kvm-guest-drivers-windows
+  Tag:      mm326
+  Commit:   47e330f26153619255c3190c6aa8810cd9e7b7fd (2026-11-13)
+  Imported: the viostor/ directory, source files only (no vcxproj, sln, bat, props, ctl,
+            OEM txtsetup files, INF template or binaries).
+  License:  BSD-3-Clause, see LICENSE (Copyright Red Hat, Google, Virtuozzo, IBM). Every .c, .h
+            and .rc file carries the notice in its header.
+
+The VirtIO transport library is not copied here: the driver is built against the tree's copy in
+sdk/lib/drivers/virtio (see "3rd Party Files.txt"), as vioscsi is.
+
+Imported files, sha256 of the upstream bytes (git normalises the line ending of virtio_stor_trace.h):
+  df050022069d6dc3831f34a3787f8ec45234ba66aaca72079a2ec568a2898eb9  LICENSE
+  79eef9f00ae34d24a375b2fe3a98af5af7fb920f257dad9490ac7956c68d8afd  virtio_pci.c
+  8a527a22839c74f8a948782c0e125146c27cd4f407557c990f820440ebf489e2  virtio_stor.c
+  f7fe783d4c7f228974bcdef9c4b18b6f2614c58b1954460da312bbda4cf6b14f  virtio_stor.h
+  28061b2af9b316e1272f4710248b8b574564e82c1d5a5ab6f0b8f264387c67d4  virtio_stor.rc
+  f48abb1f5d6d45ca3a62412500336e69af40e208e5d5b4dc96bac3f7a31d8b47  virtio_stor_hw_helper.c
+  0f22b39d9b53c878b79e0a31a1d77cd1e3d9cb98078bd6e65949b02dd012e504  virtio_stor_hw_helper.h
+  ab56bb77d74c0b959a4ccf646d4b6d5439265fbef2163e393207b391073cd88a  virtio_stor_trace.h
+  a9e74388247ee327d830bb640d90b6c39bb27c540e5a050d32482afb369999fd  virtio_stor_utils.c
+  632cbb1d2c5d29ea78dbb5eac09c78b65007721f4c3dcda773ba6f7c6aeb0241  virtio_stor_utils.h
+
+Local changes are kept as separate commits on top of the pristine import, one reason each, so that
+a later re-import of a newer tag is a mechanical merge: git log -- drivers/storage/port/viostor.

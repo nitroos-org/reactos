@@ -26,6 +26,10 @@
 
 /* Memory Tags */
 #define TAG_GLOBAL_DATA     'DGtS'
+#define TAG_REGISTRY_BUFFER 'BRtS'
+
+/* STOR_LOG_EVENT_DETAILS.InterfaceRevision this Storport accepts; the low byte is not compared */
+#define STOR_LOG_EVENT_REVISION_1 0x00000100
 #define TAG_INIT_DATA       'DItS'
 #define TAG_DEVICE_RELATION 'RDtS'
 #define TAG_DEVICE_ID       'DItS'
@@ -224,6 +228,9 @@ typedef struct _FDO_IO_FLOW_CONTROL
     ULONG RemainingBusyRequests;
     ULONG RemainingPauseTime;
 
+    /* Set when the adapter left Busy or Pause: held requests are issued by PortFdoKickRequests */
+    LONG KickNeeded;
+
     /*
      * If FDO blocks a request from being issued, it'll be queued on both the PDO queue and
      * this queue. This is used to implement first-come-first-serve when FDO becomes ready again
@@ -299,6 +306,18 @@ typedef struct _FDO_DEVICE_EXTENSION
 
     /* Request "flow control" */
     FDO_IO_FLOW_CONTROL FlowControl;
+
+    /* Issues held requests after StorPortResume / StorPortReady / pause expiry, at DISPATCH_LEVEL */
+    KDPC FlowKickDpc;
+
+    /* The one registry buffer a miniport may hold (StorPortAllocateRegistryBuffer) */
+    PVOID RegistryBuffer;
+
+    /* StorPortStateChangeDetected: one at a time */
+    LONG StateChangePending;
+    PHW_STATE_CHANGE StateChangeRoutine;
+    PVOID StateChangeContext;
+    STOR_ADDR_BTL8 StateChangeAddress;
 
     /* This maximum number is set in port configuration */
     ULONG OutstandingRequestMax;
@@ -402,6 +421,9 @@ typedef struct _PDO_DEVICE_EXTENSION
 
     /* What the miniport keeps about this one unit, if it asked for any */
     PVOID LunExtension;
+
+    /* StorPortSetUnitAttributes */
+    STOR_UNIT_ATTRIBUTES UnitAttributes;
 
 } PDO_DEVICE_EXTENSION, *PPDO_DEVICE_EXTENSION;
 
@@ -742,6 +764,15 @@ PortGetMiniportParameter(
     _In_ PCWSTR Name,
     _In_ ULONG Default);
 
+BOOLEAN
+PortReadMiniportRegistryValue(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PCSTR ValueName,
+    _In_ ULONG Global,
+    _In_ ULONG Type,
+    _Out_writes_bytes_to_opt_(*BufferLength, *BufferLength) PUCHAR Buffer,
+    _Inout_ PULONG BufferLength);
+
 PCSTR
 GetDeviceType(
     _In_ PINQUIRYDATA InquiryData);
@@ -811,6 +842,31 @@ PortCompletionDpc(
 
 VOID
 PortInitializeTimeouts(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
+
+KIRQL
+PortFdoAcquireInterruptLocks(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
+
+VOID
+PortFdoReleaseInterruptLocks(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ KIRQL OldIrql);
+
+VOID
+PortFdoKickRequests(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
+
+VOID
+NTAPI
+PortFdoFlowKickDpc(
+    _In_ PKDPC Dpc,
+    _In_opt_ PVOID DeferredContext,
+    _In_opt_ PVOID SystemArgument1,
+    _In_opt_ PVOID SystemArgument2);
+
+VOID
+PortTimeoutPauseTick(
     _In_ PFDO_DEVICE_EXTENSION FdoExtension);
 
 VOID
