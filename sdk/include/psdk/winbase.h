@@ -2349,6 +2349,9 @@ VOID WINAPI GlobalMemoryStatus(_Out_ LPMEMORYSTATUS);
 #if (_WIN32_WINNT >= 0x0500)
 BOOL WINAPI GlobalMemoryStatusEx(LPMEMORYSTATUSEX);
 #endif
+#if (_WIN32_WINNT >= 0x0600)
+BOOL WINAPI GetPhysicallyInstalledSystemMemory(_Out_ PULONGLONG TotalMemoryInKilobytes);
+#endif
 HGLOBAL WINAPI GlobalReAlloc(HGLOBAL,SIZE_T,UINT);
 SIZE_T WINAPI GlobalSize(_In_ HGLOBAL);
 VOID WINAPI GlobalUnfix(_In_ HGLOBAL); /* Obsolete: Has no effect. */

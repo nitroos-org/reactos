@@ -994,6 +994,172 @@ GetSystemFirmwareTable(
                                    SystemFirmwareTable_Get);
 }
 
+#define SMBIOS_PROVIDER_RSMB            0x52534D42  /* 'RSMB' */
+
+/* SMBIOS structure types and Memory Device (type 17) fields, DMTF DSP0134 */
+#define SMBIOS_TYPE_MEMORY_DEVICE       17
+#define SMBIOS_TYPE_END_OF_TABLE        127
+#define SMBIOS_MEMDEV_MIN_LENGTH        0x15    /* formatted area of a Memory Device since SMBIOS 2.1 */
+#define SMBIOS_MEMDEV_SIZE              0x0C    /* WORD, SMBIOS 2.1+ */
+#define SMBIOS_MEMDEV_EXTENDED_SIZE     0x1C    /* DWORD, SMBIOS 2.7+ */
+#define SMBIOS_MEMDEV_SIZE_UNKNOWN      0xFFFF
+#define SMBIOS_MEMDEV_SIZE_USE_EXTENDED 0x7FFF
+#define SMBIOS_MEMDEV_SIZE_IN_KB        0x8000
+
+/*
+ * Adds up the sizes of the Memory Device structures of a raw SMBIOS table,
+ * in kilobytes. Returns FALSE when a structure runs past the end of the table
+ * or a Memory Device is one that Windows refuses (see below).
+ */
+static
+BOOL
+BaseSumSmbiosMemoryDevices(
+    _In_reads_bytes_(Length) const UCHAR *Table,
+    _In_ ULONG Length,
+    _Out_ PULONGLONG TotalKb)
+{
+    ULONG Offset = 0, Next;
+    ULONGLONG Total = 0;
+    UCHAR Type, HeaderLength;
+    USHORT Size;
+
+    while (Offset + 4 <= Length)
+    {
+        Type = Table[Offset];
+        HeaderLength = Table[Offset + 1];
+        if (HeaderLength < 4 || HeaderLength > Length - Offset)
+            return FALSE;
+
+        if (Type == SMBIOS_TYPE_MEMORY_DEVICE)
+        {
+            ULONGLONG Kb;
+
+            /* What Windows Server 2022 rejects as invalid data (each measured with one 4096 MB device
+             * and one more device that differs only in the field named): a formatted area shorter
+             * than 0x15 bytes (0x14 fails, 0x15 and 0x1B pass), and a Size of 0xFFFF (unknown, also
+             * with a 0x15 byte area). A Size of 0 (no device in the socket) is skipped. */
+            if (HeaderLength < SMBIOS_MEMDEV_MIN_LENGTH)
+                return FALSE;
+
+            Size = *(const USHORT UNALIGNED *)&Table[Offset + SMBIOS_MEMDEV_SIZE];
+            if (Size == SMBIOS_MEMDEV_SIZE_UNKNOWN)
+                return FALSE;
+
+            Kb = 0;
+            if (Size == SMBIOS_MEMDEV_SIZE_USE_EXTENDED &&
+                HeaderLength >= SMBIOS_MEMDEV_EXTENDED_SIZE + sizeof(ULONG))
+            {
+                ULONG Extended = *(const ULONG UNALIGNED *)&Table[Offset + SMBIOS_MEMDEV_EXTENDED_SIZE];
+
+                /* Extended Size: bits 30:0 in megabytes. Windows takes 0x7FFF MB (the Size field's own
+                 * value) when the DWORD is 0, and 0 when only bit 31 is set (measured). */
+                if (Extended == 0)
+                    Kb = (ULONGLONG)SMBIOS_MEMDEV_SIZE_USE_EXTENDED * 1024;
+                else
+                    Kb = (ULONGLONG)(Extended & 0x7FFFFFFF) * 1024;
+            }
+            else if (Size & SMBIOS_MEMDEV_SIZE_IN_KB)
+            {
+                /* bit 15 selects KB over MB */
+                Kb = Size & ~SMBIOS_MEMDEV_SIZE_IN_KB;
+            }
+            else
+            {
+                Kb = (ULONGLONG)Size * 1024;
+            }
+
+            /* A sum that does not fit is not a memory size */
+            if (Kb > ~(ULONGLONG)0 - Total)
+                return FALSE;
+            Total += Kb;
+        }
+
+        if (Type == SMBIOS_TYPE_END_OF_TABLE)
+            break;
+
+        /* The formatted area is followed by a string set that ends with two NUL bytes */
+        Next = Offset + HeaderLength;
+        while (Next + 1 < Length && (Table[Next] != 0 || Table[Next + 1] != 0))
+            Next++;
+        if (Next + 1 >= Length)
+            return FALSE;
+        Offset = Next + 2;
+    }
+
+    *TotalKb = Total;
+    return TRUE;
+}
+
+/*
+ * @implemented
+ *
+ * Returns the physically installed RAM in kilobytes, taken from the SMBIOS
+ * Memory Device structures, as documented:
+ * https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getphysicallyinstalledsystemmemory
+ * A NULL pointer fails with ERROR_INVALID_PARAMETER. SMBIOS data that does not
+ * parse, or whose total is less than the memory the system reports in
+ * GlobalMemoryStatusEx, fails with ERROR_INVALID_DATA. On failure the output
+ * is not written. Measured on Windows Server 2022: the result is the sum of the
+ * type 17 sizes (4096 MB in one device: 4194304; 16 GB + 4 GB in two: 20971520).
+ */
+BOOL
+WINAPI
+GetPhysicallyInstalledSystemMemory(
+    _Out_ PULONGLONG TotalMemoryInKilobytes)
+{
+    /* RawSMBIOSData as returned for the 'RSMB' provider */
+    struct
+    {
+        UCHAR Used20CallingMethod;
+        UCHAR SMBIOSMajorVersion;
+        UCHAR SMBIOSMinorVersion;
+        UCHAR DmiRevision;
+        ULONG Length;
+    } *Raw;
+    MEMORYSTATUSEX MemStatus;
+    ULONGLONG TotalKb = 0;
+    UINT Size;
+    BOOL Ok = FALSE;
+
+    if (!TotalMemoryInKilobytes)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* No SMBIOS table at all: fail with the error of the table query
+     * (measured on Windows Server 2022 without SMBIOS: ERROR_INVALID_FUNCTION for both) */
+    Size = GetSystemFirmwareTable(SMBIOS_PROVIDER_RSMB, 0, NULL, 0);
+    if (Size == 0)
+        return FALSE;
+    if (Size > sizeof(*Raw))
+    {
+        Raw = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size);
+        if (!Raw)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+        if (GetSystemFirmwareTable(SMBIOS_PROVIDER_RSMB, 0, Raw, Size) == Size &&
+            Raw->Length <= Size - sizeof(*Raw))
+        {
+            Ok = BaseSumSmbiosMemoryDevices((const UCHAR *)(Raw + 1), Raw->Length, &TotalKb);
+        }
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Raw);
+    }
+
+    MemStatus.dwLength = sizeof(MemStatus);
+    if (Ok && TotalKb != 0 && GlobalMemoryStatusEx(&MemStatus) &&
+        TotalKb >= MemStatus.ullTotalPhys / 1024)
+    {
+        *TotalMemoryInKilobytes = TotalKb;
+        return TRUE;
+    }
+
+    SetLastError(ERROR_INVALID_DATA);
+    return FALSE;
+}
+
 /*
  * @implemented
  */
