@@ -100,6 +100,7 @@ list(APPEND SOURCE
     RngCallersFailure.c
     RngKnownAnswer.c
     SaferIdentifyLevel.c
+    TokenFilteredFlags.c
     TokenDefaultDacl.c
     TokenElevation.c
     TokenIntegrity.c

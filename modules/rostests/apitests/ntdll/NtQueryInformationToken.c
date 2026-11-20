@@ -866,7 +866,32 @@ QueryTokenIsSandboxInert(
                                      sizeof(ULONG),
                                      &BufferLength);
     ok_ntstatus(Status, STATUS_SUCCESS);
-    ok(IsTokenInert == TRUE, "The token must be a sandbox inert one after filtering!\n");
+
+    /*
+     * Windows Server 2022 stores the flag only when the calling process runs as SYSTEM and ignores
+     * the request (without an error) for an administrator or another user
+     */
+    {
+        SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+        PSID SystemSid = NULL;
+        HANDLE ProcessToken = NULL;
+        BYTE UserBuffer[256];
+        ULONG UserLength;
+        BOOLEAN RunsAsSystem = FALSE;
+
+        if (NT_SUCCESS(RtlAllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &SystemSid)))
+        {
+            if (NT_SUCCESS(NtOpenProcessToken(NtCurrentProcess(), TOKEN_QUERY, &ProcessToken)))
+            {
+                if (NT_SUCCESS(NtQueryInformationToken(ProcessToken, TokenUser, UserBuffer, sizeof(UserBuffer), &UserLength)))
+                    RunsAsSystem = RtlEqualSid(((PTOKEN_USER)UserBuffer)->User.Sid, SystemSid);
+                NtClose(ProcessToken);
+            }
+            RtlFreeSid(SystemSid);
+        }
+        ok(IsTokenInert == RunsAsSystem, "The token is %s sandbox inert one after filtering (runs as SYSTEM: %d)!\n",
+           IsTokenInert ? "a" : "not a", RunsAsSystem);
+    }
 
     NtClose(FilteredToken);
 }

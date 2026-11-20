@@ -1581,8 +1581,13 @@ NtQueryInformationToken(
                 DPRINT("NtQueryInformationToken(TokenHasRestrictions)\n");
                 RequiredLength = sizeof(BOOLEAN);
 
-                /* Every token NtFilterToken made reports it, restricting SIDs or not (measured on Windows 10) */
-                HasRestrictions = ((Token->TokenFlags & TOKEN_IS_FILTERED) || Token->RestrictedSidCount > 0) ? TRUE : FALSE;
+                /*
+                 * A token reports it when it is filtered (a group made deny-only, privileges deleted, restricting SIDs
+                 * added) or restricted, also a write restricted token without restricting SIDs (measured on Windows
+                 * Server 2022: a token made by NtFilterToken that changed nothing does not)
+                 */
+                HasRestrictions = ((Token->TokenFlags & (TOKEN_IS_FILTERED | TOKEN_IS_RESTRICTED)) ||
+                                   Token->RestrictedSidCount > 0) ? TRUE : FALSE;
 
                 _SEH2_TRY
                 {
