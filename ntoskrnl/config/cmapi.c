@@ -294,98 +294,20 @@ CmpSetValueKeyExisting(IN PHHIVE Hive,
                        IN ULONG StorageType,
                        IN ULONG TempData)
 {
-    HCELL_INDEX DataCell, NewCell;
-    PCELL_DATA CellData;
-    ULONG Length;
-    BOOLEAN WasSmall, IsSmall;
-
     /* Registry writes must be blocked */
     CMP_ASSERT_FLUSH_LOCK(Hive);
 
     /* Mark the old child cell dirty */
     if (!HvMarkCellDirty(Hive, OldChild, FALSE)) return STATUS_NO_LOG_SPACE;
 
-    /* See if this is a small or normal key */
-    WasSmall = CmpIsKeyValueSmall(&Length, Value->DataLength);
-
-    /* See if our new data can fit in a small key */
-    IsSmall = (DataSize <= CM_KEY_VALUE_SMALL) ? TRUE: FALSE;
-
-    /* Big keys are unsupported */
-    ASSERT_VALUE_BIG(Hive, Length);
-    ASSERT_VALUE_BIG(Hive, DataSize);
-
-    /* Mark the old value dirty */
-    if (!CmpMarkValueDataDirty(Hive, Value)) return STATUS_NO_LOG_SPACE;
-
-    /* Check if we have a small key */
-    if (IsSmall)
-    {
-        /* Check if we had a normal key with some data in it */
-        if (!(WasSmall) && (Length > 0))
-        {
-            /* Free the previous data */
-            CmpFreeValueData(Hive, Value->Data, Length);
-        }
-
-        /* Write our data directly */
-        Value->DataLength = DataSize + CM_KEY_VALUE_SPECIAL_SIZE;
-        Value->Data = TempData;
-        Value->Type = Type;
-        return STATUS_SUCCESS;
-    }
-
-    /* We have a normal key. Was the old cell also normal and had data? */
-    if (!(WasSmall) && (Length > 0))
-    {
-        /* Get the current data cell and actual data inside it */
-        DataCell = Value->Data;
-        ASSERT(DataCell != HCELL_NIL);
-        CellData = HvGetCell(Hive, DataCell);
-        if (!CellData) return STATUS_INSUFFICIENT_RESOURCES;
-
-        /* Immediately release the cell */
-        HvReleaseCell(Hive, DataCell);
-
-        /* Make sure that the data cell actually has a size */
-        ASSERT(HvGetCellSize(Hive, CellData) > 0);
-
-        /* Check if the previous data cell could fit our new data */
-        if (DataSize <= (ULONG)(HvGetCellSize(Hive, CellData)))
-        {
-            /* Re-use it then */
-            NewCell = DataCell;
-        }
-        else
-        {
-            /* Otherwise, re-allocate the current data cell */
-            NewCell = HvReallocateCell(Hive, DataCell, DataSize);
-            if (NewCell == HCELL_NIL) return STATUS_INSUFFICIENT_RESOURCES;
-        }
-    }
-    else
-    {
-        /* This was a small key, or a key with no data, allocate a cell */
-        NewCell = HvAllocateCell(Hive, DataSize, StorageType, HCELL_NIL);
-        if (NewCell == HCELL_NIL) return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    /* Now get the actual data for our data cell */
-    CellData = HvGetCell(Hive, NewCell);
-    ASSERT(CellData);
-
-    /* Release it immediately */
-    HvReleaseCell(Hive, NewCell);
-
-    /* Copy our data into the data cell's buffer, and set up the value */
-    RtlCopyMemory(CellData, Data, DataSize);
-    Value->Data = NewCell;
-    Value->DataLength = DataSize;
-    Value->Type = Type;
-
-    /* Return success */
-    ASSERT(HvIsCellDirty(Hive, NewCell));
-    return STATUS_SUCCESS;
+    /* The data itself (cmlib: small, one cell, or big data in a 1.4+ hive) */
+    return CmpReplaceValueData(Hive,
+                               Value,
+                               Type,
+                               Data,
+                               DataSize,
+                               (HSTORAGE_TYPE)StorageType,
+                               TempData);
 }
 
 NTSTATUS

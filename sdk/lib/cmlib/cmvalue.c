@@ -153,6 +153,76 @@ CmpFreeBigData(
     HvFreeCell(Hive, DataCell);
 }
 
+/*
+ * Store DataSize bytes (more than CM_KEY_VALUE_BIG) as big data: the
+ * segments, the list, the 'db' cell. On failure nothing is left allocated.
+ */
+static
+NTSTATUS
+CmpSetBigData(
+    _In_ PHHIVE Hive,
+    _In_ PVOID Data,
+    _In_ ULONG DataSize,
+    _In_ HSTORAGE_TYPE StorageType,
+    _Out_ PHCELL_INDEX DataCell)
+{
+    PCM_BIG_DATA BigData;
+    PHCELL_INDEX List;
+    HCELL_INDEX BigCell, ListCell, Segment;
+    ULONG Count, i, Chunk;
+
+    *DataCell = HCELL_NIL;
+    Count = CMP_BIG_DATA_SEGMENTS(DataSize);
+
+    /* The count of segments is 16 bits wide: about 1 GB at most */
+    if (Count > MAXUSHORT)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    BigCell = HvAllocateCell(Hive, sizeof(CM_BIG_DATA), StorageType, HCELL_NIL);
+    if (BigCell == HCELL_NIL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    ListCell = HvAllocateCell(Hive, Count * sizeof(HCELL_INDEX), StorageType, BigCell);
+    if (ListCell == HCELL_NIL)
+    {
+        HvFreeCell(Hive, BigCell);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    for (i = 0; i < Count; i++)
+    {
+        Chunk = min(DataSize - i * CM_KEY_VALUE_BIG, CM_KEY_VALUE_BIG);
+        Segment = HvAllocateCell(Hive, Chunk, StorageType, ListCell);
+        if (Segment == HCELL_NIL)
+            break;
+        RtlCopyMemory(HvGetCell(Hive, Segment), (PUCHAR)Data + i * CM_KEY_VALUE_BIG, Chunk);
+        HvReleaseCell(Hive, Segment);
+
+        /* Each get of a cell is paired with its release, none is held across an allocation */
+        List = (PHCELL_INDEX)HvGetCell(Hive, ListCell);
+        List[i] = Segment;
+        HvReleaseCell(Hive, ListCell);
+    }
+    if (i < Count)
+    {
+        List = (PHCELL_INDEX)HvGetCell(Hive, ListCell);
+        while (i-- > 0)
+            HvFreeCell(Hive, List[i]);
+        HvReleaseCell(Hive, ListCell);
+        HvFreeCell(Hive, ListCell);
+        HvFreeCell(Hive, BigCell);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    BigData = (PCM_BIG_DATA)HvGetCell(Hive, BigCell);
+    BigData->Signature = CM_BIG_DATA_SIGNATURE;
+    BigData->Count = (USHORT)Count;
+    BigData->List = ListCell;
+    HvReleaseCell(Hive, BigCell);
+
+    *DataCell = BigCell;
+    return STATUS_SUCCESS;
+}
+
 /* FUNCTIONS *****************************************************************/
 
 BOOLEAN
@@ -481,9 +551,11 @@ CmpSetValueDataNew(IN PHHIVE Hive,
     PCELL_DATA CellData;
     PAGED_CODE();
     ASSERT(DataSize > CM_KEY_VALUE_SMALL);
+    UNREFERENCED_PARAMETER(ValueCell);
 
-    /* Check if this is a big key */
-    ASSERT_VALUE_BIG(Hive, DataSize);
+    /* What the hive's format holds as big data is stored so (a hive older than 1.4 never gets any) */
+    if (CmpIsKeyValueBig(Hive, DataSize))
+        return CmpSetBigData(Hive, Data, DataSize, StorageType, DataCell);
 
     /* Allocate a data cell */
     *DataCell = HvAllocateCell(Hive, DataSize, StorageType, HCELL_NIL);
@@ -497,6 +569,109 @@ CmpSetValueDataNew(IN PHHIVE Hive,
     RtlCopyMemory(CellData, Data, DataSize);
 
     /* All done */
+    return STATUS_SUCCESS;
+}
+
+/*
+ * New data for a value that exists (NtSetValueKey on an existing name): the
+ * value cell is dirty (the caller marked it). Data of up to 4 bytes goes into
+ * the value cell; other data reuses the data cell when old and new data are
+ * both one cell, else it is stored anew (as big data where the format wants
+ * it) and the old data, a chain included, is freed only once the new data is
+ * in place: on failure the value keeps its old data.
+ */
+NTSTATUS
+NTAPI
+CmpReplaceValueData(
+    _In_ PHHIVE Hive,
+    _Inout_ PCM_KEY_VALUE Value,
+    _In_ ULONG Type,
+    _In_ PVOID Data,
+    _In_ ULONG DataSize,
+    _In_ HSTORAGE_TYPE StorageType,
+    _In_ ULONG TempData)
+{
+    HCELL_INDEX DataCell, NewCell;
+    PCELL_DATA CellData;
+    ULONG Length;
+    BOOLEAN WasSmall;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    /* See if this is a small or normal key */
+    WasSmall = CmpIsKeyValueSmall(&Length, Value->DataLength);
+
+    /* Mark the old value dirty (every cell of a chain) */
+    if (!CmpMarkValueDataDirty(Hive, Value)) return STATUS_NO_LOG_SPACE;
+
+    /* Check if we have a small key */
+    if (DataSize <= CM_KEY_VALUE_SMALL)
+    {
+        /* Free the previous data, if it was in cells */
+        if (!WasSmall) CmpFreeValueData(Hive, Value->Data, Value->DataLength);
+
+        /* Write our data directly */
+        Value->DataLength = DataSize + CM_KEY_VALUE_SPECIAL_SIZE;
+        Value->Data = TempData;
+        Value->Type = Type;
+        return STATUS_SUCCESS;
+    }
+
+    /* Old and new data in one cell each: the old cell is reused or grown */
+    if (!WasSmall && (Length > 0) && (Value->Data != HCELL_NIL) &&
+        !CmpIsBigValueData(Hive, Value->Data, Length) &&
+        !CmpIsKeyValueBig(Hive, DataSize))
+    {
+        /* Get the current data cell and actual data inside it */
+        DataCell = Value->Data;
+        CellData = HvGetCell(Hive, DataCell);
+        if (!CellData) return STATUS_INSUFFICIENT_RESOURCES;
+
+        /* Immediately release the cell */
+        HvReleaseCell(Hive, DataCell);
+
+        /* Make sure that the data cell actually has a size */
+        ASSERT(HvGetCellSize(Hive, CellData) > 0);
+
+        /* Check if the previous data cell could fit our new data */
+        if (DataSize <= (ULONG)(HvGetCellSize(Hive, CellData)))
+        {
+            /* Re-use it then */
+            NewCell = DataCell;
+        }
+        else
+        {
+            /* Otherwise, re-allocate the current data cell */
+            NewCell = HvReallocateCell(Hive, DataCell, DataSize);
+            if (NewCell == HCELL_NIL) return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        /* Now get the actual data for our data cell */
+        CellData = HvGetCell(Hive, NewCell);
+        ASSERT(CellData);
+
+        /* Release it immediately */
+        HvReleaseCell(Hive, NewCell);
+
+        /* Copy our data into the data cell's buffer */
+        RtlCopyMemory(CellData, Data, DataSize);
+    }
+    else
+    {
+        /* New cells (big data in a 1.4+ hive), then the old data goes */
+        Status = CmpSetValueDataNew(Hive, Data, DataSize, StorageType, HCELL_NIL, &NewCell);
+        if (!NT_SUCCESS(Status)) return Status;
+        if (!WasSmall) CmpFreeValueData(Hive, Value->Data, Value->DataLength);
+    }
+
+    /* Set up the value */
+    Value->Data = NewCell;
+    Value->DataLength = DataSize;
+    Value->Type = Type;
+
+    /* Return success */
+    ASSERT(HvIsCellDirty(Hive, NewCell));
     return STATUS_SUCCESS;
 }
 

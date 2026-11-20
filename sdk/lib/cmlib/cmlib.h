@@ -65,6 +65,7 @@
     #define STATUS_REGISTRY_IO_FAILED        ((NTSTATUS)0xC000014D)
     #define STATUS_NOT_REGISTRY_FILE         ((NTSTATUS)0xC000015C)
     #define STATUS_REGISTRY_RECOVERED        ((NTSTATUS)0x40000009)
+    #define STATUS_NO_LOG_SPACE              ((NTSTATUS)0xC000017D)
 
     #define REG_OPTION_VOLATILE              1
     #define OBJ_CASE_INSENSITIVE             0x00000040L
@@ -456,13 +457,6 @@ extern ULONG CmlibTraceLevel;
 //
 #define CMP_BIG_DATA_SEGMENTS(Length) \
     (((Length) + CM_KEY_VALUE_BIG - 1) / CM_KEY_VALUE_BIG)
-
-//
-// The writers do not make big data yet: they store the data of a value in
-// one cell whatever its length and the hive's format.
-//
-#define ASSERT_VALUE_BIG(h, s) \
-    do { if (CmpIsKeyValueBig(h,s)) DPRINT("Big data written as one cell\n"); } while (0)
 
 //
 // Returns whether or not this is a small valued key
@@ -966,6 +960,18 @@ CmpIsBigValueData(
     _In_ PHHIVE Hive,
     _In_ HCELL_INDEX DataCell,
     _In_ ULONG Length
+);
+
+NTSTATUS
+NTAPI
+CmpReplaceValueData(
+    _In_ PHHIVE Hive,
+    _Inout_ PCM_KEY_VALUE Value,
+    _In_ ULONG Type,
+    _In_ PVOID Data,
+    _In_ ULONG DataSize,
+    _In_ HSTORAGE_TYPE StorageType,
+    _In_ ULONG TempData
 );
 
 HCELL_INDEX
