@@ -239,7 +239,6 @@ UefiGetBootPartitionEntry(
         GPT_PARTITION_ENTRY GptEntry;
         EFI_BLOCK_IO* RootBlockIo;
         ULONG EntriesPerBlock;
-        BOOLEAN BlockReadFailed = FALSE;
         ULONG UsedIndex = 0;
         EFI_STATUS Status;
         EFI_GUID UnusedGuid = EFI_PART_TYPE_UNUSED_GUID;
@@ -276,11 +275,10 @@ UefiGetBootPartitionEntry(
                     BlockSize,
                     DiskReadBuffer);
 
-                /* A block that cannot be read: its entries are skipped */
-                BlockReadFailed = EFI_ERROR(Status);
+                /* A block that cannot be read: the numbers of the used entries behind it would be wrong */
+                if (EFI_ERROR(Status))
+                    return FALSE;
             }
-            if (BlockReadFailed)
-                continue;
 
             /* Extract partition entry */
             RtlCopyMemory(&GptEntry, (PUCHAR)DiskReadBuffer + EntryOffset, sizeof(GptEntry));
