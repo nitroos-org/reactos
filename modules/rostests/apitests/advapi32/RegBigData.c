@@ -5,7 +5,10 @@
  *              16344 bytes stored as a 'db' record and segments): loaded with
  *              RegLoadKeyW, every byte reads back through the query and the
  *              enumeration paths (also into buffers that are too small), the
- *              file is unchanged after load + read + unload, and values that
+ *              file is unchanged after load + read + unload (but for what the
+ *              kernel writes into any hive it links: the root's Parent and the
+ *              base block's sequence numbers, time stamp, file name, checksum;
+ *              the same for the 1.3 hive of the same values), and values that
  *              change, are saved, deleted and loaded again keep their data
  *              and leave no cell behind.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
@@ -293,6 +296,71 @@ static void CountCells(PBYTE File, DWORD Size, PULONG BigDataCells, PULONG LongC
     }
 }
 
+/* Is offset Off of the hive file inside the data of a free cell (positive size) of File */
+static BOOL InFreeCell(const BYTE *File, DWORD Size, DWORD Off)
+{
+    DWORD Bin = HG_BLOCK, End = min(Size, HG_BLOCK + *(const DWORD *)(File + 0x28)), BinSize, C;
+    LONG S;
+
+    while (Bin + 32 <= End && *(const DWORD *)(File + Bin) == 0x6E696268)
+    {
+        BinSize = *(const DWORD *)(File + Bin + 8);
+        if (BinSize == 0 || Bin + BinSize > End)
+            return FALSE;
+        if (Off < Bin + BinSize)
+        {
+            for (C = Bin + 32; C + 8 <= Bin + BinSize; C += (DWORD)(S < 0 ? -S : S))
+            {
+                S = *(const LONG *)(File + C);
+                if (S == 0)
+                    return FALSE;
+                if (Off >= C && Off < C + (DWORD)(S < 0 ? -S : S))
+                    return S > 0 && Off >= C + 4;
+            }
+            return FALSE;
+        }
+        Bin += BinSize;
+    }
+    return FALSE;
+}
+
+/*
+ * Bytes of Now that differ from Was, other than what the kernel writes into every hive it links into the
+ * registry (CmpCreateLinkNode marks the root dirty and sets its Parent to the link node of the master hive; the
+ * write of that cell then rewrites the base block's sequence numbers, time stamp, file name and checksum, and the
+ * free-list links the kernel keeps inside free cells of the blocks it writes). Those are traced; the count of every
+ * other differing byte is returned.
+ */
+static ULONG Changed(const BYTE *Was, const BYTE *Now, DWORD Size, PCSTR What)
+{
+    DWORD Root = *(const DWORD *)(Was + 0x24), i, Other = 0, Header = 0, Parent = 0, Free = 0, First = (DWORD)-1;
+    DWORD ParentAt = HG_BLOCK + Root + 4 + 0x10;
+
+    for (i = 0; i < Size; i++)
+    {
+        if (Now[i] == Was[i])
+            continue;
+        if ((i >= 0x04 && i < 0x14) || (i >= 0x30 && i < 0x70) || (i >= 0x1FC && i < 0x200))
+            Header++;
+        else if (i >= ParentAt && i < ParentAt + 4)
+            Parent++;
+        else if (InFreeCell(Was, Size, i))
+            Free++;
+        else
+        {
+            if (First == (DWORD)-1)
+                First = i;
+            Other++;
+        }
+    }
+    trace("%s: after load + read + unload: %lu bytes of the base block's sequence/time stamp/file name/checksum, "
+          "%lu of the root's Parent, %lu inside free cells, %lu other bytes differ%s\n",
+          What, Header, Parent, Free, Other, Other ? "" : " (none)");
+    if (Other)
+        trace("%s: the first other difference at 0x%lx\n", What, First);
+    return Other;
+}
+
 static LONG Load(PCWSTR Mount, PCWSTR File)
 {
     RegUnLoadKeyW(HKEY_LOCAL_MACHINE, Mount);
@@ -343,7 +411,7 @@ START_TEST(RegBigData)
     RegUnLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT);
     RegUnLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT2);
 
-    /* 1. load, read every byte every way, unload: the file is the same, byte for byte */
+    /* 1. load, read every byte every way, unload: the file is the same but for what linking writes (Changed) */
     Hive = HgBuildBigData(5, &HiveSize);
     DeleteFileW(File);
     ok(WriteWholeFile(File, Hive, HiveSize), "write the hive file\n");
@@ -363,16 +431,34 @@ START_TEST(RegBigData)
     Error = RegUnLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT);
     ok(Error == ERROR_SUCCESS, "RegUnLoadKeyW: %ld\n", Error);
     Now = ReadWholeFile(File, &NowSize);
-    ok(Now && NowSize == HiveSize && memcmp(Now, Hive, HiveSize) == 0,
+    ok(Now && NowSize == HiveSize && Changed(Hive, Now, HiveSize, "1.5 fixture") == 0,
        "the hive file changed after load + read + unload (%lu bytes, was %u)\n", NowSize, HiveSize);
     if (Now)
-    {
-        DWORD i2, First = (DWORD)-1, Count = 0;
-        for (i2 = 0; i2 < min(NowSize, HiveSize); i2++)
-            if (Now[i2] != Hive[i2]) { if (First == (DWORD)-1) First = i2; Count++; }
-        if (Count)
-            trace("%lu bytes differ, the first at 0x%lx\n", Count, First);
         HeapFree(GetProcessHeap(), 0, Now);
+
+    /* the same values in a 1.3 hive (one cell each, no big data): what the kernel rewrites there, for comparison */
+    {
+        unsigned Size13;
+        PBYTE Hive13 = HgBuildBigData(3, &Size13);
+        ok(WriteWholeFile(Old, Hive13, Size13), "write the 1.3 file\n");
+        Error = Load(MOUNT, Old);
+        ok(Error == ERROR_SUCCESS, "RegLoadKeyW(1.3 hive): %ld\n", Error);
+        if (Error == ERROR_SUCCESS)
+        {
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, MOUNT, 0, KEY_READ, &Root) == ERROR_SUCCESS)
+            {
+                CheckFixture(Root);
+                RegCloseKey(Root);
+            }
+            ok(RegUnLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT) == ERROR_SUCCESS, "unload the 1.3 hive\n");
+            Now = ReadWholeFile(Old, &NowSize);
+            ok(Now && NowSize == Size13 && Changed(Hive13, Now, Size13, "1.3 fixture") == 0,
+               "the 1.3 hive file changed after load + read + unload\n");
+            if (Now)
+                HeapFree(GetProcessHeap(), 0, Now);
+        }
+        free(Hive13);
+        DeleteFileW(Old);
     }
 
     /* 2. changes: small -> big -> small -> one cell -> big ..., a new big value, a save, deletes */
@@ -479,7 +565,7 @@ START_TEST(RegBigData)
         ok(RegUnLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT) == ERROR_SUCCESS, "unload\n");
         {
             PBYTE After = ReadWholeFile(File, &Size);
-            ok(Now && After && Size == NowSize && memcmp(After, Now, Size) == 0,
+            ok(Now && After && Size == NowSize && Changed(Now, After, Size, "kernel-written 1.5 hive") == 0,
                "the kernel-written hive changed at its next load\n");
             if (After)
                 HeapFree(GetProcessHeap(), 0, After);
