@@ -1756,6 +1756,10 @@ done:
 
     if (!NT_SUCCESS(Status))
     {
+        /* A logon refused for a restriction of the account says which one in the substatus (disabled, expired,
+           "must change the password at the next logon", locked out, ...); Windows returns that error */
+        if (Status == STATUS_ACCOUNT_RESTRICTION && !NT_SUCCESS(SubStatus))
+            Status = SubStatus;
         SetLastError(RtlNtStatusToDosError(Status));
         return FALSE;
     }

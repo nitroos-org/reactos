@@ -43,6 +43,7 @@ list(APPEND SOURCE
     LogonUserCleartext.c
     LogonUserServiceSecret.c
     LogonUserTypes.c
+    LogonUserAccountState.c
     LogonUserUserRights.c
     LsaLookupLeak.c
     LsaLookupNamesUnmapped.c

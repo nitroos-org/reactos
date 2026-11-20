@@ -41,6 +41,7 @@ extern void func_LogonUser(void);
 extern void func_LogonUserCleartext(void);
 extern void func_LogonUserServiceSecret(void);
 extern void func_LogonUserTypes(void);
+extern void func_LogonUserAccountState(void);
 extern void func_LogonUserUserRights(void);
 extern void func_LsaLogonSession(void);
 extern void func_LsaTrustedClientToken(void);
@@ -205,6 +206,7 @@ const struct test winetest_testlist[] =
     { "LogonUserCleartext", func_LogonUserCleartext },
     { "LogonUserServiceSecret", func_LogonUserServiceSecret },
     { "LogonUserTypes", func_LogonUserTypes },
+    { "LogonUserAccountState", func_LogonUserAccountState },
     { "LogonUserUserRights", func_LogonUserUserRights },
     { "LsaLogonSession", func_LsaLogonSession },
     { "LsaLookupLeak", func_LsaLookupLeak },
