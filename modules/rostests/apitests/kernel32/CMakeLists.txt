@@ -1,5 +1,6 @@
 
 add_subdirectory(dllinitdep)
+add_subdirectory(loadsearch)
 add_subdirectory(redirptest)
 add_subdirectory(tlsdyn)
 
@@ -7,6 +8,7 @@ add_message_headers(ANSI FormatMessage.mc)
 
 list(APPEND SOURCE
     GetFileInformationByHandleEx.c
+    LoadLibrarySearchOrder.c
     VirtualAlloc2.c
     VirtualAllocLarge.c
     Placeholder.c

@@ -476,6 +476,23 @@ BaseComputeProcessExePath(IN LPWSTR FullPath)
 
 LPWSTR
 WINAPI
+BaseComputeProcessDllPathNoCurrent(IN LPWSTR FullPath,
+                                   IN PVOID Environment)
+{
+    LPWSTR DllPath;
+
+    /* Acquire DLL directory lock: the directory of SetDllDirectory is part of this order */
+    RtlEnterCriticalSection(&BaseDllDirectoryLock);
+    DllPath = BasepComputeProcessPath(BaseDllDirectory.Buffer ? BaseDllOrderNoCurrent : BaseProcessOrderNoCurrent,
+                                      FullPath,
+                                      Environment);
+    RtlLeaveCriticalSection(&BaseDllDirectoryLock);
+
+    return DllPath;
+}
+
+LPWSTR
+WINAPI
 BaseComputeProcessDllPath(IN LPWSTR FullPath,
                           IN PVOID Environment)
 {
@@ -629,7 +646,11 @@ WINAPI
 BasepGetDllSearchFlags(
     _In_ ULONG LoadFlags)
 {
-    ULONG SearchFlags = LoadFlags & BASEP_LOAD_LIBRARY_SEARCH_MASK;
+    ULONG SearchFlags = LoadFlags & (BASEP_LOAD_LIBRARY_SEARCH_MASK | BASEP_LOAD_LIBRARY_SEARCH_SYSTEM32_NO_FORWARDER);
+
+    /* Measured on Windows: asking for the system directory without forwarders searches the system directory */
+    if (SearchFlags & BASEP_LOAD_LIBRARY_SEARCH_SYSTEM32_NO_FORWARDER)
+        SearchFlags = (SearchFlags & ~BASEP_LOAD_LIBRARY_SEARCH_SYSTEM32_NO_FORWARDER) | LOAD_LIBRARY_SEARCH_SYSTEM32;
 
     if (SearchFlags == 0)
     {
@@ -739,13 +760,27 @@ BasepComputeDllSearchFlagsPath(
 
         /*
          * No directory is no search: an empty path would be taken for the current directory. A full path needs no
-         * directory.
+         * directory for itself, but its dependencies are looked for in the directories of the flags only: with no
+         * directory they are not found (measured on Windows), so the search path is one that holds no file.
          */
-        if (Position == 0 && (!DllName || !BasepIsFullPathName(DllName)))
+        if (Position == 0)
         {
             RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
             Buffer = NULL;
-            *Status = STATUS_DLL_NOT_FOUND;
+            if (!DllName || !BasepIsFullPathName(DllName))
+            {
+                *Status = STATUS_DLL_NOT_FOUND;
+            }
+            else
+            {
+                static const WCHAR NoDirectory[] = L"\\\\.\\NUL";
+
+                Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(NoDirectory));
+                if (Buffer)
+                    RtlCopyMemory(Buffer, NoDirectory, sizeof(NoDirectory));
+                else
+                    *Status = STATUS_NO_MEMORY;
+            }
         }
     }
 

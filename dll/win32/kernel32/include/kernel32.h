@@ -364,8 +364,18 @@ BaseComputeProcessDllPath(
     IN PVOID Environment
 );
 
+/* The same, without the current directory in the order (LOAD_LIBRARY_SAFE_CURRENT_DIRS) */
+LPWSTR
+WINAPI
+BaseComputeProcessDllPathNoCurrent(
+    IN LPWSTR FullPath,
+    IN PVOID Environment
+);
+
 /* The flags of LoadLibraryEx that choose the directories to search: LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR to _DEFAULT_DIRS */
 #define BASEP_LOAD_LIBRARY_SEARCH_MASK  0x00001F00
+/* The bits of the flags of LoadLibraryEx that Windows accepts: the ones above 0xFFFF are bad parameters */
+#define BASEP_LOAD_LIBRARY_VALID_FLAGS  0x0000FFFF
 #define BASEP_LOAD_LIBRARY_SAFE_CURRENT_DIRS            0x00002000
 #define BASEP_LOAD_LIBRARY_SEARCH_SYSTEM32_NO_FORWARDER 0x00004000
 
