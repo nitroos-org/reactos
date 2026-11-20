@@ -140,11 +140,13 @@ relocated:
 
     // A valid signature alone does not make the disk bootable: the protective MBR of a GPT disk
     // (written by gptfdisk, parted, diskpart or our Setup on UEFI) and the MBR of a data disk
-    // carry no boot code. Jumping into 446 zero bytes hangs the machine, so boot FREELDR from
+    // carry no boot code. Jumping into zero bytes hangs the machine, so boot FREELDR from
     // our ReactOS medium instead. Disks with boot code (including GRUB on a GPT disk) are unchanged.
+    // The boot code area is the first 440 bytes: the next 4 bytes hold the disk signature that fdisk,
+    // diskpart and Disk Management write to a disk that has no boot code at all.
     cld
     mov si, HEX(7C00)
-    mov cx, 446 / 2
+    mov cx, 440 / 2
     xor bx, bx
 .scan_boot_code:
     lodsw
