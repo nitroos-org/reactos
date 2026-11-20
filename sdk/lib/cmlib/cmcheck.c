@@ -841,13 +841,18 @@ CmpCheckDirty(
         HvMarkCellDirty(Ctx->Hive, Cell, FALSE);
 }
 
-/* A repair was made: the hive is self-healed */
+/*
+ * A repair was made: the hive is self-healed. Only where repairs are allowed:
+ * the boot loader (no self-heal) only normalises a subkey count the index
+ * disagrees with (CmpEndIndex), which is no repair to report.
+ */
 static
 VOID
 CmpCheckHealed(
     _In_ PCMP_CHECK Ctx)
 {
-    Ctx->Hive->BaseBlock->BootType |= HBOOT_TYPE_SELF_HEAL;
+    if (Ctx->Heal)
+        Ctx->Hive->BaseBlock->BootType |= HBOOT_TYPE_SELF_HEAL;
 }
 
 /* For CmpRepairSubKeyIndexCase: an index entry it may read as a key node */
