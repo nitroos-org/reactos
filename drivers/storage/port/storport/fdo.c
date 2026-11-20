@@ -161,6 +161,120 @@ PortFlushStarvedRequests(
     }
 }
 
+/*
+ * SRB extensions.
+ *
+ * "An SRB extension can be safely accessed by the HBA hardware" (HW_INITIALIZATION_DATA,
+ * SrbExtensionSize): miniports put structures the device reads or writes by physical address
+ * there, typically the per-request scatter/gather list or descriptor table, and they take the
+ * address of the whole structure from StorPortGetPhysicalAddress at its start. vioscsi and
+ * viostor put a virtqueue indirect descriptor table of up to several KB there, and the request
+ * and response headers the device reads and writes. So every SRB extension is physically
+ * contiguous: allocated with MmAllocateContiguousMemorySpecifyCache below the adapter's DMA
+ * limit, page aligned, and kept on a per-adapter free list for reuse, as allocating contiguous
+ * memory is slow and, above APC_LEVEL, possible only while pool happens to be contiguous.
+ * A request that finds no extension waits on the starved queue (the reserve guarantees one).
+ */
+
+static
+VOID
+PortInitializeSrbExtensions(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension)
+{
+    PPORT_CONFIGURATION_INFORMATION PortConfig = &FdoExtension->Miniport.PortConfig;
+    ULONG AllocSize = ROUND_TO_PAGES(PortConfig->SrbExtensionSize);
+
+    /* A restart of the adapter keeps the extensions it already has, if they still fit */
+    if (FdoExtension->SrbExtensionAllocSize == AllocSize && AllocSize != 0)
+        return;
+
+    PortReleaseSrbExtensions(FdoExtension);
+    FdoExtension->SrbExtensionAllocSize = AllocSize;
+
+    /* SCSI_DMA64_MINIPORT_SUPPORTED: the adapter takes 64-bit addresses */
+    if (PortConfig->Dma64BitAddresses & ~SCSI_DMA64_SYSTEM_SUPPORTED)
+        FdoExtension->SrbExtensionHighest.QuadPart = (LONGLONG)-1;
+    else
+        FdoExtension->SrbExtensionHighest.QuadPart = 0xFFFFFFFF;
+}
+
+/**
+ * @brief A zeroed, page aligned, physically contiguous SRB extension, or NULL. IRQL <= DISPATCH_LEVEL.
+ */
+PVOID
+PortAllocateSrbExtension(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension)
+{
+    PVOID Extension;
+    PHYSICAL_ADDRESS Lowest, Boundary;
+
+    NT_ASSERT(FdoExtension->SrbExtensionAllocSize != 0);
+
+    Extension = InterlockedPopEntrySList(&FdoExtension->SrbExtensionFreeList);
+    if (Extension == NULL)
+    {
+        Lowest.QuadPart = 0;
+        Boundary.QuadPart = 0;
+        Extension = MmAllocateContiguousMemorySpecifyCache(FdoExtension->SrbExtensionAllocSize,
+                                                           Lowest,
+                                                           FdoExtension->SrbExtensionHighest,
+                                                           Boundary,
+                                                           MmCached);
+        if (Extension == NULL)
+            return NULL;
+
+#if DBG
+        /* What the device relies on: one physically contiguous block */
+        {
+            ULONG Offset;
+
+            for (Offset = PAGE_SIZE; Offset < FdoExtension->SrbExtensionAllocSize; Offset += PAGE_SIZE)
+            {
+                NT_ASSERTMSG("SRB extension not physically contiguous",
+                             MmGetPhysicalAddress((PUCHAR)Extension + Offset).QuadPart ==
+                             MmGetPhysicalAddress(Extension).QuadPart + Offset);
+            }
+        }
+#endif
+
+        InterlockedIncrement(&FdoExtension->SrbExtensionCount);
+    }
+
+    RtlZeroMemory(Extension, FdoExtension->Miniport.PortConfig.SrbExtensionSize);
+    return Extension;
+}
+
+/**
+ * @brief Puts an SRB extension back on the adapter's free list. Any IRQL up to DISPATCH_LEVEL.
+ */
+VOID
+PortFreeSrbExtension(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PVOID Extension)
+{
+    /* Page aligned, so aligned enough for an SLIST_ENTRY */
+    InterlockedPushEntrySList(&FdoExtension->SrbExtensionFreeList, (PSLIST_ENTRY)Extension);
+}
+
+/**
+ * @brief Frees every SRB extension on the free list. No request may be using one. Passive level.
+ */
+VOID
+PortReleaseSrbExtensions(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension)
+{
+    PSLIST_ENTRY Entry;
+
+    while ((Entry = InterlockedPopEntrySList(&FdoExtension->SrbExtensionFreeList)) != NULL)
+    {
+        MmFreeContiguousMemorySpecifyCache(Entry, FdoExtension->SrbExtensionAllocSize, MmCached);
+        InterlockedDecrement(&FdoExtension->SrbExtensionCount);
+    }
+
+    NT_ASSERT(FdoExtension->SrbExtensionCount == 0);
+    FdoExtension->SrbExtensionAllocSize = 0;
+}
+
 /**
  * @brief Reserves the memory a single request needs, so IO can still be issued out of pool.
  */
@@ -185,9 +299,9 @@ PortAllocateRequestReserve(
         return;
     }
 
-    FdoExtension->ReservedSrbExtension = ExAllocatePoolWithTag(NonPagedPool,
-                                                               SrbExtensionSize,
-                                                               TAG_SRB_EXTENSION);
+    PortInitializeSrbExtensions(FdoExtension);
+
+    FdoExtension->ReservedSrbExtension = PortAllocateSrbExtension(FdoExtension);
     if (FdoExtension->ReservedSrbExtension == NULL)
     {
         DPRINT1("Failed to reserve an SRB extension\n");
@@ -207,9 +321,12 @@ PortFreeRequestReserve(
 {
     if (FdoExtension->ReservedSrbExtension != NULL)
     {
-        ExFreePoolWithTag(FdoExtension->ReservedSrbExtension, TAG_SRB_EXTENSION);
+        PortFreeSrbExtension(FdoExtension, FdoExtension->ReservedSrbExtension);
         FdoExtension->ReservedSrbExtension = NULL;
     }
+
+    /* Nothing is in flight any more: give every SRB extension back to the system */
+    PortReleaseSrbExtensions(FdoExtension);
 
     if (FdoExtension->ReservedRequestReference != NULL)
     {

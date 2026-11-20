@@ -290,6 +290,9 @@ PortAddDevice(
     InitializeListHead(&DeviceExtension->FlowControl.FdoBlockedRequestsListHead);
     KeInitializeDpc(&DeviceExtension->FlowKickDpc, PortFdoFlowKickDpc, DeviceExtension);
 
+    /* Physically contiguous SRB extensions, sized once the miniport is up */
+    InitializeSListHead(&DeviceExtension->SrbExtensionFreeList);
+
     /* Attach the FDO to the device stack */
     Status = IoAttachDeviceToDeviceStackSafe(Fdo,
                                              PhysicalDeviceObject,

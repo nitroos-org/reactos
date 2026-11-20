@@ -403,16 +403,13 @@ PortPdoSrbAllocatePrivateContexts(
         return STATUS_SUCCESS;
     }
 
-    Srb->SrbExtension = ExAllocatePoolWithTag(NonPagedPool,
-                                              SrbExtensionSize,
-                                              TAG_SRB_EXTENSION);
+    /* Physically contiguous and zeroed (PortAllocateSrbExtension) */
+    Srb->SrbExtension = PortAllocateSrbExtension(FdoExtension);
     if (Srb->SrbExtension == NULL)
     {
         StorpSrbFreeRequestReference(Srb);
         return PortPdoStarveRequest(FdoExtension, Srb, Irp);
     }
-
-    RtlZeroMemory(Srb->SrbExtension, SrbExtensionSize);
 
     return STATUS_SUCCESS;
 }
@@ -1253,7 +1250,7 @@ PortCompleteRequest(
         /* The reserved one is handed back along with its packet, not freed */
         if (!FromReserve)
         {
-            ExFreePoolWithTag(Srb->SrbExtension, TAG_SRB_EXTENSION);
+            PortFreeSrbExtension(FdoExtension, Srb->SrbExtension);
         }
         Srb->SrbExtension = NULL;
     }

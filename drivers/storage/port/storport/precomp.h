@@ -332,6 +332,12 @@ typedef struct _FDO_DEVICE_EXTENSION
     /* Memory for one request, reserved at adapter start, for when pool runs out */
     struct _QUEUED_REQUEST_REFERENCE *ReservedRequestReference;
     PVOID ReservedSrbExtension;
+
+    /* Physically contiguous SRB extensions not in use (fdo.c, PortAllocateSrbExtension) */
+    SLIST_HEADER SrbExtensionFreeList;
+    ULONG SrbExtensionAllocSize;
+    LONG SrbExtensionCount;
+    PHYSICAL_ADDRESS SrbExtensionHighest;
     LONG ReserveInUse;
     STARVED_REQUEST_QUEUE StarvedRequests;
 
@@ -559,6 +565,19 @@ PortAllocateRequestReserve(
 
 VOID
 PortFreeRequestReserve(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
+
+PVOID
+PortAllocateSrbExtension(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
+
+VOID
+PortFreeSrbExtension(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PVOID Extension);
+
+VOID
+PortReleaseSrbExtensions(
     _In_ PFDO_DEVICE_EXTENSION FdoExtension);
 
 PPDO_DEVICE_EXTENSION
