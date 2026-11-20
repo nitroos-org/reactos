@@ -500,7 +500,8 @@ LoadOSList(HWND hwndDlg, PSTARTINFO pStartInfo)
         EnableWindow(GetDlgItem(hwndDlg, IDC_STRRECEDIT), FALSE);
         {
             WCHAR szMsg[256], szTitle[64];
-            LoadStringW(hApplet, (dwError == ERROR_ACCESS_DENIED) ? IDS_STARTREC_ESP_DENIED : IDS_STARTREC_ESP_MISSING,
+            LoadStringW(hApplet, (dwError == ERROR_ACCESS_DENIED) ? IDS_STARTREC_ESP_DENIED :
+                                   (dwError == ERROR_TOO_MANY_NAMES) ? IDS_STARTREC_ESP_AMBIGUOUS : IDS_STARTREC_ESP_MISSING,
                         szMsg, ARRAYSIZE(szMsg));
             LoadStringW(hApplet, IDS_CPLSYSTEMNAME, szTitle, ARRAYSIZE(szTitle));
             MessageBoxW(hwndDlg, szMsg, szTitle, MB_OK | MB_ICONINFORMATION);

@@ -351,6 +351,7 @@ BEGIN
     IDS_CPLSYSTEMNAME "System"
     IDS_STARTREC_ESP_DENIED "The boot settings are on the EFI system partition of this computer. Only an administrator can read and change them."
     IDS_STARTREC_ESP_MISSING "The boot settings file (freeldr.ini) was not found on the EFI system partition of the system disk."
+    IDS_STARTREC_ESP_AMBIGUOUS "More than one EFI system partition of the system disk holds a freeldr.ini, and Windows cannot tell which of them this computer starts from. The boot settings are not shown and nothing is changed."
     IDS_STARTREC_ESP_NOTSAVED "The boot settings could not be saved. The file on the EFI system partition was left unchanged."
     IDS_CPLSYSTEMDESCRIPTION "See information about your computer and change various system and hardware settings."
     IDS_PERFORMANCEOPTIONS "Performance Options"

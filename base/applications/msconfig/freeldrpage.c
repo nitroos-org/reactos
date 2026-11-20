@@ -141,7 +141,8 @@ InitializeFreeLDRDialog(HWND hDlg)
         /* Nothing was read: show why in the list instead of an empty page */
         {
             WCHAR szMsg[256];
-            LoadStringW(hInst, (dwError == ERROR_ACCESS_DENIED) ? IDS_FREELDR_ESP_DENIED : IDS_FREELDR_ESP_MISSING,
+            LoadStringW(hInst, (dwError == ERROR_ACCESS_DENIED) ? IDS_FREELDR_ESP_DENIED :
+                                  (dwError == ERROR_TOO_MANY_NAMES) ? IDS_FREELDR_ESP_AMBIGUOUS : IDS_FREELDR_ESP_MISSING,
                         szMsg, ARRAYSIZE(szMsg));
             SendDlgItemMessageW(hDlg, IDC_LIST_BOX, LB_ADDSTRING, 0, (LPARAM)szMsg);
         }

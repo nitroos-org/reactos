@@ -55,7 +55,9 @@ EspIniGetVolumeDisk(HANDLE hVolume, PDWORD DiskNumber)
  * On success returns ERROR_SUCCESS and Path holds the volume GUID path of the file
  * (\\?\Volume{...}\freeldr.ini). Otherwise a Win32 error: ERROR_ACCESS_DENIED when the
  * volumes could not be opened (not an administrator), ERROR_FILE_NOT_FOUND when the
- * system disk has no ESP with a freeldr.ini.
+ * system disk has no ESP with a freeldr.ini, ERROR_TOO_MANY_NAMES when it has more than
+ * one (another installation's ESP, for example): nothing says which one the computer
+ * starts from, and a change written to the other one would never take effect.
  */
 static inline DWORD
 EspIniFindFreeldrIni(PWCHAR Path, SIZE_T cchPath)
@@ -64,6 +66,8 @@ EspIniFindFreeldrIni(PWCHAR Path, SIZE_T cchPath)
     HANDLE hFind, hVolume;
     DWORD SystemDisk, Disk, Returned, Length, Error = ERROR_FILE_NOT_FOUND;
     BOOL SawDenied = FALSE;
+    ULONG Matches = 0;
+    WCHAR First[MAX_PATH + 16];
     PARTITION_INFORMATION_EX Info;
 
     /* The disk of the system drive: a query-only handle is enough */
@@ -112,14 +116,20 @@ EspIniFindFreeldrIni(PWCHAR Path, SIZE_T cchPath)
             wcscat(Path, L"freeldr.ini");
             if (GetFileAttributesW(Path) != INVALID_FILE_ATTRIBUTES)
             {
-                CloseHandle(hVolume);
-                FindVolumeClose(hFind);
-                return ERROR_SUCCESS;
+                if (Matches++ == 0)
+                    wcscpy(First, Path);
             }
         }
         CloseHandle(hVolume);
     } while (FindNextVolumeW(hFind, Volume, ARRAYSIZE(Volume) - 16));
     FindVolumeClose(hFind);
 
+    if (Matches == 1)
+    {
+        wcscpy(Path, First);
+        return ERROR_SUCCESS;
+    }
+    if (Matches > 1)
+        return ERROR_TOO_MANY_NAMES;
     return SawDenied ? ERROR_ACCESS_DENIED : ERROR_FILE_NOT_FOUND;
 }
