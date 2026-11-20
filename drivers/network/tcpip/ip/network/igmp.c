@@ -269,6 +269,15 @@ IgmpAddRecord(PIGMP_SEND S, UCHAR Type, ULONG Group, const ULONG *Sources, ULONG
     return TRUE;
 }
 
+/* Appends G's current-state record (IS_EX{} or IS_IN{sources}); FALSE when it does not fit */
+static BOOLEAN
+IgmpAddCurrent(PIGMP_SEND S, PIGMP_GROUP G)
+{
+    if (G->Mode == IGMP_MODE_EXCLUDE)
+        return IgmpAddRecord(S, IGMP_REC_IS_EX, G->Group, NULL, 0);
+    return IgmpAddRecord(S, IGMP_REC_IS_IN, G->Group, G->Sources, G->NumSources);
+}
+
 static VOID
 IgmpStartV3(PIGMP_SEND S, ULONG IfIndex)
 {
@@ -384,13 +393,24 @@ IgmpNextDue(PIGMP_SEND S, ULONGLONG Now)
                         continue;
                     IgmpAddRecord(S, IGMP_REC_IS_IN, G->Group, Taken, n);
                 }
-                else if (G->Mode == IGMP_MODE_EXCLUDE)
-                {
-                    IgmpAddRecord(S, IGMP_REC_IS_EX, G->Group, NULL, 0);
-                }
                 else
                 {
-                    IgmpAddRecord(S, IGMP_REC_IS_IN, G->Group, G->Sources, G->NumSources);
+                    PLIST_ENTRY E3;
+
+                    IgmpAddCurrent(S, G);
+                    /* the other groups of the interface whose answer is due go in the same report, as many as fit
+                       (Windows Server 2022 answers a general query with the groups due together in one report) */
+                    for (E3 = E2->Flink; E3 != &IF->Groups; E3 = E3->Flink)
+                    {
+                        PIGMP_GROUP H = CONTAINING_RECORD(E3, IGMP_GROUP, Entry);
+
+                        if (!H->Member || !H->AnswerDue || H->AnswerDue > Now || H->AnswerSources ||
+                            (H->ChangeDue && H->ChangeDue <= Now))
+                            continue;
+                        if (!IgmpAddCurrent(S, H))
+                            break;
+                        H->AnswerDue = 0;
+                    }
                 }
                 IgmpFinish(S);
                 return TRUE;
