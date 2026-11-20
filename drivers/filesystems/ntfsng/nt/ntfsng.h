@@ -358,6 +358,8 @@ typedef struct _NG_GLOBAL
     ULONG FuaAliasMB;               /* test only: "FuaAliasMB" DWORD, see NgDevSetFua */
     ULONG NoFua;                    /* "NoFua" DWORD in the service key: never use Force Unit Access, keep the flushes of the journal */
     ULONG GroupCommitMB;            /* batch of a group commit in MB ("GroupCommitMB", default NG_GROUP_DEFAULT_MB); 0 = off ("NoGroupCommit"=1) */
+    ULONG FlushJournalOnly;         /* "FlushJournalOnly" DWORD: a file flush leaves a small commit retained (durable in the journal only, as before; comparison) */
+    ULONG FlushAlwaysInPlace;       /* "FlushAlwaysInPlace" DWORD: every file flush puts the committed metadata in place (comparison) */
     ULONG ForceReadOnly;            /* "ReadOnly" DWORD in the service key: mount every volume read-only */
     ULONG Verbose;                  /* "Verbose" DWORD: request log (NGDIAG) and periodic core dumps on the debug port */
     BOOLEAN Disable8dot3;           /* NtfsDisable8dot3NameCreation == 1: no short names for new names */

@@ -929,44 +929,114 @@ static void kj_batch_add(struct kj_batch *w, u64 dev, const void *data, size_t l
 	w->used += len;
 }
 
-static void kj_apply_ent(struct kj_batch *w, struct kj_ent *e)
+/* The sectors of @mask of @e, adjacent ones in one transfer. */
+static void kj_apply_ent_m(struct kj_batch *w, struct kj_ent *e, u8 mask)
 {
 	u64 base = e->blk * KJ_PAGE;
-	if (e->mask == 0xff) {
+	if (mask == 0xff) {
 		kj_batch_add(w, base, e->data, KJ_PAGE);
 		return;
 	}
 	for (int s = 0; s < 8; s++) {
 		int z = s;
-		if (!(e->mask & (1u << s)))
+		if (!(mask & (1u << s)))
 			continue;
-		while (z + 1 < 8 && (e->mask & (1u << (z + 1))))
+		while (z + 1 < 8 && (mask & (1u << (z + 1))))
 			z++;
 		kj_batch_add(w, base + s * KJ_SECT, e->data + s * KJ_SECT, (z - s + 1) * KJ_SECT);
 		s = z;
 	}
 }
 
-/* In place, in block order (v sorted), adjacent pages in one transfer. */
+static void kj_apply_ent(struct kj_batch *w, struct kj_ent *e)
+{
+	kj_apply_ent_m(w, e, e->mask);
+}
+
+/*
+ * The sectors of @e that hold an MFT record which is not in use in the new image (a file deleted, the old target of a rename
+ * over it): the in-place pass writes them last, after a device flush, so that a reader that does not replay the journal never
+ * finds a directory entry whose record is already free.  Between the two parts such a reader sees the freed record still in
+ * use and no longer named (an orphan for chkdsk), never a name without its file.  Found from the bytes alone (a record header:
+ * "FILE", the flags and the allocated size lie in its first sector, which the update sequence fix-ups leave alone except for
+ * its last two bytes); a page of another kind that looks like one only goes in place a flush later, which changes nothing
+ * else.  The replay still installs every page whatever part of the pass reached the medium.
+ */
+static u8 kj_freed_records(const struct kj_ent *e)
+{
+	u8 late = 0;
+	for (int s = 0; s < 8; s++) {
+		const u8 *r = e->data + s * KJ_SECT;
+		u32 alloc;
+		int ns;
+		if (!(e->mask & (1u << s)) || memcmp(r, "FILE", 4))
+			continue;
+		alloc = r[0x1c] | r[0x1d] << 8 | r[0x1e] << 16 | (u32)r[0x1f] << 24;
+		if (alloc < 2 * KJ_SECT || alloc > KJ_PAGE || (alloc & (alloc - 1)) || s * KJ_SECT + alloc > KJ_PAGE)
+			continue;
+		ns = alloc / KJ_SECT;
+		if (!(r[0x16] & 1))	/* MFT_RECORD_IN_USE clear */
+			late |= (u8)(((1u << ns) - 1) << s);
+		s += ns - 1;
+	}
+	return late & e->mask;
+}
+
+/* In place, in block order (v sorted), adjacent pages in one transfer; freed MFT records after a flush (kj_freed_records). */
 static int kj_apply(struct block_device *b, struct kj_ent **v, unsigned long n)
 {
 	struct kj_batch w;
+	unsigned long late = 0;
 	kj_batch_init(&w, b, n);
-	for (unsigned long i = 0; i < n && !w.err; i++)
-		kj_apply_ent(&w, v[i]);
+	for (unsigned long i = 0; i < n && !w.err; i++) {
+		u8 f = kj_freed_records(v[i]);
+		late += f != 0;
+		if (v[i]->mask & ~f)
+			kj_apply_ent_m(&w, v[i], v[i]->mask & ~f);
+	}
 	kj_batch_flush(&w);
+	if (late && !w.err) {
+		if (kj_dev_flush(b))
+			w.err = -EIO;
+		for (unsigned long i = 0; i < n && !w.err; i++) {
+			u8 f = kj_freed_records(v[i]);
+			if (f)
+				kj_apply_ent_m(&w, v[i], f);
+		}
+		kj_batch_flush(&w);
+	}
 	kfree(w.buf);
 	return w.err;
 }
 
-/* In place without allocating (the out-of-memory fallback). */
-static int kj_apply_buckets(struct block_device *b, struct kshim_jnl *j)
+/* In place without allocating (the out-of-memory fallbacks), in bucket order; freed MFT records after a flush as in kj_apply. */
+static int kj_apply_h(struct block_device *b, struct kj_ent **hash)
 {
 	struct kj_batch w = { .b = b };
+	int late = 0;
 	for (int i = 0; i < KJ_BUCKETS && !w.err; i++)
-		for (struct kj_ent *e = j->hash[i]; e && !w.err; e = e->next)
-			kj_apply_ent(&w, e);
+		for (struct kj_ent *e = hash[i]; e && !w.err; e = e->next) {
+			u8 f = kj_freed_records(e);
+			late |= f != 0;
+			if (e->mask & ~f)
+				kj_apply_ent_m(&w, e, e->mask & ~f);
+		}
+	if (late && !w.err) {
+		if (kj_dev_flush(b))
+			w.err = -EIO;
+		for (int i = 0; i < KJ_BUCKETS && !w.err; i++)
+			for (struct kj_ent *e = hash[i]; e && !w.err; e = e->next) {
+				u8 f = kj_freed_records(e);
+				if (f)
+					kj_apply_ent_m(&w, e, f);
+			}
+	}
 	return w.err;
+}
+
+static int kj_apply_buckets(struct block_device *b, struct kshim_jnl *j)
+{
+	return kj_apply_h(b, j->hash);
 }
 
 /* Merge-sort replacement for the shim's insertion sort: a transaction can hold thousands of pages. */
@@ -1170,12 +1240,7 @@ static int kj_ckpt_io(struct kshim_jnl *j)
 		err = kj_tx_apply(b, j, v, n, j->rusn_new);
 	} else {
 		/* No memory for the sorted list: the same writes in bucket order, without allocating. */
-		struct kj_batch w = { .b = b };
-		for (int i = 0; i < KJ_BUCKETS && !w.err; i++)
-			for (struct kj_ent *e = j->rhash[i]; e && !w.err; e = e->next)
-				kj_apply_ent(&w, e);
-		kj_batch_flush(&w);
-		err = w.err;
+		err = kj_apply_h(b, j->rhash);
 		if (!err && kj_dev_flush(b))
 			err = -EIO;
 		if (err) {

@@ -17,6 +17,7 @@ extern void func_NtfsCreateDeletePool(void);
 extern void func_NtfsDelete(void);
 extern void func_NtfsDeleteRunning(void);
 extern void func_NtfsDirRename(void);
+extern void func_NtfsFlushHome(void);
 extern void func_NtfsHardLink(void);
 extern void func_NtfsInherit(void);
 extern void func_NtfsNotifyRename(void);
@@ -56,6 +57,7 @@ const struct test winetest_testlist[] =
     { "NtfsDelete", func_NtfsDelete },
     { "NtfsDeleteRunning", func_NtfsDeleteRunning },
     { "NtfsDirRename", func_NtfsDirRename },
+    { "NtfsFlushHome", func_NtfsFlushHome },
     { "NtfsHardLink", func_NtfsHardLink },
     { "NtfsInherit", func_NtfsInherit },
     { "NtfsNotifyRename", func_NtfsNotifyRename },

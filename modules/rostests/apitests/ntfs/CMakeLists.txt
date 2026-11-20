@@ -3,6 +3,7 @@ list(APPEND SOURCE
     access.c
     attrs.c
     delete.c
+    flushhome.c
     inherit.c
     notify.c
     pagingwrite.c

@@ -52,7 +52,8 @@ int ngos_dev_write_v(void *dev, const struct ngos_iov *iov, unsigned int n);
  * place and the ACTIVE header (with three device flushes), and takes CoreLock again to release the sealed overlay.  A commit
  * of few pages stops after the COMMITTED header and its flush (the transaction is durable and replayable): its pages stay
  * in memory as the retained transaction and go in place later, with the next checkpoint (kshim_jnl_settle: the quiet flusher
- * pass, an allocation after a free, a commit too large to retain, a clean unmount).  New
+ * pass, an allocation after a free, a commit too large to retain, a file flush whose file is not complete in place yet
+ * (NgFlushBuffers), a clean unmount).  New
  * lock rules, none of them a new lock:
  *   - NgCommit drops CoreLock only at CoreDepth 1 and not once a dismount began.  It is called between core operations
  *     (the flusher, FlushFileBuffers and write-through, and NgSetFileSize before a growth), never from inside one.
@@ -1810,7 +1811,30 @@ NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     NgApplyModified(Fcb);
     NgAcquireCore(Vcb);
-    Err = NgCommitEx(Vcb, TRUE);
+    /*
+     * A flushed file is complete on the volume itself, not only in the journal: its size, allocation, initialized size,
+     * the runs that reach its data, its names and its directory entries are in place when this returns, together with
+     * every other change committed before.  A reader that does not replay the journal (the boot loader, another system,
+     * an offline tool) relies on that: a hive whose header was written after a flush that grew it must not look longer
+     * than its file.  The commit may still be retained (durable in the journal, two device flushes), and stays so when
+     * the file's base MFT record on the disk already is its current one apart from times and attributes (an overwrite
+     * inside the file, ngc_record_home): then a reader finds everything of it as now.  Otherwise the retained pages are
+     * written in place (ngc_checkpoint: one more device flush), together with whatever else was retained.
+     * FlushAlwaysInPlace=1: every flush checkpoints; FlushJournalOnly=1: none does, as before (comparison).
+     */
+    if (NgGlobal.FlushAlwaysInPlace)
+    {
+        Err = NgCommitEx(Vcb, FALSE);
+        if (!Err)
+            Err = ngc_checkpoint(Vcb->Core);
+    }
+    else
+    {
+        Err = NgCommitEx(Vcb, TRUE);
+        if (!Err && !NgGlobal.FlushJournalOnly &&
+            (Fcb->IsDirectory || NgEnsureNode(Fcb) || !ngc_record_home(Vcb->Core, Fcb->Node)))
+            Err = ngc_checkpoint(Vcb->Core);
+    }
     Vcb->Syncs++;
     NgReleaseCore(Vcb);
     if (Err)

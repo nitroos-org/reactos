@@ -927,6 +927,16 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         NgGlobal.GroupCommitMB = 0;
         DPRINT1("ntfsng: NoGroupCommit: every write-through write commits before it returns\n");
     }
+    /*
+     * FlushFileBuffers (write.c NgFlushBuffers): "FlushAlwaysInPlace"=1 = every flush puts the metadata in place;
+     * "FlushJournalOnly"=1 = no flush does, as before: durable through the journal only (both for comparison).
+     */
+    NgGlobal.FlushAlwaysInPlace = NgReadDword(RegistryPath, L"FlushAlwaysInPlace");
+    NgGlobal.FlushJournalOnly = !NgGlobal.FlushAlwaysInPlace && NgReadDword(RegistryPath, L"FlushJournalOnly");
+    if (NgGlobal.FlushAlwaysInPlace)
+        DPRINT1("ntfsng: FlushAlwaysInPlace: every file flush puts the metadata in place\n");
+    if (NgGlobal.FlushJournalOnly)
+        DPRINT1("ntfsng: FlushJournalOnly: a file flush is durable in the journal, not in place\n");
     NgGlobal.Verbose = NgReadDword(RegistryPath, L"Verbose");
     /* "MountCheck": 0 or absent = after an unclean shutdown and for small MFTs, 1 = always, 2 = never. */
     i = NgReadDword(RegistryPath, L"MountCheck");
