@@ -28,6 +28,8 @@ typedef struct _STARTINFO
     DWORD dwCrashDumpEnabled;
     BOOL bCrashDumpChanged;
     INT iFreeLdrIni;
+    BOOL bEspIni; /* freeldr.ini is on the EFI system partition (UEFI) */
+    DWORD dwEspIniAttributes;
 } STARTINFO, *PSTARTINFO;
 
 /* The debugging information choices, in the order of the combo box: the index is the registry value */
@@ -471,6 +473,41 @@ LoadOSList(HWND hwndDlg, PSTARTINFO pStartInfo)
     WCHAR *szSystemDrive;
     HINF hInf;
 
+    /* UEFI: freeldr.ini is on the EFI system partition, which has no drive letter */
+    if (EspIniIsUefiBoot())
+    {
+        DWORD dwError = EspIniFindFreeldrIni(pStartInfo->szFreeldrIni,
+                                             ARRAYSIZE(pStartInfo->szFreeldrIni));
+        if (dwError == ERROR_SUCCESS)
+        {
+            hInf = SetupOpenInfFileW(pStartInfo->szFreeldrIni, NULL, INF_STYLE_OLDNT, NULL);
+            if (hInf != INVALID_HANDLE_VALUE)
+            {
+                LoadFreeldrSettings(hInf, hwndDlg);
+                SetupCloseInfFile(hInf);
+                pStartInfo->iFreeLdrIni = 1;
+                pStartInfo->bEspIni = TRUE;
+                return TRUE;
+            }
+            dwError = GetLastError();
+        }
+
+        /* Nothing is read and nothing will be written: say why */
+        pStartInfo->szFreeldrIni[0] = UNICODE_NULL;
+        EnableWindow(GetDlgItem(hwndDlg, IDC_STRECOSCOMBO), FALSE);
+        EnableWindow(GetDlgItem(hwndDlg, IDC_STRECLIST), FALSE);
+        EnableWindow(GetDlgItem(hwndDlg, IDC_STRRECLISTUPDWN), FALSE);
+        EnableWindow(GetDlgItem(hwndDlg, IDC_STRRECEDIT), FALSE);
+        {
+            WCHAR szMsg[256], szTitle[64];
+            LoadStringW(hApplet, (dwError == ERROR_ACCESS_DENIED) ? IDS_STARTREC_ESP_DENIED : IDS_STARTREC_ESP_MISSING,
+                        szMsg, ARRAYSIZE(szMsg));
+            LoadStringW(hApplet, IDS_CPLSYSTEMNAME, szTitle, ARRAYSIZE(szTitle));
+            MessageBoxW(hwndDlg, szMsg, szTitle, MB_OK | MB_ICONINFORMATION);
+        }
+        return FALSE;
+    }
+
     dwBufSize = GetSystemDrive(&szSystemDrive);
     if (dwBufSize == 0)
         return FALSE;
@@ -765,6 +802,17 @@ StartRecDlgProc(HWND hwndDlg,
 
                     if ((INT_PTR)pRecord != CB_ERR)
                     {
+                        /* The loader's freeldr.ini on the EFI system partition is hidden and a system file:
+                         * writing to it fails unless these attributes are off while it is written */
+                        if (pStartInfo->bEspIni)
+                        {
+                            pStartInfo->dwEspIniAttributes = GetFileAttributesW(pStartInfo->szFreeldrIni);
+                            if (pStartInfo->dwEspIniAttributes != INVALID_FILE_ATTRIBUTES)
+                                SetFileAttributesW(pStartInfo->szFreeldrIni,
+                                                   pStartInfo->dwEspIniAttributes &
+                                                   ~(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM));
+                        }
+
                         if (pStartInfo->iFreeLdrIni == 1) // FreeLdrIni style
                         {
                             /* Set default timeout */
@@ -793,6 +841,12 @@ StartRecDlgProc(HWND hwndDlg,
                                                       pStartInfo->szFreeldrIni);
 
                         }
+                    }
+
+                    if (pStartInfo->bEspIni && pStartInfo->dwEspIniAttributes != INVALID_FILE_ATTRIBUTES &&
+                        pStartInfo->dwEspIniAttributes != 0)
+                    {
+                        SetFileAttributesW(pStartInfo->szFreeldrIni, pStartInfo->dwEspIniAttributes);
                     }
 
                     if (SaveRecoveryOptions)

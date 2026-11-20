@@ -23,6 +23,7 @@
 #include <cpl.h>
 
 #include <strsafe.h>
+#include <reactos/espini.h>
 
 #include "resource.h"
 

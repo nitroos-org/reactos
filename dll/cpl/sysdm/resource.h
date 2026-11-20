@@ -69,6 +69,8 @@
 #define IDS_ENVIRONMENT_WARNING            150
 #define IDS_ENVIRONMENT_WARNING_TITLE      151
 #define IDS_FILE_BROWSE_FILTER             152
+#define IDS_STARTREC_ESP_DENIED            153
+#define IDS_STARTREC_ESP_MISSING           154
 
 /* Propsheet - general */
 #define IDD_PROPPAGEGENERAL  100
