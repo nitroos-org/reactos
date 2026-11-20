@@ -120,6 +120,7 @@ extern void func_SaferIdentifyLevel(void);
 extern void func_TokenDefaultDacl(void);
 extern void func_TokenElevation(void);
 extern void func_TokenIntegrity(void);
+extern void func_TraverseRestricted(void);
 extern void func_TokenLogonSid(void);
 extern void func_WriteRestrictedToken(void);
 extern void func_TokenQueryParity(void);
@@ -291,6 +292,7 @@ const struct test winetest_testlist[] =
     { "TokenDefaultDacl", func_TokenDefaultDacl },
     { "TokenElevation", func_TokenElevation },
     { "TokenIntegrity", func_TokenIntegrity },
+    { "TraverseRestricted", func_TraverseRestricted },
     { "TokenLogonSid", func_TokenLogonSid },
     { "WriteRestrictedToken", func_WriteRestrictedToken },
     { "TokenQueryParity", func_TokenQueryParity },

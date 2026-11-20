@@ -103,6 +103,7 @@ list(APPEND SOURCE
     TokenDefaultDacl.c
     TokenElevation.c
     TokenIntegrity.c
+    TraverseRestricted.c
     TokenLogonSid.c
     WriteRestrictedToken.c
     TokenQueryParity.c
