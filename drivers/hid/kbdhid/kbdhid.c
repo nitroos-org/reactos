@@ -95,6 +95,21 @@ KbdHid_StopRepeat(
     KeReleaseSpinLock(&DeviceExtension->RepeatLock, OldIrql);
 }
 
+/* stop the repeat for good until the device is started again */
+static VOID
+KbdHid_DisableRepeat(
+    IN PKBDHID_DEVICE_EXTENSION DeviceExtension,
+    IN BOOLEAN Disabled)
+{
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&DeviceExtension->RepeatLock, &OldIrql);
+    DeviceExtension->RepeatDisabled = Disabled;
+    DeviceExtension->RepeatActive = FALSE;
+    KeCancelTimer(&DeviceExtension->RepeatTimer);
+    KeReleaseSpinLock(&DeviceExtension->RepeatLock, OldIrql);
+}
+
 static VOID
 KbdHid_UpdateRepeat(
     IN PKBDHID_DEVICE_EXTENSION DeviceExtension,
@@ -105,6 +120,13 @@ KbdHid_UpdateRepeat(
     LARGE_INTEGER DueTime;
 
     KeAcquireSpinLock(&DeviceExtension->RepeatLock, &OldIrql);
+
+    if (DeviceExtension->RepeatDisabled)
+    {
+        /* the device is stopping: a report that completes late must not arm the timer again */
+        KeReleaseSpinLock(&DeviceExtension->RepeatLock, OldIrql);
+        return;
+    }
 
     if (InputData->Flags & KEY_BREAK)
     {
@@ -877,6 +899,9 @@ KbdHid_StartDevice(
     /* get device extension */
     DeviceExtension = DeviceObject->DeviceExtension;
 
+    /* a restarted device repeats keys again */
+    KbdHid_DisableRepeat(DeviceExtension, FALSE);
+
     /* query collection information */
     Status = KbdHid_SubmitRequest(DeviceObject,
                                   IOCTL_HID_GET_COLLECTION_INFORMATION,
@@ -1015,7 +1040,7 @@ KbdHid_FreeResources(
     DeviceExtension = DeviceObject->DeviceExtension;
 
     /* stop the key repeat, and wait for a repeat that runs right now */
-    KbdHid_StopRepeat(DeviceExtension);
+    KbdHid_DisableRepeat(DeviceExtension, TRUE);
     KeFlushQueuedDpcs();
 
     /* free resources */

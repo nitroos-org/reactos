@@ -138,6 +138,7 @@ typedef struct
     KDPC RepeatDpc;
     KEYBOARD_INPUT_DATA RepeatKey;
     BOOLEAN RepeatActive;
+    BOOLEAN RepeatDisabled;
 
 } KBDHID_DEVICE_EXTENSION, *PKBDHID_DEVICE_EXTENSION;
 
