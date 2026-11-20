@@ -302,6 +302,42 @@ START_TEST(LogonUserBlankPassword)
         ok_dec(Logon(WithPw, TestPassword, LOGON32_LOGON_INTERACTIVE), ERROR_SUCCESS);
     }
 
+    /* The password change of a blank account (policy on), measured on Windows Server 2022: a standard user gets 5 with
+       the empty and with a wrong old password, not counted; the policy off: 0; the Administrator: 0 */
+    if (HaveNever && HaveEmpty && HaveWithPw)
+    {
+        HANDLE Token = NULL;
+        DWORD Before = BadCount(Never);
+
+        if (LogonUserW(WithPw, L".", TestPassword, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &Token) &&
+            ImpersonateLoggedOnUser(Token))
+        {
+            ok_dec(NetUserChangePassword(NULL, Never, L"", TestPassword), ERROR_ACCESS_DENIED);
+            ok_dec(NetUserChangePassword(NULL, Never, WrongPassword, TestPassword), ERROR_ACCESS_DENIED);
+            RevertToSelf();
+            ok_dec(BadCount(Never), Before);
+            ok_dec(Logon(Never, TestPassword, LOGON32_LOGON_INTERACTIVE), ERROR_LOGON_FAILURE);
+
+            ok(SetLimitBlank(0), "cannot set LimitBlankPasswordUse 0\n");
+            ok(ImpersonateLoggedOnUser(Token), "impersonation failed: %lu\n", GetLastError());
+            ok_dec(NetUserChangePassword(NULL, Never, L"", TestPassword), NERR_Success);
+            RevertToSelf();
+            ok_dec(Logon(Never, TestPassword, LOGON32_LOGON_INTERACTIVE), ERROR_SUCCESS);
+            /* back to the blank password for the rows below */
+            ok_dec(NetUserChangePassword(NULL, Never, TestPassword, L""), NERR_Success);
+            ok(SetLimitBlank(1), "cannot set LimitBlankPasswordUse 1\n");
+        }
+        else
+            skip("cannot log on and impersonate %ls: %lu\n", WithPw, GetLastError());
+        if (Token != NULL)
+            CloseHandle(Token);
+
+        /* the caller of this test, an administrator: allowed (it can reset the password anyway) */
+        ok_dec(NetUserChangePassword(NULL, Empty, L"", TestPassword), NERR_Success);
+        ok_dec(Logon(Empty, TestPassword, LOGON32_LOGON_INTERACTIVE), ERROR_SUCCESS);
+        ok_dec(NetUserChangePassword(NULL, Empty, TestPassword, L""), NERR_Success);
+    }
+
     /* the policy off: the empty password logs on, a wrong one still does not */
     ok(SetLimitBlank(0), "cannot set LimitBlankPasswordUse 0\n");
     if (HaveNever)
