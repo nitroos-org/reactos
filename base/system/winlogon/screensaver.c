@@ -489,6 +489,7 @@ StartScreenSaver(
     BOOL bLock = FALSE;
     BOOL bNoSaver = FALSE;
     BOOL bStartFailed = FALSE;
+    BOOL bSwitched = FALSE;
     DWORD StartTick = 0;
     /* A machine setting: read as winlogon, not as the user */
     DWORD GracePeriod = bSecure ? GetScreenSaverGracePeriod() : 0;
@@ -569,6 +570,15 @@ StartScreenSaver(
      * (and nothing typed to wake it) can reach the application desktop */
     StartupInfo.lpDesktop = L"WinSta0\\Screen-Saver";
 
+    /* Show the screen saver desktop before the saver exists: its window is created and activated on the desktop that
+     * has the input, and the application desktop is out of reach until the saver ends. A saver that is not there is
+     * not shown (nothing would be on the screen for the time it takes to find out) */
+    if (GetFileAttributesW(szApplicationName) != INVALID_FILE_ATTRIBUTES)
+    {
+        SwitchDesktop(Session->ScreenSaverDesktop);
+        bSwitched = TRUE;
+    }
+
     ret = CreateProcessAsUserW(Session->UserToken,
                                szApplicationName,
                                szCommandLine,
@@ -583,6 +593,10 @@ StartScreenSaver(
     if (!ret)
     {
         ERR("WL: Unable to start %S, error %lu\n", szApplicationName, GetLastError());
+        if (bSwitched)
+        {
+            SwitchDesktop(Session->LogonState == STATE_LOCKED ? Session->WinlogonDesktop : Session->ApplicationDesktop);
+        }
         bStartFailed = TRUE;
         goto cleanup;
     }
@@ -590,8 +604,8 @@ StartScreenSaver(
     CloseHandle(ProcessInformation.hThread);
     StartTick = GetTickCount();
 
-    /* Show the screen saver desktop: the application desktop is out of reach until the saver ends */
-    SwitchDesktop(Session->ScreenSaverDesktop);
+    if (!bSwitched)
+        SwitchDesktop(Session->ScreenSaverDesktop);
 
     SystemParametersInfoW(SPI_SETSCREENSAVERRUNNING, TRUE, NULL, 0);
 
