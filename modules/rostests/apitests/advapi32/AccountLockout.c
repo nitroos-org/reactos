@@ -27,6 +27,7 @@
 #include <sspi.h>
 
 #define NT_STATUS_ACCOUNT_LOCKED_OUT ((NTSTATUS)0xC0000234)
+#define NT_STATUS_LOGON_FAILURE ((NTSTATUS)0xC000006D)
 #define NT_STATUS_SUCCESS ((NTSTATUS)0x00000000)
 
 static WCHAR UserPassword[] = L"Lockout-Test-2026!a";
@@ -60,6 +61,9 @@ static DWORD Logon(PCWSTR User, PCWSTR Password, DWORD Type)
     }
     return GetLastError();
 }
+
+/* LsaLogonUser through an untrusted connection; the substatus of the last call in LastSubStatus */
+static NTSTATUS LastSubStatus;
 
 static NTSTATUS LsaLogon(PCWSTR User, PCWSTR Password)
 {
@@ -112,6 +116,7 @@ static NTSTATUS LsaLogon(PCWSTR User, PCWSTR Password)
 
     Status = pLsaLogonUser(Lsa, &Origin, Interactive, PackageId, Buffer, Size, NULL, &Source,
                            &Profile, &ProfileLength, &LogonId, &Token, &Quotas, &SubStatus);
+    LastSubStatus = SubStatus;
     if (Profile)
         pLsaFreeReturnBuffer(Profile);
     if (Token)
@@ -293,6 +298,15 @@ static void TestCounting(PCWSTR User)
     ok_hex(NtlmLogon(User, UserPassword), SEC_E_OK);
     ok_state(User, 0, 0);
 
+    /* LsaLogonUser: a wrong password and an unknown account look the same, substatus included (measured) */
+    ok_hex(LsaLogon(User, WrongPassword), NT_STATUS_LOGON_FAILURE);
+    ok_hex(LastSubStatus, NT_STATUS_SUCCESS);
+    ok_state(User, 0, 1);
+    ok_hex(LsaLogon(L"nosuchuser9z", WrongPassword), NT_STATUS_LOGON_FAILURE);
+    ok_hex(LastSubStatus, NT_STATUS_SUCCESS);
+    ok_dec(Logon(User, UserPassword, LOGON32_LOGON_INTERACTIVE), ERROR_SUCCESS);
+    ok_state(User, 0, 0);
+
     /* NEW_CREDENTIALS does not check the password */
     ok_dec(Logon(User, WrongPassword, LOGON32_LOGON_NEW_CREDENTIALS), ERROR_SUCCESS);
     ok_state(User, 0, 0);
@@ -331,6 +345,7 @@ static void TestLocked(PCWSTR User, PCWSTR Other)
     ok_dec(Logon(User, L"", LOGON32_LOGON_INTERACTIVE), ERROR_ACCOUNT_LOCKED_OUT);
     Status = LsaLogon(User, UserPassword);
     ok(Status == NT_STATUS_ACCOUNT_LOCKED_OUT, "LsaLogonUser of the locked account: 0x%08lx\n", Status);
+    ok_hex(LastSubStatus, NT_STATUS_SUCCESS);
     ok_dec(NetUserChangePassword(NULL, User, UserPassword, NewPassword), ERROR_ACCOUNT_LOCKED_OUT);
     ok_hex(NtlmLogon(User, UserPassword), SEC_E_LOGON_DENIED);
     ok_hex(NtlmLogon(User, WrongPassword), SEC_E_LOGON_DENIED);

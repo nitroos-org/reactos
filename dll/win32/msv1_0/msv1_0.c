@@ -2672,10 +2672,13 @@ done:
     if (AccountDomainSid != NULL)
         RtlFreeHeap(RtlGetProcessHeap(), 0, AccountDomainSid);
 
+    /* An unknown user and a wrong password are the same failure to every caller, trusted or not: the substatus
+       does not tell them apart (measured on Windows Server 2022: STATUS_LOGON_FAILURE, substatus 0, for both;
+       before, the substatus told a caller whether the account exists) */
     if (Status == STATUS_NO_SUCH_USER ||
         Status == STATUS_WRONG_PASSWORD)
     {
-        *SubStatus = Status;
+        *SubStatus = STATUS_SUCCESS;
         Status = STATUS_LOGON_FAILURE;
     }
 
