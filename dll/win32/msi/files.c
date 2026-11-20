@@ -1873,6 +1873,28 @@ static UINT ITERATE_RemoveFiles(MSIRECORD *row, LPVOID param)
         lstrcatW(path, filename);
 
         TRACE("Deleting misc file: %s\n", debugstr_w(path));
+#ifdef __REACTOS__
+        /* the FileName of the RemoveFile table may hold the wildcards * and ? (Windows Installer SDK, RemoveFile
+           table): every matching file of the directory goes, directories never */
+        if (wcspbrk( filename, L"*?" ))
+        {
+            WIN32_FIND_DATAW wfd;
+            HANDLE find = msi_find_first_file( package, path, &wfd );
+            BOOL more = find != INVALID_HANDLE_VALUE;
+
+            for (; more; more = msi_find_next_file( package, find, &wfd ))
+            {
+                WCHAR *match;
+
+                if (wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                if (!(match = msi_build_directory_name( 2, dir, wfd.cFileName ))) continue;
+                msi_delete_file( package, match );
+                free( match );
+            }
+            if (find != INVALID_HANDLE_VALUE) FindClose( find );
+        }
+        else
+#endif
         msi_delete_file( package, path );
     }
     else
