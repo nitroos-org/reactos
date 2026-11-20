@@ -309,7 +309,11 @@ TCPInterfaceMulticast4(PIP_INTERFACE IF)
 {
     LOCK_TCPIP_CORE();
     if (IF->TCPContext && UDP4HasGroups())
+    {
         TCP6UpdateMulticast(IF->TCPContext);
+        /* and IGMP reports them there */
+        UDP4IgmpInterface(IF->Index);
+    }
     UNLOCK_TCPIP_CORE();
 }
 

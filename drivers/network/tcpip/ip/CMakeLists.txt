@@ -19,6 +19,7 @@ list(APPEND SOURCE
     network/checksum.c
     network/echo6.c
     network/icmp.c
+    network/igmp.c
     network/interface.c
     network/ip.c
     network/loopback.c

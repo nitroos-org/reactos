@@ -13,6 +13,7 @@
 #define __LWIP_INET_H__
 #include "lwip/netifapi.h"
 #include <nitrofwk.h>
+#include <igmp.h>
 
 
 LIST_ENTRY InterfaceListHead;
@@ -475,6 +476,9 @@ VOID IPUnregisterInterface(
        this under the locks that NBDestroyNeighborsForInterface and RouterRemoveRoutesForInterface
        take afterwards, so these find whatever was added meanwhile */
     InterlockedExchange(&IF->Unbound, TRUE);
+
+    /* nothing more is reported there */
+    IGMPInterfaceGone(IF->Index);
 
     IPRemoveInterfaceRoute( IF );
 

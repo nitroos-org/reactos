@@ -12,6 +12,7 @@
 #include <nitrofwk.h>
 #include <icmp.h>
 #include <nitrotdi.h>
+#include <igmp.h>
 #include "lwip/netif.h"
 #include "lwip/tcpip.h"
 
@@ -425,12 +426,14 @@ NTSTATUS UDPSendDatagram(
  * group's whole filter, NITRO_AO_OPTION_MCAST_FILTER, nitrotdi.h) is kept on the same table: Mode with the
  * sources. Delivery: a multicast datagram the adapter passes reaches every socket bound to its port (no per-socket
  * membership); a socket with a filter for the group takes it only from a source the filter allows (INCLUDE: listed,
- * EXCLUDE: not listed). The stack sends no IGMP (a snooping switch does not forward the groups).
+ * EXCLUDE: not listed). IGMP (igmp.c) reports each group with the sockets' filters merged per interface
+ * (Udp4IgmpMerge), so a snooping switch forwards the groups.
  * A socket's joins are changed under its object lock and the core lock; delivery reads them under the former, the
  * adapter list under the latter.
  */
 #define UDP4_TAG            'M4pU'
 #define UDP4_SOCKET_GROUPS  NITRO_MCAST_MAX_GROUPS      /* IP_MAX_MEMBERSHIPS */
+#define IGMP_MAX_GROUPS_TOLD 1024                       /* groups told to IGMP for an interface that registers */
 
 typedef struct _UDP4_GROUP {
     ULONG Group;                /* network order */
@@ -492,6 +495,128 @@ UDP4HasGroups(VOID)
     return Udp4Joins != 0;
 }
 
+/*
+ * IGMP (igmp.c): the filter of Group on interface IfIndex, merged from the sockets that joined it there or without an
+ * interface (RFC 3376 3.2, simplified the way igmp.c reports it): a socket in EXCLUDE mode makes it EXCLUDE with no
+ * source, else INCLUDE with the union of the sources (more than IGMP_MAX_SOURCES: EXCLUDE with none); no socket:
+ * INCLUDE with none. The work is bounded: the walk stops once the answer is EXCLUDE, and the union never holds more
+ * than IGMP_MAX_SOURCES + 1. Core lock held (the sockets' joins change under it).
+ */
+static ULONG Udp4IgmpSources[IGMP_MAX_SOURCES];
+
+static
+VOID
+Udp4IgmpMerge(ULONG IfIndex, ULONG Group)
+{
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+    BOOLEAN Exclude = FALSE;
+    ULONG Count = 0, i, j, k;
+
+    TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
+    for (Entry = AddressFileListHead.Flink; Entry != &AddressFileListHead && !Exclude; Entry = Entry->Flink)
+    {
+        PADDRESS_FILE AddrFile = CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry);
+        PUDP4_MEMBERSHIPS M = AddrFile->Groups4;
+
+        for (i = 0; M && i < M->Count && !Exclude; i++)
+        {
+            PUDP4_GROUP G = &M->Groups[i];
+
+            if (G->Group != Group || (G->IfIndex && G->IfIndex != IfIndex))
+                continue;
+            if (G->Mode == NITRO_MCAST_EXCLUDE)
+            {
+                Exclude = TRUE;
+                break;
+            }
+            /* the union, kept sorted */
+            for (j = 0; j < G->NumSources && !Exclude; j++)
+            {
+                ULONG Source = G->Sources[j];
+
+                for (k = 0; k < Count && Udp4IgmpSources[k] < Source; k++)
+                    ;
+                if (k < Count && Udp4IgmpSources[k] == Source)
+                    continue;
+                if (Count == IGMP_MAX_SOURCES)
+                {
+                    Exclude = TRUE;     /* too many to report: all sources */
+                    break;
+                }
+                RtlMoveMemory(&Udp4IgmpSources[k + 1], &Udp4IgmpSources[k], (Count - k) * sizeof(ULONG));
+                Udp4IgmpSources[k] = Source;
+                Count++;
+            }
+        }
+    }
+    TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
+
+    if (Exclude)
+        IGMPSetGroupState(IfIndex, Group, IGMP_MODE_EXCLUDE, NULL, 0);
+    else
+        IGMPSetGroupState(IfIndex, Group, IGMP_MODE_INCLUDE, Udp4IgmpSources, Count);
+}
+
+/* Group's joins changed on interface IfIndex (0: the joins without an interface, every adapter): IGMP is told the
+   new filter of each interface concerned (core lock held) */
+static
+VOID
+Udp4IgmpGroupChanged(ULONG IfIndex, ULONG Group)
+{
+    struct netif *netif;
+
+    NETIF_FOREACH(netif)
+    {
+        PIP_INTERFACE IF = netif->state;
+
+        if (IF && IF != Loopback && (!IfIndex || IF->Index == IfIndex))
+            Udp4IgmpMerge(IF->Index, Group);
+    }
+}
+
+/* An interface registered (if6.c, core lock held): IGMP is told every group the sockets joined there or without an
+   interface. Each group is merged once per socket that has it; the joins are bounded per socket */
+VOID
+UDP4IgmpInterface(ULONG IfIndex)
+{
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+    ULONG i, Seen = 0;
+    ULONG *Groups;
+
+    if (!Udp4Joins)
+        return;
+    Groups = ExAllocatePoolWithTag(NonPagedPool, IGMP_MAX_GROUPS_TOLD * sizeof(ULONG), UDP4_TAG);
+    if (!Groups)
+        return;
+
+    TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
+    for (Entry = AddressFileListHead.Flink; Entry != &AddressFileListHead && Seen < IGMP_MAX_GROUPS_TOLD;
+         Entry = Entry->Flink)
+    {
+        PADDRESS_FILE AddrFile = CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry);
+        PUDP4_MEMBERSHIPS M = AddrFile->Groups4;
+
+        for (i = 0; M && i < M->Count && Seen < IGMP_MAX_GROUPS_TOLD; i++)
+        {
+            ULONG k;
+
+            if (M->Groups[i].IfIndex && M->Groups[i].IfIndex != IfIndex)
+                continue;
+            for (k = 0; k < Seen && Groups[k] != M->Groups[i].Group; k++)
+                ;
+            if (k == Seen)
+                Groups[Seen++] = M->Groups[i].Group;
+        }
+    }
+    TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
+
+    for (i = 0; i < Seen; i++)
+        Udp4IgmpMerge(IfIndex, Groups[i]);
+    ExFreePoolWithTag(Groups, UDP4_TAG);
+}
+
 /* The Ethernet addresses of the IPv4 groups sockets joined on interface IfIndex or without an interface, added to
  * its adapter's list (if6.c, core lock held). *Count becomes Max + 1 when they do not all fit */
 VOID
@@ -503,6 +628,24 @@ UDP4AddMulticastList(ULONG IfIndex, PUCHAR List, PUINT Count, UINT Max)
 
     if (!Udp4Joins)
         return;
+
+    /* A host in any group is in 224.0.0.1 too (RFC 1112 6.2): the general IGMP queries go there (igmp.c) */
+    {
+        static const UCHAR AllSystems[6] = { 0x01, 0x00, 0x5E, 0x00, 0x00, 0x01 };
+
+        for (j = 0; j < *Count && RtlCompareMemory(&List[j * 6], AllSystems, 6) != 6; j++)
+            ;
+        if (j == *Count)
+        {
+            if (*Count == Max)
+            {
+                *Count = Max + 1;
+                return;
+            }
+            RtlCopyMemory(&List[*Count * 6], AllSystems, 6);
+            (*Count)++;
+        }
+    }
 
     TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
     for (Entry = AddressFileListHead.Flink; Entry != &AddressFileListHead && *Count <= Max; Entry = Entry->Flink)
@@ -649,6 +792,7 @@ Udp4Apply(PADDRESS_FILE AddrFile, ULONG IfIndex, ULONG Group, UCHAR Mode, ULONG 
             M->Count++;
             Udp4Joins++;
             Udp4GroupsChanged(IfIndex);
+            Udp4IgmpGroupChanged(IfIndex, Group);
         }
     }
     else if (MustBeNew)
@@ -663,6 +807,7 @@ Udp4Apply(PADDRESS_FILE AddrFile, ULONG IfIndex, ULONG Group, UCHAR Mode, ULONG 
         M->Groups[i] = M->Groups[--M->Count];
         Udp4Joins--;
         Udp4GroupsChanged(IfIndex);
+        Udp4IgmpGroupChanged(IfIndex, Group);
     }
     else
     {
@@ -671,6 +816,7 @@ Udp4Apply(PADDRESS_FILE AddrFile, ULONG IfIndex, ULONG Group, UCHAR Mode, ULONG 
         M->Groups[i].NumSources = NumSources;
         M->Groups[i].Sources = Copy;
         Copy = NULL;
+        Udp4IgmpGroupChanged(M->Groups[i].IfIndex, Group);
     }
 
 Done:
@@ -807,6 +953,8 @@ UDP4LeaveAll(PADDRESS_FILE AddrFile)
     {
         Udp4Joins -= M->Count;
         Udp4GroupsChanged(0);
+        for (i = 0; i < M->Count; i++)
+            Udp4IgmpGroupChanged(M->Groups[i].IfIndex, M->Groups[i].Group);
     }
     UNLOCK_TCPIP_CORE();
     UnlockObject(AddrFile);

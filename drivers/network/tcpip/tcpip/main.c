@@ -9,6 +9,7 @@
  */
 
 #include "precomp.h"
+#include <igmp.h>
 
 #include <ntifs.h>
 #include <ndk/rtlfuncs.h>
@@ -1189,6 +1190,7 @@ VOID NTAPI TiUnload(
     UDPShutdown();
     RawIPShutdown();
     ICMPShutdown();
+    IGMPShutdown();
 
     /* Shutdown network level protocol subsystem */
     IPShutdown();
@@ -1377,6 +1379,12 @@ DriverEntry(
     }
 
     Status = ICMPStartup();
+    if( !NT_SUCCESS(Status) ) {
+        TiUnload(DriverObject);
+        return Status;
+    }
+
+    Status = IGMPStartup();
     if( !NT_SUCCESS(Status) ) {
         TiUnload(DriverObject);
         return Status;
