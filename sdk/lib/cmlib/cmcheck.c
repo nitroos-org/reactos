@@ -1109,6 +1109,33 @@ CmpCheckValueList(
 /* The flags a key of a hive file may have */
 #define CMP_FILE_KEY_FLAGS_DROPPED (KEY_HIVE_EXIT | KEY_PREDEF_HANDLE | KEY_IS_VOLATILE)
 
+/* Does the name of a key node (inside its cell: checked by the caller) hold a path separator */
+static
+BOOLEAN
+CmpKeyNameHasSeparator(
+    _In_ PCM_KEY_NODE Node)
+{
+    ULONG i;
+
+    if (Node->Flags & KEY_COMP_NAME)
+    {
+        for (i = 0; i < Node->NameLength; i++)
+        {
+            if (((PUCHAR)Node->Name)[i] == '\\')
+                return TRUE;
+        }
+    }
+    else
+    {
+        for (i = 0; i < Node->NameLength / sizeof(WCHAR); i++)
+        {
+            if (Node->Name[i] == L'\\')
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 /*
  * Is the key at Cell sound by itself (its subkeys are checked by the walk):
  * a key node cell not in use, its name inside it, its security, class and
@@ -1153,8 +1180,23 @@ CmpCheckKey(
      * lose what a program wrote, and the check of a live hive would refuse
      * every hive that holds one. Its name is no pointer or length; the code
      * that reads names as C strings (RegDeleteTreeW) handles it by its
-     * counted name.
+     * counted name. (NtRenameKey makes such names as well.)
      */
+
+    /*
+     * A name with a path separator, though, no create or rename makes: the
+     * parser splits names at it and NtRenameKey refuses it. No open reaches
+     * such a key, and a program that opens the subkeys it enumerates by
+     * their names opens the parent again instead (RegDeleteTreeW recursed
+     * until its stack overflowed, in-guest fuzz). The key is not one a hive
+     * written by the registry can hold: it goes. The root's name is not
+     * parsed.
+     */
+    if (Parent != HCELL_NIL && CmpKeyNameHasSeparator(Node))
+    {
+        DPRINT1("Key 0x%x: the name holds a path separator\n", Cell);
+        return FALSE;
+    }
 
     /* The parent named by the key is the one it is found under */
     if (Parent != HCELL_NIL && Node->Parent != Parent)
