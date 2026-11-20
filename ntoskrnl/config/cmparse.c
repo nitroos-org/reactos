@@ -89,8 +89,16 @@ CmpGetSymbolicLink(IN PHHIVE Hive,
     PCM_KEY_NODE Node;
     UNICODE_STRING NewObjectName;
 
+    /*
+     * The callers hold no KCB lock here (the registry lock only). A set of
+     * the link value holds this KCB's lock exclusively while it replaces the
+     * data (a data length and a data cell written one after the other, an
+     * old big data chain freed): read the value under the lock, shared.
+     */
+    CmpAcquireKcbLockShared(SymbolicKcb);
+
     /* Make sure we're not being deleted */
-    if (SymbolicKcb->Delete) return FALSE;
+    if (SymbolicKcb->Delete) goto Exit;
 
     /* Get the key node */
     Node = (PCM_KEY_NODE)HvGetCell(SymbolicKcb->KeyHive, SymbolicKcb->KeyCell);
@@ -196,6 +204,7 @@ Exit:
 
     /* Check if we had an active cell and release it, then return the result */
     if (CellToRelease != HCELL_NIL) HvReleaseCell(Hive, CellToRelease);
+    CmpReleaseKcbLock(SymbolicKcb);
     return Result;
 }
 
