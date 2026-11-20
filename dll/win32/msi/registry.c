@@ -425,7 +425,13 @@ static LONG userdata_open( const WCHAR *keypath, REGSAM access, BOOL create, BOO
     }
     r = RegOpenKeyExW( HKEY_CURRENT_USER, path, 0, access, key );
     if (r == ERROR_FILE_NOT_FOUND || r == ERROR_PATH_NOT_FOUND)
+    {
         r = RegOpenKeyExW( HKEY_LOCAL_MACHINE, keypath, 0, access, key );
+        /* data from before this layout: with registry key security enforced a standard user may read it, not
+           change it, and every open here asks for full access */
+        if (r == ERROR_ACCESS_DENIED)
+            r = RegOpenKeyExW( HKEY_LOCAL_MACHINE, keypath, 0, (access & (KEY_WOW64_64KEY | KEY_WOW64_32KEY)) | KEY_READ, key );
+    }
     return r;
 }
 
