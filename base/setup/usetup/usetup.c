@@ -30,6 +30,7 @@
 #include <math.h>
 #include <ntstrsafe.h>
 
+#include <../lib/components.h>
 #include "cmdcons.h"
 #include "devinst.h"
 #include "fmtchk.h"
@@ -3396,6 +3397,18 @@ InitInstallDir:
         DPRINT1("InitDestinationPaths() failed: Status 0x%lx\n", Status);
         MUIDisplayError(ERROR_NO_BUILD_PATH, Ir, POPUP_WAIT_ENTER);
         return QUIT_PAGE;
+    }
+
+    /*
+     * An update or repair of a system that was installed with components left out: keep them out. What the
+     * installation recorded (Panther\components.txt) is applied to the files of this medium, so that the
+     * update does not put back what the person had chosen not to install, and the record stays true.
+     * A system without a record gets everything, as always.
+     */
+    if (RepairUpdateFlag && !USetupData.Components)
+    {
+        USetupData.Components = ComponentsLoadRecorded(USetupData.SourcePath.Buffer, USetupData.LanguageId,
+                                                       USetupData.DestinationPath.Buffer);
     }
 
     /*

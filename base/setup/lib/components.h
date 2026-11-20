@@ -24,6 +24,8 @@ typedef signed char COMPONENT_CHOICE;
 #define COMPONENT_NO        0
 #define COMPONENT_YES       1
 
+#define COMPONENT_REG_GLOB_MAX  128    /* registry patterns of the left-out components */
+
 /*
  * What the resolver needs to know about a component (pure data: unit-tested).
  * Bit i of a mask is the component with index i.
@@ -49,6 +51,9 @@ typedef struct _COMPONENTS_STATE
     BOOLEAN Record;                     /* write the record on the installed system (the answer file had a
                                            [Components] section, or something is left out) */
     BOOLEAN AnyOff;
+    ULONG RegSkipped;                   /* registry lines of the hive inf files that were not added (left-out components) */
+    ULONG OmitRegCount;                 /* the registry patterns of the components that are left out */
+    PCWSTR OmitReg[COMPONENT_REG_GLOB_MAX];
     ULONG SkippedFiles;
     ULONG TotalFiles;
 } COMPONENTS_STATE, *PCOMPONENTS_STATE;
@@ -151,6 +156,34 @@ NTAPI
 ComponentsFeatureBlockedBy(
     _In_ PCOMPONENTS_STATE State,
     _In_ PCWSTR FeatureId);
+
+/* Is the directory (relative to the installation directory) only there for files of components that are left out?
+ * (A file of the directory would match a pattern of a left-out component.) Such a directory is not created. */
+BOOLEAN
+NTAPI
+ComponentsIsDirectoryOmitted(
+    _In_ PCOMPONENTS_STATE State,
+    _In_ PCWSTR RelativeDir);
+
+/* A line of a hive inf file (Root "HKLM", Key, optional value name): does a left-out component own it? Matched
+ * against "Root\Key" (the whole key) and "Root\Key|Value" (one value) with the Registry= patterns of components.inf */
+BOOLEAN
+NTAPI
+ComponentsIsRegistryOmitted(
+    _In_ PCOMPONENTS_STATE State,
+    _In_ PCWSTR Root,
+    _In_ PCWSTR Key,
+    _In_opt_ PCWSTR Value);
+
+/* An update or repair of an installed system: read what the installation recorded
+ * (<installation directory>\Panther\components.txt) and apply the same selection to the files of the medium.
+ * Returns NULL (nothing recorded: install everything as always). */
+PCOMPONENTS_STATE
+NTAPI
+ComponentsLoadRecorded(
+    _In_ PCWSTR SourcePath,
+    _In_ LCID LocaleId,
+    _In_ PCWSTR InstallationDirectory);
 
 /* After the hives are built: apply the registry lines of the left-out components and of the profile,
  * and record the selection under HKLM\SOFTWARE\ReactOS\Nitro\Components */

@@ -68,6 +68,7 @@ Description  = %gl.desc%
 Compat       = %gl.compat%
 Profiles     = standard, minimal, core
 Files        = system32\libgallium_wgl.dll, system32\mesa3d-licenses.txt, system32\llvm-licenses.txt
+Registry     = "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D*"
 
 [vulkan]
 Description  = %vulkan.desc%
@@ -84,6 +85,7 @@ Arch         = amd64
 Profiles     = standard
 Depends      = wow64
 Files        = SysWOW64\libgallium_wgl.dll, SysWOW64\mesa3d-licenses.txt
+Registry     = "HKLM\SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D*"
 
 [fonts-cjk]
 Description  = %fonts-cjk.desc%
@@ -108,6 +110,23 @@ Description  = %accessories.desc%
 Compat       = %accessories.compat%
 Profiles     = standard
 Files        = system32\calc.exe, system32\charmap.exe, system32\clipbrd.exe, system32\fontview.exe, system32\mplay32.exe, system32\mspaint.exe, system32\sndrec32.exe, system32\wordpad.exe, system32\write.exe, SysWOW64\calc.exe, SysWOW64\charmap.exe, SysWOW64\mspaint.exe, SysWOW64\write.exe
+; The lines of the hive inf files that name these programs are not added (Root\Key, or Root\Key|Value;
+; '*' as in Files). The file types themselves stay: a file with no handler asks which program to use.
+Registry     = HKCR\*\OpenWithList\mspaint.exe, HKCR\*\OpenWithList\wordpad.exe, \
+               HKCR\SystemFileAssociations\text\OpenWithList\wordpad.exe, \
+               HKCR\.rtf, HKCR\.rtf\*, HKCR\rtffile, HKCR\rtffile\*, HKCR\clpfile, HKCR\clpfile\*, \
+               HKCR\fonfile\shell\open, HKCR\fonfile\shell\open\*, HKCR\fntfile\shell\open, HKCR\fntfile\shell\open\*, \
+               HKCR\ttffile\shell\open, HKCR\ttffile\shell\open\*, HKCR\ttcfile\shell\open, HKCR\ttcfile\shell\open\*, \
+               HKCR\otffile\shell\open, HKCR\otffile\shell\open\*, HKCR\otcfile\shell\open, HKCR\otcfile\shell\open\*, \
+               HKCR\SoundRec\shell\open, HKCR\SoundRec\shell\open\*, HKCR\MIDFile\shell\open, HKCR\MIDFile\shell\open\*, \
+               HKCR\CDAFile\shell\open, HKCR\CDAFile\shell\open\*, HKCR\AVIFile\shell\open, HKCR\AVIFile\shell\open\*, \
+               HKCR\jpegfile\shell\edit, HKCR\jpegfile\shell\edit\*, HKCR\bmpfile\shell\edit, HKCR\bmpfile\shell\edit\*, \
+               HKCR\pngfile\shell\edit, HKCR\pngfile\shell\edit\*, HKCR\TIFImage.Document\shell\edit, HKCR\TIFImage.Document\shell\edit\*, \
+               HKLM\SOFTWARE\Classes\Applications\mspaint.exe\*, HKLM\SOFTWARE\Classes\Applications\wordpad.exe\*, \
+               HKLM\SOFTWARE\Classes\Applications\mplay32.exe\*, \
+               "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\pbrush.exe*", \
+               "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\wordpad.exe*", \
+               "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\write.exe*"
 
 [net-legacy]
 Description  = %net-legacy.desc%

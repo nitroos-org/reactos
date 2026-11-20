@@ -238,6 +238,37 @@ Test_GlobBoundaries(void)
     ok(!ComponentGlobMatch(LongPattern, LongPath), "many stars against a long path\n");
 }
 
+/* The registry lines of left-out components: whole keys, one value, wildcards, other keys untouched */
+static void
+Test_RegistryOmitted(void)
+{
+    static COMPONENTS_STATE s;
+
+    RtlZeroMemory(&s, sizeof(s));
+    ok(!ComponentsIsRegistryOmitted(&s, L"HKCR", L"rtffile\\shell\\open\\command", L""), "no patterns: nothing is omitted\n");
+
+    s.OmitReg[s.OmitRegCount++] = L"HKCR\\rtffile";
+    s.OmitReg[s.OmitRegCount++] = L"HKCR\\rtffile\\*";
+    s.OmitReg[s.OmitRegCount++] = L"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\wordpad.exe*";
+    s.OmitReg[s.OmitRegCount++] = L"HKLM\\SOFTWARE\\Classes\\Foo|Bar";
+    s.OmitReg[s.OmitRegCount++] = L"HKCR\\*\\OpenWithList\\wordpad.exe";
+
+    ok(ComponentsIsRegistryOmitted(&s, L"HKCR", L"rtffile", NULL), "the key itself\n");
+    ok(ComponentsIsRegistryOmitted(&s, L"HKCR", L"RTFFILE", L""), "any case\n");
+    ok(ComponentsIsRegistryOmitted(&s, L"HKCR", L"rtffile\\shell\\open\\command", L""), "a subkey\n");
+    ok(ComponentsIsRegistryOmitted(&s, L"HKCR", L"rtffile\\DefaultIcon", L"Value"), "a subkey with a value\n");
+    ok(!ComponentsIsRegistryOmitted(&s, L"HKCR", L"rtffile2", L""), "a key with the same start is not matched\n");
+    ok(!ComponentsIsRegistryOmitted(&s, L"HKLM", L"rtffile", L""), "another root\n");
+    ok(ComponentsIsRegistryOmitted(&s, L"HKLM", L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\wordpad.exe", L"Path"),
+       "a key with a space in its path, and a value of it\n");
+    ok(ComponentsIsRegistryOmitted(&s, L"HKLM", L"SOFTWARE\\Classes\\Foo", L"Bar"), "one value\n");
+    ok(!ComponentsIsRegistryOmitted(&s, L"HKLM", L"SOFTWARE\\Classes\\Foo", L"Baz"), "another value of the key\n");
+    ok(!ComponentsIsRegistryOmitted(&s, L"HKLM", L"SOFTWARE\\Classes\\Foo", NULL), "the key of a value pattern\n");
+    ok(ComponentsIsRegistryOmitted(&s, L"HKCR", L"*\\OpenWithList\\wordpad.exe", L""), "the key named *\n");
+    ok(ComponentsIsRegistryOmitted(&s, L"HKCR", L"SystemFileAssociations\\text\\OpenWithList\\wordpad.exe", L""), "* is any run\n");
+    ok(!ComponentsIsRegistryOmitted(&s, L"HKCR", L"*\\OpenWithList\\notepad.exe", L""), "another program\n");
+}
+
 /* The 32-component limit of the masks */
 static void
 Test_ResolveLimits(void)
@@ -279,4 +310,5 @@ START_TEST(ComponentsList)
     Test_Resolve();
     Test_ResolveLimits();
     Test_Find();
+    Test_RegistryOmitted();
 }

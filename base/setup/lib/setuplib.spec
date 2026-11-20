@@ -74,6 +74,7 @@
 @ stdcall InitializeSetup(ptr ptr ptr ptr)
 @ stdcall InitSystemPartition(ptr ptr ptr ptr ptr)
 @ stdcall InstallSetupInfFile(ptr)
+@ stdcall ComponentsLoadRecorded(wstr long wstr)
 @ stdcall UpdateRegistry(ptr long ptr long wstr ptr ptr)
 
 ;; fsutil

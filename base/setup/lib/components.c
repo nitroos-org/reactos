@@ -329,6 +329,17 @@ ComponentsLoad(
         RtlStringCchCopyW(State->Desc[State->Count].Id, COMPONENT_ID_MAX, Value);
         State->Count++;
     }
+    if (Ok)
+    {
+        /* The masks hold COMPONENT_MAX components: the rest of the list cannot be used. Say so (a medium that lists
+         * more components than this Setup can handle would otherwise install them all without a word) */
+        ULONG More = 0;
+
+        for (; Ok; Ok = SpInfFindNextLine(&Context, &Context))
+            ++More;
+        SetupLogFormat("components.inf lists more than %lu components: the last %lu are ignored (always installed)",
+                       (ULONG)COMPONENT_MAX, More);
+    }
 
     /* A file without a component list (empty, or not a components.inf) is as good as none: nothing is left out,
      * nothing is recorded */
@@ -377,6 +388,24 @@ GetDisplayName(
     return Buffer;
 }
 
+/* The state whose registry patterns RegistryLineFilter applies (NULL: nothing is filtered) */
+static PCOMPONENTS_STATE RegFilterState = NULL;
+
+static BOOLEAN
+NTAPI
+RegistryLineFilter(
+    _In_ PCWSTR Root,
+    _In_ PCWSTR Key,
+    _In_opt_ PCWSTR Value)
+{
+    if (RegFilterState && ComponentsIsRegistryOmitted(RegFilterState, Root, Key, Value))
+    {
+        RegFilterState->RegSkipped++;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 /* Collect the file patterns of the components that are left out */
 static VOID
 BuildOmitGlobs(
@@ -386,6 +415,8 @@ BuildOmitGlobs(
     PCWSTR Value;
 
     OmitGlobCount = 0;
+    State->OmitRegCount = 0;
+    RegistrySetLineFilter(RegistryLineFilter);
     for (i = 0; i < State->Count; ++i)
     {
         if (!State->Desc[i].Applicable || (State->Selected & (1UL << i)))
@@ -397,8 +428,22 @@ BuildOmitGlobs(
             else
                 DPRINT1("components.inf: too many file patterns\n");
         }
+        /* the registry lines that name programs of this component: the hive inf files are read as always, but
+         * these lines are not added (there is nothing to delete later) */
+        for (Index = 1; (Value = GetKeyField(State->Inf, State->Desc[i].Id, L"Registry", Index)) != NULL; ++Index)
+        {
+            if (State->OmitRegCount < COMPONENT_REG_GLOB_MAX)
+                State->OmitReg[State->OmitRegCount++] = Value;
+            else
+                SetupLogFormat("components.inf: too many registry patterns (%u)", COMPONENT_REG_GLOB_MAX);
+        }
     }
+    RegFilterState = State->OmitRegCount ? State : NULL;
 }
+
+static VOID
+CommitSelection(
+    _Inout_ PCOMPONENTS_STATE State);
 
 VOID
 NTAPI
@@ -408,9 +453,8 @@ ComponentsApplyAnswerFile(
 {
     INFCONTEXT Context;
     PCWSTR Key, Value;
-    WCHAR Names[400];
     BOOLEAN Ok;
-    ULONG i, Problems = 0;
+    ULONG Problems = 0;
 
     RtlFillMemory(State->Explicit, sizeof(State->Explicit), (UCHAR)COMPONENT_UNSET);
     State->Profile = COMPONENT_PROFILE_STANDARD;
@@ -459,7 +503,19 @@ ComponentsApplyAnswerFile(
         SetupLogFormat("[Components]: %lu more lines were ignored (not logged one by one)", Problems - COMPONENT_LOG_PROBLEMS);
 
     State->Selected = ComponentsResolve(State->Count, State->Desc, State->Profile, State->Explicit);
+    CommitSelection(State);
+}
+
+/* The selection in State->Selected is final: log it and build the file filter */
+static VOID
+CommitSelection(
+    _Inout_ PCOMPONENTS_STATE State)
+{
+    WCHAR Names[400];
+    ULONG i;
+
     State->Resolved = TRUE;
+    State->AnyOff = FALSE;
 
     /* The summary */
     Names[0] = UNICODE_NULL;
@@ -502,6 +558,60 @@ ComponentsIsFileOmitted(
         if (ComponentGlobMatch(OmitGlobs[i], RelativePath))
         {
             State->SkippedFiles++;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+BOOLEAN
+NTAPI
+ComponentsIsDirectoryOmitted(
+    _In_ PCOMPONENTS_STATE State,
+    _In_ PCWSTR RelativeDir)
+{
+    WCHAR Probe[MAX_PATH];
+    ULONG i;
+
+    UNREFERENCED_PARAMETER(State);
+    /* a directory the file filter would leave empty: a file of any name inside it is left out */
+    if (!RelativeDir[0] || RelativeDir[0] == L'\\' ||
+        FAILED(RtlStringCchPrintfW(Probe, ARRAYSIZE(Probe), L"%s\\x", RelativeDir)))
+    {
+        return FALSE;
+    }
+    for (i = 0; i < OmitGlobCount; ++i)
+    {
+        if (ComponentGlobMatch(OmitGlobs[i], Probe))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+BOOLEAN
+NTAPI
+ComponentsIsRegistryOmitted(
+    _In_ PCOMPONENTS_STATE State,
+    _In_ PCWSTR Root,
+    _In_ PCWSTR Key,
+    _In_opt_ PCWSTR Value)
+{
+    WCHAR KeyPath[MAX_PATH], ValuePath[MAX_PATH + 64];
+    ULONG i;
+
+    if (!State->OmitRegCount)
+        return FALSE;
+    if (FAILED(RtlStringCchPrintfW(KeyPath, ARRAYSIZE(KeyPath), L"%s\\%s", Root, Key)))
+        return FALSE;
+    ValuePath[0] = UNICODE_NULL;
+    if (Value && Value[0])
+        RtlStringCchPrintfW(ValuePath, ARRAYSIZE(ValuePath), L"%s|%s", KeyPath, Value);
+
+    for (i = 0; i < State->OmitRegCount; ++i)
+    {
+        if (ComponentGlobMatch(State->OmitReg[i], KeyPath) ||
+            (ValuePath[0] && ComponentGlobMatch(State->OmitReg[i], ValuePath)))
+        {
             return TRUE;
         }
     }
@@ -621,6 +731,9 @@ ComponentsApplyRegistry(
     SetSz(COMPONENTS_REG_KEY, L"Profile", ComponentProfileName(State->Profile));
     SetSz(COMPONENTS_REG_KEY, L"SourceVersion", Version);
     SetDword(COMPONENTS_REG_KEY, L"AnyOff", State->AnyOff ? 1 : 0);
+    /* how many lines of the hive inf files were not added for the components that are left out (the setup log is
+     * written before the hives are built, so it cannot say) */
+    SetDword(COMPONENTS_REG_KEY, L"RegistryLinesSkipped", State->RegSkipped);
 
     for (i = 0; i < State->Count; ++i)
     {
@@ -714,6 +827,139 @@ ComponentsWriteManifest(
 
     NtClose(FileHandle);
     return STATUS_SUCCESS;
+}
+
+static VOID
+FreeRecordedState(
+    _In_ PCOMPONENTS_STATE State)
+{
+    SpInfCloseInfFile(State->Inf);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, State);
+}
+
+/*
+ * What an earlier installation recorded (components.txt), read without the INF parser: the display names in it
+ * are free text. Section [Selection] Profile=, then [Installed] and [Omitted] with one id per line.
+ */
+#define RECORD_MAX  0x10000
+
+PCOMPONENTS_STATE
+NTAPI
+ComponentsLoadRecorded(
+    _In_ PCWSTR SourcePath,
+    _In_ LCID LocaleId,
+    _In_ PCWSTR InstallationDirectory)
+{
+    PCOMPONENTS_STATE State;
+    WCHAR PathBuffer[MAX_PATH];
+    UNICODE_STRING FileName;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    HANDLE FileHandle;
+    NTSTATUS Status;
+    PCHAR Buffer, Line, End, Next;
+    ULONG Length, Section = 0, Profile = COMPONENT_PROFILE_STANDARD, i;
+    BOOLEAN Any = FALSE;
+
+    if (!NT_SUCCESS(CombinePaths(PathBuffer, ARRAYSIZE(PathBuffer), 2, InstallationDirectory, L"Panther\\components.txt")))
+        return NULL;
+    if (!DoesFileExist(NULL, PathBuffer))
+        return NULL;     /* installed without a selection: everything is there */
+
+    State = ComponentsLoad(SourcePath, LocaleId);
+    if (!State)
+    {
+        SetupLogFormat("update: the installation recorded a component selection but this medium has no components.inf: installing everything");
+        return NULL;
+    }
+
+    RtlInitUnicodeString(&FileName, PathBuffer);
+    InitializeObjectAttributes(&ObjectAttributes, &FileName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtCreateFile(&FileHandle, FILE_READ_DATA | SYNCHRONIZE, &ObjectAttributes, &IoStatusBlock,
+                          NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_OPEN,
+                          FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+    Buffer = NT_SUCCESS(Status) ? RtlAllocateHeap(RtlGetProcessHeap(), 0, RECORD_MAX + 1) : NULL;
+    if (!Buffer)
+    {
+        if (NT_SUCCESS(Status)) NtClose(FileHandle);
+        SetupLogFormat("update: cannot read the recorded component selection (0x%08lx): installing everything", Status);
+        FreeRecordedState(State);
+        return NULL;
+    }
+    Status = NtReadFile(FileHandle, NULL, NULL, NULL, &IoStatusBlock, Buffer, RECORD_MAX, NULL, NULL);
+    NtClose(FileHandle);
+    Length = NT_SUCCESS(Status) ? (ULONG)IoStatusBlock.Information : 0;
+    Buffer[Length] = '\0';
+
+    RtlFillMemory(State->Explicit, sizeof(State->Explicit), (UCHAR)COMPONENT_UNSET);
+    for (Line = Buffer; *Line; Line = Next)
+    {
+        PCHAR Eq;
+        WCHAR Id[COMPONENT_ID_MAX];
+        LONG Index;
+
+        End = Line;
+        while (*End && *End != '\r' && *End != '\n')
+            ++End;
+        Next = End;
+        while (*Next == '\r' || *Next == '\n')
+            ++Next;
+        if (*End)
+            *End = '\0';
+
+        if (*Line == ';' || !*Line)
+            continue;
+        if (*Line == '[')
+        {
+            Section = !_strnicmp(Line, "[Selection]", 11) ? 1 :
+                      !_strnicmp(Line, "[Installed]", 11) ? 2 :
+                      !_strnicmp(Line, "[Omitted]", 9) ? 3 : 0;
+            continue;
+        }
+        Eq = strchr(Line, '=');
+        if (!Eq || !Section)
+            continue;
+        *Eq = '\0';
+
+        if (Section == 1)
+        {
+            WCHAR Value[32];
+            ULONG n;
+
+            if (_stricmp(Line, "Profile"))
+                continue;
+            for (n = 0; n < ARRAYSIZE(Value) - 1 && Eq[1 + n]; ++n)
+                Value[n] = (WCHAR)(UCHAR)Eq[1 + n];
+            Value[n] = UNICODE_NULL;
+            if (!ComponentParseProfile(Value, &Profile))
+                Profile = COMPONENT_PROFILE_STANDARD;
+            continue;
+        }
+
+        for (i = 0; i < ARRAYSIZE(Id) - 1 && Line[i] && Line[i] != ' '; ++i)
+            Id[i] = (WCHAR)(UCHAR)Line[i];
+        Id[i] = UNICODE_NULL;
+        Index = ComponentFindIndex(State->Count, State->Desc, Id);
+        if (Index < 0 || !State->Desc[Index].Applicable)
+            continue;
+        State->Explicit[Index] = (Section == 2) ? COMPONENT_YES : COMPONENT_NO;
+        if (Section == 3)
+            Any = TRUE;
+    }
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+
+    if (!Any && Profile == COMPONENT_PROFILE_STANDARD)
+    {
+        FreeRecordedState(State);
+        return NULL;
+    }
+
+    State->Profile = Profile;
+    State->Selected = ComponentsResolve(State->Count, State->Desc, Profile, State->Explicit);
+    State->Record = TRUE;
+    SetupLogFormat("update: keeping the component selection of the installation (components.txt)");
+    CommitSelection(State);
+    return State;
 }
 
 /* EOF */

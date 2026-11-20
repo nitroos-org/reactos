@@ -50,6 +50,18 @@ ImportRegistrySection(
     IN PVOID hInf, // HINF
     IN PCWSTR Section);
 
+/* A line that the filter says TRUE for is not added by ImportRegistryFile / ImportRegistrySection
+ * (the lines that belong to components that are left out). NULL: no filter. */
+typedef BOOLEAN
+(NTAPI *PREGISTRY_LINE_FILTER)(
+    IN PCWSTR Root,
+    IN PCWSTR Key,
+    IN PCWSTR Value OPTIONAL);
+
+VOID
+RegistrySetLineFilter(
+    IN PREGISTRY_LINE_FILTER Filter OPTIONAL);
+
 BOOLEAN
 SetRegistryValue(
     IN PCWSTR RootName,
