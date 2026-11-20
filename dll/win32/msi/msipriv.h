@@ -980,6 +980,9 @@ extern UINT MSIREG_OpenUserDataPatchKey(LPCWSTR szPatch, MSIINSTALLCONTEXT dwCon
                                         HKEY *key, BOOL create);
 extern UINT MSIREG_OpenUserDataProductPatchesKey(LPCWSTR product, MSIINSTALLCONTEXT context,
                                                  HKEY *key, BOOL create);
+#ifdef __REACTOS__
+extern UINT MSIREG_OpenInstallPropsTrusted(LPCWSTR szProduct, MSIINSTALLCONTEXT dwContext, LPCWSTR szUserSid, HKEY *key);
+#endif
 extern UINT MSIREG_OpenInstallProps(LPCWSTR szProduct, MSIINSTALLCONTEXT dwContext,
                                     LPCWSTR szUserSid, HKEY *key, BOOL create);
 extern UINT MSIREG_OpenUpgradeCodesKey(LPCWSTR szProduct, HKEY* key, BOOL create);

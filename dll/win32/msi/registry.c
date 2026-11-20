@@ -321,6 +321,175 @@ static WCHAR *get_user_sid(void)
 }
 
 #ifdef __REACTOS__
+/*
+ * Product data of the per-user installations of a standard user (Installer\UserData\<own SID>: Products,
+ * Components, Patches). On Windows the installer service writes it under HKEY_LOCAL_MACHINE; a standard user
+ * cannot create keys there (nor here once registry key security is enforced) and no service-side engine
+ * exists, so a non-elevated caller keeps its own data under HKEY_CURRENT_USER\Software\Microsoft\Installer\UserData
+ * (the <SID> level is dropped, the hive is the user's own). Only the caller's own SID is redirected:
+ *  - writes: an administrator's token writes HKEY_LOCAL_MACHINE as before, any other token HKEY_CURRENT_USER;
+ *  - reads of the own SID look in the place the token writes first, then in the other (data written by an
+ *    elevated run of the same user, or before this layout, is found);
+ *  - another user's data (an administrator asking for a given SID, MsiEnumProductsEx style) is read from
+ *    HKEY_LOCAL_MACHINE, then, for an administrator only and read-only, from the user's loaded hive
+ *    HKEY_USERS\<SID>. It is never written and never taken from there by a non-administrator.
+ * The per-machine data (S-1-5-18) is untouched.
+ */
+static const WCHAR userdata_hklm[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\";
+static const WCHAR userdata_hkcu[] = L"Software\\Microsoft\\Installer\\UserData\\";
+
+/* split an HKLM UserData path: the SID (into sid) and the part after it */
+static BOOL userdata_split( const WCHAR *keypath, WCHAR *sid, DWORD sidlen, const WCHAR **rest )
+{
+    const WCHAR *p, *end;
+    DWORD len = wcslen( userdata_hklm );
+
+    if (wcsnicmp( keypath, userdata_hklm, len )) return FALSE;
+    p = keypath + len;
+    if (!(end = wcschr( p, '\\' ))) end = p + wcslen( p );
+    if (end == p || (DWORD)(end - p) >= sidlen) return FALSE;
+    memcpy( sid, p, (end - p) * sizeof(WCHAR) );
+    sid[end - p] = 0;
+    *rest = *end ? end + 1 : end;
+    return TRUE;
+}
+
+static void userdata_hkcu_path( WCHAR *buf, DWORD len, const WCHAR *rest )
+{
+    swprintf( buf, len, L"%s%s", userdata_hkcu, rest );
+}
+
+/* the token of the process does not change: ask once (every key open of an installation passes here) */
+static const WCHAR *userdata_own_sid( void )
+{
+    static WCHAR *sid;
+
+    if (!sid)
+    {
+        WCHAR *tmp = get_user_sid();
+        if (tmp && InterlockedCompareExchangePointer( (void **)&sid, tmp, NULL )) LocalFree( tmp );
+    }
+    return sid;
+}
+
+static BOOL userdata_is_admin( void )
+{
+    static LONG state;
+
+    if (!state) InterlockedCompareExchange( &state, msi_user_is_admin() ? 1 : 2, 0 );
+    return state == 1;
+}
+
+static LONG userdata_open( const WCHAR *keypath, REGSAM access, BOOL create, BOOL allow_hku, HKEY *key )
+{
+    WCHAR sid[128], path[0x200];
+    const WCHAR *rest, *own;
+    BOOL is_own = FALSE, admin = userdata_is_admin();
+    LONG r;
+
+    if (userdata_split( keypath, sid, ARRAY_SIZE(sid), &rest ) && wcsicmp( sid, L"S-1-5-18" ) &&
+        (own = userdata_own_sid()))
+        is_own = !wcsicmp( sid, own );
+    if (!is_own)
+    {
+        if (create) return RegCreateKeyExW( HKEY_LOCAL_MACHINE, keypath, 0, NULL, 0, access, NULL, key, NULL );
+        r = RegOpenKeyExW( HKEY_LOCAL_MACHINE, keypath, 0, access, key );
+        if ((r == ERROR_FILE_NOT_FOUND || r == ERROR_PATH_NOT_FOUND) && admin && allow_hku &&
+            userdata_split( keypath, sid, ARRAY_SIZE(sid), &rest ) && wcsicmp( sid, L"S-1-5-18" ) &&
+            !wcschr( sid, '\\' ))
+        {
+            WCHAR upath[0x200];
+            HKEY users;
+            /* an administrator asked for the data of another user: read it, nothing else, from the loaded hive */
+            swprintf( upath, ARRAY_SIZE(upath), L"%s\\%s%s", sid, userdata_hkcu, rest );
+            if (!RegOpenKeyExW( HKEY_USERS, upath, 0, (access & (KEY_WOW64_64KEY | KEY_WOW64_32KEY)) | KEY_READ, &users ))
+            {
+                *key = users;
+                return ERROR_SUCCESS;
+            }
+        }
+        return r;
+    }
+    userdata_hkcu_path( path, ARRAY_SIZE(path), rest );
+    if (create)
+    {
+        if (admin) return RegCreateKeyExW( HKEY_LOCAL_MACHINE, keypath, 0, NULL, 0, access, NULL, key, NULL );
+        return RegCreateKeyExW( HKEY_CURRENT_USER, path, 0, NULL, 0, access, NULL, key, NULL );
+    }
+    if (admin)
+    {
+        r = RegOpenKeyExW( HKEY_LOCAL_MACHINE, keypath, 0, access, key );
+        if (r == ERROR_FILE_NOT_FOUND || r == ERROR_PATH_NOT_FOUND)
+            r = RegOpenKeyExW( HKEY_CURRENT_USER, path, 0, access, key );
+        return r;
+    }
+    r = RegOpenKeyExW( HKEY_CURRENT_USER, path, 0, access, key );
+    if (r == ERROR_FILE_NOT_FOUND || r == ERROR_PATH_NOT_FOUND)
+    {
+        r = RegOpenKeyExW( HKEY_LOCAL_MACHINE, keypath, 0, access, key );
+        /* data from before this layout: with registry key security enforced a standard user may read it, not
+           change it, and every open here asks for full access */
+        if (r == ERROR_ACCESS_DENIED)
+            r = RegOpenKeyExW( HKEY_LOCAL_MACHINE, keypath, 0, (access & (KEY_WOW64_64KEY | KEY_WOW64_32KEY)) | KEY_READ, key );
+    }
+    return r;
+}
+
+static LONG msi_userdata_open( const WCHAR *keypath, REGSAM access, BOOL create, HKEY *key )
+{
+    return userdata_open( keypath, access, create, TRUE, key );
+}
+
+/* delete the key child of the HKLM UserData path parent; the own SID is deleted from both places */
+static LONG msi_userdata_delete( const WCHAR *parent, REGSAM access, const WCHAR *child )
+{
+    WCHAR sid[128], path[0x200];
+    const WCHAR *rest, *own;
+    HKEY hkey;
+    LONG r = ERROR_SUCCESS;
+    BOOL is_own = FALSE;
+
+    if (userdata_split( parent, sid, ARRAY_SIZE(sid), &rest ) && wcsicmp( sid, L"S-1-5-18" ) &&
+        (own = userdata_own_sid()))
+        is_own = !wcsicmp( sid, own );
+    if (is_own)
+    {
+        userdata_hkcu_path( path, ARRAY_SIZE(path), rest );
+        if (!RegOpenKeyExW( HKEY_CURRENT_USER, path, 0, access, &hkey ))
+        {
+            r = RegDeleteTreeW( hkey, child );
+            RegCloseKey( hkey );
+            if (r == ERROR_FILE_NOT_FOUND) r = ERROR_SUCCESS;
+        }
+    }
+    if (is_own && !userdata_is_admin())
+    {
+        /* data of a per-user installation made before this layout (default mode, or by an elevated run): remove it
+           when it is there and the key can be changed; a refusal is not an error of the removal, and nothing is
+           asked of the machine key when no such data exists (a refused open is a registry audit entry) */
+        WCHAR old[0x200];
+        HKEY probe;
+
+        swprintf( old, ARRAY_SIZE(old), L"%s\\%s", parent, child );
+        if (!RegOpenKeyExW( HKEY_LOCAL_MACHINE, old, 0, KEY_READ | (access & KEY_WOW64_64KEY), &probe ))
+        {
+            RegCloseKey( probe );
+            if (!RegOpenKeyExW( HKEY_LOCAL_MACHINE, parent, 0, access, &hkey ))
+            {
+                RegDeleteTreeW( hkey, child );
+                RegCloseKey( hkey );
+            }
+        }
+        return r;
+    }
+    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, parent, 0, access, &hkey )) return r;
+    r = RegDeleteTreeW( hkey, child );
+    RegCloseKey( hkey );
+    return r;
+}
+#endif
+
+#ifdef __REACTOS__
 /* The Add/Remove Programs entry of a per-user product of a standard user is under HKEY_CURRENT_USER (an
    administrator keeps the one under HKEY_LOCAL_MACHINE, as the winetests of Wine expect) */
 UINT MSIREG_OpenUninstallKey(const WCHAR *product, enum platform platform, MSIINSTALLCONTEXT context, HKEY *key, BOOL create)
@@ -545,8 +714,12 @@ UINT MSIREG_OpenUserDataFeaturesKey(LPCWSTR szProduct, LPCWSTR szUserSid, MSIINS
         swprintf( keypath, ARRAY_SIZE(keypath), fmtW, szUserSid, squashed_pc );
         LocalFree(usersid);
     }
+#ifdef __REACTOS__
+    return msi_userdata_open( keypath, access, create, key );
+#else
     if (create) return RegCreateKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, NULL, 0, access, NULL, key, NULL);
     return RegOpenKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, access, key);
+#endif
 }
 
 UINT MSIREG_OpenUserComponentsKey(LPCWSTR szComponent, HKEY *key, BOOL create)
@@ -592,8 +765,12 @@ UINT MSIREG_OpenUserDataComponentKey(LPCWSTR szComponent, LPCWSTR szUserSid, HKE
     }
     else swprintf( keypath, ARRAY_SIZE(keypath), fmtW, szUserSid, squashed_comp );
 
+#ifdef __REACTOS__
+    return msi_userdata_open( keypath, access, create, key );
+#else
     if (create) return RegCreateKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, NULL, 0, access, NULL, key, NULL);
     return RegOpenKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, access, key);
+#endif
 }
 
 UINT MSIREG_DeleteUserDataComponentKey(LPCWSTR szComponent, LPCWSTR szUserSid)
@@ -602,8 +779,10 @@ UINT MSIREG_DeleteUserDataComponentKey(LPCWSTR szComponent, LPCWSTR szUserSid)
         L"Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\%s\\Components";
     REGSAM access = KEY_WOW64_64KEY | KEY_ALL_ACCESS;
     WCHAR *usersid, squashed_comp[SQUASHED_GUID_SIZE], keypath[0x200];
+#ifndef __REACTOS__
     HKEY hkey;
     LONG r;
+#endif
 
     if (!squash_guid( szComponent, squashed_comp )) return ERROR_FUNCTION_FAILED;
     TRACE("%s squashed %s\n", debugstr_w(szComponent), debugstr_w(squashed_comp));
@@ -620,10 +799,14 @@ UINT MSIREG_DeleteUserDataComponentKey(LPCWSTR szComponent, LPCWSTR szUserSid)
     }
     else swprintf(keypath, ARRAY_SIZE(keypath), fmtW, szUserSid);
 
+#ifdef __REACTOS__
+    return msi_userdata_delete( keypath, access, squashed_comp );
+#else
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, access, &hkey)) return ERROR_SUCCESS;
     r = RegDeleteTreeW( hkey, squashed_comp );
     RegCloseKey(hkey);
     return r;
+#endif
 }
 
 UINT MSIREG_OpenUserDataProductKey(LPCWSTR szProduct, MSIINSTALLCONTEXT dwContext, LPCWSTR szUserSid, HKEY *key, BOOL create)
@@ -650,8 +833,12 @@ UINT MSIREG_OpenUserDataProductKey(LPCWSTR szProduct, MSIINSTALLCONTEXT dwContex
         swprintf( keypath, ARRAY_SIZE(keypath), fmtW, usersid, squashed_pc );
         LocalFree(usersid);
     }
+#ifdef __REACTOS__
+    return msi_userdata_open( keypath, access, create, key );
+#else
     if (create) return RegCreateKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, NULL, 0, access, NULL, key, NULL);
     return RegOpenKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, access, key);
+#endif
 }
 
 UINT MSIREG_OpenUserDataPatchKey(LPCWSTR szPatch, MSIINSTALLCONTEXT dwContext, HKEY *key, BOOL create)
@@ -676,8 +863,12 @@ UINT MSIREG_OpenUserDataPatchKey(LPCWSTR szPatch, MSIINSTALLCONTEXT dwContext, H
         swprintf( keypath, ARRAY_SIZE(keypath), fmtW, usersid, squashed_patch );
         LocalFree(usersid);
     }
+#ifdef __REACTOS__
+    return msi_userdata_open( keypath, access, create, key );
+#else
     if (create) return RegCreateKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, NULL, 0, access, NULL, key, NULL);
     return RegOpenKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, access, key);
+#endif
 }
 
 UINT MSIREG_DeleteUserDataPatchKey(LPCWSTR patch, MSIINSTALLCONTEXT context)
@@ -686,8 +877,10 @@ UINT MSIREG_DeleteUserDataPatchKey(LPCWSTR patch, MSIINSTALLCONTEXT context)
         L"Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\%s\\Patches";
     REGSAM access = KEY_WOW64_64KEY | KEY_ALL_ACCESS;
     WCHAR *usersid, squashed_patch[SQUASHED_GUID_SIZE], keypath[0x200];
+#ifndef __REACTOS__
     HKEY hkey;
     LONG r;
+#endif
 
     if (!squash_guid( patch, squashed_patch )) return ERROR_FUNCTION_FAILED;
     TRACE("%s squashed %s\n", debugstr_w(patch), debugstr_w(squashed_patch));
@@ -704,10 +897,14 @@ UINT MSIREG_DeleteUserDataPatchKey(LPCWSTR patch, MSIINSTALLCONTEXT context)
         swprintf(keypath, ARRAY_SIZE(keypath), fmtW, usersid);
         LocalFree(usersid);
     }
+#ifdef __REACTOS__
+    return msi_userdata_delete( keypath, access, squashed_patch );
+#else
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, access, &hkey)) return ERROR_SUCCESS;
     r = RegDeleteTreeW( hkey, squashed_patch );
     RegCloseKey(hkey);
     return r;
+#endif
 }
 
 UINT MSIREG_OpenUserDataProductPatchesKey(LPCWSTR product, MSIINSTALLCONTEXT context, HKEY *key, BOOL create)
@@ -732,11 +929,20 @@ UINT MSIREG_OpenUserDataProductPatchesKey(LPCWSTR product, MSIINSTALLCONTEXT con
         swprintf( keypath, ARRAY_SIZE(keypath), fmtW, usersid, squashed_product );
         LocalFree(usersid);
     }
+#ifdef __REACTOS__
+    return msi_userdata_open( keypath, access, create, key );
+#else
     if (create) return RegCreateKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, NULL, 0, access, NULL, key, NULL);
     return RegOpenKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, access, key);
+#endif
 }
 
+#ifdef __REACTOS__
+static UINT open_install_props(LPCWSTR szProduct, MSIINSTALLCONTEXT dwContext, LPCWSTR szUserSid, HKEY *key, BOOL create,
+                               BOOL allow_hku)
+#else
 UINT MSIREG_OpenInstallProps(LPCWSTR szProduct, MSIINSTALLCONTEXT dwContext, LPCWSTR szUserSid, HKEY *key, BOOL create)
+#endif
 {
     static const WCHAR fmtW[] =
         L"Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\%s\\Products\\%s\\InstallProperties";
@@ -760,9 +966,27 @@ UINT MSIREG_OpenInstallProps(LPCWSTR szProduct, MSIINSTALLCONTEXT dwContext, LPC
         swprintf( keypath, ARRAY_SIZE(keypath), fmtW, usersid, squashed_pc );
         LocalFree(usersid);
     }
+#ifdef __REACTOS__
+    return userdata_open( keypath, access, create, allow_hku, key );
+#else
     if (create) return RegCreateKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, NULL, 0, access, NULL, key, NULL);
     return RegOpenKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, access, key);
+#endif
 }
+
+#ifdef __REACTOS__
+UINT MSIREG_OpenInstallProps(LPCWSTR szProduct, MSIINSTALLCONTEXT dwContext, LPCWSTR szUserSid, HKEY *key, BOOL create)
+{
+    return open_install_props( szProduct, dwContext, szUserSid, key, create, TRUE );
+}
+
+/* the product data of another user as an administrator may trust it: never from that user's own hive, whose
+   values (LocalPackage is a path the engine opens) the user wrote */
+UINT MSIREG_OpenInstallPropsTrusted(LPCWSTR szProduct, MSIINSTALLCONTEXT dwContext, LPCWSTR szUserSid, HKEY *key)
+{
+    return open_install_props( szProduct, dwContext, szUserSid, key, FALSE, FALSE );
+}
+#endif
 
 UINT MSIREG_DeleteUserDataProductKey(LPCWSTR szProduct, MSIINSTALLCONTEXT context)
 {
@@ -770,8 +994,10 @@ UINT MSIREG_DeleteUserDataProductKey(LPCWSTR szProduct, MSIINSTALLCONTEXT contex
         L"Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\%s\\Products";
     REGSAM access = KEY_WOW64_64KEY | KEY_ALL_ACCESS;
     WCHAR *usersid, squashed_pc[SQUASHED_GUID_SIZE], keypath[0x200];
+#ifndef __REACTOS__
     HKEY hkey;
     LONG r;
+#endif
 
     if (!squash_guid( szProduct, squashed_pc )) return ERROR_FUNCTION_FAILED;
     TRACE("%s squashed %s\n", debugstr_w(szProduct), debugstr_w(squashed_pc));
@@ -789,10 +1015,14 @@ UINT MSIREG_DeleteUserDataProductKey(LPCWSTR szProduct, MSIINSTALLCONTEXT contex
         LocalFree(usersid);
     }
 
+#ifdef __REACTOS__
+    return msi_userdata_delete( keypath, access, squashed_pc );
+#else
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, access, &hkey)) return ERROR_SUCCESS;
     r = RegDeleteTreeW( hkey, squashed_pc );
     RegCloseKey(hkey);
     return r;
+#endif
 }
 
 UINT MSIREG_DeleteProductKey(LPCWSTR szProduct)
@@ -1310,6 +1540,124 @@ found:
     return r;
 }
 
+#ifdef __REACTOS__
+/* the components of the caller's own per-user installations kept under HKEY_CURRENT_USER (see msi_userdata_open) */
+static UINT fetch_hkcu_component( const WCHAR *usersid, DWORD index, DWORD *idx, WCHAR guid[39],
+                                  MSIINSTALLCONTEXT *installed_ctx, LPWSTR sid, LPDWORD sid_len )
+{
+    UINT r = ERROR_SUCCESS;
+    WCHAR component[SQUASHED_GUID_SIZE], path[0x200], *own;
+    DWORD i = 0, len_component, len_own;
+    HKEY key_components;
+    REGSAM access = KEY_ENUMERATE_SUB_KEYS | KEY_WOW64_64KEY;
+
+    if (!(own = get_user_sid())) return ERROR_NO_MORE_ITEMS;
+    if (wcscmp( usersid, L"S-1-1-0" ) && wcsicmp( usersid, own ))
+    {
+        LocalFree( own );
+        return ERROR_NO_MORE_ITEMS;
+    }
+    swprintf( path, ARRAY_SIZE(path), L"%sComponents", userdata_hkcu );
+    if (RegOpenKeyExW( HKEY_CURRENT_USER, path, 0, access, &key_components ))
+    {
+        LocalFree( own );
+        return ERROR_NO_MORE_ITEMS;
+    }
+    len_component = ARRAY_SIZE( component );
+    while (!RegEnumKeyExW( key_components, i, component, &len_component, NULL, NULL, NULL, NULL ))
+    {
+        /* the hive is the user's: a key that is not a squashed GUID is not a component */
+        if (len_component == 32)
+        {
+            if (*idx == index) goto found;
+            (*idx)++;
+        }
+        len_component = ARRAY_SIZE( component );
+        i++;
+    }
+    RegCloseKey( key_components );
+    LocalFree( own );
+    return ERROR_NO_MORE_ITEMS;
+
+found:
+    len_own = wcslen( own );
+    if (sid_len)
+    {
+        if (*sid_len < len_own + 1)
+        {
+            *sid_len = len_own + 1;
+            r = ERROR_MORE_DATA;
+        }
+        else if (sid)
+        {
+            *sid_len = len_own;
+            lstrcpyW( sid, own );
+        }
+    }
+    if (guid) unsquash_guid( component, guid );
+    if (installed_ctx) *installed_ctx = MSIINSTALLCONTEXT_USERUNMANAGED;
+    RegCloseKey( key_components );
+    LocalFree( own );
+    return r;
+}
+
+/* the components of other users' per-user installations, for an administrator, read from the loaded hives
+   (HKEY_USERS\<SID>): the data an administrator's MsiEnumComponentsEx would find under the machine key on Windows */
+static UINT fetch_hku_component( const WCHAR *usersid, DWORD index, DWORD *idx, WCHAR guid[39],
+                                 MSIINSTALLCONTEXT *installed_ctx, LPWSTR sid, LPDWORD sid_len )
+{
+    UINT r = ERROR_SUCCESS;
+    WCHAR path[MAX_PATH], component[SQUASHED_GUID_SIZE], user[128];
+    const WCHAR *own;
+    DWORD i = 0, j, len_component, len_user;
+    REGSAM access = KEY_ENUMERATE_SUB_KEYS | KEY_WOW64_64KEY;
+    HKEY key_users, key_components;
+
+    if (!userdata_is_admin() || !(own = userdata_own_sid())) return ERROR_NO_MORE_ITEMS;
+    if (RegOpenKeyExW( HKEY_USERS, NULL, 0, access, &key_users )) return ERROR_NO_MORE_ITEMS;
+
+    len_user = ARRAY_SIZE( user );
+    while (!RegEnumKeyExW( key_users, i++, user, &len_user, NULL, NULL, NULL, NULL ))
+    {
+        len_user = ARRAY_SIZE( user );
+        if (wcsncmp( user, L"S-1-5-21-", 9 ) || wcschr( user, '_' ) || !wcsicmp( user, own )) continue;
+        if (wcscmp( usersid, L"S-1-1-0" ) && wcsicmp( usersid, user )) continue;
+        swprintf( path, ARRAY_SIZE(path), L"%s\\%sComponents", user, userdata_hkcu );
+        if (RegOpenKeyExW( HKEY_USERS, path, 0, access, &key_components )) continue;
+        len_user = wcslen( user );
+        for (j = 0;; j++)
+        {
+            len_component = ARRAY_SIZE( component );
+            if (RegEnumKeyExW( key_components, j, component, &len_component, NULL, NULL, NULL, NULL )) break;
+            if (len_component != 32) continue;  /* the hive is the user's: not a squashed GUID, not a component */
+            if (*idx != index) { (*idx)++; continue; }
+            if (sid_len)
+            {
+                if (*sid_len < len_user + 1)
+                {
+                    *sid_len = len_user + 1;
+                    r = ERROR_MORE_DATA;
+                }
+                else if (sid)
+                {
+                    *sid_len = len_user;
+                    lstrcpyW( sid, user );
+                }
+            }
+            if (guid) unsquash_guid( component, guid );
+            if (installed_ctx) *installed_ctx = MSIINSTALLCONTEXT_USERUNMANAGED;
+            RegCloseKey( key_components );
+            RegCloseKey( key_users );
+            return r;
+        }
+        RegCloseKey( key_components );
+        len_user = ARRAY_SIZE( user );
+    }
+    RegCloseKey( key_users );
+    return ERROR_NO_MORE_ITEMS;
+}
+#endif
+
 static UINT enum_components( const WCHAR *usersid, DWORD ctx, DWORD index, DWORD *idx, WCHAR guid[39],
                              MSIINSTALLCONTEXT *installed_ctx, LPWSTR sid, LPDWORD sid_len )
 {
@@ -1332,6 +1680,12 @@ static UINT enum_components( const WCHAR *usersid, DWORD ctx, DWORD index, DWORD
         r = fetch_user_component( usersid, MSIINSTALLCONTEXT_USERUNMANAGED, index, idx, guid,
                                   installed_ctx, sid, sid_len );
         if (r != ERROR_NO_MORE_ITEMS) goto done;
+#ifdef __REACTOS__
+        r = fetch_hkcu_component( usersid, index, idx, guid, installed_ctx, sid, sid_len );
+        if (r != ERROR_NO_MORE_ITEMS) goto done;
+        r = fetch_hku_component( usersid, index, idx, guid, installed_ctx, sid, sid_len );
+        if (r != ERROR_NO_MORE_ITEMS) goto done;
+#endif
     }
     if (ctx & MSIINSTALLCONTEXT_MACHINE)
     {
@@ -1616,6 +1970,52 @@ UINT WINAPI MsiEnumRelatedProductsW( const WCHAR *szUpgradeCode, DWORD dwReserve
     if (NULL == lpProductBuf)
         return ERROR_INVALID_PARAMETER;
 
+#ifdef __REACTOS__
+    {
+        /* the machine list first, then the products a non-elevated user registered under HKEY_CURRENT_USER and
+           that are not in the machine list (a per-user product is published in both for an administrator) */
+        DWORD count = 0, i;
+        HKEY machine = NULL, user;
+        WCHAR name[SQUASHED_GUID_SIZE];
+
+        if (MSIREG_OpenUpgradeCodesKey(szUpgradeCode, &machine, FALSE) == ERROR_SUCCESS)
+        {
+            RegQueryInfoKeyW( machine, NULL, NULL, NULL, NULL, NULL, NULL, &count, NULL, NULL, NULL, NULL );
+            r = RegEnumValueW(machine, iProductIndex, szKeyName, &dwSize, NULL, NULL, NULL, NULL);
+            if (r == ERROR_SUCCESS)
+            {
+                unsquash_guid(szKeyName, lpProductBuf);
+                RegCloseKey(machine);
+                return r;
+            }
+            if (r != ERROR_NO_MORE_ITEMS)
+            {
+                RegCloseKey(machine);
+                return r;
+            }
+        }
+        r = ERROR_NO_MORE_ITEMS;
+        if (!MSIREG_OpenUserUpgradeCodesKey(szUpgradeCode, &user, FALSE))
+        {
+            DWORD seen = count;
+
+            for (i = 0;; i++)
+            {
+                DWORD len = ARRAY_SIZE(name);
+                if (RegEnumValueW(user, i, name, &len, NULL, NULL, NULL, NULL)) break;
+                if (len != 32) continue;  /* not a squashed GUID: unsquash_guid would leave the caller's buffer alone */
+                if (machine && !RegQueryValueExW(machine, name, NULL, NULL, NULL, NULL)) continue;
+                if (seen++ != iProductIndex) continue;
+                unsquash_guid(name, lpProductBuf);
+                r = ERROR_SUCCESS;
+                break;
+            }
+            RegCloseKey(user);
+        }
+        if (machine) RegCloseKey(machine);
+        return r;
+    }
+#endif
     r = MSIREG_OpenUpgradeCodesKey(szUpgradeCode, &hkey, FALSE);
     if (r != ERROR_SUCCESS)
         return ERROR_NO_MORE_ITEMS;

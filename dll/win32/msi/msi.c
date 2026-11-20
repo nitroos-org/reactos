@@ -801,7 +801,11 @@ static UINT open_package( const WCHAR *product, const WCHAR *usersid,
     HKEY props;
     WCHAR *localpath, sourcepath[MAX_PATH], filename[MAX_PATH];
 
+#ifdef __REACTOS__
+    r = MSIREG_OpenInstallPropsTrusted( product, context, usersid, &props );
+#else
     r = MSIREG_OpenInstallProps( product, context, usersid, &props, FALSE );
+#endif
     if (r != ERROR_SUCCESS) return ERROR_BAD_CONFIGURATION;
 
     if ((localpath = msi_reg_get_val_str( props, L"LocalPackage" )))

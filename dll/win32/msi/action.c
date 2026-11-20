@@ -2692,6 +2692,32 @@ static BYTE *parse_value( MSIPACKAGE *package, const WCHAR *value, DWORD len, DW
     return data;
 }
 
+#ifdef __REACTOS__
+/* the token of the process is the LocalSystem account (S-1-5-18), the same token the UserData lookups use */
+static BOOL msi_process_is_local_system(void)
+{
+    static LONG state;
+
+    if (!state)
+    {
+        BYTE buf[SECURITY_MAX_SID_SIZE + sizeof(TOKEN_USER)];
+        DWORD len;
+        HANDLE token;
+        LONG v = 2;
+
+        if (OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token ))
+        {
+            if (GetTokenInformation( token, TokenUser, buf, sizeof(buf), &len ) &&
+                IsWellKnownSid( ((TOKEN_USER *)buf)->User.Sid, WinLocalSystemSid ))
+                v = 1;
+            CloseHandle( token );
+        }
+        InterlockedCompareExchange( &state, v, 0 );
+    }
+    return state == 1;
+}
+#endif
+
 static const WCHAR *get_root_key( MSIPACKAGE *package, INT root, HKEY *root_key )
 {
     const WCHAR *ret;
@@ -2711,6 +2737,30 @@ static const WCHAR *get_root_key( MSIPACKAGE *package, INT root, HKEY *root_key 
         }
         break;
     case 0:
+#ifdef __REACTOS__
+        /* a per-user installation writes the classes of its Registry table under HKEY_CURRENT_USER\Software\Classes
+           (Windows Installer, Installation Context: Registry Redirection); HKEY_CLASSES_ROOT here is merged and
+           writes the machine's classes, which a standard user may not change */
+        /* Not for the LocalSystem account: its HKEY_CURRENT_USER is .DEFAULT, from which every new profile is
+           created and which no existing user sees, so its classes stay where they always went (a deliberate
+           keep-previous-behaviour choice; what Windows does for a per-user install by LocalSystem: verify on peer) */
+        if (!msi_get_property_int( package->db, L"ALLUSERS", 0 ) && !msi_process_is_local_system())
+        {
+            static HKEY user_classes;
+            HKEY key;
+
+            if (!user_classes && !RegCreateKeyExW( HKEY_CURRENT_USER, L"Software\\Classes", 0, NULL, 0, KEY_ALL_ACCESS,
+                                                    NULL, &key, NULL ) &&
+                InterlockedCompareExchangePointer( (void **)&user_classes, key, NULL ))
+                RegCloseKey( key );
+            if (user_classes)
+            {
+                *root_key = user_classes;
+                ret = L"HKEY_CURRENT_USER\\Software\\Classes\\";
+                break;
+            }
+        }
+#endif
         *root_key = HKEY_CLASSES_ROOT;
         ret = L"HKEY_CLASSES_ROOT\\";
         break;
@@ -5494,6 +5544,12 @@ static UINT ACTION_RegisterProduct(MSIPACKAGE *package)
     upgrade_code = msi_dup_property(package->db, L"UpgradeCode");
     if (upgrade_code)
     {
+#ifdef __REACTOS__
+        /* a non-elevated per-user product cannot create the machine key: its link goes to the user's own */
+        if (package->Context != MSIINSTALLCONTEXT_MACHINE && !msi_user_is_admin())
+            rc = MSIREG_OpenUserUpgradeCodesKey( upgrade_code, &upgrade_key, TRUE );
+        else
+#endif
         rc = MSIREG_OpenUpgradeCodesKey( upgrade_code, &upgrade_key, TRUE );
         if (rc == ERROR_SUCCESS)
         {
@@ -5617,8 +5673,15 @@ static UINT ACTION_UnpublishProduct(MSIPACKAGE *package)
     MSIREG_DeleteUninstallKey(package->ProductCode, package->platform);
 #endif
 
-    MSIREG_DeleteLocalClassesProductKey(package->ProductCode);
-    MSIREG_DeleteLocalClassesFeaturesKey(package->ProductCode);
+#ifdef __REACTOS__
+    /* a per-user product of a token that is not an administrator has no machine-wide registration, and the
+       machine keys are not its to change: do not ask for them (each refused open is a registry audit denial) */
+    if (package->Context == MSIINSTALLCONTEXT_MACHINE || msi_user_is_admin())
+#endif
+    {
+        MSIREG_DeleteLocalClassesProductKey(package->ProductCode);
+        MSIREG_DeleteLocalClassesFeaturesKey(package->ProductCode);
+    }
     MSIREG_DeleteUserProductKey(package->ProductCode);
     MSIREG_DeleteUserFeaturesKey(package->ProductCode);
 
