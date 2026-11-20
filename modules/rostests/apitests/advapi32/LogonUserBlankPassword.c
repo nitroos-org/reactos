@@ -200,6 +200,8 @@ static void TestBlankPolicyOn(PCWSTR User)
         ok(Error == ERROR_LOGON_FAILURE, "%ls, wrong password, type %lu: %lu, expected 1326\n",
            User, PasswordTypes[i], Error);
     }
+    ok_dec(BadCount(User), Before + RTL_NUMBER_OF(PasswordTypes));
+
     ok_dec(Logon(User, L"", LOGON32_LOGON_NEW_CREDENTIALS), ERROR_SUCCESS);
 
     Status = LsaLogon(User, L"", Interactive, &SubStatus);
