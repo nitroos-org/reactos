@@ -10,6 +10,13 @@
 
 #include "precomp.h"
 
+/* three pages on x64, two on x86 (measured under WoW64) */
+#ifdef _M_AMD64
+#define RTLP_TEST_GUARD_PAGES 3
+#else
+#define RTLP_TEST_GUARD_PAGES 2
+#endif
+
 typedef NTSTATUS (NTAPI *PFN_CreateUserStack)(SIZE_T, SIZE_T, ULONG_PTR, SIZE_T, ULONG_PTR, PINITIAL_TEB);
 typedef VOID (NTAPI *PFN_FreeUserStack)(PVOID);
 
@@ -65,6 +72,74 @@ START_TEST(RtlCreateUserStack)
     Status = pCreate(0x1000, 0x100000, 0, 0, 0x10000, &Teb);
     ok_hex(Status, STATUS_INVALID_PARAMETER);
 
+    /* the page size must not be above the alignment */
+    memset(&Teb, 0xcc, sizeof(Teb));
+    Status = pCreate(0x1000, 0x100000, 0, 0x2000, 0x1000, &Teb);
+    ok_hex(Status, STATUS_INVALID_PARAMETER);
+    Status = pCreate(0x1000, 0x100000, 0, 0x1000, 3, &Teb);
+    ok_hex(Status, STATUS_INVALID_PARAMETER);
+    Status = pCreate(0x1000, 0x100000, 0, 3, 2, &Teb);
+    ok_hex(Status, STATUS_INVALID_PARAMETER);
+    ok(Teb.StackBase == (PVOID)(ULONG_PTR)(sizeof(PVOID) == 8 ? 0xcccccccccccccccc : 0xcccccccc), "StackBase %p\n", Teb.StackBase);
+
+    /* a size that overflows when it is rounded is a bad parameter */
+    Status = pCreate((SIZE_T)-1, 0, 0, 0x1000, 0x1000, &Teb);
+    ok_hex(Status, STATUS_INVALID_PARAMETER);
+    Status = pCreate(0x2000, 0x100000, 0, 0x1000, (ULONG_PTR)-1, &Teb);
+    ok_hex(Status, STATUS_INVALID_PARAMETER);
+
+    /* the rounding is the mask (x + a - 1) & ~(a - 1) also when a is no power of two; the limit is on a page */
+    {
+        static const struct { SIZE_T PageSize, Align, Total, Committed; } s_Masks[] =
+        {
+            { 2, 3,      0x100001, 0x3001 },
+            { 0x1000, 0x1800, 0x100800, 0x3800 },
+            { 1, 1,      0x100001, 0x2001 },
+        };
+
+        for (i = 0; i < _countof(s_Masks); i++)
+        {
+            memset(&Teb, 0xcc, sizeof(Teb));
+            Status = pCreate(0x2001, 0x100001, 0, s_Masks[i].PageSize, s_Masks[i].Align, &Teb);
+            ok_hex(Status, STATUS_SUCCESS);
+            if (!NT_SUCCESS(Status))
+                continue;
+            ok((SIZE_T)((PCHAR)Teb.StackBase - (PCHAR)Teb.AllocatedStackBase) == s_Masks[i].Total, "mask row %lu: total %Ix\n", i,
+               (SIZE_T)((PCHAR)Teb.StackBase - (PCHAR)Teb.AllocatedStackBase));
+            ok((SIZE_T)((PCHAR)Teb.StackBase - (PCHAR)Teb.StackLimit) == s_Masks[i].Committed, "mask row %lu: committed %Ix\n", i,
+               (SIZE_T)((PCHAR)Teb.StackBase - (PCHAR)Teb.StackLimit));
+            ok(((ULONG_PTR)Teb.StackLimit & 0xfff) == 0, "mask row %lu: limit %p is not on a page\n", i, Teb.StackLimit);
+            pFree(Teb.AllocatedStackBase);
+        }
+    }
+
+    /* the guard region is there when that much room is left below the limit: exactly that much is enough */
+    {
+        const SIZE_T GuardPages = RTLP_TEST_GUARD_PAGES;
+        MEMORY_BASIC_INFORMATION Mbi2;
+
+        memset(&Teb, 0xcc, sizeof(Teb));
+        Status = pCreate(0x1000, (GuardPages + 1) * 0x1000, 0, 0x1000, 0x1000, &Teb);
+        ok_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            ok(VirtualQuery(Teb.AllocatedStackBase, &Mbi2, sizeof(Mbi2)) == sizeof(Mbi2), "VirtualQuery failed\n");
+            ok(Mbi2.State == MEM_COMMIT && Mbi2.Protect == (PAGE_READWRITE | PAGE_GUARD) && Mbi2.RegionSize == GuardPages * 0x1000,
+               "exact room: state %lx protect %lx size %Ix\n", Mbi2.State, Mbi2.Protect, Mbi2.RegionSize);
+            pFree(Teb.AllocatedStackBase);
+        }
+
+        memset(&Teb, 0xcc, sizeof(Teb));
+        Status = pCreate(0x1000, GuardPages * 0x1000, 0, 0x1000, 0x1000, &Teb);
+        ok_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            ok(VirtualQuery(Teb.AllocatedStackBase, &Mbi2, sizeof(Mbi2)) == sizeof(Mbi2), "VirtualQuery failed\n");
+            ok(Mbi2.State == MEM_RESERVE, "one page short: state %lx\n", Mbi2.State);
+            pFree(Teb.AllocatedStackBase);
+        }
+    }
+
     for (i = 0; i < _countof(s_Rows); i++)
     {
         MEMORY_BASIC_INFORMATION Mbi;
@@ -109,9 +184,7 @@ START_TEST(RtlCreateUserStack)
         if (s_Rows[i].Guard)
         {
             ok(GuardBytes != 0, "row %lu: no guard region\n", i);
-#ifdef _M_AMD64
-            ok(GuardBytes == 3 * s_Rows[i].PageSize, "row %lu: guard region of %Ix bytes\n", i, GuardBytes);
-#endif
+            ok(GuardBytes == RTLP_TEST_GUARD_PAGES * s_Rows[i].PageSize, "row %lu: guard region of %Ix bytes\n", i, GuardBytes);
             VirtualQuery(Base, &Mbi, sizeof(Mbi));
             ok(Mbi.State == MEM_RESERVE, "row %lu: the start is %lx, not reserved\n", i, Mbi.State);
         }
