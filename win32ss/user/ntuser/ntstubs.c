@@ -667,7 +667,7 @@ NtUserSetInformationProcess(
 }
 
 HDESK FASTCALL
-IntGetDesktopObjectHandle(PDESKTOP DesktopObject);
+IntGetDesktopObjectHandle(PDESKTOP DesktopObject, ACCESS_MASK DesiredAccess);
 
 NTSTATUS
 APIENTRY
@@ -812,7 +812,13 @@ NtUserSetInformationThread(IN HANDLE ThreadHandle,
                to its own desktop, as for a NULL handle. IntGetDesktopObjectHandle does not take
                NULL, and the call must not fail for it: CSRSS and winlogon carry on with the
                desktop they have. */
-            hdesk = gpdeskInputDesktop ? IntGetDesktopObjectHandle(gpdeskInputDesktop) : NULL;
+            /* CSRSS (SrvExitWindowsEx, SrvEndTask) has no handle to the Winlogon desktop when it
+               is the input desktop; it is opened with what its token is granted. Any other
+               process only gets the handle it already has (zero access), as before. */
+            hdesk = gpdeskInputDesktop ?
+                IntGetDesktopObjectHandle(gpdeskInputDesktop,
+                                          PsGetCurrentProcess() == gpepCSRSS ? MAXIMUM_ALLOWED : 0) :
+                NULL;
             IntSetThreadDesktop(hdesk, FALSE);
 
             break;
