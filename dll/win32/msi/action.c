@@ -398,6 +398,15 @@ UINT msi_set_context(MSIPACKAGE *package)
         else
             package->Context = MSIINSTALLCONTEXT_USERUNMANAGED;
     }
+#ifdef __REACTOS__
+    /*
+     * A product that is installed per machine is maintained per machine: a removal or repair started from the
+     * package, whose ALLUSERS is not set (the install named it on the command line), would otherwise write and
+     * remove its registry values and shortcuts under the current user and leave the machine-wide ones behind.
+     */
+    else if (package->Context == MSIINSTALLCONTEXT_MACHINE && !msi_get_property_int( package->db, L"ALLUSERS", 0 ))
+        msi_set_property( package->db, L"ALLUSERS", L"1", -1 );
+#endif
     return ERROR_SUCCESS;
 }
 
