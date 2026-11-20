@@ -131,6 +131,7 @@ ReadString(
     IN BOOL ShowString)
 {
     DWORD count, i;
+    BOOL TooLong = FALSE;
     WCHAR charToDisplay[] = { 0, UNICODE_NULL };
 
     if (!SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), 0))
@@ -147,7 +148,10 @@ ReadString(
     {
         WCHAR readChar;
         if (!ReadConsoleW(GetStdHandle(STD_INPUT_HANDLE), &readChar, 1, &count, NULL))
+        {
+            SecureZeroMemory(Buffer, BufferLength * sizeof(WCHAR));
             return FALSE;
+        }
         if (readChar == '\r' || readChar == '\n')
         {
             /* End of string */
@@ -171,12 +175,20 @@ ReadString(
                 &count,
                 NULL);
         }
-        Buffer[i++] = readChar;
-        /* FIXME: buffer overflow if the user writes too many chars! */
-        UNREFERENCED_PARAMETER(BufferLength);
+        /* The buffer is the caller's and fixed: an input that does not fit is refused, not written past its end */
+        if (i + 1 < BufferLength)
+            Buffer[i++] = readChar;
+        else
+            TooLong = TRUE;
         /* FIXME: handle backspace */
     }
     Buffer[i] = UNICODE_NULL;
+
+    if (TooLong)
+    {
+        SecureZeroMemory(Buffer, BufferLength * sizeof(WCHAR));
+        return FALSE;
+    }
 
     if (!ShowString)
     {
@@ -201,6 +213,7 @@ TUILoggedOutSAS(
     WCHAR Password[256];
     NTSTATUS Status;
     NTSTATUS SubStatus = STATUS_SUCCESS;
+    INT Action = WLX_SAS_ACTION_NONE;
 
     TRACE("TUILoggedOutSAS()\n");
 
@@ -214,10 +227,14 @@ TUILoggedOutSAS(
     if (Status == STATUS_SUCCESS)
     {
         if (CreateProfile(pgContext, UserName, NULL, Password))
-            return WLX_SAS_ACTION_LOGON;
+            Action = WLX_SAS_ACTION_LOGON;
     }
 
-    return WLX_SAS_ACTION_NONE;
+    /* The logon attempt is over: no password stays in this function or in the context (the stored automatic
+       logon password that was read into it at start-up is not used by the text mode logon) */
+    SecureZeroMemory(Password, sizeof(Password));
+    SecureZeroMemory(pgContext->Password, sizeof(pgContext->Password));
+    return Action;
 }
 
 static INT
