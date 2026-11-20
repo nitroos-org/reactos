@@ -999,6 +999,7 @@ GetSystemFirmwareTable(
 /* SMBIOS structure types and Memory Device (type 17) fields, DMTF DSP0134 */
 #define SMBIOS_TYPE_MEMORY_DEVICE       17
 #define SMBIOS_TYPE_END_OF_TABLE        127
+#define SMBIOS_MEMDEV_MIN_LENGTH        0x15    /* formatted area of a Memory Device since SMBIOS 2.1 */
 #define SMBIOS_MEMDEV_SIZE              0x0C    /* WORD, SMBIOS 2.1+ */
 #define SMBIOS_MEMDEV_EXTENDED_SIZE     0x1C    /* DWORD, SMBIOS 2.7+ */
 #define SMBIOS_MEMDEV_SIZE_UNKNOWN      0xFFFF
@@ -1007,7 +1008,8 @@ GetSystemFirmwareTable(
 
 /*
  * Adds up the sizes of the Memory Device structures of a raw SMBIOS table,
- * in kilobytes. Returns FALSE when a structure runs past the end of the table.
+ * in kilobytes. Returns FALSE when a structure runs past the end of the table
+ * or a Memory Device is one that Windows refuses (see below).
  */
 static
 BOOL
@@ -1028,23 +1030,48 @@ BaseSumSmbiosMemoryDevices(
         if (HeaderLength < 4 || HeaderLength > Length - Offset)
             return FALSE;
 
-        if (Type == SMBIOS_TYPE_MEMORY_DEVICE && HeaderLength >= SMBIOS_MEMDEV_SIZE + sizeof(USHORT))
+        if (Type == SMBIOS_TYPE_MEMORY_DEVICE)
         {
+            ULONGLONG Kb;
+
+            /* What Windows Server 2022 rejects as invalid data (each measured with one 4096 MB device
+             * and one more device that differs only in the field named): a formatted area shorter
+             * than 0x15 bytes (0x14 fails, 0x15 and 0x1B pass), and a Size of 0xFFFF (unknown, also
+             * with a 0x15 byte area). A Size of 0 (no device in the socket) is skipped. */
+            if (HeaderLength < SMBIOS_MEMDEV_MIN_LENGTH)
+                return FALSE;
+
             Size = *(const USHORT UNALIGNED *)&Table[Offset + SMBIOS_MEMDEV_SIZE];
+            if (Size == SMBIOS_MEMDEV_SIZE_UNKNOWN)
+                return FALSE;
+
+            Kb = 0;
             if (Size == SMBIOS_MEMDEV_SIZE_USE_EXTENDED &&
                 HeaderLength >= SMBIOS_MEMDEV_EXTENDED_SIZE + sizeof(ULONG))
             {
-                /* Extended Size: bits 30:0 in megabytes */
-                Total += (ULONGLONG)(*(const ULONG UNALIGNED *)&Table[Offset + SMBIOS_MEMDEV_EXTENDED_SIZE] & 0x7FFFFFFF) * 1024;
-            }
-            else if (Size != 0 && Size != SMBIOS_MEMDEV_SIZE_UNKNOWN)
-            {
-                /* 0 = no device installed in the socket; bit 15 selects KB over MB */
-                if (Size & SMBIOS_MEMDEV_SIZE_IN_KB)
-                    Total += Size & ~SMBIOS_MEMDEV_SIZE_IN_KB;
+                ULONG Extended = *(const ULONG UNALIGNED *)&Table[Offset + SMBIOS_MEMDEV_EXTENDED_SIZE];
+
+                /* Extended Size: bits 30:0 in megabytes. Windows takes 0x7FFF MB (the Size field's own
+                 * value) when the DWORD is 0, and 0 when only bit 31 is set (measured). */
+                if (Extended == 0)
+                    Kb = (ULONGLONG)SMBIOS_MEMDEV_SIZE_USE_EXTENDED * 1024;
                 else
-                    Total += (ULONGLONG)Size * 1024;
+                    Kb = (ULONGLONG)(Extended & 0x7FFFFFFF) * 1024;
             }
+            else if (Size & SMBIOS_MEMDEV_SIZE_IN_KB)
+            {
+                /* bit 15 selects KB over MB */
+                Kb = Size & ~SMBIOS_MEMDEV_SIZE_IN_KB;
+            }
+            else
+            {
+                Kb = (ULONGLONG)Size * 1024;
+            }
+
+            /* A sum that does not fit is not a memory size */
+            if (Kb > ~(ULONGLONG)0 - Total)
+                return FALSE;
+            Total += Kb;
         }
 
         if (Type == SMBIOS_TYPE_END_OF_TABLE)
