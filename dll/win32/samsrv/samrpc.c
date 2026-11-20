@@ -10164,7 +10164,6 @@ SamrSetInformationUser2(IN SAMPR_HANDLE UserHandle,
             break;
 
         case UserSetPasswordInformation:
-            TRACE("Password: %S\n", Buffer->SetPassword.Password.Buffer);
             TRACE("PasswordExpired: %d\n", Buffer->SetPassword.PasswordExpired);
 
             Status = SampSetObjectAttributeString(UserObject,

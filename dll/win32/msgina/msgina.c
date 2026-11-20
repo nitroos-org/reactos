@@ -689,90 +689,134 @@ WlxRemoveStatusMessage(
 }
 
 
-BOOL
-DoAdminUnlock(
+/* The information of a token in a buffer of the process heap (HeapFree), NULL on failure */
+static
+PVOID
+GetTokenInfo(
+    IN HANDLE hToken,
+    IN TOKEN_INFORMATION_CLASS InfoClass)
+{
+    PVOID Buffer = NULL;
+    DWORD Size = 0;
+
+    GetTokenInformation(hToken, InfoClass, NULL, 0, &Size);
+    if (Size == 0)
+        return NULL;
+
+    Buffer = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (Buffer == NULL)
+        return NULL;
+
+    if (!GetTokenInformation(hToken, InfoClass, Buffer, Size, &Size))
+    {
+        HeapFree(GetProcessHeap(), 0, Buffer);
+        return NULL;
+    }
+
+    return Buffer;
+}
+
+
+/*
+ * The logon of the unlock dialog: the LSA decides (an Unlock logon, like the logon of the logon dialog), so that a
+ * wrong password is counted by the account lockout, a locked out account cannot unlock, a password that was changed
+ * meanwhile is the one that counts, and no copy of the password is kept for the comparison.
+ *
+ * On success the user of the session (IsSessionUser) or an administrator (IsAdmin) has proved the password. The
+ * token of the unlock logon is used for those two questions only and is closed before the function returns: it
+ * is never kept, never given to winlogon and does not become the token of the session.
+ */
+NTSTATUS
+DoUnlockLogon(
     IN PGINA_CONTEXT pgContext,
     IN PWSTR UserName,
-    IN PWSTR Domain,
-    IN PWSTR Password)
+    IN PWSTR Password,
+    OUT PBOOL IsSessionUser,
+    OUT PBOOL IsAdmin,
+    OUT PNTSTATUS SubStatus)
 {
     HANDLE hToken = NULL;
+    PTOKEN_USER UnlockUser = NULL;
+    PTOKEN_USER SessionUser = NULL;
     PTOKEN_GROUPS Groups = NULL;
-    BOOL bIsAdmin = FALSE;
-    ULONG Size;
     ULONG i;
     NTSTATUS Status;
-    NTSTATUS SubStatus = STATUS_SUCCESS;
 
-    TRACE("(%S %S %S)\n", UserName, Domain, Password);
+    *IsSessionUser = FALSE;
+    *IsAdmin = FALSE;
+    *SubStatus = STATUS_SUCCESS;
 
     Status = ConnectToLsa(pgContext);
     if (!NT_SUCCESS(Status))
     {
         WARN("ConnectToLsa() failed\n");
-        return FALSE;
+        return Status;
     }
 
-    Status = MyLogonUser(pgContext->LsaHandle,
-                         pgContext->AuthenticationPackage,
-                         UserName,
-                         Domain,
-                         Password,
-                         &pgContext->UserToken,
-                         &SubStatus);
+    Status = MyUnlockUser(pgContext->LsaHandle,
+                          pgContext->AuthenticationPackage,
+                          UserName,
+                          pgContext->DomainName,
+                          Password,
+                          &hToken,
+                          SubStatus);
     if (!NT_SUCCESS(Status))
     {
-        WARN("MyLogonUser() failed\n");
-        return FALSE;
+        WARN("MyUnlockUser() failed (Status 0x%08lx)\n", Status);
+        return Status;
     }
 
-    Status = NtQueryInformationToken(hToken,
-                                     TokenGroups,
-                                     NULL,
-                                     0,
-                                     &Size);
-    if ((Status != STATUS_SUCCESS) && (Status != STATUS_BUFFER_TOO_SMALL))
+    Status = STATUS_SUCCESS;
+
+    /* A logon that did not hand back a token, or a token whose user cannot be read, proves nothing: refuse */
+    if (hToken != NULL)
+        UnlockUser = GetTokenInfo(hToken, TokenUser);
+    if (UnlockUser == NULL)
     {
-        TRACE("NtQueryInformationToken() failed (Status 0x%08lx)\n", Status);
+        WARN("The unlock logon gave no usable token\n");
+        Status = STATUS_UNSUCCESSFUL;
         goto done;
     }
 
-    Groups = HeapAlloc(GetProcessHeap(), 0, Size);
-    if (Groups == NULL)
+    if (pgContext->UserToken != NULL)
+        SessionUser = GetTokenInfo(pgContext->UserToken, TokenUser);
+
+    if ((SessionUser != NULL &&
+         RtlEqualSid(UnlockUser->User.Sid, SessionUser->User.Sid)) ||
+        (SessionUser == NULL && _wcsicmp(UserName, pgContext->UserName) == 0))
     {
-        TRACE("HeapAlloc() failed\n");
+        *IsSessionUser = TRUE;
         goto done;
     }
 
-    Status = NtQueryInformationToken(hToken,
-                                     TokenGroups,
-                                     Groups,
-                                     Size,
-                                     &Size);
-    if (!NT_SUCCESS(Status))
+    Groups = GetTokenInfo(hToken, TokenGroups);
+    if (Groups != NULL && AdminSid != NULL)
     {
-        TRACE("NtQueryInformationToken() failed (Status 0x%08lx)\n", Status);
-        goto done;
-    }
-
-    for (i = 0; i < Groups->GroupCount; i++)
-    {
-        if (RtlEqualSid(Groups->Groups[i].Sid, AdminSid))
+        for (i = 0; i < Groups->GroupCount; i++)
         {
-            TRACE("Member of Admins group\n");
-            bIsAdmin = TRUE;
-            break;
+            if (RtlEqualSid(Groups->Groups[i].Sid, AdminSid) &&
+                (Groups->Groups[i].Attributes & SE_GROUP_ENABLED))
+            {
+                TRACE("Member of Admins group\n");
+                *IsAdmin = TRUE;
+                break;
+            }
         }
     }
 
 done:
     if (Groups != NULL)
         HeapFree(GetProcessHeap(), 0, Groups);
+    if (SessionUser != NULL)
+        HeapFree(GetProcessHeap(), 0, SessionUser);
+    if (UnlockUser != NULL)
+        HeapFree(GetProcessHeap(), 0, UnlockUser);
 
+    /* The token of the unlock logon is not kept (and with it the logon session goes) */
     if (hToken != NULL)
         CloseHandle(hToken);
 
-    return bIsAdmin;
+    return Status;
 }
 
 
@@ -986,7 +1030,9 @@ WlxDisplaySASNotice(
             return;
         }
 
+        /* No automatic logon: the stored password is not needed */
         pgContext->bAutoAdminLogon = FALSE;
+        SecureZeroMemory(pgContext->Password, sizeof(pgContext->Password));
     }
 
     if (pgContext->bDisableCAD)

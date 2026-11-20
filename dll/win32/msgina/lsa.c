@@ -51,10 +51,14 @@ ConnectToLsa(
 static const CHAR User32TokenSourceName[] = "User32  ";
 C_ASSERT(sizeof(User32TokenSourceName) == RTL_FIELD_SIZE(TOKEN_SOURCE, SourceName) + 1);
 
+static
 NTSTATUS
-MyLogonUser(
+MyLogonUserOfType(
     HANDLE LsaHandle,
     ULONG AuthenticationPackage,
+    SECURITY_LOGON_TYPE LogonType,
+    MSV1_0_LOGON_SUBMIT_TYPE MessageType,
+    PCSTR lpszOrigin,
     LPWSTR lpszUsername,
     LPWSTR lpszDomain,
     LPWSTR lpszPassword,
@@ -85,7 +89,7 @@ MyLogonUser(
     *phToken = NULL;
 
     RtlInitAnsiString((PANSI_STRING)&OriginName,
-                      "MSGINA Logon");
+                      lpszOrigin);
 
     RtlInitUnicodeString(&DomainName,
                          lpszDomain);
@@ -110,7 +114,7 @@ MyLogonUser(
         goto done;
     }
 
-    AuthInfo->MessageType = MsV1_0InteractiveLogon;
+    AuthInfo->MessageType = MessageType;
 
     Ptr = (ULONG_PTR)AuthInfo + sizeof(MSV1_0_INTERACTIVE_LOGON);
 
@@ -203,7 +207,7 @@ MyLogonUser(
 
     Status = LsaLogonUser(LsaHandle,
                           &OriginName,
-                          Interactive,
+                          LogonType,
                           AuthenticationPackage,
                           (PVOID)AuthInfo,
                           AuthInfoLength,
@@ -267,6 +271,56 @@ done:
     }
 
     return Status;
+}
+
+/* The logon of the logon dialog */
+NTSTATUS
+MyLogonUser(
+    HANDLE LsaHandle,
+    ULONG AuthenticationPackage,
+    LPWSTR lpszUsername,
+    LPWSTR lpszDomain,
+    LPWSTR lpszPassword,
+    PHANDLE phToken,
+    PNTSTATUS SubStatus)
+{
+    return MyLogonUserOfType(LsaHandle,
+                             AuthenticationPackage,
+                             Interactive,
+                             MsV1_0InteractiveLogon,
+                             "MSGINA Logon",
+                             lpszUsername,
+                             lpszDomain,
+                             lpszPassword,
+                             phToken,
+                             SubStatus);
+}
+
+/*
+ * The logon of the unlock dialog: an Unlock logon of the LSA, as the logon type "unlock" of the logon types of
+ * LsaLogonUser. The LSA checks the password against the account (the counting and the lockout of a bad password
+ * included); the token that comes back proves it and is for the caller to close.
+ */
+NTSTATUS
+MyUnlockUser(
+    HANDLE LsaHandle,
+    ULONG AuthenticationPackage,
+    LPWSTR lpszUsername,
+    LPWSTR lpszDomain,
+    LPWSTR lpszPassword,
+    PHANDLE phToken,
+    PNTSTATUS SubStatus)
+{
+    return MyLogonUserOfType(LsaHandle,
+                             AuthenticationPackage,
+                             Unlock,
+                             MsV1_0WorkstationUnlockLogon,
+                             "MSGINA Unlock",
+                             lpszUsername,
+                             lpszDomain,
+                             lpszPassword,
+                             phToken,
+                             SubStatus);
 }
 
 /* EOF */
