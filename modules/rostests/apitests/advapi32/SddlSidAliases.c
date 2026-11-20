@@ -144,8 +144,7 @@ static void TestDomainAliases(void)
         SetLastError(0xdeadbeef);
         ok(!ConvertStringSidToSidW(g_DomainAliases[i], &Sid), "%ls: the alias was converted\n", g_DomainAliases[i]);
         ok(GetLastError() == ERROR_INVALID_SID, "%ls: error %lu\n", g_DomainAliases[i], GetLastError());
-        if (Sid != (PSID)0x1234)
-            LocalFree(Sid);
+        ok(Sid == (PSID)0x1234, "%ls: the output was changed to %p\n", g_DomainAliases[i], Sid);
 
         StringCchPrintfW(Sddl, ARRAYSIZE(Sddl), L"O:%lsG:%lsD:(A;;GA;;;%ls)", g_DomainAliases[i], g_DomainAliases[i], g_DomainAliases[i]);
         SetLastError(0xdeadbeef);
@@ -156,11 +155,12 @@ static void TestDomainAliases(void)
 
     /* unknown aliases */
     {
-        PSID Sid = NULL;
+        PSID Sid = (PSID)0x1234;
 
         SetLastError(0xdeadbeef);
         ok(!ConvertStringSidToSidW(L"ZZ", &Sid), "ZZ converted\n");
         ok(GetLastError() == ERROR_INVALID_SID, "ZZ: error %lu\n", GetLastError());
+        ok(Sid == (PSID)0x1234, "ZZ: the output was changed to %p\n", Sid);
     }
 }
 

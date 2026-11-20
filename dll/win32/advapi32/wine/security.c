@@ -4040,12 +4040,14 @@ BOOL WINAPI ConvertStringSidToSidW(LPCWSTR StringSid, PSID* Sid)
             constant[2] = 0;
             if (ParseStringSidToSid(constant, NULL, &cBytes))
             {
-                PSID pSid = *Sid = LocalAlloc(0, cBytes);
+                PSID pSid = LocalAlloc(0, cBytes);
 
                 if (!pSid)
                     SetLastError(ERROR_NOT_ENOUGH_MEMORY);
                 else if (!(bret = ParseStringSidToSid(constant, pSid, &cBytes)))
                     LocalFree(pSid);
+                else
+                    *Sid = pSid; /* only a SID that was built: a caller that frees *Sid after a failure must not free it twice */
                 return bret;
             }
         }
