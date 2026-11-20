@@ -16,8 +16,9 @@
  *   A  allow all to Administrators              B  A and allow all to S-1-5-33
  *   C  allow read to Everyone                   D  deny write to S-1-5-33, allow all to Administrators and to S-1-5-33
  *   NULL no DACL                                EMPTY a DACL without ACEs
- * The write rights the restricting SIDs have to grant: those of the write mapping, DELETE, WRITE_DAC and WRITE_OWNER;
- * READ_CONTROL, SYNCHRONIZE and everything else are checked against the normal SIDs only.
+ * The write rights the restricting SIDs have to grant: those of the write mapping that the read and the execute mapping do not
+ * hold, and DELETE, WRITE_DAC and WRITE_OWNER; (READ_CONTROL and SYNCHRONIZE of a file, a key or an event, as they are in the read
+ * mapping too,) and everything else are checked against the normal SIDs only.
  */
 
 #include "precomp.h"
@@ -467,6 +468,58 @@ TestFiltering(VOID)
     ok(!CanOpen(Tokens[TOK_WRITE_RESTRICTED_NO_SIDS], GENERIC_WRITE), "write restricted token without SIDs can write\n");
 }
 
+/*
+ * Windows Server 2022, generic mappings of their own: the restricting SIDs of a write restricted token have to grant the
+ * rights of the write mapping that the read and the execute mapping do not hold, and DELETE, WRITE_DAC and WRITE_OWNER (a
+ * token without restricting SIDs is granted what is not compared)
+ */
+static VOID
+TestMappings(VOID)
+{
+    static const struct { DWORD Read, Write, Execute, Right; BOOL Granted; } Cases[] =
+    {
+        { 0x10, 0x20, 0x40, READ_CONTROL, TRUE },
+        { 0x10, 0x20 | READ_CONTROL, 0x40, READ_CONTROL, FALSE },
+        { 0x10 | READ_CONTROL, 0x20 | READ_CONTROL, 0x40, READ_CONTROL, TRUE },
+        { 0x10, 0x20 | READ_CONTROL, 0x40 | READ_CONTROL, READ_CONTROL, TRUE },
+        { 0x10, 0x20 | SYNCHRONIZE, 0x40, SYNCHRONIZE, FALSE },
+        { 0x10, 0x20 | SYNCHRONIZE, 0x40 | SYNCHRONIZE, SYNCHRONIZE, TRUE },
+        { 0x10 | SYNCHRONIZE, 0x20 | SYNCHRONIZE, 0x40, SYNCHRONIZE, TRUE },
+        { 0x10, 0x20 | 0x4, 0x40, 0x4, FALSE },
+        { 0x10 | 0x4, 0x20 | 0x4, 0x40, 0x4, TRUE },
+        { 0x10, 0x20 | 0x4, 0x40 | 0x4, 0x4, TRUE },
+        { 0x10, 0x20 | 0x8000, 0x40, 0x8000, FALSE },
+        { 0x10 | 0x8000, 0x20 | 0x8000, 0x40, 0x8000, TRUE },
+        { 0x10 | DELETE, 0x20, 0x40, DELETE, FALSE },
+        { 0x10 | WRITE_DAC, 0x20, 0x40, WRITE_DAC, FALSE },
+        { 0x10 | WRITE_OWNER | DELETE, 0x20 | WRITE_OWNER | DELETE, 0x40 | WRITE_OWNER, WRITE_OWNER, FALSE },
+    };
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    ULONG c;
+
+    ok(ConvertStringSecurityDescriptorToSecurityDescriptorA("O:SYG:SYD:P(A;;0x1f8fff;;;BA)", SDDL_REVISION_1, &Sd, NULL),
+       "SDDL failed with %lu\n", GetLastError());
+    if (!Sd)
+        return;
+
+    for (c = 0; c < ARRAYSIZE(Cases); c++)
+    {
+        GENERIC_MAPPING Map = { Cases[c].Read, Cases[c].Write, Cases[c].Execute, 0x1f8fff };
+        PRIVILEGE_SET Ps;
+        DWORD Psl = sizeof(Ps), Granted = 0;
+        BOOL Status = FALSE, Normal, Wr;
+
+        Normal = AccessCheck(Sd, Tokens[TOK_NORMAL], Cases[c].Right, &Map, &Ps, &Psl, &Granted, &Status) && Status;
+        Psl = sizeof(Ps);
+        Status = FALSE;
+        Wr = AccessCheck(Sd, Tokens[TOK_WRITE_RESTRICTED_NO_SIDS], Cases[c].Right, &Map, &Ps, &Psl, &Granted, &Status) && Status;
+        ok(Normal, "mapping %lu: the normal token is refused 0x%lx\n", c, Cases[c].Right);
+        ok(Wr == Cases[c].Granted, "mapping %lu: right 0x%lx is %s for the write restricted token, expected %s\n",
+           c, Cases[c].Right, Wr ? "granted" : "refused", Cases[c].Granted ? "granted" : "refused");
+    }
+    LocalFree(Sd);
+}
+
 START_TEST(WriteRestrictedToken)
 {
     INT i;
@@ -487,6 +540,7 @@ START_TEST(WriteRestrictedToken)
     MakeSds();
     TestTokenReports();
     TestFiltering();
+    TestMappings();
     TestRows();
 
     /* Windows Server 2022: a copy of a write restricted token (primary, then impersonation again) is write restricted too */
