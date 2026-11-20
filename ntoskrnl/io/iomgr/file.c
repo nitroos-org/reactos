@@ -820,14 +820,18 @@ IopParseDevice(IN PVOID ParseObject,
             {
                 /*
                  * Check if we need to do traverse validation. A disk device is checked even with the bypass
-                 * traverse privilege, except for a restricted token: measured on Windows Server 2022, such a
-                 * token opens a file on a volume whose device descriptor grants neither its restricting SIDs
-                 * nor Everyone, as long as it holds the privilege (the directories of the path decide it).
+                 * traverse privilege. Measured on Windows Server 2022: on the boot volume and on the system
+                 * partition a token that holds the privilege opens a file whatever the descriptor of the volume
+                 * device says, a restricted one too; on a virtual disk that was attached later the device is
+                 * checked for every token, a restricted one with its restricting SIDs (a second fixed disk was
+                 * not measured). The boot volume is the one this system tells apart, so a restricted token with
+                 * the privilege skips the check there only.
                  */
                 if (!(AccessState->Flags & TOKEN_HAS_TRAVERSE_PRIVILEGE) ||
                     (((OriginalDeviceObject->DeviceType == FILE_DEVICE_DISK) ||
                       (OriginalDeviceObject->DeviceType == FILE_DEVICE_CD_ROM)) &&
-                     !(AccessState->Flags & TOKEN_IS_RESTRICTED)))
+                     !((AccessState->Flags & TOKEN_IS_RESTRICTED) &&
+                       (OriginalDeviceObject->Flags & DO_SYSTEM_BOOT_PARTITION))))
                 {
                     /* Check if this is a restricted token */
                     if (!(AccessState->Flags & TOKEN_IS_RESTRICTED))
