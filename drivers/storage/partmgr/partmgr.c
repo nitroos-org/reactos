@@ -353,6 +353,28 @@ PartMgrReleaseInstanceId(
         PartMgrReleaseLayoutLock(FdoExtension);
 }
 
+// An entry of the layout that is not a partition: an unused or container MBR entry,
+// an unused GPT entry (a slot of the entry array that holds nothing)
+static
+BOOLEAN
+PartMgrIsUnusedLayoutEntry(
+    _In_ PDRIVE_LAYOUT_INFORMATION_EX Layout,
+    _In_ PPARTITION_INFORMATION_EX Entry)
+{
+    static const GUID unusedGuid = {0};
+
+    if (Layout->PartitionStyle == PARTITION_STYLE_MBR)
+    {
+        return (Entry->Mbr.PartitionType == PARTITION_ENTRY_UNUSED ||
+                IsContainerPartition(Entry->Mbr.PartitionType));
+    }
+    if (Layout->PartitionStyle == PARTITION_STYLE_GPT)
+    {
+        return RtlCompareMemory(&Entry->Gpt.PartitionType, &unusedGuid, sizeof(GUID)) == sizeof(GUID);
+    }
+    return FALSE;
+}
+
 static
 CODE_SEG("PAGE")
 VOID
@@ -386,9 +408,7 @@ PartMgrUpdatePartitionDevices(
             partEntry = &NewLayout->PartitionEntry[i];
 
             // skip unused and container partitions
-            if (NewLayout->PartitionStyle == PARTITION_STYLE_MBR &&
-                (partEntry->Mbr.PartitionType == PARTITION_ENTRY_UNUSED ||
-                    IsContainerPartition(partEntry->Mbr.PartitionType)))
+            if (PartMgrIsUnusedLayoutEntry(NewLayout, partEntry))
             {
                 continue;
             }
@@ -462,9 +482,7 @@ PartMgrUpdatePartitionDevices(
         PPARTITION_INFORMATION_EX partEntry = &NewLayout->PartitionEntry[i];
 
         // again, skip unused and container partitions
-        if (NewLayout->PartitionStyle == PARTITION_STYLE_MBR &&
-            (partEntry->Mbr.PartitionType == PARTITION_ENTRY_UNUSED ||
-                IsContainerPartition(partEntry->Mbr.PartitionType)))
+        if (PartMgrIsUnusedLayoutEntry(NewLayout, partEntry))
         {
             continue;
         }
@@ -935,6 +953,7 @@ FdoIoctlDiskSetDriveLayoutEx(
 {
     PDRIVE_LAYOUT_INFORMATION_EX layoutEx, layoutUser = Irp->AssociatedIrp.SystemBuffer;
     NTSTATUS status;
+    BOOLEAN isGpt;
 
     PAGED_CODE();
 
@@ -960,6 +979,7 @@ FdoIoctlDiskSetDriveLayoutEx(
     }
 
     RtlCopyMemory(layoutEx, layoutUser, layoutSize);
+    isGpt = (layoutEx->PartitionStyle == PARTITION_STYLE_GPT);
 
     PartMgrAcquireLayoutLock(FdoExtension);
 
@@ -991,21 +1011,27 @@ FdoIoctlDiskSetDriveLayoutEx(
     }
     else
     {
-        // this in fact updates the bus relations
-        PartMgrUpdatePartitionDevices(FdoExtension, layoutEx);
-
-        // write the partition table to the disk
-        status = IoWritePartitionTableEx(FdoExtension->LowerDevice, layoutEx);
-        if (NT_SUCCESS(status))
+        if (layoutEx->PartitionStyle == PARTITION_STYLE_GPT)
         {
-            // set updated partition numbers
-            for (UINT32 i = 0; i < layoutEx->PartitionCount; i++)
+            // the writer puts every partition into its slot of the entry array and returns
+            // the layout in table order: the partitions are numbered in that order
+            status = IoWritePartitionTableEx(FdoExtension->LowerDevice, layoutEx);
+            if (NT_SUCCESS(status))
             {
-                PPARTITION_INFORMATION_EX part = &layoutEx->PartitionEntry[i];
-
-                part->PartitionNumber = layoutEx->PartitionEntry[i].PartitionNumber;
+                // this in fact updates the bus relations
+                PartMgrUpdatePartitionDevices(FdoExtension, layoutEx);
             }
         }
+        else
+        {
+            // this in fact updates the bus relations
+            PartMgrUpdatePartitionDevices(FdoExtension, layoutEx);
+
+            // write the partition table to the disk
+            status = IoWritePartitionTableEx(FdoExtension->LowerDevice, layoutEx);
+        }
+
+
     }
 
     // update the layout cache
@@ -1023,6 +1049,8 @@ FdoIoctlDiskSetDriveLayoutEx(
     else
     {
         FdoExtension->LayoutValid = FALSE;
+        ExFreePool(layoutEx);
+        layoutEx = NULL;
     }
 
     PartMgrReleaseLayoutLock(FdoExtension);
@@ -1042,6 +1070,22 @@ FdoIoctlDiskSetDriveLayoutEx(
                                            &notification,
                                            NULL,
                                            NULL);
+
+    if (isGpt)
+    {
+        // return the layout with the updated partition numbers, in table order, to a caller
+        // that gave room for it; a failed write is reported
+        if (NT_SUCCESS(status) && VerifyIrpOutBufferSize(Irp, layoutSize))
+        {
+            RtlCopyMemory(layoutUser, layoutEx, layoutSize);
+            Irp->IoStatus.Information = layoutSize;
+        }
+        else
+        {
+            Irp->IoStatus.Information = 0;
+        }
+        return status;
+    }
 
     Irp->IoStatus.Information = layoutSize;
     return STATUS_SUCCESS;

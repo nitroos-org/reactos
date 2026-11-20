@@ -298,6 +298,20 @@ DiskReadGptHeader(
     return FALSE;
 }
 
+/* Partitions are numbered over the used entries; the kernel reader refuses a table that has more of them than this */
+#define GPT_MAX_USED_PARTITIONS 128
+
+/* The entry that was found by the last call: the next number continues from there */
+static struct
+{
+    BOOLEAN Valid;
+    UCHAR DriveNumber;
+    ULONG Number;
+    ULONG Index;
+    ULONG HeaderCrc32;
+    ULONG ArrayCrc32;
+} GptLast;
+
 BOOLEAN
 DiskGetGptPartitionEntry(
     _In_ UCHAR DriveNumber,
@@ -308,8 +322,8 @@ DiskGetGptPartitionEntry(
     GPT_TABLE_HEADER GptHeader;
     GPT_PARTITION_ENTRY GptEntry;
     ULONGLONG EntryLba;
-    ULONG EntryOffset;
-    ULONG EntriesPerBlock;
+    ULONG EntryIndex, EntryOffset, EntriesPerBlock, UsedCount;
+    BOOLEAN NeedRead;
     GUID UnusedGuid = EFI_PART_TYPE_UNUSED_GUID;
     GUID SystemGuid = EFI_PART_TYPE_EFI_SYSTEM_PART_GUID;
 
@@ -319,30 +333,71 @@ DiskGetGptPartitionEntry(
     if (!DiskReadGptHeader(DriveNumber, &GptHeader))
         return FALSE;
 
-    /* Validate partition number */
-    //if (PartitionNumber == 0 || PartitionNumber > GptHeader.NumberOfPartitionEntries)
-    if (!(1 <= PartitionNumber && PartitionNumber <= GptHeader.NumberOfPartitionEntries))
-        return FALSE;
-
-    /* Convert to 0-based index */
-    ULONG EntryIndex = PartitionNumber - 1;
-
-    /* DiskReadGptHeader refused any other entry size or count: a block holds whole entries and the index is bounded */
-    if (SectorSize < GptHeader.SizeOfPartitionEntry)
+    if (PartitionNumber == 0 || GptHeader.SizeOfPartitionEntry == 0 ||
+        SectorSize < GptHeader.SizeOfPartitionEntry)
         return FALSE;
     EntriesPerBlock = SectorSize / GptHeader.SizeOfPartitionEntry;
-    EntryLba = GptHeader.PartitionEntryLba + (EntryIndex / EntriesPerBlock);
-    EntryOffset = (EntryIndex % EntriesPerBlock) * GptHeader.SizeOfPartitionEntry;
 
-    /* Read the block containing the partition entry */
-    if (!MachDiskReadLogicalSectors(DriveNumber, EntryLba, 1, DiskReadBuffer))
+    /*
+     * Partitions are numbered over the used entries, in table order, as the kernel does
+     * (\Device\HarddiskN\PartitionM): an unused slot, e.g. the gap left by a partition that
+     * was deleted, has no number. Find the PartitionNumber-th used entry.
+     */
+    /* The kernel refuses a table with more used entries than this (FstubReadPartitionTableEFI) */
+    if (PartitionNumber > GPT_MAX_USED_PARTITIONS)
         return FALSE;
 
-    /* Extract partition entry */
-    RtlCopyMemory(&GptEntry, (PUCHAR)DiskReadBuffer + EntryOffset, sizeof(GptEntry));
+    /*
+     * The callers ask for the numbers 1, 2, 3, ... in turn: continue after the entry that was found
+     * for the previous number instead of scanning the table again (the table, identified by the
+     * checksums of its header and of its entry array, must be the same).
+     */
+    UsedCount = 0;
+    EntryIndex = 0;
+    NeedRead = TRUE;
+    if (GptLast.Valid && GptLast.DriveNumber == DriveNumber && GptLast.Number + 1 == PartitionNumber &&
+        GptLast.HeaderCrc32 == GptHeader.HeaderCrc32 &&
+        GptLast.ArrayCrc32 == GptHeader.PartitionEntryArrayCrc32)
+    {
+        UsedCount = GptLast.Number;
+        EntryIndex = GptLast.Index + 1;
+    }
+    for (; EntryIndex < GptHeader.NumberOfPartitionEntries; EntryIndex++)
+    {
+        EntryOffset = (EntryIndex % EntriesPerBlock) * GptHeader.SizeOfPartitionEntry;
+        if (EntryOffset == 0 || NeedRead)
+        {
+            /* Read the block containing the next partition entries */
+            EntryLba = GptHeader.PartitionEntryLba + (EntryIndex / EntriesPerBlock);
+            if (!MachDiskReadLogicalSectors(DriveNumber, EntryLba, 1, DiskReadBuffer))
+                return FALSE;
+            NeedRead = FALSE;
+        }
 
-    /* Check if partition is unused */
-    if (RtlEqualMemory(&GptEntry.PartitionTypeGuid, &UnusedGuid, sizeof(UnusedGuid)))
+        /* Extract partition entry */
+        RtlCopyMemory(&GptEntry, (PUCHAR)DiskReadBuffer + EntryOffset, sizeof(GptEntry));
+
+        /* Unused slots are skipped */
+        if (RtlEqualMemory(&GptEntry.PartitionTypeGuid, &UnusedGuid, sizeof(UnusedGuid)))
+            continue;
+
+        if (++UsedCount == PartitionNumber)
+            break;
+    }
+    if (EntryIndex >= GptHeader.NumberOfPartitionEntries)
+    {
+        GptLast.Valid = FALSE;
+        return FALSE;
+    }
+    GptLast.Valid = TRUE;
+    GptLast.DriveNumber = DriveNumber;
+    GptLast.Number = PartitionNumber;
+    GptLast.Index = EntryIndex;
+    GptLast.HeaderCrc32 = GptHeader.HeaderCrc32;
+    GptLast.ArrayCrc32 = GptHeader.PartitionEntryArrayCrc32;
+
+    /* The entry must lie in the usable range (this also keeps the size and the byte offsets below from wrapping) */
+    if (!GptCheckEntry(&GptHeader, &GptEntry))
         return FALSE;
 
     /* The entry must lie in the usable range (this also keeps the size and the byte offsets below from wrapping) */

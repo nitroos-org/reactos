@@ -240,6 +240,7 @@ UefiGetBootPartitionEntry(
         EFI_BLOCK_IO* RootBlockIo;
         ULONG EntriesPerBlock;
         BOOLEAN BlockReadFailed = FALSE;
+        ULONG UsedIndex = 0;
         EFI_STATUS Status;
         EFI_GUID UnusedGuid = EFI_PART_TYPE_UNUSED_GUID;
         EFI_GUID SystemGuid = EFI_PART_TYPE_EFI_SYSTEM_PART_GUID;
@@ -284,9 +285,11 @@ UefiGetBootPartitionEntry(
             /* Extract partition entry */
             RtlCopyMemory(&GptEntry, (PUCHAR)DiskReadBuffer + EntryOffset, sizeof(GptEntry));
 
-            /* Skip unused partitions */
+            /* Skip unused partitions: they have no number (partitions are numbered over the used
+             * entries in table order, as the kernel does, see DiskGetGptPartitionEntry) */
             if (RtlEqualMemory(&GptEntry.PartitionTypeGuid, &UnusedGuid, sizeof(UnusedGuid)))
                 continue;
+            UsedIndex++;
 
             /* Skip entries outside of the usable range: their size would wrap around */
             if (!GptCheckEntry(&GptHeader, &GptEntry))
@@ -296,7 +299,7 @@ UefiGetBootPartitionEntry(
             ULONGLONG PartitionSizeBlocks = GptEntry.EndingLba - GptEntry.StartingLba + 1;
 
             TRACE("GPT Partition %lu: StartLba=%llu, EndLba=%llu, SizeBlocks=%llu\n",
-                  i + 1, GptEntry.StartingLba, GptEntry.EndingLba, PartitionSizeBlocks);
+                  UsedIndex, GptEntry.StartingLba, GptEntry.EndingLba, PartitionSizeBlocks);
 
             /* Match partition by size (within 1 block tolerance for rounding) */
             if (PartitionSizeBlocks == BootPartitionSize ||
@@ -305,9 +308,9 @@ UefiGetBootPartitionEntry(
                   BootPartitionSize <= PartitionSizeBlocks + 1)))
             {
                 TRACE("Found matching GPT partition %lu: Size matches (%llu blocks)\n",
-                      i + 1, BootPartitionSize);
+                      UsedIndex, BootPartitionSize);
 
-                *BootPartition = i + 1; /* GPT partitions are 1-indexed */
+                *BootPartition = UsedIndex; /* GPT partitions are 1-indexed, counted over the used entries */
 
                 /* Convert GPT entry to standard-style entry */
                 if (PartitionEntry)

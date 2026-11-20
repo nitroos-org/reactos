@@ -4610,14 +4610,26 @@ WriteGptPartitions(
         goto Quit;
     }
 
-    /* The partitions are numbered in table order */
+    /*
+     * The partitions are numbered in table order. The layout comes back in table order, which is
+     * not the order it was given in when a new partition took a free slot between others:
+     * find every partition in it by its offset.
+     */
     for (i = 0; i < Count; i++)
     {
         PartEntry = Parts[i];
-        PartEntry->PartitionNumber = LayoutEx->PartitionEntry[i].PartitionNumber
-                                         ? LayoutEx->PartitionEntry[i].PartitionNumber : i + 1;
-        PartEntry->OnDiskPartitionNumber = i + 1;
-        PartEntry->PartitionIndex = i;
+        for (j = 0; j < Count; j++)
+        {
+            if (LayoutEx->PartitionEntry[j].StartingOffset.QuadPart == GetPartEntryOffsetInBytes(PartEntry))
+                break;
+        }
+        if (j >= Count)
+            j = i; /* not found: the order of the call */
+
+        PartEntry->PartitionNumber = LayoutEx->PartitionEntry[j].PartitionNumber
+                                         ? LayoutEx->PartitionEntry[j].PartitionNumber : j + 1;
+        PartEntry->OnDiskPartitionNumber = j + 1;
+        PartEntry->PartitionIndex = j;
         PartEntry->New = FALSE;
         InitPartitionDeviceName(PartEntry);
     }
