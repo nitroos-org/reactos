@@ -441,14 +441,28 @@ typedef struct _HV_TRACK_CELL_REF
 extern ULONG CmlibTraceLevel;
 
 //
-// Hack since big keys are not yet supported: the data of a value is read and
-// written as one cell whatever its length. A hive file may hold a value that
-// long (any length passes in a hive older than XP); the check of a loaded hive
-// keeps a value only if one cell holds all of its data, so this is not a
-// state to assert on.
+// Big data. In a hive of format 1.4 or later (Hive->Version >= 4) the data of
+// a value longer than CM_KEY_VALUE_BIG (16344) bytes is stored as big data:
+// the value's Data names a 'db' cell (CM_BIG_DATA) with the number of
+// segments and a list cell of that many cell indexes; every listed cell holds
+// a segment of CM_KEY_VALUE_BIG bytes of the data, the last one the rest
+// (layout: the public "Windows registry file format specification" by Maxim
+// Suhanov, github.com/msuhanov/regf, section "Big data"). Older formats hold
+// such data in one cell. So does a 1.4+ hive into which a ReactOS kernel
+// without big data support wrote a long value: a data cell that holds all of
+// the data is read as one cell whatever the version, only a data cell smaller
+// than the data is a 'db' cell (CmpIsBigValueData). The check (cmcheck.c)
+// keeps a value only if its data is one of the two.
+//
+#define CMP_BIG_DATA_SEGMENTS(Length) \
+    (((Length) + CM_KEY_VALUE_BIG - 1) / CM_KEY_VALUE_BIG)
+
+//
+// The writers do not make big data yet: they store the data of a value in
+// one cell whatever its length and the hive's format.
 //
 #define ASSERT_VALUE_BIG(h, s) \
-    do { if (CmpIsKeyValueBig(h,s)) DPRINT("Big keys aren't supported!\n"); } while (0)
+    do { if (CmpIsKeyValueBig(h,s)) DPRINT("Big data written as one cell\n"); } while (0)
 
 //
 // Returns whether or not this is a small valued key
@@ -944,6 +958,14 @@ CmpGetValueData(
     OUT PVOID *Buffer,
     OUT PBOOLEAN BufferAllocated,
     OUT PHCELL_INDEX CellToRelease
+);
+
+BOOLEAN
+NTAPI
+CmpIsBigValueData(
+    _In_ PHHIVE Hive,
+    _In_ HCELL_INDEX DataCell,
+    _In_ ULONG Length
 );
 
 HCELL_INDEX
