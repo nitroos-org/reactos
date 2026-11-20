@@ -2692,6 +2692,32 @@ static BYTE *parse_value( MSIPACKAGE *package, const WCHAR *value, DWORD len, DW
     return data;
 }
 
+#ifdef __REACTOS__
+/* the token of the process is the LocalSystem account (S-1-5-18), the same token the UserData lookups use */
+static BOOL msi_process_is_local_system(void)
+{
+    static LONG state;
+
+    if (!state)
+    {
+        BYTE buf[SECURITY_MAX_SID_SIZE + sizeof(TOKEN_USER)];
+        DWORD len;
+        HANDLE token;
+        LONG v = 2;
+
+        if (OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token ))
+        {
+            if (GetTokenInformation( token, TokenUser, buf, sizeof(buf), &len ) &&
+                IsWellKnownSid( ((TOKEN_USER *)buf)->User.Sid, WinLocalSystemSid ))
+                v = 1;
+            CloseHandle( token );
+        }
+        InterlockedCompareExchange( &state, v, 0 );
+    }
+    return state == 1;
+}
+#endif
+
 static const WCHAR *get_root_key( MSIPACKAGE *package, INT root, HKEY *root_key )
 {
     const WCHAR *ret;
@@ -2715,7 +2741,10 @@ static const WCHAR *get_root_key( MSIPACKAGE *package, INT root, HKEY *root_key 
         /* a per-user installation writes the classes of its Registry table under HKEY_CURRENT_USER\Software\Classes
            (Windows Installer, Installation Context: Registry Redirection); HKEY_CLASSES_ROOT here is merged and
            writes the machine's classes, which a standard user may not change */
-        if (!msi_get_property_int( package->db, L"ALLUSERS", 0 ))
+        /* Not for the LocalSystem account: its HKEY_CURRENT_USER is .DEFAULT, from which every new profile is
+           created and which no existing user sees, so its classes stay where they always went (a deliberate
+           keep-previous-behaviour choice; what Windows does for a per-user install by LocalSystem: verify on peer) */
+        if (!msi_get_property_int( package->db, L"ALLUSERS", 0 ) && !msi_process_is_local_system())
         {
             static HKEY user_classes;
             HKEY key;
