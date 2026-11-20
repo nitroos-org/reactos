@@ -180,7 +180,8 @@ MsfsQueryInformation(PDEVICE_OBJECT DeviceObject,
         break;
 
     default:
-        Status = STATUS_NOT_IMPLEMENTED;
+        /* an unsupported class is a bad parameter, as on Windows (also the Vista class 48 that now reaches this driver) */
+        Status = STATUS_INVALID_PARAMETER;
     }
 
     Irp->IoStatus.Status = Status;
