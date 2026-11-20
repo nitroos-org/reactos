@@ -154,6 +154,10 @@ CmpFileSetSize(
         return TRUE;
     }
 
+    /* Don't do anything if we're not supposed to */
+    if (CmpNoWrite)
+        return TRUE;
+
     /*
      * Disable hard errors so that we don't deadlock
      * when touching with the hive files.
@@ -218,4 +222,139 @@ CmpFileFlush(IN PHHIVE RegistryHive,
     ASSERT(!NT_SUCCESS(Status) || Status == IoStatusBlock.Status);
 
     return NT_SUCCESS(Status) ? TRUE : FALSE;
+}
+
+/**
+ * @brief
+ * Overwrites with zeros and empties the log file of a hive that
+ * is written without a log (the SYSTEM hive: its alternate file
+ * mirrors it). Such a log was written when the hive was last
+ * loaded with a log, by setup, and holds registry data of then.
+ *
+ * @param[in] HiveFileName
+ * The full path of the hive file; the log is that path with ".LOG".
+ *
+ * @remarks
+ * Called only once the hive file is known to be clean on disk: a log
+ * is applied only to a hive whose last write was interrupted, and no
+ * write of this hive goes through the log any more. An empty log is
+ * refused by every reader. Best effort: a failure leaves the log as
+ * it was, or partly zeroed, and is tried again at the next boot.
+ */
+VOID
+NTAPI
+CmpScrubUnusedHiveLog(
+    _In_ PCUNICODE_STRING HiveFileName)
+{
+    static const UNICODE_STRING LogExtension = RTL_CONSTANT_STRING(L".LOG");
+    UNICODE_STRING LogName;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    FILE_STANDARD_INFORMATION Standard;
+    FILE_END_OF_FILE_INFORMATION EndOfFile;
+    FILE_ALLOCATION_INFORMATION Allocation;
+    LARGE_INTEGER Offset;
+    ULONG Length = 0;
+    ULONGLONG Size;
+    PVOID Zeros;
+    HANDLE LogHandle;
+    BOOLEAN HardErrors;
+    NTSTATUS Status;
+    PAGED_CODE();
+
+    if (CmpNoWrite)
+        return;
+
+    LogName.Length = 0;
+    LogName.MaximumLength = HiveFileName->Length + LogExtension.Length;
+    LogName.Buffer = ExAllocatePoolWithTag(PagedPool, LogName.MaximumLength, TAG_CM);
+    if (!LogName.Buffer)
+        return;
+    RtlCopyUnicodeString(&LogName, HiveFileName);
+    RtlAppendUnicodeStringToString(&LogName, &LogExtension);
+
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &LogName,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL,
+                               NULL);
+
+    HardErrors = IoSetThreadHardErrorMode(FALSE);
+
+    Status = ZwCreateFile(&LogHandle,
+                          FILE_READ_ATTRIBUTES | FILE_WRITE_DATA | SYNCHRONIZE,
+                          &ObjectAttributes,
+                          &IoStatusBlock,
+                          NULL,
+                          0,
+                          0,
+                          FILE_OPEN,
+                          FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE |
+                          FILE_NO_INTERMEDIATE_BUFFERING,
+                          NULL,
+                          0);
+    ExFreePoolWithTag(LogName.Buffer, TAG_CM);
+    if (!NT_SUCCESS(Status))
+    {
+        /* No log: nothing to do */
+        IoSetThreadHardErrorMode(HardErrors);
+        return;
+    }
+
+    Status = ZwQueryInformationFile(LogHandle,
+                                    &IoStatusBlock,
+                                    &Standard,
+                                    sizeof(Standard),
+                                    FileStandardInformation);
+    if (!NT_SUCCESS(Status) || Standard.EndOfFile.QuadPart == 0)
+        goto Quit;
+
+    Zeros = ExAllocatePoolWithTag(PagedPool, 16 * HBLOCK_SIZE, TAG_CM);
+    if (!Zeros)
+        goto Quit;
+    RtlZeroMemory(Zeros, 16 * HBLOCK_SIZE);
+
+    /* Whole sectors: the file is open without intermediate buffering */
+    Size = ROUND_UP((ULONGLONG)Standard.EndOfFile.QuadPart, HSECTOR_SIZE);
+    for (Offset.QuadPart = 0; (ULONGLONG)Offset.QuadPart < Size; Offset.QuadPart += Length)
+    {
+        Length = (ULONG)min(Size - Offset.QuadPart, 16 * HBLOCK_SIZE);
+        Status = ZwWriteFile(LogHandle, NULL, NULL, NULL, &IoStatusBlock,
+                             Zeros, Length, &Offset, NULL);
+        if (!NT_SUCCESS(Status))
+            break;
+    }
+    ExFreePoolWithTag(Zeros, TAG_CM);
+
+    if (NT_SUCCESS(Status))
+        Status = ZwFlushBuffersFile(LogHandle, &IoStatusBlock);
+
+    /* The zeros are on the medium: now the file can be emptied */
+    if (NT_SUCCESS(Status))
+    {
+        EndOfFile.EndOfFile.QuadPart = 0;
+        Status = ZwSetInformationFile(LogHandle,
+                                      &IoStatusBlock,
+                                      &EndOfFile,
+                                      sizeof(EndOfFile),
+                                      FileEndOfFileInformation);
+    }
+    if (NT_SUCCESS(Status))
+    {
+        Allocation.AllocationSize.QuadPart = 0;
+        Status = ZwSetInformationFile(LogHandle,
+                                      &IoStatusBlock,
+                                      &Allocation,
+                                      sizeof(Allocation),
+                                      FileAllocationInformation);
+    }
+
+    if (NT_SUCCESS(Status))
+        DPRINT1("Overwrote and emptied the unused log of %wZ (%I64u bytes)\n", HiveFileName, Size);
+    else
+        DPRINT1("Failed to overwrite the unused log of %wZ (Status 0x%lx)\n", HiveFileName, Status);
+
+Quit:
+    ZwClose(LogHandle);
+    IoSetThreadHardErrorMode(HardErrors);
 }

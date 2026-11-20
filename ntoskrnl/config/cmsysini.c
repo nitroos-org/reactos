@@ -1445,7 +1445,8 @@ CmpLoadHiveThread(IN PVOID StartContext)
                 DPRINT1("FreeLdr recovered the hive (hive 0x%p)\n", CmHive);
                 RtlSetAllBits(&CmHive->Hive.DirtyVector);
                 CmHive->Hive.DirtyCount = CmHive->Hive.DirtyVector.SizeOfBitMap;
-                HvSyncHive((PHHIVE)CmHive);
+                if (HvSyncHive((PHHIVE)CmHive))
+                    CmpScrubUnusedHiveLog(&FileName);
             }
             else
             {
@@ -1468,6 +1469,10 @@ CmpLoadHiveThread(IN PVOID StartContext)
                         goto Exit;
                     }
                 }
+
+                /* The loader found the hive file clean: its old log is never applied */
+                if (CmHive->Hive.BaseBlock->BootRecover == HBOOT_NO_BOOT_RECOVER)
+                    CmpScrubUnusedHiveLog(&FileName);
             }
 
             /* Finally, set our allocated hive to the same hive we've had */

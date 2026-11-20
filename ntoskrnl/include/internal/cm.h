@@ -1519,6 +1519,12 @@ CmpFileFlush(
    IN ULONG Length
 );
 
+VOID
+NTAPI
+CmpScrubUnusedHiveLog(
+    _In_ PCUNICODE_STRING HiveFileName
+);
+
 //
 // Configuration Manager side of Registry System Calls
 //
