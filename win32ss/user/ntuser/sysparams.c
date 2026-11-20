@@ -65,6 +65,11 @@ static const WCHAR* VAL_HOVERWIDTH = L"MouseHoverWidth";
 static const WCHAR* VAL_HOVERHEIGHT = L"MouseHoverHeight";
 static const WCHAR* VAL_SENSITIVITY = L"MouseSensitivity";
 
+#ifndef SPI_GETSCREENSAVESECURE
+#define SPI_GETSCREENSAVESECURE 0x0076
+#define SPI_SETSCREENSAVESECURE 0x0077
+#endif
+
 static const WCHAR* KEY_DESKTOP = L"Control Panel\\Desktop";
 static const WCHAR* VAL_SCRTO = L"ScreenSaveTimeOut";
 static const WCHAR* VAL_SCRNSV = L"SCRNSAVE.EXE";
@@ -330,11 +335,9 @@ SpiUpdatePerUserSystemParameters(VOID)
     gspv.dwForegroundFlashCount = 3;
 
     gspv.iScrSaverTimeout = SpiLoadTimeOut();
-    gspv.bScrSaverActive = FALSE;
+    gspv.bScrSaverActive = SpiLoadInt(KEY_DESKTOP, VAL_SCRACT, 0) != 0;
     gspv.bScrSaverRunning = FALSE;
-#if(WINVER >= 0x0600)
-    gspv.bScrSaverSecure = FALSE;
-#endif
+    gspv.bScrSaverSecure = SpiLoadInt(KEY_DESKTOP, L"ScreenSaverIsSecure", 0) != 0;
 
     gspv.bFastTaskSwitch = TRUE;
 
@@ -1607,13 +1610,15 @@ SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
         case SPI_SETAUDIODESCRIPTION:
             ERR("SPI_SETAUDIODESCRIPTION is unimplemented\n");
             break;
+#endif
 
+        /* Not under WINVER >= 0x0600: this module is built for 0x0502 and the password protection of the
+         * screen saver is read by winlogon and by the display control panel whatever the version is */
         case SPI_GETSCREENSAVESECURE:
             return SpiGetInt(pvParam, &gspv.bScrSaverSecure, fl);
 
         case SPI_SETSCREENSAVESECURE:
             return SpiSetBool(&gspv.bScrSaverSecure, uiParam, KEY_DESKTOP, L"ScreenSaverIsSecure", fl);
-#endif
 
         case SPI_GETACTIVEWINDOWTRACKING:
             return SpiGetUserPref(UPM_ACTIVEWINDOWTRACKING, pvParam, fl);
@@ -1918,9 +1923,7 @@ SpiGetSetProbeBuffer(UINT uiAction, UINT uiParam, PVOID pvParam)
         case SPI_GETSHOWIMEUI:
         case SPI_GETMOUSESPEED:
         case SPI_GETSCREENSAVERRUNNING:
-#if(WINVER >= 0x0600)
         case SPI_GETSCREENSAVESECURE:
-#endif
         case SPI_GETACTIVEWINDOWTRACKING:
         case SPI_GETMENUANIMATION:
         case SPI_GETCOMBOBOXANIMATION:
