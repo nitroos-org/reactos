@@ -13,9 +13,10 @@
  *    not have, SANDBOX_INERT alone and WRITE_RESTRICTED alone do not make a filtered token (a write restricted token reports
  *    HasRestrictions 1 because it is restricted: 0x18)
  *  - the flag of a filtered token stays in its copies and in the tokens made from it
- *  - SANDBOX_INERT is stored (0x40, TokenSandBoxInert 1) only when the calling process runs as SYSTEM (also as the
- *    TrustedInstaller service, whose token is the SYSTEM user's, and with SeTcbPrivilege deleted, or when the thread
- *    impersonates somebody else); an administrator or a standard user gets a token without it, and no error
+ *  - SANDBOX_INERT is stored (0x40, TokenSandBoxInert 1) only when the calling process runs as SYSTEM, LocalService or
+ *    NetworkService (also as the TrustedInstaller service, whose token is the SYSTEM user's, and with SeTcbPrivilege
+ *    deleted, or when the thread impersonates somebody else); an administrator or a standard user gets a token
+ *    without it, and no error
  */
 
 #include "precomp.h"
@@ -44,7 +45,7 @@ typedef struct _TF_TOKEN_ACCESS_INFORMATION
     DWORD Flags;
 } TF_TOKEN_ACCESS_INFORMATION, *PTF_TOKEN_ACCESS_INFORMATION;
 
-static BOOL RunsAsSystem;
+static BOOL RunsAsSystem;    /* the process runs as LocalSystem, LocalService or NetworkService */
 
 static DWORD
 FlagsOf(HANDLE hToken, DWORD *HasRestrictions, DWORD *Inert)
@@ -201,6 +202,7 @@ START_TEST(TokenFilteredFlags)
 {
     HANDLE hProcess = NULL, hPrimary = NULL, hFiltered = NULL, hCopy = NULL;
     BYTE Users[SECURITY_MAX_SID_SIZE], Rdu[SECURITY_MAX_SID_SIZE], Everyone[SECURITY_MAX_SID_SIZE], SystemSid[SECURITY_MAX_SID_SIZE];
+    BYTE LocalServiceSid[SECURITY_MAX_SID_SIZE], NetworkServiceSid[SECURITY_MAX_SID_SIZE];
     SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
     LUID Shutdown, CreateToken, ChangeNotify;
     DWORD cb, Flags, Has, Inert;
@@ -218,6 +220,10 @@ START_TEST(TokenFilteredFlags)
     CreateWellKnownSid(WinWorldSid, NULL, Everyone, &cb);
     cb = sizeof(SystemSid);
     CreateWellKnownSid(WinLocalSystemSid, NULL, SystemSid, &cb);
+    cb = sizeof(LocalServiceSid);
+    CreateWellKnownSid(WinLocalServiceSid, NULL, LocalServiceSid, &cb);
+    cb = sizeof(NetworkServiceSid);
+    CreateWellKnownSid(WinNetworkServiceSid, NULL, NetworkServiceSid, &cb);
     RtlInitializeSid((PSID)Rdu, &NtAuthority, 2);
     *RtlSubAuthoritySid((PSID)Rdu, 0) = SECURITY_BUILTIN_DOMAIN_RID;
     *RtlSubAuthoritySid((PSID)Rdu, 1) = DOMAIN_ALIAS_RID_REMOTE_DESKTOP_USERS;
@@ -226,7 +232,9 @@ START_TEST(TokenFilteredFlags)
     LookupPrivilegeValueA(NULL, SE_CHANGE_NOTIFY_NAME, &ChangeNotify);
 
     if (GetTokenInformation(hProcess, TokenUser, UserBuffer, sizeof(UserBuffer), &cb))
-        RunsAsSystem = EqualSid(((PTOKEN_USER)UserBuffer)->User.Sid, SystemSid);
+        RunsAsSystem = EqualSid(((PTOKEN_USER)UserBuffer)->User.Sid, SystemSid) ||
+                       EqualSid(((PTOKEN_USER)UserBuffer)->User.Sid, LocalServiceSid) ||
+                       EqualSid(((PTOKEN_USER)UserBuffer)->User.Sid, NetworkServiceSid);
 
     /* the process token itself is not filtered: the rows below start from that */
     Flags = FlagsOf(hPrimary, &Has, &Inert);

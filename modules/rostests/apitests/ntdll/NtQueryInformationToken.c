@@ -868,29 +868,36 @@ QueryTokenIsSandboxInert(
     ok_ntstatus(Status, STATUS_SUCCESS);
 
     /*
-     * Windows Server 2022 stores the flag only when the calling process runs as SYSTEM and ignores
-     * the request (without an error) for an administrator or another user
+     * Windows Server 2022 stores the flag only when the calling process runs as LocalSystem, LocalService or
+     * NetworkService and ignores the request (without an error) for an administrator or another user
      */
     {
         SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
-        PSID SystemSid = NULL;
+        PSID ServiceSids[3] = {NULL, NULL, NULL};
+        static const ULONG ServiceRids[3] = {SECURITY_LOCAL_SYSTEM_RID, SECURITY_LOCAL_SERVICE_RID, SECURITY_NETWORK_SERVICE_RID};
         HANDLE ProcessToken = NULL;
         BYTE UserBuffer[256];
-        ULONG UserLength;
-        BOOLEAN RunsAsSystem = FALSE;
+        ULONG UserLength, i;
+        BOOLEAN RunsAsService = FALSE;
 
-        if (NT_SUCCESS(RtlAllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &SystemSid)))
+        if (NT_SUCCESS(NtOpenProcessToken(NtCurrentProcess(), TOKEN_QUERY, &ProcessToken)))
         {
-            if (NT_SUCCESS(NtOpenProcessToken(NtCurrentProcess(), TOKEN_QUERY, &ProcessToken)))
+            if (NT_SUCCESS(NtQueryInformationToken(ProcessToken, TokenUser, UserBuffer, sizeof(UserBuffer), &UserLength)))
             {
-                if (NT_SUCCESS(NtQueryInformationToken(ProcessToken, TokenUser, UserBuffer, sizeof(UserBuffer), &UserLength)))
-                    RunsAsSystem = RtlEqualSid(((PTOKEN_USER)UserBuffer)->User.Sid, SystemSid);
-                NtClose(ProcessToken);
+                for (i = 0; i < 3; i++)
+                {
+                    if (NT_SUCCESS(RtlAllocateAndInitializeSid(&NtAuthority, 1, ServiceRids[i], 0, 0, 0, 0, 0, 0, 0, &ServiceSids[i])))
+                    {
+                        if (RtlEqualSid(((PTOKEN_USER)UserBuffer)->User.Sid, ServiceSids[i]))
+                            RunsAsService = TRUE;
+                        RtlFreeSid(ServiceSids[i]);
+                    }
+                }
             }
-            RtlFreeSid(SystemSid);
+            NtClose(ProcessToken);
         }
-        ok(IsTokenInert == RunsAsSystem, "The token is %s sandbox inert one after filtering (runs as SYSTEM: %d)!\n",
-           IsTokenInert ? "a" : "not a", RunsAsSystem);
+        ok(IsTokenInert == RunsAsService, "The token is %s sandbox inert one after filtering (runs as a service account: %d)!\n",
+           IsTokenInert ? "a" : "not a", RunsAsService);
     }
 
     NtClose(FilteredToken);

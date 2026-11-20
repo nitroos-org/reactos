@@ -917,9 +917,10 @@ SepMakeTokenLua(
 
 /*
  * Whether the caller of NtFilterToken may ask for SANDBOX_INERT. Measured on Windows Server 2022: the flag is stored
- * when the calling process runs as LocalSystem (also with SeTcbPrivilege deleted or disabled, with the thread
- * impersonating another user, and as the TrustedInstaller service, whose token is the SYSTEM user's) and is ignored
- * when it runs as an administrator or another user, whatever the token that is filtered. Kernel callers may.
+ * when the calling process runs as LocalSystem, LocalService or NetworkService (also with SeTcbPrivilege deleted or
+ * disabled, with the thread impersonating another user, and as the TrustedInstaller service, whose token is the SYSTEM
+ * user's) and is ignored when it runs as an administrator or another user, whatever the token that is filtered.
+ * Kernel callers may.
  */
 static
 BOOLEAN
@@ -933,7 +934,9 @@ SepCallerMaySetSandboxInert(
         return TRUE;
 
     PrimaryToken = PsReferencePrimaryToken(PsGetCurrentProcess());
-    Allowed = RtlEqualSid(((PTOKEN)PrimaryToken)->UserAndGroups[0].Sid, SeLocalSystemSid);
+    Allowed = RtlEqualSid(((PTOKEN)PrimaryToken)->UserAndGroups[0].Sid, SeLocalSystemSid) ||
+              RtlEqualSid(((PTOKEN)PrimaryToken)->UserAndGroups[0].Sid, SeLocalServiceSid) ||
+              RtlEqualSid(((PTOKEN)PrimaryToken)->UserAndGroups[0].Sid, SeNetworkServiceSid);
     PsDereferencePrimaryToken(PrimaryToken);
     return Allowed;
 }
