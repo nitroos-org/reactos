@@ -431,6 +431,14 @@ BOOLEAN
 IsMbrDiskUnusableForUefi(
     _In_ PDISKENTRY DiskEntry);
 
+#define UEFI_INSTALL_OK                 0
+#define UEFI_INSTALL_SPECIAL_PARTITION  1   /* EFI system, reserved or recovery partition */
+#define UEFI_INSTALL_SECTOR_SIZE        2   /* sectors of other than 512 bytes */
+
+ULONG
+GetUefiInstallRefusal(
+    _In_ PPARTENTRY PartEntry);
+
 PPARTENTRY
 FindSupportedSystemPartition(
     IN PPARTLIST List,

@@ -1775,6 +1775,50 @@ AddGptPartitionToDisk(
     InsertDiskRegion(DiskEntry, PartEntry, FALSE);
 }
 
+/*
+ * TRUE if the usable range of a GPT disk lies on the disk and every partition
+ * of its layout is inside that range, is not empty and overlaps no other one.
+ */
+static
+BOOLEAN
+IsGptLayoutSane(
+    _In_ PDISKENTRY DiskEntry,
+    _In_ const DRIVE_LAYOUT_INFORMATION_EX* LayoutEx)
+{
+    ULONGLONG First = DiskEntry->GptFirstUsable;
+    ULONGLONG End = DiskEntry->GptEndUsable;
+    ULONGLONG Start1, End1, Start2, End2;
+    ULONG i, j;
+
+    if (First < 2 || End <= First || End > DiskEntry->SectorCount.QuadPart ||
+        LayoutEx->PartitionCount > DiskEntry->GptMaxEntries)
+    {
+        return FALSE;
+    }
+
+    for (i = 0; i < LayoutEx->PartitionCount; i++)
+    {
+        const PARTITION_INFORMATION_EX* Info = &LayoutEx->PartitionEntry[i];
+
+        if (Info->StartingOffset.QuadPart < 0 || Info->PartitionLength.QuadPart <= 0)
+            return FALSE;
+        Start1 = (ULONGLONG)Info->StartingOffset.QuadPart / DiskEntry->BytesPerSector;
+        End1 = Start1 + (ULONGLONG)Info->PartitionLength.QuadPart / DiskEntry->BytesPerSector;
+        if (End1 <= Start1 || Start1 < First || End1 > End)
+            return FALSE;
+
+        for (j = 0; j < i; j++)
+        {
+            Info = &LayoutEx->PartitionEntry[j];
+            Start2 = (ULONGLONG)Info->StartingOffset.QuadPart / DiskEntry->BytesPerSector;
+            End2 = Start2 + (ULONGLONG)Info->PartitionLength.QuadPart / DiskEntry->BytesPerSector;
+            if (Start1 < End2 && Start2 < End1)
+                return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 /* Reads the partitions of a GPT-partitioned disk (only used on UEFI computers) */
 static
 VOID
@@ -1840,6 +1884,19 @@ AddGptDisk(
     DPRINT1("GPT disk %lu: %lu partitions, usable sectors %I64u..%I64u\n",
             DiskEntry->DiskNumber, LayoutEx->PartitionCount,
             DiskEntry->GptFirstUsable, DiskEntry->GptEndUsable);
+
+    /*
+     * Setup rewrites the whole table when it creates partitions: a table that
+     * is not sane (usable range or partitions outside of the disk, partitions
+     * that overlap) is not used at all, and no free space is offered on it.
+     */
+    if (!IsGptLayoutSane(DiskEntry, LayoutEx))
+    {
+        DPRINT1("GPT disk %lu: the partition table is damaged, the disk is not used\n", DiskEntry->DiskNumber);
+        DiskEntry->GptFirstUsable = DiskEntry->GptEndUsable = 0;
+        RtlFreeHeap(ProcessHeap, 0, LayoutEx);
+        return;
+    }
 
     if (LayoutEx->PartitionCount == 0)
         DiskEntry->NewDisk = TRUE;
@@ -2831,7 +2888,8 @@ GetNextPartition(
     {
         CurrentDisk = CONTAINING_RECORD(DiskListEntry, DISKENTRY, ListEntry);
 
-        if (CurrentDisk->DiskStyle == PARTITION_STYLE_GPT)
+        /* GPT disks are supported on UEFI computers only */
+        if (CurrentDisk->DiskStyle == PARTITION_STYLE_GPT && !List->IsUefi)
         {
             DPRINT("GPT-partitioned disk detected, not currently supported by SETUP!\n");
             continue;
@@ -2913,7 +2971,8 @@ GetPrevPartition(
     {
         CurrentDisk = CONTAINING_RECORD(DiskListEntry, DISKENTRY, ListEntry);
 
-        if (CurrentDisk->DiskStyle == PARTITION_STYLE_GPT)
+        /* GPT disks are supported on UEFI computers only */
+        if (CurrentDisk->DiskStyle == PARTITION_STYLE_GPT && !List->IsUefi)
         {
             DPRINT("GPT-partitioned disk detected, not currently supported by SETUP!\n");
             continue;
@@ -3380,8 +3439,12 @@ PartitionCreateChecks(
     {
         if (IsContainerPartition((UCHAR)PartitionInfo))
             return ERROR_WARN_PARTITION;
-        if (GetPrimaryPartitionCount(DiskEntry) >= DiskEntry->GptMaxEntries)
+        /* The EFI system and the reserved partitions that CreatePartition adds first need entries too */
+        if (GetPrimaryPartitionCount(DiskEntry) + (GetEfiPartitionsOverhead(PartEntry) ? 3 : 1) >
+            DiskEntry->GptMaxEntries)
+        {
             return ERROR_PARTITION_TABLE_FULL;
+        }
         return ERROR_SUCCESS;
     }
 
@@ -3593,6 +3656,33 @@ IsMbrDiskUnusableForUefi(
             DiskEntry->DiskStyle != PARTITION_STYLE_GPT &&
             (DiskEntry->ExtendedPartition != NULL ||
              GetPrimaryPartitionCount(DiskEntry) != 0));
+}
+
+/*
+ * UEFI computers: why Setup does not install onto this region or partition
+ * (UEFI_INSTALL_OK if it may). The EFI system partition, the reserved
+ * partition and a recovery partition are never a target: they hold the boot
+ * files of the computer's systems, which formatting would destroy (the answer
+ * file of an unattended setup counts partitions in table order, where the EFI
+ * system partition is number 1). The file system drivers cannot yet
+ * format or copy to a volume of 4096-byte sectors, so such a disk is refused
+ * before anything is written to it.
+ */
+ULONG
+GetUefiInstallRefusal(
+    _In_ PPARTENTRY PartEntry)
+{
+    PDISKENTRY DiskEntry = PartEntry->DiskEntry;
+
+    if (!DiskEntry->PartList->IsUefi || DiskEntry->MediaType != FixedMedia)
+        return UEFI_INSTALL_OK;
+
+    if (DiskEntry->BytesPerSector != 512)
+        return UEFI_INSTALL_SECTOR_SIZE;
+
+    if (IsEfiSystemPartition(PartEntry) || IsReservedGptPartition(PartEntry))
+        return UEFI_INSTALL_SPECIAL_PARTITION;
+    return UEFI_INSTALL_OK;
 }
 
 /*

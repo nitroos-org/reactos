@@ -2029,6 +2029,13 @@ CreateInstallPartition:
     /* UEFI firmware boots from GPT disks only; an MBR disk that still holds partitions cannot be used */
     if (IsMbrDiskUnusableForUefi(CurrentPartition->DiskEntry))
     {
+        if (IsUnattendedSetup)
+        {
+            UnattendedFatal("the disk is MBR-partitioned and holds partitions",
+                            "This UEFI computer cannot start from it: delete its partitions, or",
+                            "name a disk that is blank or GPT-partitioned.");
+            return QUIT_PAGE;
+        }
         PopupError("The disk you have selected uses the MBR partition style,\n"
                    "which this UEFI computer cannot start " BRAND_PRODUCT_NAME " from.\n"
                    "Delete all its partitions to let Setup convert it to GPT,\n"
@@ -2037,6 +2044,45 @@ CreateInstallPartition:
                    MUIGetString(STRING_CONTINUE),
                    Ir, POPUP_WAIT_ENTER);
         return SELECT_PARTITION_PAGE;
+    }
+
+    /* UEFI: never onto the boot files of the computer, nor onto a disk that Setup cannot finish on */
+    switch (GetUefiInstallRefusal(CurrentPartition))
+    {
+        case UEFI_INSTALL_SPECIAL_PARTITION:
+            if (IsUnattendedSetup)
+            {
+                UnattendedFatal("the partition is the EFI system, reserved or recovery one",
+                                "Partitions are counted in table order: the EFI system one is 1.",
+                                "Name the system partition, or use AutoPartition on a blank disk.");
+                return QUIT_PAGE;
+            }
+            PopupError("The selected partition is the EFI system partition, the reserved\n"
+                       "or the recovery partition of this computer. It holds the files that\n"
+                       "start the operating systems and cannot be used for the installation.\n"
+                       "Select another partition or unpartitioned space.\n"
+                       "Press ENTER to continue.",
+                       MUIGetString(STRING_CONTINUE),
+                       Ir, POPUP_WAIT_ENTER);
+            return SELECT_PARTITION_PAGE;
+
+        case UEFI_INSTALL_SECTOR_SIZE:
+            if (IsUnattendedSetup)
+            {
+                UnattendedFatal("the disk has sectors of other than 512 bytes",
+                                "The file system drivers cannot yet format such a disk.", NULL);
+                return QUIT_PAGE;
+            }
+            PopupError("The selected disk has sectors of other than 512 bytes.\n"
+                       "The file system drivers cannot yet format such a disk, so\n"
+                       "nothing has been written to it. Select another disk.\n"
+                       "Press ENTER to continue.",
+                       MUIGetString(STRING_CONTINUE),
+                       Ir, POPUP_WAIT_ENTER);
+            return SELECT_PARTITION_PAGE;
+
+        default:
+            break;
     }
 
     /* Create the partition if the selected region is empty */
