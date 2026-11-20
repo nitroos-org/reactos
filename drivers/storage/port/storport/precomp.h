@@ -369,6 +369,19 @@ typedef struct _FDO_DEVICE_EXTENSION
        restart waits for the old generation's to return before it stops the adapter */
     LONG StartIoActive[2];
 
+    /*
+     * The adapter's StartIo lock (StorPortAcquireSpinLock(StartIoLock)). Storport holds it while
+     * it calls HwStartIo, the miniport timers, HwResetBus and the state change routine, as the
+     * StorPortAcquireSpinLock documentation lists. Lock order: flow control lock, then StartIo
+     * or a DPC lock, then the interrupt lock(s).
+     */
+    KSPIN_LOCK StartIoLock;
+#if DBG
+    /* The thread that holds StartIoLock (at DISPATCH_LEVEL it stays on its processor, and a
+       DPC there runs on its behalf), NULL when free: catches a recursive acquire */
+    PKTHREAD volatile StartIoLockOwner;
+#endif
+
     /* StorPortNotification(RequestComplete) calls in progress (they may run at DIRQL) */
     LONG CompletionsInFlight;
 
@@ -776,6 +789,19 @@ TimerCallbackDpcRoutine(
 STORAGE_BUS_TYPE
 PortGetMiniportBusType(
     _In_ PDRIVER_OBJECT DriverObject);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_IRQL_raises_(DISPATCH_LEVEL)
+VOID
+PortAcquireStartIoLock(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _Out_ PKLOCK_QUEUE_HANDLE LockHandle);
+
+_IRQL_requires_(DISPATCH_LEVEL)
+VOID
+PortReleaseStartIoLock(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PKLOCK_QUEUE_HANDLE LockHandle);
 
 ULONG
 PortGetMiniportParameter(

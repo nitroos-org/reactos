@@ -1819,11 +1819,16 @@ PortFdoBusChangeDpc(
         InterlockedExchange(&FdoExtension->StateChangePending, 0);
         if (Routine != NULL)
         {
+            KLOCK_QUEUE_HANDLE StartIoLockHandle;
+
+            /* HwStorStateChange runs with the StartIo lock held (StorPortAcquireSpinLock) */
+            PortAcquireStartIoLock(FdoExtension, &StartIoLockHandle);
             Routine(FdoExtension->Miniport.MiniportExtension->HwDeviceExtension,
                     Context,
                     STOR_ADDRESS_TYPE_BTL8,
                     &FdoExtension->StateChangeAddress,
                     STOR_STATUS_SUCCESS);
+            PortReleaseStartIoLock(FdoExtension, &StartIoLockHandle);
         }
     }
 }

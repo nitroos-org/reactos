@@ -237,6 +237,7 @@ PortRestartAdapter(
     PSLIST_ENTRY SweptHead = NULL;
     ULONG Generation, Swept = 0, Kept = 0, Slot;
     KIRQL OldIrql;
+    KLOCK_QUEUE_HANDLE StartIoLockHandle;
 
     if (HwInitData->HwAdapterControl == NULL ||
         !FdoExtension->AdapterControlSupported[ScsiStopAdapter] ||
@@ -246,9 +247,10 @@ PortRestartAdapter(
         DPRINT1("storport: request still outstanding after a bus reset, the miniport cannot be restarted; resetting again\n");
         if (HwInitData->HwResetBus)
         {
-            KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+            /* HwStorResetBus runs with the StartIo lock held (StorPortAcquireSpinLock) */
+            PortAcquireStartIoLock(FdoExtension, &StartIoLockHandle);
             HwInitData->HwResetBus(&FdoExtension->Miniport.MiniportExtension->HwDeviceExtension, 0);
-            KeLowerIrql(OldIrql);
+            PortReleaseStartIoLock(FdoExtension, &StartIoLockHandle);
         }
 
         KeAcquireSpinLock(&FdoExtension->TimeoutLock, &OldIrql);
@@ -386,6 +388,7 @@ PortTimeoutWorker(
     ULONG PathId = 0;
     PLIST_ENTRY Entry;
     KIRQL OldIrql;
+    KLOCK_QUEUE_HANDLE StartIoLockHandle;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -428,10 +431,11 @@ PortTimeoutWorker(
 
         if (HwInitData->HwResetBus)
         {
-            KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+            /* HwStorResetBus runs with the StartIo lock held (StorPortAcquireSpinLock) */
+            PortAcquireStartIoLock(FdoExtension, &StartIoLockHandle);
             Result = HwInitData->HwResetBus(&FdoExtension->Miniport.MiniportExtension->HwDeviceExtension,
                                             PathId);
-            KeLowerIrql(OldIrql);
+            PortReleaseStartIoLock(FdoExtension, &StartIoLockHandle);
 
             if (!Result)
                 DPRINT1("storport: HwResetBus failed\n");

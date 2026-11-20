@@ -183,6 +183,7 @@ PortHandRequestToMiniport(
     PHW_INITIALIZATION_DATA HwInitData = FdoExtension->HwInitData;
     PSCSI_REQUEST_BLOCK Srb = RequestReference->Srb;
     PSCSI_REQUEST_BLOCK MiniportSrb = StorpMiniportSrb(RequestReference);
+    KLOCK_QUEUE_HANDLE StartIoLockHandle;
     ULONG Generation;
 
     /*
@@ -217,7 +218,16 @@ PortHandRequestToMiniport(
     }
 #endif
 
+    /*
+     * HwStartIo runs with the adapter's StartIo lock held (StorPortAcquireSpinLock: "HwStorStartIo:
+     * StartIo", there being one channel, see ExtFunctionInitializePerformanceOptimizations), so
+     * calls on several processors are serialized, and a miniport's DPC routine can exclude them
+     * by taking the same lock. HwBuildIo above runs without it, as documented. The caller may
+     * hold the flow control lock, which comes first in the lock order.
+     */
+    PortAcquireStartIoLock(FdoExtension, &StartIoLockHandle);
     HwInitData->HwStartIo(MiniportExtension, MiniportSrb);
+    PortReleaseStartIoLock(FdoExtension, &StartIoLockHandle);
 
     PortTimeoutStartIoReturned(FdoExtension, Generation);
 }
