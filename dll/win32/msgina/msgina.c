@@ -377,9 +377,8 @@ ReadScreenSaverFlag(
     _Out_ PBOOL pbSecure)
 {
     HKEY hKey;
-    DWORD Buffer[8]; /* Aligned room for a DWORD or for a string of up to 15 characters */
-    PWCHAR pwszBuffer = (PWCHAR)Buffer;
-    DWORD dwType, cbData;
+    PWCHAR pwszData;
+    DWORD dwType, cbData = 0;
     BOOL bFound = FALSE;
     LONG rc;
 
@@ -387,22 +386,33 @@ ReadScreenSaverFlag(
     if (rc != ERROR_SUCCESS)
         return FALSE;
 
-    RtlZeroMemory(Buffer, sizeof(Buffer));
-    cbData = sizeof(Buffer) - sizeof(WCHAR); /* Always leaves the string terminated */
-    rc = RegQueryValueExW(hKey, pszValue, NULL, &dwType, (LPBYTE)Buffer, &cbData);
-    if (rc == ERROR_SUCCESS)
+    /* The value may be of any length (Windows accepts a string with trailing text): ask for the size */
+    rc = RegQueryValueExW(hKey, pszValue, NULL, &dwType, NULL, &cbData);
+    if (rc == ERROR_SUCCESS &&
+        cbData <= 4096 &&
+        ((dwType == REG_DWORD && cbData == sizeof(DWORD)) ||
+         (dwType == REG_SZ && cbData >= sizeof(WCHAR))))
     {
-        if (dwType == REG_DWORD && cbData == sizeof(DWORD))
+        pwszData = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cbData + sizeof(WCHAR));
+        if (pwszData)
         {
-            *pbSecure = (Buffer[0] != 0);
-            bFound = TRUE;
-        }
-        else if (dwType == REG_SZ)
-        {
-            /* The string may have been stored without its terminator */
-            pwszBuffer[cbData / sizeof(WCHAR)] = UNICODE_NULL;
-            *pbSecure = (_wtoi(pwszBuffer) != 0);
-            bFound = TRUE;
+            rc = RegQueryValueExW(hKey, pszValue, NULL, &dwType, (LPBYTE)pwszData, &cbData);
+            if (rc == ERROR_SUCCESS)
+            {
+                if (dwType == REG_DWORD && cbData == sizeof(DWORD))
+                {
+                    *pbSecure = (*(PDWORD)pwszData != 0);
+                    bFound = TRUE;
+                }
+                else if (dwType == REG_SZ && cbData >= sizeof(WCHAR) &&
+                         pwszData[cbData / sizeof(WCHAR) - 1] == UNICODE_NULL)
+                {
+                    /* A string without its terminator is not a valid value (Windows ignores it) */
+                    *pbSecure = (_wtoi(pwszData) != 0);
+                    bFound = TRUE;
+                }
+            }
+            HeapFree(GetProcessHeap(), 0, pwszData);
         }
     }
     RegCloseKey(hKey);
