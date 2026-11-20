@@ -59,7 +59,7 @@ BOOL WINAPI AvRtCreateThreadOrderingGroupExA(
 BOOL WINAPI AvRtCreateThreadOrderingGroupExW(
     PHANDLE Context, PLARGE_INTEGER Period,
     GUID *ThreadOrderingGuid, PLARGE_INTEGER Timeout,
-    LPCSTR TaskName);
+    LPCWSTR TaskName);
 #define AvRtCreateThreadOrderingGroupEx WINELIB_NAME_AW(AvRtCreateThreadOrderingGroupEx)
 
 BOOL WINAPI AvRtJoinThreadOrderingGroup(PHANDLE Context, GUID *ThreadOrderingGuid, BOOL Before);

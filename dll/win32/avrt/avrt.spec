@@ -1,12 +1,12 @@
 @ stdcall AvQuerySystemResponsiveness(long ptr)
 @ stdcall AvRevertMmThreadCharacteristics(long)
-@ stub AvRtCreateThreadOrderingGroup
-@ stub AvRtCreateThreadOrderingGroupExA
-@ stub AvRtCreateThreadOrderingGroupExW
-@ stub AvRtDeleteThreadOrderingGroup
-@ stub AvRtJoinThreadOrderingGroup
-@ stub AvRtLeaveThreadOrderingGroup
-@ stub AvRtWaitOnThreadOrderingGroup
+@ stdcall AvRtCreateThreadOrderingGroup(ptr ptr ptr ptr)
+@ stdcall AvRtCreateThreadOrderingGroupExA(ptr ptr ptr ptr str)
+@ stdcall AvRtCreateThreadOrderingGroupExW(ptr ptr ptr ptr wstr)
+@ stdcall AvRtDeleteThreadOrderingGroup(ptr)
+@ stdcall AvRtJoinThreadOrderingGroup(ptr ptr long)
+@ stdcall AvRtLeaveThreadOrderingGroup(ptr)
+@ stdcall AvRtWaitOnThreadOrderingGroup(ptr)
 @ stdcall AvSetMmMaxThreadCharacteristicsA(str str ptr)
 @ stdcall AvSetMmMaxThreadCharacteristicsW(wstr wstr ptr)
 @ stdcall AvSetMmThreadCharacteristicsA(str ptr)

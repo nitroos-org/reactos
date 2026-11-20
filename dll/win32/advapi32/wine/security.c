@@ -88,8 +88,8 @@ static const WELLKNOWNSID WellKnownSids[] =
     { {0,0}, WinThisOrganizationSid, { SID_REVISION, 1, { SECURITY_NT_AUTHORITY }, { SECURITY_THIS_ORGANIZATION_RID } } },
     { {0,0}, WinOtherOrganizationSid, { SID_REVISION, 1, { SECURITY_NT_AUTHORITY }, { SECURITY_OTHER_ORGANIZATION_RID } } },
     { {0,0}, WinBuiltinIncomingForestTrustBuildersSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_INCOMING_FOREST_TRUST_BUILDERS  } } },
-    { {0,0}, WinBuiltinPerfMonitoringUsersSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_MONITORING_USERS } } },
-    { {0,0}, WinBuiltinPerfLoggingUsersSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_LOGGING_USERS } } },
+    { {'M','U'}, WinBuiltinPerfMonitoringUsersSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_MONITORING_USERS } } },
+    { {'L','U'}, WinBuiltinPerfLoggingUsersSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_LOGGING_USERS } } },
     { {0,0}, WinBuiltinAuthorizationAccessSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_AUTHORIZATIONACCESS } } },
     { {0,0}, WinBuiltinTerminalServerLicenseServersSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_TS_LICENSE_SERVERS } } },
     { {0,0}, WinBuiltinDCOMUsersSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_DCOM_USERS } } },
@@ -100,7 +100,32 @@ static const WELLKNOWNSID WellKnownSids[] =
     { {'A','C'}, WinBuiltinAnyPackageSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_APP_PACKAGE_BASE_RID, SECURITY_BUILTIN_PACKAGE_ANY_PACKAGE } } },
 };
 
-/* these SIDs must be constructed as relative to some domain - only the RID is well-known */
+/*
+ * Aliases of the SID string syntax that WellKnownSids has no entry for
+ * (https://learn.microsoft.com/windows/win32/secauthz/sid-strings, rows measured on Windows Server 2022).
+ * They are known to the SID strings only: CreateWellKnownSid and IsWellKnownSid do not see this table (some of these SIDs
+ * have a WELL_KNOWN_SID_TYPE that they do not build), so the type column is not used.
+ */
+static const WELLKNOWNSID SddlOnlyAliases[] =
+{
+    { {'W','R'}, WinNullSid, { SID_REVISION, 1, { SECURITY_NT_AUTHORITY }, { 33 } } },                                      /* write restricted code */
+    { {'I','S'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 568 } } },        /* IIS_IUSRS */
+    { {'C','D'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 574 } } },        /* certificate service DCOM access */
+    { {'C','Y'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 569 } } },        /* cryptographic operators */
+    { {'E','R'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 573 } } },        /* event log readers */
+    { {'R','A'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 575 } } },        /* RDS remote access servers */
+    { {'E','S'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 576 } } },        /* RDS endpoint servers */
+    { {'M','S'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 577 } } },        /* RDS management servers */
+    { {'H','A'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 578 } } },        /* Hyper-V administrators */
+    { {'A','A'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 579 } } },        /* access control assistance operators */
+    { {'R','M'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 580 } } },        /* remote management users */
+    { {'U','D'}, WinNullSid, { SID_REVISION, 6, { SECURITY_NT_AUTHORITY }, { 84, 0, 0, 0, 0, 0 } } },                          /* user-mode drivers */
+    { {'M','P'}, WinNullSid, { SID_REVISION, 1, { SECURITY_MANDATORY_LABEL_AUTHORITY }, { 0x2100 } } },                      /* medium plus mandatory level */
+    { {'A','S'}, WinNullSid, { SID_REVISION, 1, { { 0, 0, 0, 0, 0, 18 } }, { 1 } } },                                           /* authentication authority asserted */
+    { {'S','S'}, WinNullSid, { SID_REVISION, 1, { { 0, 0, 0, 0, 0, 18 } }, { 2 } } },                                           /* service asserted */
+};
+
+/* these SIDs must be constructed as relative to the machine SID - only the RID is well-known */
 typedef struct WELLKNOWNRID
 {
     WCHAR wstr[2];
@@ -123,6 +148,17 @@ static const WELLKNOWNRID WellKnownRids[] = {
     { {'P','A'}, WinAccountPolicyAdminsSid,     DOMAIN_GROUP_RID_POLICY_ADMINS },
     { {'R','S'}, WinAccountRasAndIasServersSid, DOMAIN_ALIAS_RID_RAS_SERVERS },
 };
+
+/*
+ * Of these, only LA and LG name an account of the machine's own domain. The others (CA, DA, DC, DD, DG, DU, EA, PA,
+ * RS, SA) need the SID of a domain the machine is a member of; a machine that is not domain-joined refuses them as
+ * SID strings (ERROR_INVALID_SID), as measured on Windows Server 2022. CreateWellKnownSid still builds all of them
+ * from the domain SID its caller gives.
+ */
+static BOOL IsMachineRid(const WELLKNOWNRID *rid)
+{
+    return rid->Type == WinAccountAdministratorSid || rid->Type == WinAccountGuestSid;
+}
 
 #ifndef __REACTOS__
 static const SID sidWorld = { SID_REVISION, 1, { SECURITY_WORLD_SID_AUTHORITY} , { SECURITY_WORLD_RID } };
@@ -271,20 +307,58 @@ BOOL ADVAPI_IsLocalComputer(LPCWSTR ServerName)
 
 /************************************************************
  *                ADVAPI_GetComputerSid
+ *
+ * Fills sid (a MAX_SID or larger buffer) with the SID of the local account domain (the machine SID), as the LSA
+ * reports it. The SID of a machine does not change while it runs, so it is read once.
  */
 BOOL ADVAPI_GetComputerSid(PSID sid)
 {
-    static const struct /* same fields as struct SID */
-    {
-        BYTE Revision;
-        BYTE SubAuthorityCount;
-        SID_IDENTIFIER_AUTHORITY IdentifierAuthority;
-        DWORD SubAuthority[4];
-    } computer_sid =
-    { SID_REVISION, 4, { SECURITY_NT_AUTHORITY }, { SECURITY_NT_NON_UNIQUE, 0, 0, 0 } };
+    static MAX_SID cached;
+    static LONG cached_state; /* 0 unknown, 1 being filled, 2 valid */
+    LSA_OBJECT_ATTRIBUTES attr;
+    LSA_HANDLE policy;
+    POLICY_ACCOUNT_DOMAIN_INFO *info = NULL;
+    NTSTATUS status;
+    BOOL ret = FALSE;
 
-    memcpy( sid, &computer_sid, sizeof(computer_sid) );
-    return TRUE;
+    if (InterlockedCompareExchange(&cached_state, 2, 2) == 2)
+    {
+        memcpy(sid, &cached, GetLengthSid(&cached));
+        return TRUE;
+    }
+
+    memset(&attr, 0, sizeof(attr));
+    attr.Length = sizeof(attr);
+    status = LsaOpenPolicy(NULL, &attr, POLICY_VIEW_LOCAL_INFORMATION, &policy);
+    if (status)
+    {
+        SetLastError(LsaNtStatusToWinError(status));
+        return FALSE;
+    }
+
+    status = LsaQueryInformationPolicy(policy, PolicyAccountDomainInformation, (PVOID *)&info);
+    if (!status && info && info->DomainSid && IsValidSid(info->DomainSid) &&
+        *GetSidSubAuthorityCount(info->DomainSid) < SID_MAX_SUB_AUTHORITIES)
+    {
+        MAX_SID local;
+
+        memcpy(&local, info->DomainSid, GetLengthSid(info->DomainSid));
+        memcpy(sid, &local, GetLengthSid(&local));
+        if (InterlockedCompareExchange(&cached_state, 1, 0) == 0)
+        {
+            memcpy(&cached, &local, GetLengthSid(&local));
+            InterlockedExchange(&cached_state, 2);
+        }
+        ret = TRUE;
+    }
+    else if (status)
+        SetLastError(LsaNtStatusToWinError(status));
+    else
+        SetLastError(ERROR_INVALID_SID);
+
+    if (info) LsaFreeMemory(info);
+    LsaClose(policy);
+    return ret;
 }
 
 /* Exported functions */
@@ -2888,6 +2962,29 @@ static BOOL ParseAceStringGuid(LPCWSTR *StringAcl, GUID *guid, BOOL *present)
     return TRUE;
 }
 
+/* TRUE when the text starts with the numeric form of a SID (S-...) */
+static BOOL IsNumericSidText(LPCWSTR p)
+{
+    return (p[0] == 'S' || p[0] == 's') && p[1] == '-';
+}
+
+/*
+ * A SID written as a two-letter alias ends with the alias: only blanks may follow it before the ')' of the ACE (or the
+ * end of the field). Text glued to the alias ("LAx") is not an alias plus something to ignore, it is not a SID, and the
+ * descriptor must not be built from it.
+ */
+static BOOL AliasFieldEndsCleanly(LPCWSTR p)
+{
+    while (*p == ' ')
+        p++;
+    if (!p[0] || !p[1] || IsNumericSidText(p))
+        return TRUE; /* nothing to check here: the parser refuses what it cannot read */
+    p += 2;
+    while (*p == ' ')
+        p++;
+    return !*p || *p == ')' || *p == ';';
+}
+
 /******************************************************************************
  * ParseStringAclToAcl
  *
@@ -2984,8 +3081,21 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, LPDWORD lpdwFlags,
             }
 
             /* Parse ACE account sid */
-            if (!ParseStringSidToSid(StringAcl, pAce ? (PSID)((LPBYTE)pAce + sidoff) : NULL, &sidlen))
+            if (!AliasFieldEndsCleanly(StringAcl))
                 goto lerr;
+            if (!ParseStringSidToSid(StringAcl, pAce ? (PSID)((LPBYTE)pAce + sidoff) : NULL, &sidlen))
+            {
+                LPCWSTR sidtext = StringAcl;
+
+                /* an alias that names nothing here (a domain account on a machine that is no domain member, an unknown
+                 * one) is a bad SID, not a bad ACL */
+                while (*sidtext == ' ')
+                    sidtext++;
+                if (*sidtext && *sidtext != ')' && *sidtext != ';' && !IsNumericSidText(sidtext) &&
+                    GetLastError() == ERROR_INVALID_SID)
+                    error = ERROR_INVALID_SID;
+                goto lerr;
+            }
             while (*StringAcl && *StringAcl != ')')
                 StringAcl++;
 
@@ -3098,6 +3208,11 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
             {
                 DWORD bytes;
 
+                if (!AliasFieldEndsCleanly(tok))
+                {
+                    SetLastError(ERROR_INVALID_PARAMETER);
+                    goto lend;
+                }
                 if (!ParseStringSidToSid(tok, lpNext, &bytes))
                     goto lend;
 
@@ -3116,6 +3231,11 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
             {
                 DWORD bytes;
 
+                if (!AliasFieldEndsCleanly(tok))
+                {
+                    SetLastError(ERROR_INVALID_PARAMETER);
+                    goto lend;
+                }
                 if (!ParseStringSidToSid(tok, lpNext, &bytes))
                     goto lend;
 
@@ -3341,6 +3461,40 @@ static BOOL DumpSid(PSID psid, WCHAR **pwptr, ULONG *plen)
         {
             DumpString(WellKnownSids[i].wstr, 2, pwptr, plen);
             return TRUE;
+        }
+    }
+    for (i = 0; i < sizeof(SddlOnlyAliases) / sizeof(SddlOnlyAliases[0]); i++)
+    {
+        if (EqualSid(psid, (PSID)&(SddlOnlyAliases[i].Sid.Revision)))
+        {
+            DumpString(SddlOnlyAliases[i].wstr, 2, pwptr, plen);
+            return TRUE;
+        }
+    }
+
+    /*
+     * The accounts of the machine's own domain: the SID of the machine plus a well-known RID. Only a SID of the shape
+     * S-1-5-21-a-b-c-RID can be one, so the machine SID is looked up only for those.
+     */
+    if (IsValidSid(psid) && *GetSidSubAuthorityCount(psid) == 5 &&
+        *GetSidSubAuthority(psid, 0) == SECURITY_NT_NON_UNIQUE &&
+        !memcmp(GetSidIdentifierAuthority(psid), &(SID_IDENTIFIER_AUTHORITY){ SECURITY_NT_AUTHORITY }, sizeof(SID_IDENTIFIER_AUTHORITY)))
+    {
+        DWORD rid = *GetSidSubAuthority(psid, 4);
+
+        for (i = 0; i < sizeof(WellKnownRids) / sizeof(WellKnownRids[0]); i++)
+        {
+            MAX_SID local;
+
+            if (IsMachineRid(&WellKnownRids[i]) && WellKnownRids[i].Rid == rid && ADVAPI_GetComputerSid(&local))
+            {
+                local.SubAuthority[local.SubAuthorityCount++] = rid;
+                if (EqualSid(psid, &local))
+                {
+                    DumpString(WellKnownRids[i].wstr, 2, pwptr, plen);
+                    return TRUE;
+                }
+            }
         }
     }
 
@@ -3886,12 +4040,14 @@ BOOL WINAPI ConvertStringSidToSidW(LPCWSTR StringSid, PSID* Sid)
             constant[2] = 0;
             if (ParseStringSidToSid(constant, NULL, &cBytes))
             {
-                PSID pSid = *Sid = LocalAlloc(0, cBytes);
+                PSID pSid = LocalAlloc(0, cBytes);
 
                 if (!pSid)
                     SetLastError(ERROR_NOT_ENOUGH_MEMORY);
                 else if (!(bret = ParseStringSidToSid(constant, pSid, &cBytes)))
                     LocalFree(pSid);
+                else
+                    *Sid = pSid; /* only a SID that was built: a caller that frees *Sid after a failure must not free it twice */
                 return bret;
             }
         }
@@ -4371,14 +4527,18 @@ static DWORD ComputeStringSidSize(LPCWSTR StringSid)
         unsigned int i;
 
         for (i = 0; i < sizeof(WellKnownSids)/sizeof(WellKnownSids[0]); i++)
-            if (!strncmpW(WellKnownSids[i].wstr, StringSid, 2))
+            if (!strncmpiW(WellKnownSids[i].wstr, StringSid, 2))
                 return GetSidLengthRequired(WellKnownSids[i].Sid.SubAuthorityCount);
 
+        for (i = 0; i < sizeof(SddlOnlyAliases)/sizeof(SddlOnlyAliases[0]); i++)
+            if (!strncmpiW(SddlOnlyAliases[i].wstr, StringSid, 2))
+                return GetSidLengthRequired(SddlOnlyAliases[i].Sid.SubAuthorityCount);
+
         for (i = 0; i < sizeof(WellKnownRids)/sizeof(WellKnownRids[0]); i++)
-            if (!strncmpW(WellKnownRids[i].wstr, StringSid, 2))
+            if (IsMachineRid(&WellKnownRids[i]) && !strncmpiW(WellKnownRids[i].wstr, StringSid, 2))
             {
                 MAX_SID local;
-                ADVAPI_GetComputerSid(&local);
+                if (!ADVAPI_GetComputerSid(&local)) break;
                 return GetSidLengthRequired(*GetSidSubAuthorityCount(&local) + 1);
             }
 
@@ -4464,7 +4624,7 @@ static BOOL ParseStringSidToSid(LPCWSTR StringSid, PSID pSid, LPDWORD cBytes)
         pisid->Revision = SDDL_REVISION;
 
         for (i = 0; i < sizeof(WellKnownSids)/sizeof(WellKnownSids[0]); i++)
-            if (!strncmpW(WellKnownSids[i].wstr, StringSid, 2))
+            if (!strncmpiW(WellKnownSids[i].wstr, StringSid, 2))
             {
                 DWORD j;
                 pisid->SubAuthorityCount = WellKnownSids[i].Sid.SubAuthorityCount;
@@ -4474,10 +4634,22 @@ static BOOL ParseStringSidToSid(LPCWSTR StringSid, PSID pSid, LPDWORD cBytes)
                 bret = TRUE;
             }
 
-        for (i = 0; i < sizeof(WellKnownRids)/sizeof(WellKnownRids[0]); i++)
-            if (!strncmpW(WellKnownRids[i].wstr, StringSid, 2))
+        for (i = 0; i < sizeof(SddlOnlyAliases)/sizeof(SddlOnlyAliases[0]); i++)
+            if (!strncmpiW(SddlOnlyAliases[i].wstr, StringSid, 2))
             {
-                ADVAPI_GetComputerSid(pisid);
+                DWORD j;
+                pisid->SubAuthorityCount = SddlOnlyAliases[i].Sid.SubAuthorityCount;
+                pisid->IdentifierAuthority = SddlOnlyAliases[i].Sid.IdentifierAuthority;
+                for (j = 0; j < SddlOnlyAliases[i].Sid.SubAuthorityCount; j++)
+                    pisid->SubAuthority[j] = SddlOnlyAliases[i].Sid.SubAuthority[j];
+                bret = TRUE;
+            }
+
+        for (i = 0; i < sizeof(WellKnownRids)/sizeof(WellKnownRids[0]); i++)
+            if (IsMachineRid(&WellKnownRids[i]) && !strncmpiW(WellKnownRids[i].wstr, StringSid, 2))
+            {
+                if (!ADVAPI_GetComputerSid(pisid))
+                    break;
                 pisid->SubAuthority[pisid->SubAuthorityCount] = WellKnownRids[i].Rid;
                 pisid->SubAuthorityCount++;
                 bret = TRUE;
