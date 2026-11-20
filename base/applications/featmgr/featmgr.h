@@ -89,6 +89,10 @@ void   FmFree(FM_FEATURE *arr);
 BOOL   FmFindFeature(LPCWSTR id, FM_FEATURE *out);
 FM_STATE FmGetState(LPCWSTR id);
 
+/* TRUE when the feature needs (FeaturesNeed; with includeOwn also: is the installed form of) an optional component that
+ * setup left out; comp gets the component id. Always FALSE on a system installed without a [Components] section. */
+BOOL   FmBlockedByLeftOutComponent(LPCWSTR featureId, BOOL includeOwn, LPWSTR comp, DWORD cchComp);
+
 /* Reversible operations. log may be NULL; progress is written there. */
 HRESULT FmEnable(LPCWSTR id, FILE *log);
 HRESULT FmDisable(LPCWSTR id, FILE *log);   /* refuses while enabled dependents exist */

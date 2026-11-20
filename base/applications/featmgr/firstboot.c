@@ -103,52 +103,11 @@ static BOOL IsAdmin(void)
     return is;
 }
 
-/* Setup recorded the components it left out (answer file [Components]) under HKLM\SOFTWARE\ReactOS\Nitro\Components\<id>:
- * Installed=0, FeaturesNeed / FeaturesOwn = comma lists of feature ids. A feature of such a list is not installed by
- * itself at first start: it needs a component that is not there, or it is the installed form of one that was left out.
- * Nothing recorded (a default installation): never true. */
+/* First start: a feature that needs a component setup left out, or that is the installed form of one, is not installed
+ * by itself (see FmBlockedByLeftOutComponent) */
 static BOOL BlockedByLeftOutComponent(LPCWSTR featureId, LPWSTR comp, DWORD cchComp)
 {
-    HKEY hKey, hSub;
-    DWORD i, any = 0, cb = sizeof(any), type;
-    WCHAR name[64];
-    BOOL found = FALSE;
-    static const WCHAR *const lists[] = { L"FeaturesNeed", L"FeaturesOwn" };
-
-    comp[0] = L'\0';
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ReactOS\\Nitro\\Components", 0, KEY_READ, &hKey) != ERROR_SUCCESS) return FALSE;
-    if (RegQueryValueExW(hKey, L"AnyOff", NULL, &type, (LPBYTE)&any, &cb) != ERROR_SUCCESS || type != REG_DWORD || !any)
-    {
-        RegCloseKey(hKey);
-        return FALSE;
-    }
-    for (i = 0; !found; i++)
-    {
-        DWORD cchName = ARRAYSIZE(name), installed = 1, l;
-        if (RegEnumKeyExW(hKey, i, name, &cchName, NULL, NULL, NULL, NULL) != ERROR_SUCCESS) break;
-        if (RegOpenKeyExW(hKey, name, 0, KEY_QUERY_VALUE, &hSub) != ERROR_SUCCESS) continue;
-        cb = sizeof(installed);
-        if (RegQueryValueExW(hSub, L"Installed", NULL, &type, (LPBYTE)&installed, &cb) != ERROR_SUCCESS || type != REG_DWORD) installed = 1;
-        for (l = 0; !installed && !found && l < ARRAYSIZE(lists); l++)
-        {
-            WCHAR list[256], *p;
-            cb = sizeof(list) - sizeof(WCHAR);
-            if (RegQueryValueExW(hSub, lists[l], NULL, &type, (LPBYTE)list, &cb) != ERROR_SUCCESS || type != REG_SZ) continue;
-            list[cb / sizeof(WCHAR)] = L'\0';
-            for (p = list; *p && !found; )
-            {
-                WCHAR *e = wcschr(p, L',');
-                size_t n = e ? (size_t)(e - p) : wcslen(p);
-                if (n == wcslen(featureId) && !_wcsnicmp(p, featureId, n)) found = TRUE;
-                p += n;
-                if (*p == L',') p++;
-            }
-        }
-        if (found) StringCchCopyW(comp, cchComp, name);
-        RegCloseKey(hSub);
-    }
-    RegCloseKey(hKey);
-    return found;
+    return FmBlockedByLeftOutComponent(featureId, TRUE, comp, cchComp);
 }
 
 /* the default components this machine still lacks, as jobs; first URL for the network probe */

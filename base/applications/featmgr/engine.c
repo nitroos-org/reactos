@@ -954,6 +954,55 @@ static BOOL FindByName(LPCWSTR id, FM_FEATURE *out)
     return FALSE;
 }
 
+/* Setup recorded the components it left out (answer file [Components]) under HKLM\SOFTWARE\ReactOS\Nitro\Components\<id>:
+ * Installed=0, FeaturesNeed / FeaturesOwn = comma lists of feature ids. A feature in FeaturesNeed cannot work without the
+ * component; one in FeaturesOwn is the installed form of the component. With includeOwn FALSE only the first list counts
+ * (asking for an Own feature by name is how a left-out component is added later). Nothing recorded (a default
+ * installation): never true. */
+BOOL FmBlockedByLeftOutComponent(LPCWSTR featureId, BOOL includeOwn, LPWSTR comp, DWORD cchComp)
+{
+    HKEY hKey, hSub;
+    DWORD i, any = 0, cb = sizeof(any), type;
+    WCHAR name[64];
+    BOOL found = FALSE;
+    static const WCHAR *const lists[] = { L"FeaturesNeed", L"FeaturesOwn" };
+
+    comp[0] = L'\0';
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ReactOS\\Nitro\\Components", 0, KEY_READ, &hKey) != ERROR_SUCCESS) return FALSE;
+    if (RegQueryValueExW(hKey, L"AnyOff", NULL, &type, (LPBYTE)&any, &cb) != ERROR_SUCCESS || type != REG_DWORD || !any)
+    {
+        RegCloseKey(hKey);
+        return FALSE;
+    }
+    for (i = 0; !found; i++)
+    {
+        DWORD cchName = ARRAYSIZE(name), installed = 1, l;
+        if (RegEnumKeyExW(hKey, i, name, &cchName, NULL, NULL, NULL, NULL) != ERROR_SUCCESS) break;
+        if (RegOpenKeyExW(hKey, name, 0, KEY_QUERY_VALUE, &hSub) != ERROR_SUCCESS) continue;
+        cb = sizeof(installed);
+        if (RegQueryValueExW(hSub, L"Installed", NULL, &type, (LPBYTE)&installed, &cb) != ERROR_SUCCESS || type != REG_DWORD) installed = 1;
+        for (l = 0; !installed && !found && l < (includeOwn ? ARRAYSIZE(lists) : 1); l++)
+        {
+            WCHAR list[256], *p;
+            cb = sizeof(list) - sizeof(WCHAR);
+            if (RegQueryValueExW(hSub, lists[l], NULL, &type, (LPBYTE)list, &cb) != ERROR_SUCCESS || type != REG_SZ) continue;
+            list[cb / sizeof(WCHAR)] = L'\0';
+            for (p = list; *p && !found; )
+            {
+                WCHAR *e = wcschr(p, L',');
+                size_t n = e ? (size_t)(e - p) : wcslen(p);
+                if (n == wcslen(featureId) && !_wcsnicmp(p, featureId, n)) found = TRUE;
+                p += n;
+                if (*p == L',') p++;
+            }
+        }
+        if (found) StringCchCopyW(comp, cchComp, name);
+        RegCloseKey(hSub);
+    }
+    RegCloseKey(hKey);
+    return found;
+}
+
 BOOL FmFindFeature(LPCWSTR id, FM_FEATURE *out)
 {
     FM_FEATURE *arr;
@@ -3342,6 +3391,18 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
     {
         LOGF(log, L"feature '%s' already enabled\n", id);
         return S_OK;
+    }
+    {
+        WCHAR comp[64];
+
+        /* setup left out a component that this feature does not work without: nothing is downloaded or installed */
+        if (FmBlockedByLeftOutComponent(f.Id, FALSE, comp, ARRAYSIZE(comp)))
+        {
+            LOGF(log, L"error: '%s' cannot be turned on: it needs the optional component \"%s\", which was left out when this system was installed\n",
+                 id, comp);
+            SetLastMsg(L"%s: it needs the optional component \"%s\", which was left out when this system was installed.", f.Name, comp);
+            return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+        }
     }
     if (!f.PayloadAvailable)
     {
