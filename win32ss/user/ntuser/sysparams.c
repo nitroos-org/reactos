@@ -917,10 +917,17 @@ SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
         case SPI_SETSCREENSAVETIMEOUT:
             if (SpiScreenSaverSetBlocked())
                 return 0;
+            /* As on Windows: giving a timeout to a saver that had none turns the saver on (not stored) */
+            if (uiParam != 0 && gspv.iScrSaverTimeout == 0)
+                gspv.bScrSaverActive = TRUE;
             return SpiSetInt(&gspv.iScrSaverTimeout, uiParam, KEY_DESKTOP, VAL_SCRTO, fl);
 
         case SPI_GETSCREENSAVEACTIVE:
-            return SpiGetInt(pvParam, &gspv.bScrSaverActive, fl);
+        {
+            /* A screen saver with no timeout is not active */
+            BOOL bActive = gspv.bScrSaverActive && gspv.iScrSaverTimeout != 0;
+            return SpiGetInt(pvParam, &bActive, fl);
+        }
 
         case SPI_SETSCREENSAVEACTIVE:
             if (SpiScreenSaverSetBlocked())
