@@ -795,6 +795,67 @@ GptNumberCallback(
     return TRUE;
 }
 
+/*
+ * TRUE if another hard disk than Disk has the disk GUID Guid. The kernel matches the disks of the loader's ARC
+ * list to its own by that GUID (and a checksum that two copies of a disk share), so with two such disks it may
+ * bring up the other copy of the partition the loader has just read: never boot in that case.
+ */
+static BOOLEAN
+GptDiskGuidIsShared(
+    _In_ ULONG HardDisks,
+    _In_ ULONG Disk,
+    _In_ const GUID* Guid,
+    _Out_ PULONG Other)
+{
+    static const UCHAR ZeroGuid[sizeof(GUID)] = {0};
+    ULONG Index;
+    GUID Found;
+
+    if (RtlEqualMemory(Guid, ZeroGuid, sizeof(GUID)))
+        return FALSE;
+    for (Index = 0; Index < HardDisks; Index++)
+    {
+        if (Index == Disk)
+            continue;
+        RtlZeroMemory(&Found, sizeof(Found));
+        (VOID)DiskGptScan((UCHAR)(0x80 + Index), GptDiskGuidCallback, NULL, &Found);
+        if (RtlEqualMemory(&Found, Guid, sizeof(GUID)))
+        {
+            *Other = Index;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOLEAN
+GptRefuseSharedDisk(
+    _In_ ULONG Disk,
+    _In_ ULONG Other,
+    _In_ const GUID* Guid,
+    _Out_writes_(MessageSize) PCHAR Message,
+    _In_ SIZE_T MessageSize)
+{
+    CHAR DiskString[48];
+
+    GptFormatGuid(Guid, DiskString);
+    if (MessageSize)
+    {
+        RtlStringCbPrintfA(Message, MessageSize,
+                           "The system partition of this boot entry is on a disk\n"
+                           "whose GUID is also the GUID of another disk.\n"
+                           "\n"
+                           "Disk GUID %s\n"
+                           "Disks     rdisk(%lu) and rdisk(%lu)\n"
+                           "\n"
+                           "The system could not tell which of the two copies\n"
+                           "it is started from. Disconnect one of the disks,\n"
+                           "or give it a new disk GUID.",
+                           DiskString, (Disk < Other) ? Disk : Other, (Disk < Other) ? Other : Disk);
+    }
+    return FALSE;
+}
+
 /* multi(0)disk(0)rdisk(Disk)partition(Number)Rest; FALSE if it does not fit (a cut path would name something else) */
 static BOOLEAN
 GptBuildArcPath(
@@ -903,6 +964,15 @@ GptResolveSystemPartition(
 
     if (HaveBest)
     {
+        GUID BestDiskGuidValue;
+        ULONG Other;
+
+        /* The disk the partition is on must be the only one with its disk GUID (see GptDiskGuidIsShared) */
+        RtlZeroMemory(&BestDiskGuidValue, sizeof(BestDiskGuidValue));
+        (VOID)DiskGptScan((UCHAR)(0x80 + BestDisk), GptDiskGuidCallback, NULL, &BestDiskGuidValue);
+        if (GptDiskGuidIsShared(HardDisks, BestDisk, &BestDiskGuidValue, &Other))
+            return GptRefuseSharedDisk(BestDisk, Other, &BestDiskGuidValue, Message, MessageSize);
+
         if (!GptBuildArcPath(NewPath, NewPathSize, BestDisk, BestNumber, Rest))
         {
             if (MessageSize)
@@ -942,6 +1012,14 @@ GptResolveSystemPartition(
             if (DiskGptScan((UCHAR)(0x80 + SameDisk), GptNumberCallback, &Search, NULL) &&
                 Search.Found && Search.First == First && Search.Last == Last && Search.DataType)
             {
+                GUID SameDiskGuid;
+                ULONG Other;
+
+                RtlZeroMemory(&SameDiskGuid, sizeof(SameDiskGuid));
+                (VOID)DiskGptScan((UCHAR)(0x80 + SameDisk), GptDiskGuidCallback, NULL, &SameDiskGuid);
+                if (GptDiskGuidIsShared(HardDisks, SameDisk, &SameDiskGuid, &Other))
+                    return GptRefuseSharedDisk(SameDisk, Other, &SameDiskGuid, Message, MessageSize);
+
                 if (!GptBuildArcPath(NewPath, NewPathSize, SameDisk, StoredNumber, Rest))
                 {
                     if (MessageSize)
