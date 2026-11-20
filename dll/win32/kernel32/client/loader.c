@@ -407,6 +407,13 @@ LoadLibraryExW(LPCWSTR lpLibFileName,
     ULONG DllCharacteristics = 0, SearchFlags;
     BOOL FreeString = FALSE;
 
+    /* The flags above bit 15 do not exist (measured on Windows) */
+    if (dwFlags & ~BASEP_LOAD_LIBRARY_VALID_FLAGS)
+    {
+        BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+        return NULL;
+    }
+
     /* An exclusive data file is a data file by itself: the two flags do not go together (Windows) */
     if ((dwFlags & LOAD_LIBRARY_AS_DATAFILE) && (dwFlags & LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE))
     {
@@ -455,7 +462,8 @@ LoadLibraryExW(LPCWSTR lpLibFileName,
 
     /* Compute the load path: from the search flags of the call, those of SetDefaultDllDirectories or the usual order */
     SearchFlags = BasepGetDllSearchFlags(dwFlags);
-    if (SearchFlags && (dwFlags & LOAD_WITH_ALTERED_SEARCH_PATH) && !(dwFlags & BASEP_LOAD_LIBRARY_SEARCH_MASK) &&
+    if (SearchFlags && (dwFlags & LOAD_WITH_ALTERED_SEARCH_PATH) &&
+        !(dwFlags & (BASEP_LOAD_LIBRARY_SEARCH_MASK | BASEP_LOAD_LIBRARY_SEARCH_SYSTEM32_NO_FORWARDER)) &&
         BasepIsFullPathName(DllName.Buffer))
     {
         /* The default directories of the process do not take the altered search path of a full path away */
@@ -478,8 +486,9 @@ LoadLibraryExW(LPCWSTR lpLibFileName,
     }
     else
     {
-        SearchPath = BaseComputeProcessDllPath((dwFlags & LOAD_WITH_ALTERED_SEARCH_PATH) ?
-                                               DllName.Buffer : NULL,
+        /* The current directory is not searched when the call says it is only safe in the safe load list: none is kept */
+        SearchPath = ((dwFlags & BASEP_LOAD_LIBRARY_SAFE_CURRENT_DIRS) ? BaseComputeProcessDllPathNoCurrent : BaseComputeProcessDllPath)(
+                                               (dwFlags & LOAD_WITH_ALTERED_SEARCH_PATH) ? DllName.Buffer : NULL,
                                                NULL);
         if (!SearchPath)
         {
