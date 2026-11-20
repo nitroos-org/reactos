@@ -364,15 +364,16 @@ WlxInitialize(
 }
 
 /*
- * Reads ScreenSaverIsSecure (REG_SZ "0"/"1" as written by the control panel and by SystemParametersInfo,
- * or REG_DWORD) below a key of the logged-on user's registry hive.
+ * Reads a number (REG_SZ "0"/"1" as written by the control panel and by SystemParametersInfo, or REG_DWORD)
+ * from a value of a key below the logged-on user's registry hive.
  * Returns TRUE if the value exists and holds a number, with the setting in *pbSecure.
  */
 static
 BOOL
-ReadScreenSaverIsSecure(
+ReadScreenSaverFlag(
     _In_ HKEY hUserKey,
     _In_ PCWSTR pszSubKey,
+    _In_ PCWSTR pszValue,
     _Out_ PBOOL pbSecure)
 {
     HKEY hKey;
@@ -388,7 +389,7 @@ ReadScreenSaverIsSecure(
 
     RtlZeroMemory(Buffer, sizeof(Buffer));
     cbData = sizeof(Buffer) - sizeof(WCHAR); /* Always leaves the string terminated */
-    rc = RegQueryValueExW(hKey, L"ScreenSaverIsSecure", NULL, &dwType, (LPBYTE)Buffer, &cbData);
+    rc = RegQueryValueExW(hKey, pszValue, NULL, &dwType, (LPBYTE)Buffer, &cbData);
     if (rc == ERROR_SUCCESS)
     {
         if (dwType == REG_DWORD && cbData == sizeof(DWORD))
@@ -411,7 +412,8 @@ ReadScreenSaverIsSecure(
 /*
  * @implemented
  *
- * Tells winlogon whether the workstation is to be locked when the screen saver ends.
+ * Tells winlogon whether the screen saver is to be started (TRUE) and whether the workstation is to be locked
+ * when it ends (*pSecure).
  *
  * Policy setting (user policy "Password protect the screen saver"):
  *    HKCU\Software\Policies\Microsoft\Windows\Control Panel\Desktop : ScreenSaverIsSecure
@@ -419,7 +421,9 @@ ReadScreenSaverIsSecure(
  * User setting:
  *    HKCU\Control Panel\Desktop : ScreenSaverIsSecure
  *    Missing = not protected.
- * Both are read for the logged-on user (the hive is opened with the user's token; RegOpenLoggedOnHKCU reverts
+ * Policy setting "Enable screen saver" (same key, ScreenSaveActive): 0 = no screen saver is started, at the
+ * moment the idle time has passed, whatever the user's settings are (measured on Windows Server 2022).
+ * They are read for the logged-on user (the hive is opened with the user's token; RegOpenLoggedOnHKCU reverts
  * its impersonation on every path). Nothing can be read when nobody is logged on: not secure, nothing to lock.
  */
 BOOL
@@ -431,6 +435,8 @@ WlxScreenSaverNotify(
     PGINA_CONTEXT pgContext = (PGINA_CONTEXT)pWlxContext;
     HKEY hKeyCurrentUser;
     BOOL bSecure = FALSE;
+    BOOL bStart = TRUE;
+    BOOL bActive;
     LONG rc;
 
     TRACE("(%p %p)\n", pWlxContext, pSecure);
@@ -440,11 +446,20 @@ WlxScreenSaverNotify(
         rc = RegOpenLoggedOnHKCU(pgContext->UserToken, KEY_READ, &hKeyCurrentUser);
         if (rc == ERROR_SUCCESS)
         {
-            if (!ReadScreenSaverIsSecure(hKeyCurrentUser,
-                                         L"Software\\Policies\\Microsoft\\Windows\\Control Panel\\Desktop",
-                                         &bSecure))
+            if (ReadScreenSaverFlag(hKeyCurrentUser,
+                                    L"Software\\Policies\\Microsoft\\Windows\\Control Panel\\Desktop",
+                                    L"ScreenSaveActive",
+                                    &bActive) && !bActive)
             {
-                if (!ReadScreenSaverIsSecure(hKeyCurrentUser, L"Control Panel\\Desktop", &bSecure))
+                bStart = FALSE;
+            }
+
+            if (!ReadScreenSaverFlag(hKeyCurrentUser,
+                                     L"Software\\Policies\\Microsoft\\Windows\\Control Panel\\Desktop",
+                                     L"ScreenSaverIsSecure",
+                                     &bSecure))
+            {
+                if (!ReadScreenSaverFlag(hKeyCurrentUser, L"Control Panel\\Desktop", L"ScreenSaverIsSecure", &bSecure))
                     bSecure = FALSE;
             }
             RegCloseKey(hKeyCurrentUser);
@@ -458,8 +473,8 @@ WlxScreenSaverNotify(
     TRACE("*pSecure: %d\n", bSecure);
     *pSecure = bSecure;
 
-    /* The screen saver is started whatever the setting is */
-    return TRUE;
+    /* The screen saver is started whatever the password setting is */
+    return bStart;
 }
 
 /*
