@@ -93,6 +93,8 @@ typedef struct _TASK
 static CRITICAL_SECTION g_lock;
 static TASK *g_tasks;
 static DWORD g_next_index = 1;
+static DWORD g_count;
+#define REAP_AT 1024
 static ULONG_PTR g_next_handle = 0x1000;
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
@@ -172,6 +174,30 @@ static TASK *find_by_thread(DWORD thread_id)
     return NULL;
 }
 
+/*
+ * A thread that ends without a revert leaves its registration behind (Windows keeps the handle valid, the registration
+ * is gone with the thread). A program that starts threads without ever reverting would grow this list for ever, so
+ * once it is long the registrations of ended threads are dropped (a handle of theirs is then no longer known, which is
+ * all the thread can still want from it). The caller holds g_lock.
+ */
+static void reap_ended(void)
+{
+    TASK **link = &g_tasks, *task;
+
+    while ((task = *link) != NULL)
+    {
+        if (WaitForSingleObject(task->Thread, 0) == WAIT_OBJECT_0)
+        {
+            *link = task->Next;
+            CloseHandle(task->Thread);
+            free(task);
+            g_count--;
+        }
+        else
+            link = &task->Next;
+    }
+}
+
 static HANDLE join_tasks(const WCHAR *name1, const WCHAR *name2, DWORD *index)
 {
     int category1, category2, category;
@@ -205,6 +231,13 @@ static HANDLE join_tasks(const WCHAR *name1, const WCHAR *name2, DWORD *index)
 
     EnterCriticalSection(&g_lock);
     existing = find_by_thread(thread_id);
+    if (existing && WaitForSingleObject(existing->Thread, 0) == WAIT_OBJECT_0)
+    {
+        /* the thread that joined has ended without a revert (its handle stays valid until it is reverted, as in Windows)
+         * and this thread has the identifier it left: not in a task */
+        existing->ThreadId = 0;
+        existing = NULL;
+    }
     if (existing)
     {
         /* a thread is in one task at a time: asking again for the task it is in is refused as such, any other index is not its own */
@@ -220,6 +253,8 @@ static HANDLE join_tasks(const WCHAR *name1, const WCHAR *name2, DWORD *index)
         return NULL;
     }
 
+    if (g_count >= REAP_AT)
+        reap_ended();
     task = calloc(1, sizeof(*task));
     if (task)
         task->Thread = OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION, FALSE, thread_id);
@@ -240,6 +275,7 @@ static HANDLE join_tasks(const WCHAR *name1, const WCHAR *name2, DWORD *index)
     task->SavedPriority = GetThreadPriority(task->Thread);
     task->Next = g_tasks;
     g_tasks = task;
+    g_count++;
     *index = task->Index;
     LeaveCriticalSection(&g_lock);
     return task->Handle;
@@ -291,6 +327,7 @@ BOOL WINAPI AvRevertMmThreadCharacteristics(HANDLE AvrtHandle)
         {
             task = *link;
             *link = task->Next;
+            g_count--;
             break;
         }
     }
@@ -363,4 +400,50 @@ HANDLE WINAPI AvSetMmMaxThreadCharacteristicsA(const char *task1, const char *ta
 HANDLE WINAPI AvSetMmMaxThreadCharacteristicsW(const WCHAR *task1, const WCHAR *task2, DWORD *index)
 {
     return join_tasks(task1, task2, index);
+}
+
+/*
+ * The thread ordering groups need the scheduler service. Windows Server 2022 refuses every call of them with
+ * ERROR_SERVICE_DISABLED, whether the service runs or not (measured); they are not stubs that stop the process.
+ */
+BOOL WINAPI AvRtCreateThreadOrderingGroup(PHANDLE context, PLARGE_INTEGER period, GUID *guid, PLARGE_INTEGER timeout)
+{
+    SetLastError(ERROR_SERVICE_DISABLED);
+    return FALSE;
+}
+
+BOOL WINAPI AvRtCreateThreadOrderingGroupExA(PHANDLE context, PLARGE_INTEGER period, GUID *guid, PLARGE_INTEGER timeout, LPCSTR name)
+{
+    SetLastError(ERROR_SERVICE_DISABLED);
+    return FALSE;
+}
+
+BOOL WINAPI AvRtCreateThreadOrderingGroupExW(PHANDLE context, PLARGE_INTEGER period, GUID *guid, PLARGE_INTEGER timeout, LPCWSTR name)
+{
+    SetLastError(ERROR_SERVICE_DISABLED);
+    return FALSE;
+}
+
+BOOL WINAPI AvRtJoinThreadOrderingGroup(PHANDLE context, GUID *guid, BOOL before)
+{
+    SetLastError(ERROR_SERVICE_DISABLED);
+    return FALSE;
+}
+
+BOOL WINAPI AvRtWaitOnThreadOrderingGroup(HANDLE context)
+{
+    SetLastError(ERROR_SERVICE_DISABLED);
+    return FALSE;
+}
+
+BOOL WINAPI AvRtLeaveThreadOrderingGroup(HANDLE context)
+{
+    SetLastError(ERROR_SERVICE_DISABLED);
+    return FALSE;
+}
+
+BOOL WINAPI AvRtDeleteThreadOrderingGroup(HANDLE context)
+{
+    SetLastError(ERROR_SERVICE_DISABLED);
+    return FALSE;
 }

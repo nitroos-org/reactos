@@ -335,6 +335,73 @@ static void TestCustomTasks(void)
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 }
 
+/* a thread that joins and ends without a revert must not keep a later thread (which may get its identifier) out of a task */
+static DWORD WINAPI JoinAndEnd(PVOID Context)
+{
+    DWORD Index = 0;
+    HANDLE Handle = pSet(L"Games", &Index);
+
+    *(LONG *)Context = Handle != NULL;
+    return 0;
+}
+
+static void TestEndedThreads(void)
+{
+    int i, Failed = 0;
+    HANDLE Handle;
+    DWORD Index = 0;
+
+    for (i = 0; i < 3000; i++)
+    {
+        LONG Joined = 0;
+        HANDLE Thread = CreateThread(NULL, 0, JoinAndEnd, &Joined, 0, NULL);
+
+        WaitForSingleObject(Thread, 10000);
+        CloseHandle(Thread);
+        if (!Joined)
+            Failed++;
+    }
+    ok(Failed == 0, "%d of 3000 threads were refused a task after earlier threads ended inside one\n", Failed);
+    Handle = SetTask(L"Games", &Index);
+    ok(Handle != NULL, "the main thread is refused a task: %lu\n", g_Error);
+    if (Handle)
+        pRevert(Handle);
+}
+
+/* the thread ordering groups fail as a group (ERROR_SERVICE_DISABLED on Windows Server 2022), they do not stop the process */
+static void TestOrderingGroups(HMODULE Avrt)
+{
+    BOOL (WINAPI *pCreate)(PHANDLE, PLARGE_INTEGER, GUID *, PLARGE_INTEGER) = (PVOID)GetProcAddress(Avrt, "AvRtCreateThreadOrderingGroup");
+    BOOL (WINAPI *pCreateEx)(PHANDLE, PLARGE_INTEGER, GUID *, PLARGE_INTEGER, LPCWSTR) = (PVOID)GetProcAddress(Avrt, "AvRtCreateThreadOrderingGroupExW");
+    BOOL (WINAPI *pJoin)(PHANDLE, GUID *, BOOL) = (PVOID)GetProcAddress(Avrt, "AvRtJoinThreadOrderingGroup");
+    BOOL (WINAPI *pWait)(HANDLE) = (PVOID)GetProcAddress(Avrt, "AvRtWaitOnThreadOrderingGroup");
+    BOOL (WINAPI *pLeave)(HANDLE) = (PVOID)GetProcAddress(Avrt, "AvRtLeaveThreadOrderingGroup");
+    BOOL (WINAPI *pDelete)(HANDLE) = (PVOID)GetProcAddress(Avrt, "AvRtDeleteThreadOrderingGroup");
+    HANDLE Group = NULL;
+    LARGE_INTEGER Period, Timeout;
+    GUID Guid = { 0 };
+    BOOL Ok;
+
+    if (!pCreate || !pCreateEx || !pJoin || !pWait || !pLeave || !pDelete)
+    {
+        skip("the thread ordering group exports are missing\n");
+        return;
+    }
+    Period.QuadPart = 100000;
+    Timeout.QuadPart = 10000000;
+
+#define GROUP_FAILS(Call, Name) \
+    SetLastError(0xdeadbeef); Ok = Call; \
+    ok(!Ok && GetLastError() == ERROR_SERVICE_DISABLED, Name ": %d, error %lu\n", Ok, GetLastError())
+    GROUP_FAILS(pCreate(&Group, &Period, &Guid, &Timeout), "create");
+    GROUP_FAILS(pCreateEx(&Group, &Period, &Guid, &Timeout, L"Audio"), "create ex");
+    GROUP_FAILS(pJoin(&Group, &Guid, TRUE), "join");
+    GROUP_FAILS(pWait(Group), "wait");
+    GROUP_FAILS(pLeave(Group), "leave");
+    GROUP_FAILS(pDelete(Group), "delete");
+#undef GROUP_FAILS
+}
+
 START_TEST(AvrtScheduler)
 {
     HMODULE Avrt = LoadLibraryW(L"avrt.dll");
@@ -358,6 +425,8 @@ START_TEST(AvrtScheduler)
     TestNames();
     TestRegistration();
     TestMax();
+    TestEndedThreads();
+    TestOrderingGroups(Avrt);
     if (MakeCustomTasks())
         TestCustomTasks();
     else
