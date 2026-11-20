@@ -723,8 +723,9 @@ IGMPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
             return;     /* a general query names no source */
     }
 
-    /* tenths of a second; v1 has none: 10 s (RFC 2236 4) */
-    MaxMs = (Version == 1) ? 10000 : IgmpMaxResponse(M[1]) * 100;
+    /* tenths of a second; v1 has none: 10 s (RFC 2236 4); a v2 query's is linear over its whole range, the floating
+       point form is IGMPv3's only (RFC 3376 4.1.1, 7.2.1) */
+    MaxMs = (Version == 1) ? 10000 : ((Version == 2) ? M[1] : IgmpMaxResponse(M[1])) * 100;
 
     Now = IgmpNow();
     KeAcquireSpinLock(&IgmpLock, &OldIrql);
