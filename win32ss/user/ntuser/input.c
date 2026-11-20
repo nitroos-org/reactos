@@ -442,8 +442,11 @@ ProcessKeyboardUpdates(
 
     RtlZeroMemory(&LocalTypematic, sizeof(LocalTypematic));
     RtlZeroMemory(&GlobalTypematic, sizeof(GlobalTypematic));
-    GlobalTypematic.Rate = gspv.dwKbdSpeed;
-    GlobalTypematic.Delay = gspv.iKbdDelay;
+    /* The settings are the indices of SPI_SETKEYBOARDSPEED (0..31: about 2.5 to 30 repeats per
+     * second) and SPI_SETKEYBOARDDELAY (0..3: 250 to 1000 ms); the keyboard drivers take repeats
+     * per second and milliseconds. */
+    GlobalTypematic.Rate = (USHORT)(2 + (min(gspv.dwKbdSpeed, 31) * 28 + 15) / 31);
+    GlobalTypematic.Delay = (USHORT)(250 * (max(min(gspv.iKbdDelay, 3), 0) + 1));
 
     AcquireDeviceInfoListMutex();
     for (DeviceInfo = gpInputDeviceInfo; DeviceInfo; DeviceInfo = DeviceInfo->pNextDeviceInfo)
