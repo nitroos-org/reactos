@@ -713,6 +713,8 @@ RtlSetPortableOperatingSystem(
     Status = NtSetValueKey(KeyHandle, &ValueName, 0, REG_DWORD, &Value, sizeof(Value));
     NtClose(KeyHandle);
     return Status;
+}
+
 /* USER STACKS **************************************************************/
 
 /*
