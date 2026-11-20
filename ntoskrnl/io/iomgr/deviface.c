@@ -1308,14 +1308,27 @@ IoGetDeviceInterfaces(IN CONST GUID *InterfaceClassGuid,
             /* Fixup the prefix (from "\\?\") */
             RtlCopyMemory(KeyName.Buffer, L"\\??\\", 4 * sizeof(WCHAR));
 
+            /*
+             * The list is kept in a UNICODE_STRING, whose lengths are 16 bits:
+             * stop before they wrap around (the new buffer would be too small
+             * for the copy that follows).
+             */
+            if ((ULONG)ReturnBuffer.Length + KeyName.Length + 2 * sizeof(WCHAR) > MAXUSHORT)
+            {
+                DPRINT1("The list of device interfaces does not fit in 64 KiB\n");
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                goto cleanup;
+            }
+
             /* Add new symbolic link to symbolic link list */
             if (ReturnBuffer.Length + KeyName.Length + sizeof(WCHAR) > ReturnBuffer.MaximumLength)
             {
                 PWSTR NewBuffer;
-                ReturnBuffer.MaximumLength = (USHORT)max(2 * ReturnBuffer.MaximumLength,
-                                                         (USHORT)(ReturnBuffer.Length +
-                                                         KeyName.Length +
-                                                         2 * sizeof(WCHAR)));
+                ULONG NewMaximumLength = max(2 * (ULONG)ReturnBuffer.MaximumLength,
+                                             (ULONG)ReturnBuffer.Length + KeyName.Length + 2 * sizeof(WCHAR));
+
+                /* Doubling must not wrap around in 16 bits: the check above leaves room for the new entry */
+                ReturnBuffer.MaximumLength = (USHORT)min(NewMaximumLength, MAXUSHORT);
                 NewBuffer = ExAllocatePool(PagedPool, ReturnBuffer.MaximumLength);
                 if (!NewBuffer)
                 {
