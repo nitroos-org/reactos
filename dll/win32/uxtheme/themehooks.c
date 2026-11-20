@@ -365,7 +365,9 @@ void SetThemeRegion(HWND hWnd)
 
     DeleteObject(hrgn1);
 
+    /* win32k sets a copy of the region; this one is not needed any more */
     g_user32ApiHook.SetWindowRgn(hWnd, hrgn, TRUE);
+    DeleteObject(hrgn);
 }
 
 int OnPostWinPosChanged(HWND hWnd, WINDOWPOS* pWinPos)
