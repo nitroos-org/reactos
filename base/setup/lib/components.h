@@ -11,6 +11,7 @@
 
 #define COMPONENT_MAX           32
 #define COMPONENT_ID_MAX        32
+#define COMPONENT_GLOB_MAX      256
 
 /* Profiles are presets of the per-component switches */
 #define COMPONENT_PROFILE_STANDARD  0
@@ -51,6 +52,18 @@ typedef struct _COMPONENTS_STATE
     BOOLEAN AnyOff;
     ULONG SkippedFiles;
     ULONG TotalFiles;
+
+    /* Sizes (the interactive page): every file of the medium that belongs to at least one component, with
+     * the mask of the components it belongs to and its size; read from the cabinet inf by ComponentsMeasure */
+    BOOLEAN SizesKnown;
+    ULONG FileCount;
+    ULONG FileCapacity;
+    PULONG FileMask;
+    PULONGLONG FileBytes;
+    ULONGLONG OwnBytes[COMPONENT_MAX];  /* bytes of all files that belong to component i */
+    ULONG GlobCount;                    /* the file patterns of every component, for ComponentsAddFile */
+    PCWSTR Glob[COMPONENT_GLOB_MAX];
+    UCHAR GlobOwner[COMPONENT_GLOB_MAX];
 } COMPONENTS_STATE, *PCOMPONENTS_STATE;
 
 
@@ -166,3 +179,104 @@ ComponentsWriteManifest(
     _In_ PCOMPONENTS_STATE State,
     _In_ PCWSTR DestinationPath,
     _In_ PCWSTR SourcePath);
+
+
+/* The interactive choice (text mode setup page) ***********************************/
+
+/* Result of ComponentsToggle */
+#define COMPONENT_TOGGLE_OK             0
+#define COMPONENT_TOGGLE_NOT_HERE       1   /* the component does not exist in this edition */
+#define COMPONENT_TOGGLE_NEEDS_MISSING  2   /* it needs a component that does not exist in this edition */
+
+/*
+ * Turn one component on or off in a selection (a mask) the way the person at the keyboard does: turning a
+ * component on turns on what it needs, turning one off turns off everything that needs it (and, when something
+ * is turned on that conflicts with a selected component, that one goes). AlsoOn / AlsoOff report which other
+ * components changed, so that the page can say so. The result is a selection that ComponentsResolve leaves as it is.
+ * On failure the selection is unchanged.
+ */
+ULONG
+NTAPI
+ComponentsToggle(
+    _In_ ULONG Count,
+    _In_reads_(Count) const COMPONENT_DESC *Desc,
+    _In_ ULONG Selected,
+    _In_ ULONG Index,
+    _In_ BOOLEAN On,
+    _Out_ PULONG NewSelected,
+    _Out_ PULONG AlsoOn,
+    _Out_ PULONG AlsoOff);
+
+/* Mask of the components that exist in this edition */
+ULONG
+NTAPI
+ComponentsApplicableMask(
+    _In_ ULONG Count,
+    _In_reads_(Count) const COMPONENT_DESC *Desc);
+
+/* Record a file of the medium (path relative to the installation directory, size in bytes): which components it
+ * belongs to is decided by their patterns (State->Glob). Files that belong to no component are not kept. */
+VOID
+NTAPI
+ComponentsAddFile(
+    _Inout_ PCOMPONENTS_STATE State,
+    _In_ PCWSTR RelativePath,
+    _In_ ULONGLONG Bytes);
+
+/* Bytes that are not installed when only the components in Selected are: the files of every component that exists
+ * in this edition and is not in Selected (a file shared by two components counts once). */
+ULONGLONG
+NTAPI
+ComponentsBytesLeftOut(
+    _In_ PCOMPONENTS_STATE State,
+    _In_ ULONG Selected);
+
+/* The profile and the selection chosen on the page: becomes the selection of the installation (the same state as an
+ * answer file leaves: resolved, logged, file filter built). Returns TRUE if anything is left out or the profile is
+ * not "standard", that is, if the record is written; FALSE means: install everything, as without the page. */
+BOOLEAN
+NTAPI
+ComponentsSetChoice(
+    _Inout_ PCOMPONENTS_STATE State,
+    _In_ ULONG Profile,
+    _In_ ULONG Selected);
+
+/* Selection of a profile alone (the preset, resolved) */
+ULONG
+NTAPI
+ComponentsProfileSelection(
+    _In_ PCOMPONENTS_STATE State,
+    _In_ ULONG Profile);
+
+/* [Strings]-expanded text of key (Description, Compat) of component Index, or of the profile (ProfileText) */
+PCWSTR
+NTAPI
+ComponentsGetText(
+    _In_ PCOMPONENTS_STATE State,
+    _In_ ULONG Index,
+    _In_ PCWSTR Key,
+    _Out_writes_(Size) PWSTR Buffer,
+    _In_ ULONG Size);
+
+PCWSTR
+NTAPI
+ComponentsGetProfileText(
+    _In_ PCOMPONENTS_STATE State,
+    _In_ ULONG Profile,
+    _In_ ULONG Field,   /* 1 = name, 2 = description */
+    _Out_writes_(Size) PWSTR Buffer,
+    _In_ ULONG Size);
+
+PCWSTR
+NTAPI
+ComponentsGetName(
+    _In_ PCOMPONENTS_STATE State,
+    _In_ ULONG Index,
+    _Out_writes_(Size) PWSTR Buffer,
+    _In_ ULONG Size);
+
+/* Release the state (an interactive choice that left everything on installs as without the page) */
+VOID
+NTAPI
+ComponentsFree(
+    _In_opt_ PCOMPONENTS_STATE State);

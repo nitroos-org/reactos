@@ -32,6 +32,12 @@ PrepareFileCopy(
     IN OUT PUSETUP_DATA pSetupData,
     IN PFILE_COPY_STATUS_ROUTINE StatusRoutine OPTIONAL);
 
+/* Sizes of the files that belong to optional components (pSetupData->Components is the state to fill) */
+BOOLEAN
+NTAPI
+ComponentsMeasure(
+    IN OUT PUSETUP_DATA pSetupData);
+
 BOOLEAN
 NTAPI
 DoFileCopy(

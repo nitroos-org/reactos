@@ -25,8 +25,6 @@
 
 /* GLOBALS ******************************************************************/
 
-#define COMPONENT_GLOB_MAX  256
-
 /* Lines of the answer file's [Components] that are logged one by one when they cannot be used */
 #define COMPONENT_LOG_PROBLEMS  12
 
@@ -247,6 +245,203 @@ ComponentsResolve(
     return Selected;
 }
 
+ULONG
+NTAPI
+ComponentsApplicableMask(
+    _In_ ULONG Count,
+    _In_reads_(Count) const COMPONENT_DESC *Desc)
+{
+    ULONG Mask = 0, i;
+
+    if (Count > COMPONENT_MAX)
+        Count = COMPONENT_MAX;
+    for (i = 0; i < Count; ++i)
+    {
+        if (Desc[i].Applicable)
+            Mask |= (1UL << i);
+    }
+    return Mask;
+}
+
+/* Everything that (transitively) needs a component that is not selected goes; returns what went */
+static ULONG
+DropOrphans(
+    _In_ ULONG Count,
+    _In_reads_(Count) const COMPONENT_DESC *Desc,
+    _Inout_ PULONG Selected)
+{
+    ULONG Dropped = 0, i;
+    BOOLEAN Changed;
+
+    do
+    {
+        Changed = FALSE;
+        for (i = 0; i < Count; ++i)
+        {
+            if ((*Selected & (1UL << i)) && (Desc[i].Depends & ~*Selected))
+            {
+                *Selected &= ~(1UL << i);
+                Dropped |= (1UL << i);
+                Changed = TRUE;
+            }
+        }
+    } while (Changed);
+    return Dropped;
+}
+
+ULONG
+NTAPI
+ComponentsToggle(
+    _In_ ULONG Count,
+    _In_reads_(Count) const COMPONENT_DESC *Desc,
+    _In_ ULONG Selected,
+    _In_ ULONG Index,
+    _In_ BOOLEAN On,
+    _Out_ PULONG NewSelected,
+    _Out_ PULONG AlsoOn,
+    _Out_ PULONG AlsoOff)
+{
+    ULONG Sel = Selected, Applicable, NewlyOn, On2 = 0, Off2 = 0, i, k;
+    BOOLEAN Changed;
+
+    *NewSelected = Selected;
+    *AlsoOn = 0;
+    *AlsoOff = 0;
+    if (Count > COMPONENT_MAX)
+        Count = COMPONENT_MAX;
+    if (Index >= Count || !Desc[Index].Applicable)
+        return COMPONENT_TOGGLE_NOT_HERE;
+    Applicable = ComponentsApplicableMask(Count, Desc);
+
+    if (!On)
+    {
+        Sel &= ~(1UL << Index);
+        Off2 = DropOrphans(Count, Desc, &Sel);
+        *NewSelected = Sel;
+        *AlsoOff = Off2;
+        return COMPONENT_TOGGLE_OK;
+    }
+
+    /* On: what it needs comes with it, to the end of the chain */
+    Sel |= (1UL << Index);
+    NewlyOn = (1UL << Index);
+    do
+    {
+        Changed = FALSE;
+        for (i = 0; i < Count; ++i)
+        {
+            if (!(NewlyOn & (1UL << i)))
+                continue;
+            for (k = 0; k < Count; ++k)
+            {
+                if (!(Desc[i].Depends & (1UL << k)) || (Sel & (1UL << k)))
+                    continue;
+                if (!(Applicable & (1UL << k)))
+                    return COMPONENT_TOGGLE_NEEDS_MISSING;
+                Sel |= (1UL << k);
+                NewlyOn |= (1UL << k);
+                On2 |= (1UL << k);
+                Changed = TRUE;
+            }
+        }
+    } while (Changed);
+
+    /* a component that was selected before and conflicts with one that is turned on goes (and what needs it) */
+    for (i = 0; i < Count; ++i)
+    {
+        if (!(NewlyOn & (1UL << i)))
+            continue;
+        for (k = 0; k < Count; ++k)
+        {
+            if ((Selected & (1UL << k)) && !(NewlyOn & (1UL << k)) &&
+                ((Desc[i].Conflicts & (1UL << k)) || (Desc[k].Conflicts & (1UL << i))))
+            {
+                Sel &= ~(1UL << k);
+                Off2 |= (1UL << k);
+            }
+        }
+    }
+    Off2 |= DropOrphans(Count, Desc, &Sel);
+    /* the request itself cannot stand (what it needs conflicts with another thing it needs): refuse it */
+    if (!(Sel & (1UL << Index)))
+        return COMPONENT_TOGGLE_NEEDS_MISSING;
+    On2 &= Sel;
+
+    *NewSelected = Sel;
+    *AlsoOn = On2;
+    *AlsoOff = Off2;
+    return COMPONENT_TOGGLE_OK;
+}
+
+VOID
+NTAPI
+ComponentsAddFile(
+    _Inout_ PCOMPONENTS_STATE State,
+    _In_ PCWSTR RelativePath,
+    _In_ ULONGLONG Bytes)
+{
+    ULONG Mask = 0, i;
+
+    for (i = 0; i < State->GlobCount; ++i)
+    {
+        if (ComponentGlobMatch(State->Glob[i], RelativePath))
+            Mask |= (1UL << State->GlobOwner[i]);
+    }
+    if (!Mask)
+        return;
+
+    if (State->FileCount >= State->FileCapacity)
+    {
+        ULONG NewCapacity = State->FileCapacity ? State->FileCapacity * 2 : 512;
+        PULONG NewMask = RtlAllocateHeap(RtlGetProcessHeap(), 0, NewCapacity * sizeof(ULONG));
+        PULONGLONG NewBytes = RtlAllocateHeap(RtlGetProcessHeap(), 0, NewCapacity * sizeof(ULONGLONG));
+
+        if (!NewMask || !NewBytes)
+        {
+            if (NewMask) RtlFreeHeap(RtlGetProcessHeap(), 0, NewMask);
+            if (NewBytes) RtlFreeHeap(RtlGetProcessHeap(), 0, NewBytes);
+            return;
+        }
+        if (State->FileCount)
+        {
+            RtlCopyMemory(NewMask, State->FileMask, State->FileCount * sizeof(ULONG));
+            RtlCopyMemory(NewBytes, State->FileBytes, State->FileCount * sizeof(ULONGLONG));
+        }
+        if (State->FileMask) RtlFreeHeap(RtlGetProcessHeap(), 0, State->FileMask);
+        if (State->FileBytes) RtlFreeHeap(RtlGetProcessHeap(), 0, State->FileBytes);
+        State->FileMask = NewMask;
+        State->FileBytes = NewBytes;
+        State->FileCapacity = NewCapacity;
+    }
+    State->FileMask[State->FileCount] = Mask;
+    State->FileBytes[State->FileCount] = Bytes;
+    State->FileCount++;
+
+    for (i = 0; i < COMPONENT_MAX; ++i)
+    {
+        if (Mask & (1UL << i))
+            State->OwnBytes[i] += Bytes;
+    }
+}
+
+ULONGLONG
+NTAPI
+ComponentsBytesLeftOut(
+    _In_ PCOMPONENTS_STATE State,
+    _In_ ULONG Selected)
+{
+    ULONGLONG Total = 0;
+    ULONG Off = ComponentsApplicableMask(State->Count, State->Desc) & ~Selected;
+    ULONG i;
+
+    for (i = 0; i < State->FileCount; ++i)
+    {
+        if (State->FileMask[i] & Off)
+            Total += State->FileBytes[i];
+    }
+    return Total;
+}
+
 
 /* INF LOADING **************************************************************/
 
@@ -356,9 +551,39 @@ ComponentsLoad(
         }
         Desc->Depends = ReadIdMask(State, Desc->Id, L"Depends");
         Desc->Conflicts = ReadIdMask(State, Desc->Id, L"Conflicts");
+
+        /* The file patterns of every component, for the sizes (ComponentsAddFile) */
+        if (Desc->Applicable)
+        {
+            for (Index = 1; (Value = GetKeyField(State->Inf, Desc->Id, L"Files", Index)) != NULL; ++Index)
+            {
+                if (State->GlobCount < COMPONENT_GLOB_MAX)
+                {
+                    State->Glob[State->GlobCount] = Value;
+                    State->GlobOwner[State->GlobCount] = (UCHAR)i;
+                    State->GlobCount++;
+                }
+            }
+        }
     }
 
     return State;
+}
+
+VOID
+NTAPI
+ComponentsFree(
+    _In_opt_ PCOMPONENTS_STATE State)
+{
+    if (!State)
+        return;
+    if (State->FileMask)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, State->FileMask);
+    if (State->FileBytes)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, State->FileBytes);
+    if (State->Inf && State->Inf != INVALID_HANDLE_VALUE)
+        SpInfCloseInfFile(State->Inf);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, State);
 }
 
 /* The display name of component i, with the [Strings] tokens expanded (what the field functions return is raw) */
@@ -400,6 +625,10 @@ BuildOmitGlobs(
     }
 }
 
+static VOID
+CommitSelection(
+    _Inout_ PCOMPONENTS_STATE State);
+
 VOID
 NTAPI
 ComponentsApplyAnswerFile(
@@ -408,9 +637,8 @@ ComponentsApplyAnswerFile(
 {
     INFCONTEXT Context;
     PCWSTR Key, Value;
-    WCHAR Names[400];
     BOOLEAN Ok;
-    ULONG i, Problems = 0;
+    ULONG Problems = 0;
 
     RtlFillMemory(State->Explicit, sizeof(State->Explicit), (UCHAR)COMPONENT_UNSET);
     State->Profile = COMPONENT_PROFILE_STANDARD;
@@ -459,7 +687,19 @@ ComponentsApplyAnswerFile(
         SetupLogFormat("[Components]: %lu more lines were ignored (not logged one by one)", Problems - COMPONENT_LOG_PROBLEMS);
 
     State->Selected = ComponentsResolve(State->Count, State->Desc, State->Profile, State->Explicit);
+    CommitSelection(State);
+}
+
+/* The selection in State->Selected is final: log it and build the file filter */
+static VOID
+CommitSelection(
+    _Inout_ PCOMPONENTS_STATE State)
+{
+    WCHAR Names[400];
+    ULONG i;
+
     State->Resolved = TRUE;
+    State->AnyOff = FALSE;
 
     /* The summary */
     Names[0] = UNICODE_NULL;
@@ -486,6 +726,104 @@ ComponentsApplyAnswerFile(
         SetupLogFormat("components left out: %S", Names);
 
     BuildOmitGlobs(State);
+}
+
+BOOLEAN
+NTAPI
+ComponentsSetChoice(
+    _Inout_ PCOMPONENTS_STATE State,
+    _In_ ULONG Profile,
+    _In_ ULONG Selected)
+{
+    ULONG i;
+
+    if (Profile >= COMPONENT_PROFILE_COUNT)
+        Profile = COMPONENT_PROFILE_STANDARD;
+    State->Profile = Profile;
+
+    /* every component gets an explicit answer: the person at the keyboard decided each one */
+    for (i = 0; i < COMPONENT_MAX; ++i)
+    {
+        if (i >= State->Count || !State->Desc[i].Applicable)
+            State->Explicit[i] = COMPONENT_UNSET;
+        else
+            State->Explicit[i] = (Selected & (1UL << i)) ? COMPONENT_YES : COMPONENT_NO;
+    }
+    State->Selected = ComponentsResolve(State->Count, State->Desc, Profile, State->Explicit);
+
+    if (State->Selected == ComponentsApplicableMask(State->Count, State->Desc) &&
+        Profile == COMPONENT_PROFILE_STANDARD)
+    {
+        /* Nothing left out: this is the installation without the page, in every detail (no record, no log line) */
+        State->Record = FALSE;
+        State->AnyOff = FALSE;
+        State->Resolved = FALSE;
+        return FALSE;
+    }
+
+    State->Record = TRUE;
+    CommitSelection(State);
+    return TRUE;
+}
+
+ULONG
+NTAPI
+ComponentsProfileSelection(
+    _In_ PCOMPONENTS_STATE State,
+    _In_ ULONG Profile)
+{
+    COMPONENT_CHOICE Unset[COMPONENT_MAX];
+
+    RtlFillMemory(Unset, sizeof(Unset), (UCHAR)COMPONENT_UNSET);
+    return ComponentsResolve(State->Count, State->Desc, Profile, Unset);
+}
+
+PCWSTR
+NTAPI
+ComponentsGetText(
+    _In_ PCOMPONENTS_STATE State,
+    _In_ ULONG Index,
+    _In_ PCWSTR Key,
+    _Out_writes_(Size) PWSTR Buffer,
+    _In_ ULONG Size)
+{
+    INFCONTEXT Context;
+
+    Buffer[0] = UNICODE_NULL;
+    if (Index < State->Count &&
+        SpInfFindFirstLine(State->Inf, State->Desc[Index].Id, Key, &Context))
+    {
+        (void)SpInfGetStringField(&Context, 1, Buffer, Size, NULL);
+    }
+    return Buffer;
+}
+
+PCWSTR
+NTAPI
+ComponentsGetProfileText(
+    _In_ PCOMPONENTS_STATE State,
+    _In_ ULONG Profile,
+    _In_ ULONG Field,
+    _Out_writes_(Size) PWSTR Buffer,
+    _In_ ULONG Size)
+{
+    INFCONTEXT Context;
+
+    Buffer[0] = UNICODE_NULL;
+    if (SpInfFindFirstLine(State->Inf, L"ProfileText", ComponentProfileName(Profile), &Context))
+        (void)SpInfGetStringField(&Context, Field, Buffer, Size, NULL);
+    return Buffer;
+}
+
+PCWSTR
+NTAPI
+ComponentsGetName(
+    _In_ PCOMPONENTS_STATE State,
+    _In_ ULONG Index,
+    _Out_writes_(Size) PWSTR Buffer,
+    _In_ ULONG Size)
+{
+    return GetDisplayName(State, Index, Buffer, Size);
 }
 
 BOOLEAN
