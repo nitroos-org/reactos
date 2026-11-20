@@ -3,6 +3,7 @@
 #include <apitest.h>
 
 extern void func_PortableOperatingSystem(void);
+extern void func_RtlCreateUserStack(void);
 extern void func_ZeroBits(void);
 extern void func_ImagePlacement(void);
 
@@ -301,6 +302,7 @@ extern void func_ZwQuerySystemInformationEx(void);
 const struct test winetest_testlist[] =
 {
     { "PortableOperatingSystem", func_PortableOperatingSystem },
+    { "RtlCreateUserStack", func_RtlCreateUserStack },
     { "ZeroBits", func_ZeroBits },
     { "ImagePlacement", func_ImagePlacement },
     // CRT tests from ../crt
