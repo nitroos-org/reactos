@@ -1552,6 +1552,61 @@ found:
     LocalFree( own );
     return r;
 }
+
+/* the components of other users' per-user installations, for an administrator, read from the loaded hives
+   (HKEY_USERS\<SID>): the data an administrator's MsiEnumComponentsEx would find under the machine key on Windows */
+static UINT fetch_hku_component( const WCHAR *usersid, DWORD index, DWORD *idx, WCHAR guid[39],
+                                 MSIINSTALLCONTEXT *installed_ctx, LPWSTR sid, LPDWORD sid_len )
+{
+    UINT r = ERROR_SUCCESS;
+    WCHAR path[MAX_PATH], component[SQUASHED_GUID_SIZE], user[128];
+    const WCHAR *own;
+    DWORD i = 0, j, len_component, len_user;
+    REGSAM access = KEY_ENUMERATE_SUB_KEYS | KEY_WOW64_64KEY;
+    HKEY key_users, key_components;
+
+    if (!userdata_is_admin() || !(own = userdata_own_sid())) return ERROR_NO_MORE_ITEMS;
+    if (RegOpenKeyExW( HKEY_USERS, NULL, 0, access, &key_users )) return ERROR_NO_MORE_ITEMS;
+
+    len_user = ARRAY_SIZE( user );
+    while (!RegEnumKeyExW( key_users, i++, user, &len_user, NULL, NULL, NULL, NULL ))
+    {
+        len_user = ARRAY_SIZE( user );
+        if (wcsncmp( user, L"S-1-5-21-", 9 ) || wcschr( user, '_' ) || !wcsicmp( user, own )) continue;
+        if (wcscmp( usersid, L"S-1-1-0" ) && wcsicmp( usersid, user )) continue;
+        swprintf( path, ARRAY_SIZE(path), L"%s\\%sComponents", user, userdata_hkcu );
+        if (RegOpenKeyExW( HKEY_USERS, path, 0, access, &key_components )) continue;
+        len_user = wcslen( user );
+        for (j = 0;; j++)
+        {
+            len_component = ARRAY_SIZE( component );
+            if (RegEnumKeyExW( key_components, j, component, &len_component, NULL, NULL, NULL, NULL )) break;
+            if (*idx != index) { (*idx)++; continue; }
+            if (sid_len)
+            {
+                if (*sid_len < len_user + 1)
+                {
+                    *sid_len = len_user + 1;
+                    r = ERROR_MORE_DATA;
+                }
+                else if (sid)
+                {
+                    *sid_len = len_user;
+                    lstrcpyW( sid, user );
+                }
+            }
+            if (guid) unsquash_guid( component, guid );
+            if (installed_ctx) *installed_ctx = MSIINSTALLCONTEXT_USERUNMANAGED;
+            RegCloseKey( key_components );
+            RegCloseKey( key_users );
+            return r;
+        }
+        RegCloseKey( key_components );
+        len_user = ARRAY_SIZE( user );
+    }
+    RegCloseKey( key_users );
+    return ERROR_NO_MORE_ITEMS;
+}
 #endif
 
 static UINT enum_components( const WCHAR *usersid, DWORD ctx, DWORD index, DWORD *idx, WCHAR guid[39],
@@ -1578,6 +1633,8 @@ static UINT enum_components( const WCHAR *usersid, DWORD ctx, DWORD index, DWORD
         if (r != ERROR_NO_MORE_ITEMS) goto done;
 #ifdef __REACTOS__
         r = fetch_hkcu_component( usersid, index, idx, guid, installed_ctx, sid, sid_len );
+        if (r != ERROR_NO_MORE_ITEMS) goto done;
+        r = fetch_hku_component( usersid, index, idx, guid, installed_ctx, sid, sid_len );
         if (r != ERROR_NO_MORE_ITEMS) goto done;
 #endif
     }
