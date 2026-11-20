@@ -75,6 +75,7 @@ list(APPEND SOURCE
     RegNotifyChangeKeyValue.c
     RegNotifyLeak.c
     RegLoadCraftedHive.c
+    RegBigData.c
     RegLoadKey.c
     RegOpenKeyExW.c
     RegPerformanceData.c
