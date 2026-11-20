@@ -64,6 +64,18 @@ extern SIZE_T DiskReadBufferSize;
 /* ARC path of the boot drive and partition */
 extern CCHAR FrLdrBootPath[MAX_PATH];
 
+#ifdef UEFIBOOT
+/* The system partition of a boot entry that names it by GUID, resolved at this boot (arch/uefi/uefidisk.c) */
+BOOLEAN
+UefiResolveSystemPath(
+    _In_ ULONG Argc,
+    _In_ PCHAR Argv[],
+    _Inout_ PCHAR BootPath,
+    _In_ SIZE_T BootPathSize,
+    _Out_writes_(MessageSize) PCHAR Message,
+    _In_ SIZE_T MessageSize);
+#endif
+
 
 ///////////////////////////////////////////////////////////////////////////////
 //

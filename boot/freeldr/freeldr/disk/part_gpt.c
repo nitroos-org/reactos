@@ -413,4 +413,481 @@ DiskGetGptPartitionEntry(
     return TRUE;
 }
 
+#ifdef UEFIBOOT
+
+/*
+ * Text form of a GUID, as a boot entry names a partition by its unique GUID: 8-4-4-4-12 hexadecimal
+ * digits, with or without one pair of braces. Anything else (another length, a sign, a space, an
+ * embedded null, a dash in another place) is refused, and Guid is left alone.
+ */
+BOOLEAN
+GptParseGuid(
+    _In_ PCSTR Text,
+    _Out_ GUID* Guid)
+{
+    ULONG Length, First, Position, Digit, Nibbles = 0;
+    UCHAR Bytes[16] = {0};
+    UCHAR Char;
+
+    if (Text == NULL)
+        return FALSE;
+
+    /* Length: at most 39 characters are looked at, so that an unterminated or huge string costs nothing */
+    for (Length = 0; Length < 39 && Text[Length] != ANSI_NULL; Length++)
+        ;
+    if (Length == 38)
+    {
+        if (Text[0] != '{' || Text[37] != '}')
+            return FALSE;
+        First = 1;
+    }
+    else if (Length == 36)
+    {
+        First = 0;
+    }
+    else
+    {
+        return FALSE;
+    }
+
+    for (Position = 0; Position < 36; Position++)
+    {
+        Char = (UCHAR)Text[First + Position];
+        if (Position == 8 || Position == 13 || Position == 18 || Position == 23)
+        {
+            if (Char != '-')
+                return FALSE;
+            continue;
+        }
+
+        if (Char >= '0' && Char <= '9')
+            Digit = Char - '0';
+        else if (Char >= 'a' && Char <= 'f')
+            Digit = Char - 'a' + 10;
+        else if (Char >= 'A' && Char <= 'F')
+            Digit = Char - 'A' + 10;
+        else
+            return FALSE;
+
+        /* Digits in text order: Bytes holds the GUID as it reads, the first eight digits make Data1 and so on */
+        if (Nibbles & 1)
+            Bytes[Nibbles / 2] |= (UCHAR)Digit;
+        else
+            Bytes[Nibbles / 2] = (UCHAR)(Digit << 4);
+        Nibbles++;
+    }
+    if (Nibbles != 32)
+        return FALSE;
+
+    Guid->Data1 = ((ULONG)Bytes[0] << 24) | ((ULONG)Bytes[1] << 16) | ((ULONG)Bytes[2] << 8) | Bytes[3];
+    Guid->Data2 = (USHORT)(((USHORT)Bytes[4] << 8) | Bytes[5]);
+    Guid->Data3 = (USHORT)(((USHORT)Bytes[6] << 8) | Bytes[7]);
+    RtlCopyMemory(Guid->Data4, &Bytes[8], 8);
+    return TRUE;
+}
+
+/*
+ * Calls Callback for every used entry of the GPT of the disk, in table order, with the number the entry has
+ * (the same one DiskGetGptPartitionEntry takes: partitions are numbered over the used entries, as the kernel
+ * does) and its slot (1-based position in the entry array, as the firmware's device path node counts it),
+ * until the callback returns TRUE. The table is the one DiskReadGptHeader accepts: the same table, and the
+ * same numbering, that the partition(N) of an ARC path means. Returns FALSE when the disk has no such table
+ * or an entry block cannot be read; the callback has seen the entries up to there.
+ */
+BOOLEAN
+DiskGptScan(
+    _In_ UCHAR DriveNumber,
+    _In_ PGPT_SCAN_CALLBACK Callback,
+    _In_opt_ PVOID Context,
+    _Out_opt_ GUID* DiskGuid)
+{
+    GPT_TABLE_HEADER GptHeader;
+    GPT_PARTITION_ENTRY GptEntry;
+    GEOMETRY Geometry;
+    ULONG SectorSize = 512;
+    ULONG EntriesPerBlock, EntryIndex, EntryOffset, Number = 0;
+    GUID UnusedGuid = EFI_PART_TYPE_UNUSED_GUID;
+
+    if (!DiskReadGptHeader(DriveNumber, &GptHeader))
+        return FALSE;
+    if (DiskGuid)
+        RtlCopyMemory(DiskGuid, &GptHeader.DiskGuid, sizeof(GUID));
+
+    /* The block size DiskReadGptHeader used */
+    if (MachDiskGetDriveGeometry(DriveNumber, &Geometry) && Geometry.BytesPerSector >= 512)
+        SectorSize = Geometry.BytesPerSector;
+    if (SectorSize > DiskReadBufferSize || SectorSize < GptHeader.SizeOfPartitionEntry)
+        return FALSE;
+    EntriesPerBlock = SectorSize / GptHeader.SizeOfPartitionEntry;
+
+    for (EntryIndex = 0; EntryIndex < GptHeader.NumberOfPartitionEntries; EntryIndex++)
+    {
+        EntryOffset = (EntryIndex % EntriesPerBlock) * GptHeader.SizeOfPartitionEntry;
+        if (EntryOffset == 0)
+        {
+            if (!MachDiskReadLogicalSectors(DriveNumber,
+                                            GptHeader.PartitionEntryLba + (EntryIndex / EntriesPerBlock),
+                                            1, DiskReadBuffer))
+                return FALSE;
+        }
+        RtlCopyMemory(&GptEntry, (PUCHAR)DiskReadBuffer + EntryOffset, sizeof(GptEntry));
+
+        if (RtlEqualMemory(&GptEntry.PartitionTypeGuid, &UnusedGuid, sizeof(UnusedGuid)))
+            continue;
+        Number++;
+
+        /* An entry outside of the usable range is numbered but never offered (the table check refuses such a table anyway) */
+        if (!GptCheckEntry(&GptHeader, &GptEntry))
+            continue;
+        if (Callback(Context, Number, EntryIndex + 1, &GptEntry, SectorSize))
+            break;
+    }
+    return TRUE;
+}
+
+static BOOLEAN
+GptStopCallback(
+    _In_opt_ PVOID Context,
+    _In_ ULONG Number,
+    _In_ ULONG Slot,
+    _In_ const GPT_PARTITION_ENTRY* Entry,
+    _In_ ULONG SectorSize)
+{
+    return TRUE;
+}
+
+typedef struct _GPT_FIND_CONTEXT
+{
+    const GUID* PartitionGuid;
+    PGPT_PARTITION_MATCH Match;
+} GPT_FIND_CONTEXT;
+
+static BOOLEAN
+GptFindCallback(
+    _In_opt_ PVOID Context,
+    _In_ ULONG Number,
+    _In_ ULONG Slot,
+    _In_ const GPT_PARTITION_ENTRY* Entry,
+    _In_ ULONG SectorSize)
+{
+    GPT_FIND_CONTEXT* Find = (GPT_FIND_CONTEXT*)Context;
+
+    if (!RtlEqualMemory(&Entry->UniquePartitionGuid, Find->PartitionGuid, sizeof(GUID)))
+        return FALSE;
+    if (Find->Match->Count++ == 0)
+    {
+        Find->Match->Number = Number;
+        Find->Match->Slot = Slot;
+        Find->Match->StartLba = Entry->StartingLba;
+        Find->Match->EndLba = Entry->EndingLba;
+        RtlCopyMemory(&Find->Match->TypeGuid, &Entry->PartitionTypeGuid, sizeof(GUID));
+    }
+    return FALSE; /* keep going: a second entry with the same GUID is a duplicate the caller must know about */
+}
+
+/*
+ * The used entries of the disk that carry the unique GUID PartitionGuid: Match->Count of them (0 if none, or
+ * if the disk has no acceptable GPT), the first one in Match->Number (numbered as DiskGetGptPartitionEntry
+ * does) with its slot, range and type. The all-zero GUID matches nothing. Match->DiskGuid is the disk GUID of
+ * the table, whether the partition was found or not.
+ */
+BOOLEAN
+DiskGptFindPartitionByGuid(
+    _In_ UCHAR DriveNumber,
+    _In_ const GUID* PartitionGuid,
+    _Out_ PGPT_PARTITION_MATCH Match)
+{
+    static const UCHAR ZeroGuid[sizeof(GUID)] = {0};
+    GPT_FIND_CONTEXT Find;
+
+    RtlZeroMemory(Match, sizeof(*Match));
+    Find.PartitionGuid = PartitionGuid;
+    Find.Match = Match;
+
+    /* The all-zero GUID is what an unused entry carries: it names nothing (the scan only fills in the disk GUID) */
+    if (RtlEqualMemory(PartitionGuid, ZeroGuid, sizeof(GUID)))
+    {
+        DiskGptScan(DriveNumber, GptStopCallback, NULL, &Match->DiskGuid);
+        return FALSE;
+    }
+
+    if (!DiskGptScan(DriveNumber, GptFindCallback, &Find, &Match->DiskGuid))
+    {
+        /* No table (or a read error half way): no answer is trusted */
+        Match->Count = 0;
+        return FALSE;
+    }
+    return (Match->Count != 0);
+}
+
+/* The GUID the way a freeldr.ini entry spells it */
+static VOID
+GptFormatGuid(
+    _In_ const GUID* Guid,
+    _Out_writes_(48) PCHAR Text)
+{
+    RtlStringCbPrintfA(Text, 48, "{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+                       (ULONG)Guid->Data1, (ULONG)Guid->Data2, (ULONG)Guid->Data3,
+                       (ULONG)Guid->Data4[0], (ULONG)Guid->Data4[1], (ULONG)Guid->Data4[2], (ULONG)Guid->Data4[3],
+                       (ULONG)Guid->Data4[4], (ULONG)Guid->Data4[5], (ULONG)Guid->Data4[6], (ULONG)Guid->Data4[7]);
+}
+
+/* "first-last" in decimal, nothing else; first <= last */
+static BOOLEAN
+GptParseRange(
+    _In_ PCSTR Text,
+    _Out_ PULONGLONG First,
+    _Out_ PULONGLONG Last)
+{
+    ULONGLONG Value[2] = {0, 0};
+    ULONG Part, Digits;
+
+    for (Part = 0; Part < 2; Part++)
+    {
+        for (Digits = 0; *Text >= '0' && *Text <= '9'; Digits++, Text++)
+        {
+            if (Value[Part] > ((ULONGLONG)~0ULL - (ULONG)(*Text - '0')) / 10)
+                return FALSE; /* does not fit */
+            Value[Part] = Value[Part] * 10 + (ULONG)(*Text - '0');
+        }
+        if (Digits == 0)
+            return FALSE;
+        if (Part == 0 && *Text++ != '-')
+            return FALSE;
+    }
+    if (*Text != ANSI_NULL || Value[0] > Value[1])
+        return FALSE;
+    *First = Value[0];
+    *Last = Value[1];
+    return TRUE;
+}
+
+/* Stops the scan at the first used entry: DiskGptScan has by then read the disk GUID */
+static BOOLEAN
+GptDiskGuidCallback(
+    _In_opt_ PVOID Context,
+    _In_ ULONG Number,
+    _In_ ULONG Slot,
+    _In_ const GPT_PARTITION_ENTRY* Entry,
+    _In_ ULONG SectorSize)
+{
+    return TRUE;
+}
+
+typedef struct _GPT_NUMBER_SEARCH
+{
+    ULONG Number;
+    ULONGLONG First;
+    ULONGLONG Last;
+    BOOLEAN Found;
+} GPT_NUMBER_SEARCH;
+
+static BOOLEAN
+GptNumberCallback(
+    _In_opt_ PVOID Context,
+    _In_ ULONG Number,
+    _In_ ULONG Slot,
+    _In_ const GPT_PARTITION_ENTRY* Entry,
+    _In_ ULONG SectorSize)
+{
+    GPT_NUMBER_SEARCH* Search = (GPT_NUMBER_SEARCH*)Context;
+
+    if (Number != Search->Number)
+        return FALSE;
+    Search->Found = TRUE;
+    Search->First = Entry->StartingLba;
+    Search->Last = Entry->EndingLba;
+    return TRUE;
+}
+
+/* multi(0)disk(0)rdisk(Disk)partition(Number)Rest; FALSE if it does not fit (a cut path would name something else) */
+static BOOLEAN
+GptBuildArcPath(
+    _Out_writes_(Size) PCHAR Path,
+    _In_ SIZE_T Size,
+    _In_ ULONG Disk,
+    _In_ ULONG Number,
+    _In_ PCSTR Rest)
+{
+    SIZE_T Length = 0;
+
+    /* The prefix is "multi(0)disk(0)rdisk(" + at most 10 digits + ")partition(" + at most 10 digits + ")" */
+    while (Rest[Length] != ANSI_NULL && Length < Size)
+        Length++;
+    if (Length + 64 > Size)
+        return FALSE;
+    RtlStringCbPrintfA(Path, Size, "multi(0)disk(0)rdisk(%lu)partition(%lu)%s", Disk, Number, Rest);
+    return TRUE;
+}
+
+/*
+ * Resolves the system partition of a boot entry that names it by GUID, at this boot.
+ *
+ * The hard disks are rdisk(0) .. rdisk(HardDisks - 1), disk n being drive 0x80 + n; BootDisk is the one the
+ * loader was started from. StoredDisk, StoredNumber and Rest are the parts of the entry's SystemPath
+ * multi(0)disk(0)rdisk(StoredDisk)partition(StoredNumber)Rest. PartText, DiskText and RangeText are the values of
+ * SystemPathPartitionGuid, SystemPathDiskGuid and SystemPathPartitionRange (DiskText and RangeText may be NULL).
+ * On TRUE, NewPath is the path to use. On FALSE nothing is ours and Message says so.
+ *
+ * 1. Every hard disk's table (the table DiskReadGptHeader accepts, numbered over the used entries as the
+ *    kernel does) is searched for a used entry with the unique GUID. Found: the path becomes
+ *    multi(0)disk(0)rdisk(R)partition(N) of THAT entry at THIS boot, followed by Rest (GPT_SYSPATH_RESOLVED).
+ *    The numbers in the stored path are not consulted.
+ * 2. Two or more entries carry the GUID (a cloned disk, a partition copied with its GUID, two entries of one
+ *    table): the entry whose disk has the disk GUID of DiskText wins, then the one on the disk the loader was
+ *    started from, then the lowest rdisk, then the lowest partition number. Nothing but the rdisk order, which
+ *    the firmware gives, enters the choice, so it is the same at every boot of the same hardware.
+ * 3. No entry has the GUID (the partition was deleted, or recreated by a tool that gave it a new GUID): the
+ *    stored position is used ONLY IF the entry it names now covers exactly the blocks of RangeText, on the disk
+ *    with the GUID of DiskText (or rdisk(StoredDisk) when that disk is not there): the same place on the same
+ *    disk, i.e. the partition was restored or recreated in place (GPT_SYSPATH_SAME_PLACE). Anything else,
+ *    including no range or a range that is not the same, is a failure: nothing is read from the partition
+ *    that the stored number now names.
+ * 4. A PartText that is not a GUID follows rule 3; an unusable DiskText is ignored (the partition GUID
+ *    is the identity). Of two keys with the same name the loader sees the first.
+ */
+BOOLEAN
+GptResolveSystemPartition(
+    _In_ ULONG HardDisks,
+    _In_ ULONG BootDisk,
+    _In_ ULONG StoredDisk,
+    _In_ ULONG StoredNumber,
+    _In_ PCSTR Rest,
+    _In_ PCSTR PartText,
+    _In_opt_ PCSTR DiskText,
+    _In_opt_ PCSTR RangeText,
+    _Out_writes_(NewPathSize) PCHAR NewPath,
+    _In_ SIZE_T NewPathSize,
+    _Out_writes_(MessageSize) PCHAR Message,
+    _In_ SIZE_T MessageSize,
+    _Out_ GPT_SYSPATH_STATUS* Status)
+{
+    GUID PartGuid, DiskGuid;
+    BOOLEAN PartGuidOk, DiskGuidOk, RangeOk;
+    ULONGLONG First = 0, Last = 0;
+    ULONG Disk, Candidates = 0;
+    BOOLEAN HaveBest = FALSE, BestDiskGuid = FALSE, BestBoot = FALSE;
+    ULONG BestDisk = 0, BestNumber = 0;
+    CHAR PartString[48], DiskString[48];
+
+    *Status = GPT_SYSPATH_NOT_FOUND;
+    if (NewPathSize)
+        *NewPath = ANSI_NULL;
+    if (MessageSize)
+        *Message = ANSI_NULL;
+
+    PartGuidOk = GptParseGuid(PartText, &PartGuid);
+    DiskGuidOk = (DiskText != NULL) && GptParseGuid(DiskText, &DiskGuid);
+    RangeOk = (RangeText != NULL) && GptParseRange(RangeText, &First, &Last);
+
+    /* Rules 1 and 2 */
+    for (Disk = 0; PartGuidOk && Disk < HardDisks; Disk++)
+    {
+        GPT_PARTITION_MATCH Match;
+        BOOLEAN ThisDiskGuid, ThisBoot;
+
+        if (!DiskGptFindPartitionByGuid((UCHAR)(0x80 + Disk), &PartGuid, &Match))
+            continue;
+
+        Candidates += Match.Count;
+        ThisDiskGuid = DiskGuidOk && RtlEqualMemory(&Match.DiskGuid, &DiskGuid, sizeof(GUID));
+        ThisBoot = (Disk == BootDisk);
+
+        /* Better than the best so far? Disks are visited in rdisk order, so a tie keeps the lower one */
+        if (!HaveBest ||
+            (ThisDiskGuid && !BestDiskGuid) ||
+            (ThisDiskGuid == BestDiskGuid && ThisBoot && !BestBoot))
+        {
+            HaveBest = TRUE;
+            BestDisk = Disk;
+            BestNumber = Match.Number;
+            BestDiskGuid = ThisDiskGuid;
+            BestBoot = ThisBoot;
+        }
+    }
+
+    if (HaveBest)
+    {
+        if (!GptBuildArcPath(NewPath, NewPathSize, BestDisk, BestNumber, Rest))
+        {
+            if (MessageSize)
+                RtlStringCbCopyA(Message, MessageSize, "The system path of this boot entry is too long.");
+            return FALSE;
+        }
+        *Status = GPT_SYSPATH_RESOLVED;
+        TRACE("%lu partition(s) carry the system partition's GUID: disk %lu partition %lu\n",
+              Candidates, BestDisk, BestNumber);
+        return TRUE;
+    }
+
+    /* Rule 3: the same place on the same disk */
+    if (RangeOk)
+    {
+        ULONG SameDisk = StoredDisk;
+
+        /* The disk with the recorded disk GUID, wherever the firmware put it this time */
+        for (Disk = 0; DiskGuidOk && Disk < HardDisks; Disk++)
+        {
+            GUID Found;
+
+            if (DiskGptScan((UCHAR)(0x80 + Disk), GptDiskGuidCallback, NULL, &Found) &&
+                RtlEqualMemory(&Found, &DiskGuid, sizeof(GUID)))
+            {
+                SameDisk = Disk;
+                break;
+            }
+        }
+
+        if (SameDisk < HardDisks)
+        {
+            GPT_NUMBER_SEARCH Search;
+
+            RtlZeroMemory(&Search, sizeof(Search));
+            Search.Number = StoredNumber;
+            if (DiskGptScan((UCHAR)(0x80 + SameDisk), GptNumberCallback, &Search, NULL) &&
+                Search.Found && Search.First == First && Search.Last == Last)
+            {
+                if (!GptBuildArcPath(NewPath, NewPathSize, SameDisk, StoredNumber, Rest))
+                {
+                    if (MessageSize)
+                        RtlStringCbCopyA(Message, MessageSize, "The system path of this boot entry is too long.");
+                    return FALSE;
+                }
+                *Status = GPT_SYSPATH_SAME_PLACE;
+                return TRUE;
+            }
+        }
+    }
+
+    /* Nothing that is ours */
+    if (PartGuidOk)
+        GptFormatGuid(&PartGuid, PartString);
+    else
+        RtlStringCbCopyA(PartString, sizeof(PartString), "(not a GUID)");
+    if (DiskGuidOk)
+        GptFormatGuid(&DiskGuid, DiskString);
+    else
+        RtlStringCbCopyA(DiskString, sizeof(DiskString), "(not recorded)");
+    if (MessageSize)
+    {
+        RtlStringCbPrintfA(Message, MessageSize,
+                           "The system partition of this boot entry was not found.\n"
+                           "\n"
+                           "Partition GUID %s\n"
+                           "Disk GUID      %s\n"
+                           "\n"
+                           "No disk has a partition with that GUID, and the\n"
+                           "partition the stored path names is not in the\n"
+                           "recorded place. It may have been deleted or\n"
+                           "recreated. Nothing was read from another partition.\n"
+                           "\n"
+                           "Correct SystemPath and SystemPathPartitionGuid of\n"
+                           "this entry in freeldr.ini on the EFI system partition.",
+                           PartString, DiskString);
+    }
+    return FALSE;
+}
+
+#endif /* UEFIBOOT */
+
 #endif

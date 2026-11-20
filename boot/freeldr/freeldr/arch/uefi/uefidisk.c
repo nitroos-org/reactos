@@ -1482,3 +1482,67 @@ UefiDiskGetCacheableBlockCount(UCHAR DriveNumber)
 
     return (ULONG)(BlockIo->Media->LastBlock + 1);
 }
+
+/* SYSTEM PARTITION BY GUID **************************************************/
+
+/*
+ * A boot entry of freeldr.ini that was written by Setup on a UEFI computer names its system partition twice:
+ * by position, in SystemPath (multi(0)disk(0)rdisk(R)partition(N)\ReactOS, the name the kernel is given), and by
+ * what a change of the partition table does not move, in three more keys of the entry:
+ *
+ *   SystemPathPartitionGuid  = {unique GUID of the GPT entry of the system partition}
+ *   SystemPathDiskGuid       = {GUID of the disk's GPT header}
+ *   SystemPathPartitionRange = <first LBA>-<last LBA>      (decimal, in blocks of the disk)
+ *
+ * UefiResolveSystemPath turns the name by position into the one that is right at this boot; the rules are
+ * in GptResolveSystemPartition (disk/part_gpt.c). TRUE: go on with BootPath (rewritten if the entry has the
+ * GUID key); FALSE: do not boot, Message says which partition is missing.
+ */
+BOOLEAN
+UefiResolveSystemPath(
+    _In_ ULONG Argc,
+    _In_ PCHAR Argv[],
+    _Inout_ PCHAR BootPath,
+    _In_ SIZE_T BootPathSize,
+    _Out_writes_(MessageSize) PCHAR Message,
+    _In_ SIZE_T MessageSize)
+{
+    PCSTR PartText, Rest;
+    UCHAR StoredDrive;
+    ULONG StoredNumber;
+    CHAR NewPath[MAX_PATH];
+    GPT_SYSPATH_STATUS Status;
+
+    if (Message && MessageSize)
+        *Message = ANSI_NULL;
+
+    PartText = GetArgumentValue(Argc, Argv, "SystemPathPartitionGuid");
+    if (PartText == NULL || *PartText == ANSI_NULL)
+        return TRUE; /* not GUID-named: every install written before the key existed, and every BIOS install */
+
+    /* The name by position: the rest of the path is kept, and the position is the fallback */
+    if (!DissectArcPath(BootPath, &Rest, &StoredDrive, &StoredNumber) ||
+        StoredDrive < FIRST_BIOS_DISK || StoredNumber == 0)
+    {
+        /* Not a hard disk partition path (a ram disk, a CD): there is no partition to look for */
+        WARN("SystemPath '%s' is not a hard disk partition path, SystemPathPartitionGuid ignored\n", BootPath);
+        return TRUE;
+    }
+
+    if (!GptResolveSystemPartition(UefiGetHarddiskCount(), PublicBootArcDisk,
+                                   StoredDrive - FIRST_BIOS_DISK, StoredNumber, Rest,
+                                   PartText,
+                                   GetArgumentValue(Argc, Argv, "SystemPathDiskGuid"),
+                                   GetArgumentValue(Argc, Argv, "SystemPathPartitionRange"),
+                                   NewPath, sizeof(NewPath), Message, MessageSize, &Status))
+        return FALSE;
+
+    if (strlen(NewPath) >= BootPathSize)
+    {
+        ERR("The system path '%s' is too long\n", NewPath);
+        return FALSE;
+    }
+    TRACE("System partition: '%s' -> '%s'\n", BootPath, NewPath);
+    RtlStringCbCopyA(BootPath, BootPathSize, NewPath);
+    return TRUE;
+}

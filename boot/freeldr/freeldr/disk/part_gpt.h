@@ -74,3 +74,69 @@ BOOLEAN
 GptCheckEntry(
     _In_ const GPT_TABLE_HEADER* Header,
     _In_ const GPT_PARTITION_ENTRY* Entry);
+
+#ifdef UEFIBOOT
+
+/* Text form of a GUID (8-4-4-4-12 hexadecimal digits, optional braces): strict, see part_gpt.c */
+BOOLEAN
+GptParseGuid(
+    _In_ PCSTR Text,
+    _Out_ GUID* Guid);
+
+/* Called for each used entry of a table: its number (over the used entries) and 1-based slot; TRUE stops the scan */
+typedef BOOLEAN
+(*PGPT_SCAN_CALLBACK)(
+    _In_opt_ PVOID Context,
+    _In_ ULONG Number,
+    _In_ ULONG Slot,
+    _In_ const GPT_PARTITION_ENTRY* Entry,
+    _In_ ULONG SectorSize);
+
+BOOLEAN
+DiskGptScan(
+    _In_ UCHAR DriveNumber,
+    _In_ PGPT_SCAN_CALLBACK Callback,
+    _In_opt_ PVOID Context,
+    _Out_opt_ GUID* DiskGuid);
+
+typedef struct _GPT_PARTITION_MATCH
+{
+    ULONG Count;            /* used entries with the GUID */
+    ULONG Number;           /* of the first one: number over the used entries (the N of partition(N)) */
+    ULONG Slot;             /* and its 1-based slot */
+    ULONGLONG StartLba;
+    ULONGLONG EndLba;
+    GUID TypeGuid;
+    GUID DiskGuid;          /* disk GUID of the table that was read (valid when the disk has an acceptable GPT) */
+} GPT_PARTITION_MATCH, *PGPT_PARTITION_MATCH;
+
+BOOLEAN
+DiskGptFindPartitionByGuid(
+    _In_ UCHAR DriveNumber,
+    _In_ const GUID* PartitionGuid,
+    _Out_ PGPT_PARTITION_MATCH Match);
+
+typedef enum _GPT_SYSPATH_STATUS
+{
+    GPT_SYSPATH_RESOLVED,       /* the path names the partition with the GUID, at this boot */
+    GPT_SYSPATH_SAME_PLACE,     /* GUID not found; the stored number names a partition in the recorded place */
+    GPT_SYSPATH_NOT_FOUND       /* nothing that is ours */
+} GPT_SYSPATH_STATUS;
+
+BOOLEAN
+GptResolveSystemPartition(
+    _In_ ULONG HardDisks,
+    _In_ ULONG BootDisk,
+    _In_ ULONG StoredDisk,
+    _In_ ULONG StoredNumber,
+    _In_ PCSTR Rest,
+    _In_ PCSTR PartText,
+    _In_opt_ PCSTR DiskText,
+    _In_opt_ PCSTR RangeText,
+    _Out_writes_(NewPathSize) PCHAR NewPath,
+    _In_ SIZE_T NewPathSize,
+    _Out_writes_(MessageSize) PCHAR Message,
+    _In_ SIZE_T MessageSize,
+    _Out_ GPT_SYSPATH_STATUS* Status);
+
+#endif /* UEFIBOOT */
