@@ -17,6 +17,8 @@
  *              - NetUserModalsSet level 3: a duration shorter than the window is 87 with parm_err 10;
  *                TIMEQ_FOREVER as the duration keeps the account locked until an administrator unlocks it;
  *              - the built-in Administrator counts and shows UF_LOCKOUT, but its logons are not refused.
+ *              - the opt-in policy "Allow Administrator account lockout" (KB5020282, here Lsa\AllowAdministratorLockout,
+ *                default off) locks it out for the network logons only (documented, not measurable on this build).
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -450,32 +452,29 @@ static void TestPolicyValues(void)
     }
 }
 
-/* The built-in Administrator (RID 500) counts and shows UF_LOCKOUT but is not locked out */
-static void TestAdministrator(void)
+/* The name of the built-in Administrator (RID 500) of this machine */
+static BOOL GetAdministratorName(PWSTR Name, DWORD NameChars)
 {
-    SID_IDENTIFIER_AUTHORITY Nt = { SECURITY_NT_AUTHORITY };
     PPOLICY_ACCOUNT_DOMAIN_INFO DomainInfo = NULL;
     LSA_OBJECT_ATTRIBUTES Attributes = { sizeof(Attributes) };
     LSA_HANDLE Policy = NULL;
     BYTE SidBuffer[SECURITY_MAX_SID_SIZE];
     PSID Sid = (PSID)SidBuffer;
-    WCHAR Name[256], Domain[256];
-    DWORD NameLength = RTL_NUMBER_OF(Name), DomainLength = RTL_NUMBER_OF(Domain);
+    WCHAR Domain[256];
+    DWORD DomainLength = RTL_NUMBER_OF(Domain);
     SID_NAME_USE Use;
-    DWORD Locked, Count, ParmErr, i;
     UCHAR SubCount;
 
-    UNREFERENCED_PARAMETER(Nt);
     if (LsaOpenPolicy(NULL, &Attributes, POLICY_VIEW_LOCAL_INFORMATION, &Policy) != NT_STATUS_SUCCESS)
     {
         skip("LsaOpenPolicy failed\n");
-        return;
+        return FALSE;
     }
     if (LsaQueryInformationPolicy(Policy, PolicyAccountDomainInformation, (PVOID *)&DomainInfo) != NT_STATUS_SUCCESS)
     {
         LsaClose(Policy);
         skip("no account domain\n");
-        return;
+        return FALSE;
     }
     SubCount = *GetSidSubAuthorityCount(DomainInfo->DomainSid);
     CopySid(sizeof(SidBuffer), Sid, DomainInfo->DomainSid);
@@ -483,11 +482,22 @@ static void TestAdministrator(void)
     *GetSidSubAuthority(Sid, SubCount) = DOMAIN_USER_RID_ADMIN;
     LsaFreeMemory(DomainInfo);
     LsaClose(Policy);
-    if (!LookupAccountSidW(NULL, Sid, Name, &NameLength, Domain, &DomainLength, &Use))
+    if (!LookupAccountSidW(NULL, Sid, Name, &NameChars, Domain, &DomainLength, &Use))
     {
         skip("LookupAccountSid of RID 500 failed: %lu\n", GetLastError());
-        return;
+        return FALSE;
     }
+    return TRUE;
+}
+
+/* The built-in Administrator (RID 500) counts and shows UF_LOCKOUT but is not locked out */
+static void TestAdministrator(void)
+{
+    WCHAR Name[256];
+    DWORD Locked, Count, ParmErr, i;
+
+    if (!GetAdministratorName(Name, RTL_NUMBER_OF(Name)))
+        return;
 
     ok_dec(SetPolicy(120, 60, 3, &ParmErr), NERR_Success);
     for (i = 0; i < 4; i++)
@@ -527,6 +537,131 @@ static void TestAdministrator(void)
         }
     }
     SetLockFlag(Name, FALSE);
+}
+
+/* The opt-in policy "Allow Administrator account lockout" (KB5020282; here HKLM\SYSTEM\CurrentControlSet\Control\Lsa
+   AllowAdministratorLockout, default off). KB5020282: with it on the built-in Administrator is locked out for network
+   logons ("such as RDP attempts") and console logons stay possible. The rows run with the policy value on and off; the
+   Administrator's own blank password is used (LimitBlankPasswordUse 0 for the duration of the test), no row is run when
+   it has a password. */
+static void LockAdministrator(PCWSTR Name)
+{
+    ok_dec(Logon(Name, WrongPassword, LOGON32_LOGON_INTERACTIVE), ERROR_LOGON_FAILURE);
+    ok_dec(Logon(Name, WrongPassword, LOGON32_LOGON_INTERACTIVE), ERROR_LOGON_FAILURE);
+    ok_dec(Logon(Name, WrongPassword, LOGON32_LOGON_INTERACTIVE), ERROR_LOGON_FAILURE);
+    ok_state(Name, 1, 3);
+}
+
+static void SaveLsaDword(HKEY Key, PCWSTR Value, PBOOL Had, PDWORD Old)
+{
+    DWORD Size = sizeof(*Old), Type;
+
+    *Old = 0;
+    *Had = RegQueryValueExW(Key, Value, NULL, &Type, (PBYTE)Old, &Size) == ERROR_SUCCESS && Type == REG_DWORD;
+}
+
+static void SetLsaDword(HKEY Key, PCWSTR Value, DWORD Data)
+{
+    ok_dec(RegSetValueExW(Key, Value, 0, REG_DWORD, (const BYTE *)&Data, sizeof(Data)), ERROR_SUCCESS);
+}
+
+static void RestoreLsaDword(HKEY Key, PCWSTR Value, BOOL Had, DWORD Old)
+{
+    if (Had)
+        RegSetValueExW(Key, Value, 0, REG_DWORD, (const BYTE *)&Old, sizeof(Old));
+    else
+        RegDeleteValueW(Key, Value);
+}
+
+static void TestAdministratorPolicy(void)
+{
+    static const PCWSTR Policy = L"AllowAdministratorLockout";
+    static const PCWSTR Limit = L"LimitBlankPasswordUse";
+    WCHAR Name[256];
+    HKEY Key;
+    BOOL HadLimit, HadPolicy;
+    DWORD OldLimit, OldPolicy, ParmErr;
+    NTSTATUS Status;
+
+    if (!GetAdministratorName(Name, RTL_NUMBER_OF(Name)))
+        return;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Lsa", 0,
+                      KEY_QUERY_VALUE | KEY_SET_VALUE, &Key) != ERROR_SUCCESS)
+    {
+        skip("cannot open the Lsa key for writing\n");
+        return;
+    }
+    SaveLsaDword(Key, Limit, &HadLimit, &OldLimit);
+    SaveLsaDword(Key, Policy, &HadPolicy, &OldPolicy);
+    SetLsaDword(Key, Limit, 0);
+    SetLsaDword(Key, Policy, 0);
+
+    if (Logon(Name, L"", LOGON32_LOGON_INTERACTIVE) != ERROR_SUCCESS)
+    {
+        skip("the Administrator has a password: the policy rows are not run\n");
+        goto done;
+    }
+
+    ok_dec(SetPolicy(120, 60, 3, &ParmErr), NERR_Success);
+
+    /* policy off: not locked for any logon (the rows of TestAdministrator) */
+    LockAdministrator(Name);
+    ok_dec(Logon(Name, L"", LOGON32_LOGON_NETWORK), ERROR_SUCCESS);
+    ok_state(Name, 0, 0);
+
+    /* policy on: locked for the network logons, the right password as well, nothing more is counted */
+    SetLsaDword(Key, Policy, 1);
+    LockAdministrator(Name);
+    ok_dec(Logon(Name, L"", LOGON32_LOGON_NETWORK), ERROR_ACCOUNT_LOCKED_OUT);
+    ok_dec(Logon(Name, L"", LOGON32_LOGON_NETWORK_CLEARTEXT), ERROR_ACCOUNT_LOCKED_OUT);
+    ok_dec(Logon(Name, WrongPassword, LOGON32_LOGON_NETWORK), ERROR_ACCOUNT_LOCKED_OUT);
+    ok_state(Name, 1, 3);
+
+    /* the console logons are not refused (KB5020282), and the one that succeeds clears the flag and the count, as
+       every successful logon of the Administrator did before */
+    ok_dec(Logon(Name, L"", LOGON32_LOGON_INTERACTIVE), ERROR_SUCCESS);
+    ok_state(Name, 0, 0);
+    LockAdministrator(Name);
+    ok_dec(Logon(Name, L"", LOGON32_LOGON_UNLOCK), ERROR_SUCCESS);
+    ok_state(Name, 0, 0);
+    LockAdministrator(Name);
+    Status = LsaLogon(Name, L"");
+    ok(Status == NT_STATUS_SUCCESS, "LsaLogonUser (interactive) of the locked Administrator: 0x%08lx\n", Status);
+    ok_state(Name, 0, 0);
+
+    /* an administrator's write without UF_LOCKOUT unlocks it as it does any account */
+    LockAdministrator(Name);
+    ok_dec(SetLockFlag(Name, FALSE), NERR_Success);
+    ok_state(Name, 0, 0);
+    ok_dec(Logon(Name, L"", LOGON32_LOGON_NETWORK), ERROR_SUCCESS);
+
+    /* the lock ends by itself after the duration */
+    ok_dec(SetPolicy(4, 2, 3, &ParmErr), NERR_Success);
+    LockAdministrator(Name);
+    ok_dec(Logon(Name, L"", LOGON32_LOGON_NETWORK), ERROR_ACCOUNT_LOCKED_OUT);
+    Sleep(5000);
+    ok_state(Name, 0, 0);
+    ok_dec(Logon(Name, L"", LOGON32_LOGON_NETWORK), ERROR_SUCCESS);
+
+    /* back to off: the same state of the account is not refused any more */
+    ok_dec(SetPolicy(120, 60, 3, &ParmErr), NERR_Success);
+    LockAdministrator(Name);
+    SetLsaDword(Key, Policy, 0);
+    ok_dec(Logon(Name, L"", LOGON32_LOGON_NETWORK), ERROR_SUCCESS);
+    ok_state(Name, 0, 0);
+
+    /* a value that is not 0 counts as on */
+    SetLsaDword(Key, Policy, 7);
+    LockAdministrator(Name);
+    ok_dec(Logon(Name, L"", LOGON32_LOGON_NETWORK), ERROR_ACCOUNT_LOCKED_OUT);
+    SetLsaDword(Key, Policy, 0);
+    ok_dec(Logon(Name, L"", LOGON32_LOGON_NETWORK), ERROR_SUCCESS);
+
+done:
+    SetLockFlag(Name, FALSE);
+    RestoreLsaDword(Key, Limit, HadLimit, OldLimit);
+    RestoreLsaDword(Key, Policy, HadPolicy, OldPolicy);
+    RegCloseKey(Key);
 }
 
 /* "net accounts /maxpwage:unlimited": NetUserModalsSet level 0 with TIMEQ_FOREVER. It reads back as TIMEQ_FOREVER and
@@ -618,6 +753,7 @@ START_TEST(AccountLockout)
     }
     TestPolicyValues();
     TestAdministrator();
+    TestAdministratorPolicy();
 
     /* restore the policy */
     Status = SetPolicy(Saved->usrmod3_lockout_duration, Saved->usrmod3_lockout_observation_window,

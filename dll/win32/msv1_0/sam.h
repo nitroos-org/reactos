@@ -37,11 +37,18 @@ typedef struct _LSA_SAM_PWD_DATA
     /* The interactive logon of the logon dialog on the console (winlogon of the console session): the only
        logon that a blank password may be used for while Lsa\LimitBlankPasswordUse is on */
     BOOL IsConsole;
+
+    /* A network logon (Network, NetworkCleartext, or the remote desktop's RemoteInteractive): set by SamValidateUser */
+    BOOL IsRemoteLogon;
 } LSA_SAM_PWD_DATA, *PLSA_SAM_PWD_DATA;
 
 /* Lsa\LimitBlankPasswordUse (missing = on), read at each call */
 BOOL
 MsvpLimitBlankPasswordUse(VOID);
+
+/* Lsa\AllowAdministratorLockout (missing = off), read at each call */
+BOOL
+MsvpAllowAdministratorLockout(VOID);
 
 /**
  * @brief Validates a user by checking if it exists in the sam database.
