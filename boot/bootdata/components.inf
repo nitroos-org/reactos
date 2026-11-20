@@ -52,7 +52,7 @@ Description  = %wow64.desc%
 Compat       = %wow64.compat%
 Arch         = amd64
 Profiles     = standard
-FeaturesNeed = wine-gecko, dotnet-framework-4.8
+FeaturesNeed = wine-gecko, dotnet-framework-4.8, firefox
 Files        = SysWOW64\*, Microsoft.NET\Framework\v4.0.30319\wminet_utils.dll, winsxs\x86_*, winsxs\manifests\x86_*
 
 [powershell7]
@@ -115,7 +115,7 @@ Compat       = %net-legacy.compat%
 Profiles     = standard
 Files        = system32\finger.exe, system32\ftp.exe, system32\telnet.exe, system32\telnet.ini, system32\telnet.cfg, system32\whois.exe, system32\telnetd.exe, system32\tftpd.exe, system32\tcpsvcs.exe, system32\drivers\etc\quotes, SysWOW64\ftp.exe
 
-; The two services of this block are registered with demand start: they stay registered and cannot be started.
+; The two services of this block are registered as disabled (Start = 4): they stay registered and cannot be started.
 [net-legacy.Off]
 HKLM,"SYSTEM\CurrentControlSet\Services\tcpsvcs","Start",0x00010001,4
 HKLM,"SYSTEM\CurrentControlSet\Services\telnetd","Start",0x00010001,4
