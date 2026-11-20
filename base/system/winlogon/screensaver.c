@@ -349,6 +349,39 @@ GetScreenSaverGracePeriod(VOID)
 
 
 /*
+ * Tells whether the SAS window has a request that ends a running screen saver: a hot key (Ctrl-Alt-Delete,
+ * Win+L, ...), a request to lock the workstation or to log off, or any other SAS. The requests to start a
+ * screen saver that are queued while one runs (win32k asks every second until the saver connects, the idle
+ * thread asks once) are dropped here. Only the first request of each kind is looked at.
+ */
+static
+BOOL
+IsSasRequestPending(
+    IN PWLSESSION Session)
+{
+    MSG Message;
+
+    while (PeekMessageW(&Message, Session->SASWindow, WM_LOGONNOTIFY, WM_LOGONNOTIFY, PM_NOREMOVE))
+    {
+        if (Message.wParam == LN_LOCK_WORKSTATION || Message.wParam == LN_LOGOFF)
+            return TRUE;
+        if (Message.wParam != LN_START_SCREENSAVE)
+            break;
+        PeekMessageW(&Message, Session->SASWindow, WM_LOGONNOTIFY, WM_LOGONNOTIFY, PM_REMOVE);
+    }
+
+    while (PeekMessageW(&Message, Session->SASWindow, WLX_WM_SAS, WLX_WM_SAS, PM_NOREMOVE))
+    {
+        if (Message.wParam != WLX_SAS_TYPE_SCRNSVR_TIMEOUT)
+            return TRUE;
+        PeekMessageW(&Message, Session->SASWindow, WLX_WM_SAS, WLX_WM_SAS, PM_REMOVE);
+    }
+
+    return PeekMessageW(&Message, Session->SASWindow, WM_HOTKEY, WM_HOTKEY, PM_NOREMOVE);
+}
+
+
+/*
  * A password protected screen saver is configured but there is no screen saver file (the setting
  * "(None)" with "On resume, display the logon screen"): Windows shows the empty screen saver desktop for
  * the grace period and then locks the workstation, without any input; input within the grace period
@@ -410,7 +443,6 @@ StartScreenSaver(
     STARTUPINFOW StartupInfo;
     PROCESS_INFORMATION ProcessInformation;
     HANDLE HandleArray[2];
-    MSG Message;
     LONG rc;
     DWORD Status;
     BOOL ret = FALSE;
@@ -526,12 +558,13 @@ StartScreenSaver(
             break;
 
         /*
-         * This thread owns the SAS window: a Ctrl-Alt-Delete or Win+L (hot keys of that window) pressed while
-         * a saver that does not end on input (it hangs, or it never created a window) shows the empty screen
-         * saver desktop would otherwise wait behind the saver for ever. End the saver; the key is handled
-         * when this function has returned (after the lock, if the saver was password protected).
+         * This thread owns the SAS window: a Ctrl-Alt-Delete or Win+L (hot keys of that window), a request to
+         * lock the workstation or to log off, that arrives while a saver that does not end on input (it hangs,
+         * or it never created a window) shows the empty screen saver desktop would otherwise wait behind
+         * the saver for ever. End the saver; the request is handled when this function has returned (after
+         * the lock, if the saver was password protected).
          */
-        if (PeekMessageW(&Message, Session->SASWindow, WM_HOTKEY, WM_HOTKEY, PM_NOREMOVE))
+        if (IsSasRequestPending(Session))
         {
             Status = WAIT_OBJECT_0 + 1;
             break;
