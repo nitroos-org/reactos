@@ -147,6 +147,13 @@ CmpGetValueData(IN PHHIVE Hive,
         return TRUE;
     }
 
+    /* No data: nothing to read (a hive may hold no data cell for it, Data = HCELL_NIL) */
+    if (*Length == 0)
+    {
+        *Buffer = &Value->Data;
+        return TRUE;
+    }
+
     /* Unsupported at the moment */
     ASSERT_VALUE_BIG(Hive, *Length);
 

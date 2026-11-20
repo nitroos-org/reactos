@@ -36,8 +36,9 @@
  *    add up to the key's count, subkeys in the order lookups assume, a value
  *    list whose count fits its cell, a class inside its cell.
  *  - Values: signature 'vk', a name inside the cell, small data at most 4
- *    bytes, other data in one cell that holds all of it (ReactOS has no reader
- *    for big data chains: a value whose data is not one such cell is removed).
+ *    bytes, no data cell only for no data, other data in one cell that holds
+ *    all of it (ReactOS has no reader for big data chains: a value whose
+ *    data is not one such cell is removed).
  *  - Security: a key's 'sk' cell is in a ring of sound 'sk' cells (each named
  *    by its neighbours, descriptor inside the cell) and holds a valid
  *    self-relative descriptor; reference counts are recounted.
@@ -1001,16 +1002,16 @@ CmpCheckValue(
     }
     else if (Value->Data == HCELL_NIL)
     {
+        /*
+         * No cell: only for no data. The kernel writes such values (the copy
+         * of a value without data, CmpCopyValue, e.g. in every saved hive),
+         * and the public format specification describes them too (a
+         * tombstone value: Data size 0, Data offset 0xFFFFFFFF). No reader
+         * looks a cell up for DataLength 0 (CmpGetValueData), so the value
+         * is kept as it is: a valid hive loads unchanged.
+         */
         if (Length != 0)
             return FALSE;
-
-        /* No data and no cell: the readers would look the cell up (CmpGetValueData); make it empty small data */
-        if (!Ctx->Live)
-        {
-            CmpCheckDirty(Ctx, Cell);
-            Value->DataLength = CM_KEY_VALUE_SPECIAL_SIZE;
-            Value->Data = 0;
-        }
     }
     else
     {
