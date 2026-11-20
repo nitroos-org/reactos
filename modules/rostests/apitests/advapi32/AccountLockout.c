@@ -529,6 +529,42 @@ static void TestAdministrator(void)
     SetLockFlag(Name, FALSE);
 }
 
+/* "net accounts /maxpwage:unlimited": NetUserModalsSet level 0 with TIMEQ_FOREVER. It reads back as TIMEQ_FOREVER and
+   the passwords do not expire ([MS-SAMR] 3.1.5.14.4: "never" for a maximum age that does not end) */
+static void TestMaxPasswordAgeUnlimited(PCWSTR User)
+{
+    USER_MODALS_INFO_0 *Saved = NULL, *Now = NULL, New;
+    DWORD ParmErr = 0;
+    NET_API_STATUS Status;
+
+    Status = NetUserModalsGet(NULL, 0, (PBYTE *)&Saved);
+    ok_dec(Status, NERR_Success);
+    if (Status != NERR_Success)
+        return;
+
+    New = *Saved;
+    New.usrmod0_max_passwd_age = TIMEQ_FOREVER;
+    Status = NetUserModalsSet(NULL, 0, (PBYTE)&New, &ParmErr);
+    ok_dec(Status, NERR_Success);
+    if (Status == NERR_Success)
+    {
+        Status = NetUserModalsGet(NULL, 0, (PBYTE *)&Now);
+        ok_dec(Status, NERR_Success);
+        if (Status == NERR_Success)
+        {
+            ok_hex(Now->usrmod0_max_passwd_age, TIMEQ_FOREVER);
+            NetApiBufferFree(Now);
+        }
+
+        ok_dec(Logon(User, UserPassword, LOGON32_LOGON_INTERACTIVE), ERROR_SUCCESS);
+        ok_dec(Logon(User, UserPassword, LOGON32_LOGON_NETWORK), ERROR_SUCCESS);
+
+        Status = NetUserModalsSet(NULL, 0, (PBYTE)Saved, &ParmErr);
+        ok_dec(Status, NERR_Success);
+    }
+    NetApiBufferFree(Saved);
+}
+
 START_TEST(AccountLockout)
 {
     HMODULE Secur32 = LoadLibraryW(L"secur32.dll");
@@ -578,6 +614,7 @@ START_TEST(AccountLockout)
         if (HaveOther)
             TestLocked(User, Other);
         TestTimes(User);
+        TestMaxPasswordAgeUnlimited(User);
     }
     TestPolicyValues();
     TestAdministrator();
