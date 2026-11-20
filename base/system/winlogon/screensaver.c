@@ -349,6 +349,46 @@ GetScreenSaverGracePeriod(VOID)
 
 
 /*
+ * The policy "Screen saver executable name":
+ * HKCU\Software\Policies\Microsoft\Windows\Control Panel\Desktop : SCRNSAVE.EXE (REG_SZ, not empty).
+ * Returns ERROR_SUCCESS with the name in Buffer (*pcbData bytes, at most MAX_PATH - 1 characters, terminated).
+ */
+static
+LONG
+ReadPolicyScreenSaverFile(
+    IN HKEY hCurrentUser,
+    OUT PWCHAR Buffer,
+    IN OUT PDWORD pcbData)
+{
+    HKEY hPolicyKey;
+    DWORD dwType, cbData = *pcbData;
+    LONG rc;
+
+    rc = RegOpenKeyExW(hCurrentUser,
+                       L"Software\\Policies\\Microsoft\\Windows\\Control Panel\\Desktop",
+                       0,
+                       KEY_QUERY_VALUE,
+                       &hPolicyKey);
+    if (rc != ERROR_SUCCESS)
+        return rc;
+
+    cbData = MAX_PATH * sizeof(WCHAR) - sizeof(WCHAR);
+    rc = RegQueryValueExW(hPolicyKey, L"SCRNSAVE.EXE", 0, &dwType, (LPBYTE)Buffer, &cbData);
+    RegCloseKey(hPolicyKey);
+
+    if (rc == ERROR_SUCCESS)
+    {
+        Buffer[cbData / sizeof(WCHAR)] = UNICODE_NULL; /* Terminate the string */
+        if (dwType != REG_SZ || Buffer[0] == UNICODE_NULL)
+            rc = ERROR_FILE_NOT_FOUND;
+        else
+            *pcbData = cbData;
+    }
+    return rc;
+}
+
+
+/*
  * Tells whether the SAS window has a request that ends a running screen saver: a hot key (Ctrl-Alt-Delete,
  * Win+L, ...), a request to lock the workstation or to log off, or any other SAS. The requests to start a
  * screen saver that are queued while one runs (win32k asks every second until the saver connects, the idle
@@ -478,12 +518,22 @@ StartScreenSaver(
         goto cleanup;
     }
 
-    rc = RegQueryValueExW(hKey,
-                          L"SCRNSAVE.EXE",
-                          0,
-                          &dwType,
-                          (LPBYTE)szApplicationName,
-                          &bufferSize);
+    /* The policy "Screen saver executable name" decides when it is present (measured on Windows Server 2022) */
+    rc = ReadPolicyScreenSaverFile(hCurrentUser, szApplicationName, &bufferSize);
+    if (rc != ERROR_SUCCESS)
+    {
+        bufferSize = sizeof(szApplicationName) - sizeof(WCHAR);
+        rc = RegQueryValueExW(hKey,
+                              L"SCRNSAVE.EXE",
+                              0,
+                              &dwType,
+                              (LPBYTE)szApplicationName,
+                              &bufferSize);
+    }
+    else
+    {
+        dwType = REG_SZ;
+    }
     if (rc != ERROR_SUCCESS || dwType != REG_SZ)
     {
         if (rc == ERROR_FILE_NOT_FOUND)
