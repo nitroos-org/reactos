@@ -481,12 +481,19 @@ IopInitializePlugPlayServices(VOID)
     }
     RtlZeroMemory(PnpBusTypeGuidList.Guids, PnpBusTypeGuidList.AllocatedCount * sizeof(GUID));
 
-    /* Initialize PnP root relations (this is a syncronous operation) */
-    PiQueueDeviceAction(Pdo, PiActionEnumRootDevices, NULL, NULL);
-
-    /* Launch the firmware mapper */
+    /*
+     * Launch the firmware mapper before the root bus is enumerated for the
+     * first time: it creates the volatile LogConf (boot resources) of the
+     * detected devices, and the root enumerator reads them only when it first
+     * finds a device. A device that is already in the registry from an earlier
+     * boot (keyboard, mouse, serial and parallel ports of a machine without
+     * ACPI) would otherwise start without its ports and interrupt.
+     */
     Status = IopUpdateRootKey();
     if (!NT_SUCCESS(Status)) return Status;
+
+    /* Initialize PnP root relations (this is a syncronous operation) */
+    PiQueueDeviceAction(Pdo, PiActionEnumRootDevices, NULL, NULL);
 
     /* Close the handle to the control set */
     NtClose(KeyHandle);
