@@ -287,7 +287,15 @@ FailPending(PSMBENG_CONN Conn, NTSTATUS Status, ULONG Win32)
         PSMBENG_OP Op = CONTAINING_RECORD(RemoveHeadList(&Conn->Pending), SMBENG_OP, Link);
 
         if (Op->Opcode == SmbUpConnect)
+        {
             Op->Win32Error = Win32;
+            /* A server that offered a guest session for what the user gave: not used (no fallback to
+             * guest). A tree connect (net use, a mapped drive) is told so (Windows: error 1272 where
+             * the open of a UNC name only sees "access denied") */
+            if (Status == STATUS_ACCESS_DENIED && Win32 == 1272 && Op->Request != NULL &&
+                (((const SMBUP_CONNECT_REQUEST *)(Op->Request + 1))->Flags & SMBUP_CONNECT_USE))
+                Status = STATUS_SMB_GUEST_LOGON_BLOCKED;
+        }
         FailOp(Conn, Op, Status);
     }
 }
@@ -513,8 +521,17 @@ SmbEngSamePassword(PSMBENG_CONN Conn, const WCHAR *Password, ULONG Bytes)
     LeaveCriticalSection(&Conn->QueueLock);
     if (Clear == NULL)
         return FALSE;
-    if (NT_SUCCESS(SystemFunction041(Clear, Alloc, SMBENG_ENCRYPT_SAME_PROCESS)))
-        Same = (Held == Bytes) && (Bytes == 0 || memcmp(Clear, Password, Bytes) == 0);
+    if (NT_SUCCESS(SystemFunction041(Clear, Alloc, SMBENG_ENCRYPT_SAME_PROCESS)) && Held == Bytes)
+    {
+        /* Every byte is looked at whatever the first difference: a credential check (\;#:) can ask
+         * this as often as it likes, without the server, so its time must not tell how much fits */
+        volatile UCHAR Diff = 0;
+        ULONG i;
+
+        for (i = 0; i < Bytes; i++)
+            Diff |= Clear[i] ^ ((const UCHAR *)Password)[i];
+        Same = (Diff == 0);
+    }
     SecureZeroMemory(Clear, Alloc);
     free(Clear);
     return Same;

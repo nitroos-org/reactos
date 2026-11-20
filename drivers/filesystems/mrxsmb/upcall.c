@@ -16,6 +16,8 @@
 
 #include "mrxsmb.h"
 #include <wdmsec.h>
+#undef INVALID_HANDLE_VALUE /* the NDK defines it again */
+#include <ndk/pstypes.h>    /* ETHREAD.IrpList */
 
 #define NDEBUG
 #include <debug.h>
@@ -31,7 +33,15 @@ static LIST_ENTRY SmbCopyingList;
  * SmbNeedEvent; a request without an engine sets it and waits for SmbAttachedEvent */
 static KEVENT SmbNeedEvent;             /* synchronization: one wake-up per need */
 static KEVENT SmbAttachedEvent;         /* notification: set while an engine is attached */
-static volatile LONG SmbStarterSeen;    /* a starter has waited since the driver loaded */
+static KEVENT SmbStartFailedEvent;      /* notification: set while the last start of an engine has failed */
+static volatile LONG SmbStarterWaiters; /* threads inside IOCTL_SMBRDR_WAIT_ENGINE_NEEDED right now */
+/* Interrupt times (100 ns): the starter was woken and is starting an engine until ...; the start has failed,
+ * so requests that need an engine fail at once until ... */
+static volatile ULONGLONG SmbStarterBusyUntil;
+static volatile ULONGLONG SmbStartFailedUntil;
+/* Read and written from several threads without a common lock: whole 64-bit values (two halves on x86) */
+#define SmbReadTime(p)     ((ULONGLONG)InterlockedCompareExchange64((volatile LONGLONG *)(p), 0, 0))
+#define SmbWriteTime(p, v) ((VOID)InterlockedExchange64((volatile LONGLONG *)(p), (LONGLONG)(v)))
 
 VOID
 SmbEngineInitialize(VOID)
@@ -46,38 +56,122 @@ SmbEngineInitialize(VOID)
     KeInitializeEvent(&SmbEngine.BudgetEvent, NotificationEvent, FALSE);
     KeInitializeEvent(&SmbNeedEvent, SynchronizationEvent, FALSE);
     KeInitializeEvent(&SmbAttachedEvent, NotificationEvent, FALSE);
+    KeInitializeEvent(&SmbStartFailedEvent, NotificationEvent, FALSE);
+}
+
+/*
+ * The caller of this wait gave up the UNC open it is for. MUP asks the providers from inside the
+ * caller's own system service, with an IRP of its own: CancelSynchronousIo marks the open's IRP in
+ * the thread's list, not that one, so the thread's list is looked at too (as its owner does, at
+ * APC_LEVEL); a terminating thread has no use for the answer either.
+ */
+static
+BOOLEAN
+SmbCallerGaveUp(PIRP QueryIrp)
+{
+    PETHREAD Thread = PsGetCurrentThread();
+    PLIST_ENTRY Head, Entry;
+    BOOLEAN Gave = FALSE;
+    KIRQL OldIrql;
+
+    if (SmbIrpCancelled(QueryIrp) || PsIsThreadTerminating(Thread))
+        return TRUE;
+
+    KeRaiseIrql(APC_LEVEL, &OldIrql);
+    Head = &Thread->IrpList;
+    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
+    {
+        PIRP Irp = CONTAINING_RECORD(Entry, IRP, ThreadListEntry);
+        PFILE_OBJECT File = Irp->Tail.Overlay.OriginalFileObject;
+
+        if (Irp->Cancel && !(Irp->Flags & (IRP_CLOSE_OPERATION | IRP_PAGING_IO)) &&
+            ((Irp->Flags & IRP_SYNCHRONOUS_API) || (File != NULL && (File->Flags & FO_SYNCHRONOUS_IO))))
+        {
+            Gave = TRUE;
+            break;
+        }
+    }
+    KeLowerIrql(OldIrql);
+    return Gave;
+}
+
+/* The start of an engine has failed (the starter said so, or none attached in time): until then,
+ * requests that need an engine fail at once instead of each waiting for the starter again */
+static
+VOID
+SmbNoteStartFailed(VOID)
+{
+    SmbWriteTime(&SmbStartFailedUntil, KeQueryInterruptTime() + (ULONGLONG)NITRO_SMBRDR_ENGINE_FAIL_CACHE_SECONDS * 10000000ULL);
+    SmbWriteTime(&SmbStarterBusyUntil, 0);
+    KeSetEvent(&SmbStartFailedEvent, IO_NO_INCREMENT, FALSE);
 }
 
 /*
  * An engine for a user's request: at once if one is attached; otherwise, if a starter is
- * there, ask it for one and wait (NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS at most, in 1 s
- * slices that end early when Irp is given up). Without a starter (the client is switched
- * off, or the engine was started by hand) there is nothing to wait for.
+ * there, ask it for one and wait (NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS at most, in slices
+ * that end early when the starter reports that it could not start one, and when Irp is
+ * given up: cancelled, or its thread terminating). Without a starter (the client is switched
+ * off, the Workstation service is stopped, or the engine was started by hand) or after a
+ * failed start (for NITRO_SMBRDR_ENGINE_FAIL_CACHE_SECONDS) there is nothing to wait for:
+ * the request fails at once, so that a UNC open of any other provider is not held up.
  */
 NTSTATUS
 SmbEnsureEngine(PIRP Irp)
 {
+    PVOID Events[2] = { &SmbAttachedEvent, &SmbStartFailedEvent };
     LARGE_INTEGER Slice;
-    ULONG i;
+    ULONGLONG Now, Deadline;
+    NTSTATUS Status;
 
     PAGED_CODE();
 
     if (SmbEngine.FileObject != NULL)
         return STATUS_SUCCESS;
-    if (!SmbStarterSeen)
+    Now = KeQueryInterruptTime();
+    if (SmbStarterWaiters == 0 && Now >= SmbReadTime(&SmbStarterBusyUntil))
+        return STATUS_REDIRECTOR_NOT_STARTED;
+    if (Now < SmbReadTime(&SmbStartFailedUntil))
         return STATUS_REDIRECTOR_NOT_STARTED;
 
+    KeClearEvent(&SmbStartFailedEvent);
     KeSetEvent(&SmbNeedEvent, IO_NO_INCREMENT, FALSE);
-    Slice.QuadPart = -10000000LL;
-    for (i = 0; i < NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS; i++)
+    Deadline = Now + (ULONGLONG)NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS * 10000000ULL;
+    Slice.QuadPart = -2500000LL;    /* 250 ms: the longest a cancelled caller waits */
+    for (;;)
     {
-        if (KeWaitForSingleObject(&SmbAttachedEvent, Executive, KernelMode, FALSE, &Slice) == STATUS_SUCCESS)
+        Status = KeWaitForMultipleObjects(2, Events, WaitAny, Executive, KernelMode, FALSE, &Slice, NULL);
+        if (Status == STATUS_WAIT_0 || SmbEngine.FileObject != NULL)
             return STATUS_SUCCESS;
-        if (SmbIrpCancelled(Irp))
+        if (Status == STATUS_WAIT_1)
+            return STATUS_REDIRECTOR_NOT_STARTED;
+        if (SmbCallerGaveUp(Irp))
             return STATUS_CANCELLED;
+        Now = KeQueryInterruptTime();
+        if (SmbStarterWaiters == 0 && Now >= SmbReadTime(&SmbStarterBusyUntil))
+            return STATUS_REDIRECTOR_NOT_STARTED;   /* the starter went away meanwhile */
+        /* A failed start that another request's KeClearEvent hid from this wait */
+        if (Now < SmbReadTime(&SmbStartFailedUntil))
+            return STATUS_REDIRECTOR_NOT_STARTED;
+        if (Now >= Deadline)
+            break;
     }
     DPRINT1("mrxsmb: no engine attached within %lu s\n", NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS);
+    SmbNoteStartFailed();
     return STATUS_REDIRECTOR_NOT_STARTED;
+}
+
+/* IOCTL_SMBRDR_ENGINE_START_FAILED: the starter could not start an engine (or is going away) */
+static
+NTSTATUS
+SmbEngineStartFailed(PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    PAGED_CODE();
+
+    if (Stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(ULONG))
+        return STATUS_BUFFER_TOO_SMALL;
+    DPRINT1("mrxsmb: the starter could not start an engine (%lu)\n", *(PULONG)Irp->AssociatedIrp.SystemBuffer);
+    SmbNoteStartFailed();
+    return STATUS_SUCCESS;
 }
 
 /* IOCTL_SMBRDR_WAIT_ENGINE_NEEDED: the starter's thread waits here (alertable, so it can be
@@ -91,9 +185,15 @@ SmbWaitEngineNeeded(VOID)
 
     PAGED_CODE();
 
-    InterlockedExchange(&SmbStarterSeen, 1);
+    /* While a starter waits here, requests that need an engine wait for it; once it is woken it is
+     * counted as busy (starting the engine) for as long as a request would wait, and when it is
+     * gone (the Workstation service stopped) requests fail at once */
+    InterlockedIncrement(&SmbStarterWaiters);
     Timeout.QuadPart = -10000000LL * 300;
     Status = KeWaitForSingleObject(&SmbNeedEvent, UserRequest, UserMode, TRUE, &Timeout);
+    if (Status == STATUS_SUCCESS && SmbEngine.FileObject == NULL)
+        SmbWriteTime(&SmbStarterBusyUntil, KeQueryInterruptTime() + (ULONGLONG)NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS * 10000000ULL);
+    InterlockedDecrement(&SmbStarterWaiters);
     if (Status == STATUS_SUCCESS)
         return SmbEngine.FileObject == NULL ? STATUS_SUCCESS : STATUS_ALREADY_REGISTERED;
     return Status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : Status;
@@ -653,6 +753,9 @@ SmbEngineAttach(PIRP Irp, PIO_STACK_LOCATION Stack)
     SmbEngine.Process = Process;
     SmbEngine.Generation++;
     KeClearEvent(&SmbEngine.DetachEvent);
+    SmbWriteTime(&SmbStartFailedUntil, 0);
+    SmbWriteTime(&SmbStarterBusyUntil, 0);
+    KeClearEvent(&SmbStartFailedEvent);
     KeSetEvent(&SmbAttachedEvent, IO_NO_INCREMENT, FALSE);
     KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
 
@@ -968,6 +1071,10 @@ SmbEngineDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                     /* Not for the engine itself (its handle would hold a GET thread) */
                     Status = (SmbEngine.FileObject == Stack->FileObject) ? STATUS_INVALID_DEVICE_REQUEST :
                              SmbWaitEngineNeeded();
+                    break;
+                case IOCTL_SMBRDR_ENGINE_START_FAILED:
+                    Status = (SmbEngine.FileObject == Stack->FileObject) ? STATUS_INVALID_DEVICE_REQUEST :
+                             SmbEngineStartFailed(Irp, Stack);
                     break;
                 default:
                     Status = STATUS_INVALID_DEVICE_REQUEST;

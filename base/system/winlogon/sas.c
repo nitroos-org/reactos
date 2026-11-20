@@ -430,69 +430,6 @@ PlayEventSound(
 
 static
 VOID
-RestoreAllConnections(
-    _In_ PWLSESSION Session)
-{
-    DWORD dRet;
-    HANDLE hEnum;
-    LPNETRESOURCE lpRes;
-    DWORD dSize = 0x1000;
-    DWORD dCount = -1;
-    LPNETRESOURCE lpCur;
-    BOOL UserProfile;
-
-    UserProfile = (Session && Session->UserToken);
-    if (!UserProfile)
-        return;
-
-    if (!ImpersonateLoggedOnUser(Session->UserToken))
-    {
-        ERR("WL: ImpersonateLoggedOnUser() failed with error %lu\n", GetLastError());
-        return;
-    }
-
-    dRet = WNetOpenEnum(RESOURCE_REMEMBERED, RESOURCETYPE_DISK, 0, NULL, &hEnum);
-    if (dRet != WN_SUCCESS)
-    {
-        ERR("Failed to open enumeration: %lu\n", dRet);
-        goto quit;
-    }
-
-    lpRes = HeapAlloc(GetProcessHeap(), 0, dSize);
-    if (!lpRes)
-    {
-        ERR("Failed to allocate memory\n");
-        WNetCloseEnum(hEnum);
-        goto quit;
-    }
-
-    do
-    {
-        dSize = 0x1000;
-        dCount = -1;
-
-        ZeroMemory(lpRes, dSize);
-        dRet = WNetEnumResource(hEnum, &dCount, lpRes, &dSize);
-        if (dRet == WN_SUCCESS || dRet == WN_MORE_DATA)
-        {
-            lpCur = lpRes;
-            for (; dCount; dCount--)
-            {
-                WNetAddConnection(lpCur->lpRemoteName, NULL, lpCur->lpLocalName);
-                lpCur++;
-            }
-        }
-    } while (dRet != WN_NO_MORE_ENTRIES);
-
-    HeapFree(GetProcessHeap(), 0, lpRes);
-    WNetCloseEnum(hEnum);
-
-quit:
-    RevertToSelf();
-}
-
-static
-VOID
 CloseAllConnections(
     _In_ PWLSESSION Session)
 {
@@ -663,8 +600,11 @@ HandleLogon(
 
     CallNotificationDlls(Session, LogonHandler);
 
-    /* Connect remote resources */
-    RestoreAllConnections(Session);
+    /* The user's remembered network drives are restored by the shell, in the background, with
+     * mpr's rules (WNetRestoreConnectionW: a drive remembered with another user name is left for
+     * the user, no password being stored). Not here: this connected every remembered drive with
+     * the logged-on user's own identity, whatever user it was remembered with, and held up the
+     * logon for the connect time of every server that was away */
 
     /* Start the user shell */
     CallNotificationDlls(Session, StartShellHandler);

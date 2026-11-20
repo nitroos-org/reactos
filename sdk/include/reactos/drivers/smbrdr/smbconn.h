@@ -22,6 +22,17 @@
  * The logon id in a drive-letter name must be the caller's: the driver refuses
  * other values (STATUS_ACCESS_DENIED).
  *
+ * Checking credentials against an existing connection. A second explicit tree connect to a name
+ * that is already connected reaches no driver code (rdbss reuses the connection), so the password
+ * of the second one would never be compared with the first one's. The provider asks instead with
+ *   \Device\LanmanRedirector\;#:<logon id, 16 hex digits>\server\share[\path]
+ * and the credentials in the EA buffer, as above (a name that is no drive, nothing is kept): the
+ * engine compares them with the identity the caller's logon session uses for the server. The
+ * answer is STATUS_NETWORK_CREDENTIAL_CONFLICT when they differ, SMBCONN_STATUS_PROBE_OK
+ * (an error severity, so that rdbss keeps nothing of the create) when they fit, or the status of
+ * a failed connect. Without credentials, or in a create that is no tree connect, it is
+ * STATUS_INVALID_PARAMETER.
+ *
  * The tree-connect handle keeps the connection after it is closed (rdbss's extra
  * reference); IOCTL_SMBCONN_DELETE ends it. Both list and delete act only on the
  * connections of the caller's logon session (the driver takes the logon id from the
@@ -36,6 +47,9 @@
 
 #define SMBCONN_DEVICE_NAME              L"\\Device\\NitroSmbRedirector"
 #define SMBCONN_REDIRECTOR_PREFIX        L"\\Device\\LanmanRedirector"
+
+/* Customer-defined NTSTATUS (bit 29 set): the credentials of a \;#: check fit */
+#define SMBCONN_STATUS_PROBE_OK          ((NTSTATUS)0xE0534D01)
 
 #define SMBCONN_EA_USERNAME              "NitroSmbAccount"
 #define SMBCONN_EA_DOMAIN                "NitroSmbDomain"

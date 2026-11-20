@@ -653,6 +653,7 @@ SmbParseVNetRootName(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext)
     PAGED_CODE();
 
     Ext->Local = 0;
+    Ext->Probe = FALSE;
     if (p == NULL || Chars < 2 || p[0] != OBJ_NAME_PATH_SEPARATOR)
         return STATUS_OBJECT_NAME_INVALID;
 
@@ -663,7 +664,7 @@ SmbParseVNetRootName(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext)
         if (i == Chars)
             return STATUS_OBJECT_NAME_INVALID;
         Rest = i;
-        if (i >= 4 && p[3] == L':' && ((p[2] >= L'A' && p[2] <= L'Z') || (p[2] >= L'a' && p[2] <= L'z')))
+        if (i >= 4 && p[3] == L':' && ((p[2] >= L'A' && p[2] <= L'Z') || (p[2] >= L'a' && p[2] <= L'z') || p[2] == L'#'))
         {
             ULONGLONG Id = 0, Mine;
             ULONG Digits = i - 4, d;
@@ -686,7 +687,10 @@ SmbParseVNetRootName(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext)
                 DPRINT1("mrxsmb: drive name of another logon session refused\n");
                 return STATUS_ACCESS_DENIED;
             }
-            Ext->Local = (p[2] >= L'a') ? (WCHAR)(p[2] - L'a' + L'A') : p[2];
+            if (p[2] == L'#')
+                Ext->Probe = TRUE;      /* no drive: the answer to a credential check, never kept */
+            else
+                Ext->Local = (p[2] >= L'a') ? (WCHAR)(p[2] - L'a' + L'A') : p[2];
         }
         else if (p[2] != L':')
         {
@@ -815,6 +819,23 @@ SmbListVNetRoot(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext)
     ExReleaseFastMutex(&SmbConnLock);
 }
 
+static VOID SmbDisconnectNow(PMRX_V_NET_ROOT VNetRoot);
+
+/*
+ * A failed tree connect that says something about the name itself, the same for every caller (not a
+ * disk share, a name that cannot be one). Every other failure belongs to the caller's own connection:
+ * the engine connects per (logon session, server, share), so what one logon session gets (its
+ * credentials refused, the identity it holds for the server, its own connection limit or back-off,
+ * a cancelled or timed-out wait, a server or share that answers this user only) says nothing about
+ * the share for another one.
+ */
+static
+BOOLEAN
+SmbIsNameFailure(NTSTATUS Status)
+{
+    return Status == STATUS_BAD_DEVICE_TYPE || Status == STATUS_OBJECT_NAME_INVALID;
+}
+
 static
 NTSTATUS
 NTAPI
@@ -843,7 +864,13 @@ SmbCreateVNetRoot(PMRX_CREATENETROOT_CONTEXT Context)
     Status = SmbParseVNetRootName(VNetRoot, Ext);
     if (!NT_SUCCESS(Status))
         goto Done;
-    Ext->IsUse = SmbIsTreeConnect(RxContext);
+    Ext->IsUse = SmbIsTreeConnect(RxContext) && !Ext->Probe;
+    if (Ext->Probe && (!Explicit || !SmbIsTreeConnect(RxContext)))
+    {
+        /* A credential check is a tree connect with credentials, nothing else */
+        Status = STATUS_INVALID_PARAMETER;
+        goto Done;
+    }
 
     if (NetRoot->Type != NET_ROOT_DISK && NetRoot->Type != NET_ROOT_WILD)
     {
@@ -927,7 +954,14 @@ SmbCreateVNetRoot(PMRX_CREATENETROOT_CONTEXT Context)
     Status = SmbConnect(VNetRoot, Ext, RxContext->CurrentIrp, Explicit ? &Creds : NULL);
     ExReleaseFastMutex(&Ext->ConnectLock);
 
-    if (NT_SUCCESS(Status))
+    if (Ext->Probe && NT_SUCCESS(Status))
+    {
+        /* The credentials fit the identity held for the server (or there is none): let go of the
+         * binding at once and answer with a status that is no success, so that rdbss keeps nothing */
+        SmbDisconnectNow(VNetRoot);
+        Status = SMBCONN_STATUS_PROBE_OK;
+    }
+    else if (NT_SUCCESS(Status))
     {
         NetRoot->MRxNetRootState = MRX_NET_ROOT_STATE_GOOD;
         NetRoot->DeviceType = FILE_DEVICE_DISK;
@@ -937,7 +971,19 @@ SmbCreateVNetRoot(PMRX_CREATENETROOT_CONTEXT Context)
 Done:
     SmbWipeCredentials(&Creds);
     Context->VirtualNetRootStatus = Status;
-    Context->NetRootStatus = Status;
+    if (!NT_SUCCESS(Status) && !SmbIsNameFailure(Status))
+    {
+        /* This logon session's connection to the share is what failed. Saying the net root failed
+         * would make rdbss mark it bad for everyone who uses it (other connections to the share, and
+         * every later connect to it, of every logon session) until it is scavenged */
+        NetRoot->MRxNetRootState = MRX_NET_ROOT_STATE_GOOD;
+        NetRoot->DeviceType = FILE_DEVICE_DISK;
+        Context->NetRootStatus = STATUS_SUCCESS;
+    }
+    else
+    {
+        Context->NetRootStatus = Status;
+    }
     Context->Callback(Context);
 
     /* rdbss expects STATUS_PENDING, the result is in the context */
@@ -2013,7 +2059,7 @@ SmbQueryPathEx(PIRP Irp, PIO_STACK_LOCATION Stack)
     if (SmbRdrDeviceFileObject == NULL ||
         RequestEx->PathName.Length == 0 || RequestEx->PathName.Length >= MAXUSHORT - sizeof(WCHAR) ||
         SmbIsEngineProcess(IoGetCurrentProcess()) ||
-        !NT_SUCCESS(SmbEnsureEngine(NULL)))
+        !NT_SUCCESS(SmbEnsureEngine(Irp)))
     {
         Status = STATUS_BAD_NETWORK_PATH;
         goto Complete;

@@ -330,8 +330,15 @@ typedef struct _SMBUP_CANCEL_REQUEST
  * woken by an APC or terminated; the IRP has no cancel routine), at most 5 minutes
  * (STATUS_IO_TIMEOUT). Several waiters are allowed; each need wakes one of them. */
 #define IOCTL_SMBRDR_WAIT_ENGINE_NEEDED SMBUP_CTL_CODE(17, METHOD_BUFFERED)
+/* From the starter: it could not start an engine (input: ULONG Win32 error) or is going away. Requests
+ * that wait for an engine fail at once, and requests that arrive in the next
+ * NITRO_SMBRDR_ENGINE_FAIL_CACHE_SECONDS fail without asking the starter again. Without a waiting or busy
+ * starter (the Workstation service stopped) requests that need an engine fail at once too. */
+#define IOCTL_SMBRDR_ENGINE_START_FAILED SMBUP_CTL_CODE(18, METHOD_BUFFERED)
 /* How long a request waits for an engine to attach after asking for one */
-#define NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS 20
+#define NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS 10
+/* How long requests fail at once after a start of the engine failed */
+#define NITRO_SMBRDR_ENGINE_FAIL_CACHE_SECONDS 30
 
 #ifdef __cplusplus
 #define SMBUP_STATIC_ASSERT(e, m) static_assert(e, #m)

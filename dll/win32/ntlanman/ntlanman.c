@@ -42,6 +42,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(ntlanman);
 
 #define PROVIDER_NAME L"Microsoft Windows Network"
 #define SESSION_CREDENTIAL_CONFLICT 1219    /* ERROR_SESSION_CREDENTIAL_CONFLICT */
+#define SMB_GUEST_LOGON_BLOCKED 1272        /* ERROR_SMB_GUEST_LOGON_BLOCKED */
 #define NOT_CONNECTED 2250                  /* ERROR_NOT_CONNECTED */
 #define OPEN_FILES 2401                     /* ERROR_OPEN_FILES */
 
@@ -83,6 +84,7 @@ StatusToError(NTSTATUS Status)
         case STATUS_NO_SUCH_USER:
             return ERROR_INVALID_PASSWORD;
         case STATUS_NETWORK_CREDENTIAL_CONFLICT: return SESSION_CREDENTIAL_CONFLICT;
+        case STATUS_SMB_GUEST_LOGON_BLOCKED: return SMB_GUEST_LOGON_BLOCKED;
         case STATUS_FILES_OPEN: return OPEN_FILES;
         case STATUS_NOT_FOUND: return NOT_CONNECTED;
         default: return RtlNtStatusToDosError(Status);
@@ -186,6 +188,124 @@ EntryRemoteIs(PSMBCONN_ENUM_OUTPUT Uses, PSMBCONN_ENTRY e, LPCWSTR Remote, SIZE_
 {
     return e->RemoteLength == RemoteChars * sizeof(WCHAR) &&
            _wcsnicmp((PCWSTR)((PUCHAR)Uses + e->RemoteOffset), Remote, RemoteChars) == 0;
+}
+
+/* Is the connection to the server (the "\\server" of Remote, as the caller wrote it) */
+static
+BOOL
+EntryServerIs(PSMBCONN_ENUM_OUTPUT Uses, PSMBCONN_ENTRY e, LPCWSTR Remote)
+{
+    PCWSTR Theirs = (PCWSTR)((PUCHAR)Uses + e->RemoteOffset);
+    SIZE_T TheirChars = e->RemoteLength / sizeof(WCHAR), n = 2, m = 2;
+
+    while (Remote[n] != 0 && Remote[n] != L'\\')
+        n++;
+    while (m < TheirChars && Theirs[m] != L'\\')
+        m++;
+    return n == m && _wcsnicmp(Theirs, Remote, n) == 0;
+}
+
+/* A share or folder name longer than a name can be (255 characters): Windows answers 53, not 67 */
+static
+BOOL
+RemoteComponentTooLong(LPCWSTR Remote, SIZE_T Chars)
+{
+    SIZE_T i = 2, Start = 2;
+
+    while (i < Chars && Remote[i] != L'\\')
+        i++;
+    for (Start = i + 1; Start < Chars; Start = i + 1)
+    {
+        for (i = Start; i < Chars && Remote[i] != L'\\'; i++)
+            ;
+        if (i - Start > 255)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* Is there a path beyond "\\server\share" in Remote (Chars long, no trailing separators) */
+static
+BOOL
+RemoteHasPath(LPCWSTR Remote, SIZE_T Chars)
+{
+    SIZE_T i = 2;
+
+    while (i < Chars && Remote[i] != L'\\')
+        i++;
+    for (i++; i < Chars && Remote[i] != L'\\'; i++)
+        ;
+    return i < Chars;
+}
+
+/* The connection a call just made is not wanted after all (the drive could not be defined, the
+ * folder is not there): the drive's, or the one of that name without a drive */
+static
+VOID
+TakeConnectionBack(WCHAR Letter, LPCWSTR Remote, SIZE_T RemoteChars)
+{
+    PSMBCONN_ENUM_OUTPUT Uses;
+    DWORD i, Error;
+
+    Uses = GetUses(&Error);
+    if (Uses == NULL)
+        return;
+    for (i = 0; i < Uses->Count; i++)
+    {
+        PSMBCONN_ENTRY e = &Uses->Entries[i];
+
+        if ((Letter != 0 && e->Local == Letter) ||
+            (Letter == 0 && e->Local == 0 && (e->Flags & SMBCONN_FLAG_TREE_CONNECTED) && EntryRemoteIs(Uses, e, Remote, RemoteChars)))
+            DeleteUse(e->Id, TRUE);
+    }
+    HeapFree(GetProcessHeap(), 0, Uses);
+}
+
+/* The password (and the rest) of an EA buffer never outlives the call that used it */
+static
+VOID
+WipeEa(PVOID Ea, ULONG Bytes)
+{
+    if (Ea != NULL)
+    {
+        SecureZeroMemory(Ea, Bytes);
+        HeapFree(GetProcessHeap(), 0, Ea);
+    }
+}
+
+/*
+ * Do the credentials of Ea (user, domain, password) fit the identity the caller's logon session
+ * uses for the server of Remote? A second explicit use of a name that is connected never reaches
+ * the driver (rdbss reuses the connection), so the driver is asked with a create of a \;#: name
+ * (smbconn.h) that the engine answers by comparing and the driver never keeps.
+ */
+static
+NTSTATUS
+ProbeCredentials(LPCWSTR Remote, SIZE_T RemoteChars, const LUID *LogonId, PVOID Ea, ULONG EaLength)
+{
+    static const WCHAR Device[] = SMBCONN_REDIRECTOR_PREFIX;
+    UNICODE_STRING NtName;
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Iosb;
+    HANDLE Handle;
+    PWSTR Name;
+    SIZE_T Chars = wcslen(Device) + 24 + RemoteChars + 1;
+    NTSTATUS Status;
+
+    Name = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Chars * sizeof(WCHAR));
+    if (Name == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    _snwprintf(Name, Chars - 1, L"%s\\;#:%08lx%08lx%.*s", Device, (ULONG)LogonId->HighPart, LogonId->LowPart,
+               (int)(RemoteChars - 1), Remote + 1);
+    RtlInitUnicodeString(&NtName, Name);
+    InitializeObjectAttributes(&Attributes, &NtName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtCreateFile(&Handle, SYNCHRONIZE, &Attributes, &Iosb, NULL, FILE_ATTRIBUTE_NORMAL,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN_IF,
+                          FILE_CREATE_TREE_CONNECTION | FILE_SYNCHRONOUS_IO_NONALERT, Ea, EaLength);
+    if (NT_SUCCESS(Status))
+        NtClose(Handle);
+    HeapFree(GetProcessHeap(), 0, Name);
+    return Status;
 }
 
 /* "\\server\share[\path]" without trailing separators; FALSE when it is not one */
@@ -400,6 +520,9 @@ NPAddConnection3(HWND hwndOwner,
     Remote = lpNetResource->lpRemoteName;
     if (!CheckRemoteName(Remote, &RemoteChars))
         return WN_BAD_NETNAME;
+    /* A trailing separator, or a name that cannot be one: not found (Windows Server 2022, measured) */
+    if (wcslen(Remote) != RemoteChars || RemoteComponentTooLong(Remote, RemoteChars))
+        return ERROR_BAD_NETPATH;
     Letter = 0;
     if (lpNetResource->lpLocalName != NULL && lpNetResource->lpLocalName[0])
     {
@@ -451,47 +574,119 @@ NPAddConnection3(HWND hwndOwner,
             return WN_BAD_PASSWORD;
     }
 
-    /* A connection to the same name without a drive letter may exist (also from a plain UNC
-     * open): rdbss would use it whatever the credentials, so compare them first */
+    /* The explicit credentials, as the EA buffer of the tree connect (and of the credential check) */
+    if (Explicit)
+    {
+        EaAlloc = 3 * (FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName) + 32 + 8) +
+                  (ULONG)((UserChars + DomainChars + PasswordChars) * sizeof(WCHAR));
+        Ea = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, EaAlloc);
+        if (Ea == NULL)
+            return WN_OUT_OF_MEMORY;
+        EaLength = PutEa(Ea, 0, &Previous, SMBCONN_EA_USERNAME, User, UserChars);
+        EaLength = PutEa(Ea, EaLength, &Previous, SMBCONN_EA_DOMAIN, Domain, DomainChars);
+        EaLength = PutEa(Ea, EaLength, &Previous, SMBCONN_EA_PASSWORD, lpPassword, PasswordChars);
+    }
+
     Uses = GetUses(&Error);
     if (Uses == NULL)
-        return Error;
-    if (Letter == 0)
     {
+        WipeEa(Ea, EaAlloc);
+        return Error;
+    }
+    if (Explicit)
+    {
+        /* Explicit credentials become the identity for the server, and connections that plain UNC
+         * opens made do not hold one (Windows Server 2022, measured): they are ended and made
+         * again with it when used. One that has files open cannot be ended; it stays. */
         for (i = 0; i < Uses->Count; i++)
         {
             PSMBCONN_ENTRY e = &Uses->Entries[i];
 
-            if (e->Local != 0 || !EntryRemoteIs(Uses, e, Remote, RemoteChars))
-                continue;
-            if (Explicit)
-            {
-                WCHAR Want[DNLEN + UNLEN + 260];
+            if (!(e->Flags & SMBCONN_FLAG_TREE_CONNECTED) && EntryServerIs(Uses, e, Remote))
+                DeleteUse(e->Id, FALSE);
+        }
+        HeapFree(GetProcessHeap(), 0, Uses);
+        Uses = GetUses(&Error);
+        if (Uses == NULL)
+        {
+            WipeEa(Ea, EaAlloc);
+            return Error;
+        }
+    }
 
-                _snwprintf(Want, ARRAYSIZE(Want), L"%.*s%s%.*s", (int)DomainChars, Domain ? Domain : L"",
-                           DomainChars ? L"\\" : L"", (int)UserChars, User);
-                Want[ARRAYSIZE(Want) - 1] = 0;
-                if (!(e->Flags & SMBCONN_FLAG_EXPLICIT) || e->UserLength != wcslen(Want) * sizeof(WCHAR) ||
-                    _wcsnicmp((PCWSTR)((PUCHAR)Uses + e->UserOffset), Want, wcslen(Want)) != 0)
-                {
-                    HeapFree(GetProcessHeap(), 0, Uses);
-                    return SESSION_CREDENTIAL_CONFLICT;
-                }
-            }
-            else if (e->Flags & SMBCONN_FLAG_EXPLICIT)
+    /* A connection to the same name may exist: rdbss would use it whatever the credentials of this
+     * call, so they are compared first. The user name here; the password by the engine
+     * (ProbeCredentials), which is the only one that has the other one. A drive of the caller to the
+     * same share counts too: when rdbss finds a connection of that name of another logon session
+     * first, it takes any connection of the caller's logon session to the share instead, the
+     * drive's included, and the tree connect of a name without a drive then never reaches the driver. */
+    if (Letter == 0 && Explicit)
+    {
+        WCHAR Want[DNLEN + UNLEN + 260];
+        BOOL Conflict = FALSE, Held = FALSE, HeldByDrive = FALSE;
+
+        _snwprintf(Want, ARRAYSIZE(Want), L"%.*s%s%.*s", (int)DomainChars, Domain ? Domain : L"",
+                   DomainChars ? L"\\" : L"", (int)UserChars, User);
+        Want[ARRAYSIZE(Want) - 1] = 0;
+        for (i = 0; i < Uses->Count && !Conflict; i++)
+        {
+            PSMBCONN_ENTRY e = &Uses->Entries[i];
+
+            if (!EntryRemoteIs(Uses, e, Remote, RemoteChars))
+                continue;
+            if (!(e->Flags & SMBCONN_FLAG_TREE_CONNECTED) || !(e->Flags & SMBCONN_FLAG_EXPLICIT) ||
+                e->UserLength != wcslen(Want) * sizeof(WCHAR) ||
+                _wcsnicmp((PCWSTR)((PUCHAR)Uses + e->UserOffset), Want, wcslen(Want)) != 0)
+                Conflict = TRUE;    /* another identity, or a connection in use that could not be ended */
+            else if (e->Local == 0)
+                Held = TRUE;
+            else
+                HeldByDrive = TRUE;
+        }
+        HeapFree(GetProcessHeap(), 0, Uses);
+        if (Conflict)
+        {
+            WipeEa(Ea, EaAlloc);
+            return SESSION_CREDENTIAL_CONFLICT;
+        }
+        if ((Held || HeldByDrive) && lpPassword == NULL)
+        {
+            /* The user again with no password given: the connection that is there (Windows Server 2022:
+             * net use \\server\share /user:u with a connection of u is a success) */
+            WipeEa(Ea, EaAlloc);
+            return WN_SUCCESS;
+        }
+        if (Held)
+        {
+            /* The same user already uses the name: the connection stays, if the password is the same */
+            Status = ProbeCredentials(Remote, RemoteChars, &LogonId, Ea, EaLength);
+            WipeEa(Ea, EaAlloc);
+            return (Status == SMBCONN_STATUS_PROBE_OK || NT_SUCCESS(Status)) ? WN_SUCCESS : StatusToError(Status);
+        }
+        if (HeldByDrive)
+        {
+            /* Only a drive of the same user: the password first, then the use without a drive */
+            Status = ProbeCredentials(Remote, RemoteChars, &LogonId, Ea, EaLength);
+            if (Status != SMBCONN_STATUS_PROBE_OK && !NT_SUCCESS(Status))
             {
-                /* Single sign-on asked; the existing connection has explicit credentials: Windows
-                 * keeps one identity per server, the existing one (verify on the peer) */
+                WipeEa(Ea, EaAlloc);
+                return StatusToError(Status);
             }
         }
     }
-    HeapFree(GetProcessHeap(), 0, Uses);
+    else
+    {
+        HeapFree(GetProcessHeap(), 0, Uses);
+    }
 
     /* \Device\LanmanRedirector\;X:<logon id>\server\share  or  \Device\LanmanRedirector\server\share */
     i = (DWORD)(wcslen(Device) + 24 + RemoteChars + 1);
     Name = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, i * sizeof(WCHAR));
     if (Name == NULL)
+    {
+        WipeEa(Ea, EaAlloc);
         return WN_OUT_OF_MEMORY;
+    }
     if (Letter != 0)
         _snwprintf(Name, i - 1, L"%s\\;%c:%08lx%08lx%.*s", Device, Letter, (ULONG)LogonId.HighPart, LogonId.LowPart,
                    (int)(RemoteChars - 1), Remote + 1);
@@ -501,34 +696,16 @@ NPAddConnection3(HWND hwndOwner,
     {
         /* A drive whose target could not be read back could not be cancelled either */
         HeapFree(GetProcessHeap(), 0, Name);
+        WipeEa(Ea, EaAlloc);
         return ERROR_BAD_NETPATH;
     }
     RtlInitUnicodeString(&NtName, Name);
-
-    if (Explicit)
-    {
-        EaAlloc = 3 * (FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName) + 32 + 8) +
-                  (ULONG)((UserChars + DomainChars + PasswordChars) * sizeof(WCHAR));
-        Ea = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, EaAlloc);
-        if (Ea == NULL)
-        {
-            HeapFree(GetProcessHeap(), 0, Name);
-            return WN_OUT_OF_MEMORY;
-        }
-        EaLength = PutEa(Ea, 0, &Previous, SMBCONN_EA_USERNAME, User, UserChars);
-        EaLength = PutEa(Ea, EaLength, &Previous, SMBCONN_EA_DOMAIN, Domain, DomainChars);
-        EaLength = PutEa(Ea, EaLength, &Previous, SMBCONN_EA_PASSWORD, lpPassword, PasswordChars);
-    }
 
     InitializeObjectAttributes(&Attributes, &NtName, OBJ_CASE_INSENSITIVE, NULL, NULL);
     Status = NtCreateFile(&Handle, SYNCHRONIZE, &Attributes, &Iosb, NULL, FILE_ATTRIBUTE_NORMAL,
                           FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN_IF,
                           FILE_CREATE_TREE_CONNECTION | FILE_SYNCHRONOUS_IO_NONALERT, Ea, EaLength);
-    if (Ea != NULL)
-    {
-        SecureZeroMemory(Ea, EaAlloc);
-        HeapFree(GetProcessHeap(), 0, Ea);
-    }
+    WipeEa(Ea, EaAlloc);
     if (!NT_SUCCESS(Status))
     {
         TRACE("tree connect %wZ: %lx\n", &NtName, Status);
@@ -538,6 +715,28 @@ NPAddConnection3(HWND hwndOwner,
     /* The connection stays after this handle (the redirector keeps it until NPCancelConnection) */
     NtClose(Handle);
 
+    /* A name with a path beyond the share connects to that folder, which has to be there (Windows
+     * Server 2022, measured: 55 for a folder that does not exist, 267 for a file) */
+    if (RemoteHasPath(Remote, RemoteChars))
+    {
+        InitializeObjectAttributes(&Attributes, &NtName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        Status = NtCreateFile(&Handle, FILE_LIST_DIRECTORY | SYNCHRONIZE, &Attributes, &Iosb, NULL, FILE_ATTRIBUTE_NORMAL,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+                              FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+        if (NT_SUCCESS(Status))
+        {
+            NtClose(Handle);
+        }
+        else
+        {
+            TakeConnectionBack(Letter, Remote, RemoteChars);
+            HeapFree(GetProcessHeap(), 0, Name);
+            if (Status == STATUS_OBJECT_NAME_NOT_FOUND || Status == STATUS_OBJECT_PATH_NOT_FOUND || Status == STATUS_NO_SUCH_FILE)
+                return ERROR_DEV_NOT_EXIST;
+            return StatusToError(Status);
+        }
+    }
+
     Error = WN_SUCCESS;
     if (Letter != 0)
     {
@@ -546,17 +745,7 @@ NPAddConnection3(HWND hwndOwner,
         if (!DefineDosDeviceW(DDD_RAW_TARGET_PATH, Drive, Name))
         {
             Error = GetLastError();
-            /* Take the connection back */
-            Uses = GetUses(&i);
-            if (Uses != NULL)
-            {
-                for (i = 0; i < Uses->Count; i++)
-                {
-                    if (Uses->Entries[i].Local == Letter)
-                        DeleteUse(Uses->Entries[i].Id, TRUE);
-                }
-                HeapFree(GetProcessHeap(), 0, Uses);
-            }
+            TakeConnectionBack(Letter, Remote, RemoteChars);
         }
     }
     HeapFree(GetProcessHeap(), 0, Name);

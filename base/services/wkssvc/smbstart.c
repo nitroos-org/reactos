@@ -113,6 +113,8 @@ StarterMain(LPVOID Parameter)
             if (Error != ERROR_SUCCESS)
             {
                 ERR("SMB client: smbengine not started (%lu)\n", Error);
+                /* Tell the redirector: its waiting requests fail at once, later ones without waiting */
+                DeviceIoControl(Device, IOCTL_SMBRDR_ENGINE_START_FAILED, &Error, sizeof(Error), NULL, 0, &Got, NULL);
                 SleepEx(1000, TRUE);
             }
             continue;
@@ -126,7 +128,12 @@ StarterMain(LPVOID Parameter)
         }
     }
     if (Device != INVALID_HANDLE_VALUE)
+    {
+        /* Going away (the Workstation service stops): a request that was waiting for this starter fails now */
+        Error = ERROR_SERVICE_NOT_ACTIVE;
+        DeviceIoControl(Device, IOCTL_SMBRDR_ENGINE_START_FAILED, &Error, sizeof(Error), NULL, 0, &Got, NULL);
         CloseHandle(Device);
+    }
     CloseServiceHandle(Manager);
     return 0;
 }
