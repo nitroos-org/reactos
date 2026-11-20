@@ -1049,7 +1049,9 @@ GetAdaptersAddressesImpl(
                         UnicastAddress->Flags = 0;
                         UnicastAddress->PrefixOrigin = IpPrefixOriginOther;
                         UnicastAddress->SuffixOrigin = IpSuffixOriginOther;
-                        UnicastAddress->DadState = IpDadStatePreferred;
+                        /* the addresses of a disconnected interface stay and are Deprecated until the link is back
+                           (Windows Server 2022: GetAdaptersAddresses, GetUnicastIpAddressTable, Get-NetIPAddress) */
+                        UnicastAddress->DadState = (CurrentAA->OperStatus == IfOperStatusUp) ? IpDadStatePreferred : IpDadStateDeprecated;
                         UnicastAddress->ValidLifetime = 0xFFFFFFFF;
                         UnicastAddress->PreferredLifetime = 0xFFFFFFFF;
                         UnicastAddress->OnLinkPrefixLength = (UINT8)CountPrefixBits(AddrEntries[j].iae_mask);
@@ -1155,6 +1157,9 @@ GetAdaptersAddressesImpl(
                     UnicastAddress->PrefixOrigin = Address->PrefixOrigin;
                     UnicastAddress->SuffixOrigin = Address->SuffixOrigin;
                     UnicastAddress->DadState = Address->DadState;
+                    /* as for IPv4: Deprecated while the interface is disconnected (lifetimes as they are) */
+                    if (!Loopback && CurrentAA->OperStatus != IfOperStatusUp && Address->DadState == IpDadStatePreferred)
+                        UnicastAddress->DadState = IpDadStateDeprecated;
                     UnicastAddress->ValidLifetime = Address->ValidLifetime;
                     UnicastAddress->PreferredLifetime = Address->PreferredLifetime;
                     UnicastAddress->OnLinkPrefixLength = (UINT8)Address->PrefixLength;
