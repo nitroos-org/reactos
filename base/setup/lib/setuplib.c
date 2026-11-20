@@ -1440,6 +1440,21 @@ InitDestinationPaths(
         return Status;
     }
 
+    /*
+     * On a GPT disk the partition is also named by what a change of the partition table does not move
+     * (the boot entries carry it, the loader resolves it at every boot).
+     */
+    RtlZeroMemory(&pSetupData->DestinationIdentity, sizeof(pSetupData->DestinationIdentity));
+    if (DiskEntry->DiskStyle == PARTITION_STYLE_GPT && PartEntry->SectorCount.QuadPart != 0)
+    {
+        pSetupData->DestinationIdentity.IsGpt = TRUE;
+        pSetupData->DestinationIdentity.DiskGuid = DiskEntry->GptDiskId;
+        pSetupData->DestinationIdentity.PartitionGuid = PartEntry->GptId;
+        pSetupData->DestinationIdentity.FirstSector = PartEntry->StartSector.QuadPart;
+        pSetupData->DestinationIdentity.LastSector = PartEntry->StartSector.QuadPart +
+                                                     PartEntry->SectorCount.QuadPart - 1;
+    }
+
 /** Equivalent of 'NTOS_INSTALLATION::SystemNtPath' **/
     /* Create 'pSetupData->DestinationPath' string */
     RtlFreeUnicodeString(&pSetupData->DestinationPath);

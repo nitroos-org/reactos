@@ -4025,7 +4025,8 @@ BootLoaderHardDiskPage(PINPUT_RECORD Ir)
                 &USetupData.DestinationArcPath,
                 (USetupData.BootLoaderLocation == 2)
                    ? 1 /* Install MBR and VBR */
-                   : 0 /* Install VBR only */);
+                   : 0 /* Install VBR only */,
+                &USetupData.DestinationIdentity);
     if (Status == STATUS_SUCCESS && PartitionList->ForeignBootPartition)
     {
         /* Keep the other system bootable from the FreeLoader menu */

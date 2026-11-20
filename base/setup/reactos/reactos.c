@@ -2264,7 +2264,8 @@ PrepareAndDoCopyThread(
                         &pSetupData->USetupData.DestinationArcPath,
                         (pSetupData->USetupData.BootLoaderLocation == 2)
                            ? 1 /* Install MBR and VBR */
-                           : 0 /* Install VBR only */);
+                           : 0 /* Install VBR only */,
+                        &pSetupData->USetupData.DestinationIdentity);
             if (Status == STATUS_SUCCESS && pSetupData->PartitionList->ForeignBootPartition)
             {
                 /* Keep the other system bootable from the FreeLoader menu */

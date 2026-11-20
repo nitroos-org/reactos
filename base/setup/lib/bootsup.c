@@ -1667,6 +1667,60 @@ AreFilesIdentical(
 }
 
 /*
+ * UEFI, GPT: opens the freeldr.ini of the EFI system partition and either (Rebase) moves the entries that
+ * already carry the partition's GUID to the partition position in DestinationArcPath, or gives the entries
+ * of DestinationArcPath the keys SystemPathPartitionGuid, SystemPathDiskGuid and SystemPathPartitionRange
+ * (see FreeLdrMarkEntriesWithIdentity). The loader (UefiResolveSystemPath) resolves them at every boot.
+ */
+static
+NTSTATUS
+SetEfiEntryIdentity(
+    _In_ PCUNICODE_STRING SystemRootPath,
+    _In_ PCUNICODE_STRING DestinationArcPath,
+    _In_ const BOOT_TARGET_IDENTITY* Identity,
+    _In_ BOOLEAN Rebase)
+{
+    NTSTATUS Status;
+    PVOID BootStoreHandle;
+    UNICODE_STRING PartGuid = {0}, DiskGuid = {0};
+    WCHAR Range[48];
+
+    Status = RtlStringFromGUID((REFGUID)&Identity->PartitionGuid, &PartGuid);
+    if (NT_SUCCESS(Status))
+        Status = RtlStringFromGUID((REFGUID)&Identity->DiskGuid, &DiskGuid);
+    if (!NT_SUCCESS(Status))
+        goto Quit;
+
+    Status = RtlStringCchPrintfW(Range, ARRAYSIZE(Range), L"%I64u-%I64u",
+                                 Identity->FirstSector, Identity->LastSector);
+    if (!NT_SUCCESS(Status))
+        goto Quit;
+
+    Status = OpenBootStore(&BootStoreHandle, SystemRootPath->Buffer, FreeLdr,
+                           BS_OpenExisting, BS_ReadWriteAccess);
+    if (!NT_SUCCESS(Status))
+        goto Quit;
+
+    if (Rebase)
+    {
+        Status = FreeLdrRebaseEntriesByPartitionGuid(BootStoreHandle, DestinationArcPath->Buffer,
+                                                     PartGuid.Buffer);
+    }
+    else
+    {
+        Status = FreeLdrMarkEntriesWithIdentity(BootStoreHandle, DestinationArcPath->Buffer,
+                                                PartGuid.Buffer, DiskGuid.Buffer, Range);
+    }
+
+    CloseBootStore(BootStoreHandle);
+
+Quit:
+    RtlFreeUnicodeString(&PartGuid);
+    RtlFreeUnicodeString(&DiskGuid);
+    return Status;
+}
+
+/*
  * UEFI computers: put the UEFI boot loader on the EFI system partition, in
  * its own directory \EFI\NITROOS, and at \EFI\BOOT\BOOTX64.EFI, the
  * removable-media path that every firmware tries when it has no boot entry
@@ -1681,7 +1735,8 @@ NTSTATUS
 InstallEfiBootFiles(
     _In_ PCUNICODE_STRING SystemRootPath,
     _In_ PCUNICODE_STRING SourceRootPath,
-    _In_ PCUNICODE_STRING DestinationArcPath)
+    _In_ PCUNICODE_STRING DestinationArcPath,
+    _In_opt_ const BOOT_TARGET_IDENTITY* TargetIdentity)
 {
 #if defined(_M_AMD64)
 #define EFI_BOOT_FILE_SRC L"\\efi\\boot\\bootx64.efi"
@@ -1754,6 +1809,15 @@ InstallEfiBootFiles(
 
     if (DoesFileExist_2(SystemRootPath->Buffer, L"freeldr.ini"))
     {
+        /*
+         * An entry of this installation that names its partition by GUID but has an out-of-date position
+         * (the table changed since the entry was written: this is a repair or an upgrade) is brought to the
+         * position of now, before UpdateFreeLoaderIni looks for an entry with this path: otherwise it would
+         * add a second set of entries next to the stale ones.
+         */
+        if (TargetIdentity && TargetIdentity->IsGpt)
+            SetEfiEntryIdentity(SystemRootPath, DestinationArcPath, TargetIdentity, TRUE);
+
         DPRINT1("Update existing 'freeldr.ini'\n");
         Status = UpdateFreeLoaderIni(SystemRootPath->Buffer, DestinationArcPath->Buffer);
     }
@@ -1764,6 +1828,14 @@ InstallEfiBootFiles(
     }
     if (!NT_SUCCESS(Status))
         DPRINT1("Writing 'freeldr.ini' failed (Status 0x%08lx)\n", Status);
+
+    /* Name the partition by its GUID as well: the loader finds it by that at every boot */
+    if (NT_SUCCESS(Status) && TargetIdentity && TargetIdentity->IsGpt)
+    {
+        Status = SetEfiEntryIdentity(SystemRootPath, DestinationArcPath, TargetIdentity, FALSE);
+        if (!NT_SUCCESS(Status))
+            DPRINT1("Naming the system partition by GUID in 'freeldr.ini' failed (Status 0x%08lx)\n", Status);
+    }
     return Status;
 #else
     return STATUS_NOT_SUPPORTED;
@@ -1861,6 +1933,12 @@ GetDeviceInfo(
  *      1: Install on both VBR and MBR.
  *      2: Install on removable disk.
  *
+ * @param[in]   TargetIdentity
+ * For UEFI computers with a GPT system disk: the GUIDs and the range of the
+ * partition of the installation, which are written to its boot entries so
+ * that the loader finds the partition by them (NULL or IsGpt == FALSE: the
+ * entries name the partition by its position only).
+ *
  * @return  An NTSTATUS code indicating success or failure.
  **/
 NTSTATUS
@@ -1870,7 +1948,8 @@ InstallBootManagerAndBootEntries(
     _In_ PCUNICODE_STRING SystemRootPath,
     _In_ PCUNICODE_STRING SourceRootPath,
     _In_ PCUNICODE_STRING DestinationArcPath,
-    _In_ ULONG_PTR Options)
+    _In_ ULONG_PTR Options,
+    _In_opt_ const BOOT_TARGET_IDENTITY* TargetIdentity)
 {
     NTSTATUS Status;
     HANDLE DeviceHandle;
@@ -1881,7 +1960,7 @@ InstallBootManagerAndBootEntries(
 
     /* UEFI: no MBR or volume boot record, the loader is a file on the EFI system partition */
     if (ArchType == ARCH_Efi)
-        return InstallEfiBootFiles(SystemRootPath, SourceRootPath, DestinationArcPath);
+        return InstallEfiBootFiles(SystemRootPath, SourceRootPath, DestinationArcPath, TargetIdentity);
     WCHAR FileSystem[MAX_PATH+1];
 
     /* Remove any trailing backslash if needed */
@@ -2104,7 +2183,8 @@ InstallBootcodeToRemovable(
                                               RemovableRootPath,
                                               SourceRootPath,
                                               DestinationArcPath,
-                                              2 /* Install on removable media */);
+                                              2 /* Install on removable media */,
+                                              NULL);
     if (!NT_SUCCESS(Status))
         DPRINT1("InstallBootManagerAndBootEntries() failed (Status 0x%08lx)\n", Status);
     return Status;
