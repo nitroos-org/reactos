@@ -8,6 +8,7 @@ list(APPEND SOURCE
     acceptname.c
     loopbackalias.c
     addresschange.c
+    addrchange6.c
     asyncselect.c
     backlog.c
     basehandle.c

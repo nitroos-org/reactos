@@ -122,11 +122,81 @@ ChangeQueueInitialize(CHANGE_QUEUE *Queue)
                     ChangeCsqCompleteCanceledIrp);
 }
 
+/*
+ * IPv6 changes come from the stack's events one at a time: one router advertisement, one address becoming preferred
+ * or one link coming up is a burst of them within a millisecond (an event per address and state). Completing the
+ * waiting requests at each one woke a waiter as many times as it re-queued its request in between (SIO_ADDRESS_LIST_
+ * CHANGE on an AF_INET6 socket fired 55 times over a run in which Windows Server 2022 fired 8). They are gathered for
+ * IPV6_CHANGE_DELAY_MS and completed once: what changed in that time is one change to a waiter, as on Windows. IPv4
+ * changes, which come one at a time from the configuration requests, are completed at once as before.
+ */
+#define IPV6_CHANGE_DELAY_MS    20
+#define PENDING_ADDR6           1
+#define PENDING_ROUTE6          2
+
+static KTIMER Ipv6ChangeTimer;
+static KDPC Ipv6ChangeDpc;
+static volatile LONG Ipv6ChangePending;     /* PENDING_*: what the timer completes */
+static BOOLEAN Ipv6ChangeStarted;
+
+static VOID ChangeQueueNotify(CHANGE_QUEUE *Queue, ULONG Families);
+
+static
+VOID
+NTAPI
+Ipv6ChangeDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
+{
+    LONG Pending = InterlockedExchange(&Ipv6ChangePending, 0);
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(Context);
+    UNREFERENCED_PARAMETER(Arg1);
+    UNREFERENCED_PARAMETER(Arg2);
+
+    if (Pending & PENDING_ADDR6)
+        ChangeQueueNotify(&AddrChangeQueue, TCP_CHANGE_FAMILY_IPV6);
+    if (Pending & PENDING_ROUTE6)
+        ChangeQueueNotify(&RouteChangeQueue, TCP_CHANGE_FAMILY_IPV6);
+}
+
+/* An IPv6 change of the address (PENDING_ADDR6) or route (PENDING_ROUTE6) table: completed by the timer; the first
+   change of a burst starts it, the others join the pending one */
+static
+VOID
+Ipv6ChangeDefer(LONG What)
+{
+    LARGE_INTEGER Due;
+
+    if (!Ipv6ChangeStarted)
+    {
+        ChangeQueueNotify((What == PENDING_ADDR6) ? &AddrChangeQueue : &RouteChangeQueue, TCP_CHANGE_FAMILY_IPV6);
+        return;
+    }
+    if (InterlockedOr(&Ipv6ChangePending, What) != 0)
+        return;     /* the timer is set already */
+    Due.QuadPart = -(LONGLONG)IPV6_CHANGE_DELAY_MS * 10000;
+    KeSetTimer(&Ipv6ChangeTimer, Due, &Ipv6ChangeDpc);
+}
+
 VOID
 AddrChangeInitialize(VOID)
 {
     ChangeQueueInitialize(&AddrChangeQueue);
     ChangeQueueInitialize(&RouteChangeQueue);
+    KeInitializeTimer(&Ipv6ChangeTimer);
+    KeInitializeDpc(&Ipv6ChangeDpc, Ipv6ChangeDpcRoutine, NULL);
+    Ipv6ChangeStarted = TRUE;
+}
+
+/* The driver unloads: no timer may fire after it */
+VOID
+AddrChangeShutdown(VOID)
+{
+    if (!Ipv6ChangeStarted)
+        return;
+    Ipv6ChangeStarted = FALSE;
+    KeCancelTimer(&Ipv6ChangeTimer);
+    KeFlushQueuedDpcs();
 }
 
 /* Complete the waiting requests that wait for one of the families that changed; each one is told which of its
@@ -161,14 +231,20 @@ ChangeQueueNotify(CHANGE_QUEUE *Queue, ULONG Families)
 VOID
 AddrChangeNotifyFamilies(ULONG Families)
 {
-    ChangeQueueNotify(&AddrChangeQueue, Families);
+    if (Families & TCP_CHANGE_FAMILY_IPV6)
+        Ipv6ChangeDefer(PENDING_ADDR6);
+    if (Families & ~TCP_CHANGE_FAMILY_IPV6)
+        ChangeQueueNotify(&AddrChangeQueue, Families & ~TCP_CHANGE_FAMILY_IPV6);
 }
 
 /* The route table of these families changed (a route added or removed); callable at IRQL <= DISPATCH_LEVEL */
 VOID
 RouteChangeNotifyFamilies(ULONG Families)
 {
-    ChangeQueueNotify(&RouteChangeQueue, Families);
+    if (Families & TCP_CHANGE_FAMILY_IPV6)
+        Ipv6ChangeDefer(PENDING_ROUTE6);
+    if (Families & ~TCP_CHANGE_FAMILY_IPV6)
+        ChangeQueueNotify(&RouteChangeQueue, Families & ~TCP_CHANGE_FAMILY_IPV6);
 }
 
 /* The most requests one file object keeps waiting, in both queues together: the pool is not charged to anyone */

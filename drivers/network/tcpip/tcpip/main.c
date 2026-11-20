@@ -1191,6 +1191,7 @@ VOID NTAPI TiUnload(
     RawIPShutdown();
     ICMPShutdown();
     IGMPShutdown();
+    AddrChangeShutdown();
 
     /* Shutdown network level protocol subsystem */
     IPShutdown();
