@@ -91,6 +91,11 @@ typedef struct
     ULONG ReportLength;
 
     //
+    // output report length, 0 when the keyboard has no indicators to set
+    //
+    ULONG OutputReportLength;
+
+    //
     // file object the device is reading reports from
     //
     PFILE_OBJECT FileObject;
@@ -124,6 +129,16 @@ typedef struct
     // keyboard type matic
     //
     KEYBOARD_TYPEMATIC_PARAMETERS KeyboardTypematic;
+
+    //
+    // key repeat: the key that repeats, the timer and its DPC, protected by the lock
+    //
+    KSPIN_LOCK RepeatLock;
+    KTIMER RepeatTimer;
+    KDPC RepeatDpc;
+    KEYBOARD_INPUT_DATA RepeatKey;
+    BOOLEAN RepeatActive;
+    BOOLEAN RepeatDisabled;
 
 } KBDHID_DEVICE_EXTENSION, *PKBDHID_DEVICE_EXTENSION;
 

@@ -10,6 +10,7 @@
 
 #include "precomp.h"
 #include "hidbounds.h"
+#include <pseh/pseh2.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -832,32 +833,107 @@ HidClass_Write(
     IN PIRP Irp)
 {
     PIO_STACK_LOCATION IoStack;
-    PHIDCLASS_COMMON_DEVICE_EXTENSION CommonDeviceExtension;
+    PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension;
+    PHIDP_REPORT_IDS ReportIds;
     PIRP SubIrp;
     KEVENT Event;
     IO_STATUS_BLOCK IoStatusBlock;
     HID_XFER_PACKET XferPacket;
+    PUCHAR Report = NULL;
     NTSTATUS Status;
-    ULONG Length;
+    ULONG Length, Index, OutputLength = 0;
+    UCHAR ReportId = 0;
+
+    PDODeviceExtension = DeviceObject->DeviceExtension;
+    if (PDODeviceExtension->Common.IsFDO)
+    {
+        Status = STATUS_INVALID_DEVICE_REQUEST;
+        goto Done;
+    }
 
     IoStack = IoGetCurrentIrpStackLocation(Irp);
     Length = IoStack->Parameters.Write.Length;
     if (Length < 1)
     {
-        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
-        IoCompleteRequest(Irp, IO_NO_INCREMENT);
-        return STATUS_INVALID_PARAMETER;
+        Status = STATUS_INVALID_PARAMETER;
+        goto Done;
     }
 
-    RtlZeroMemory(&XferPacket, sizeof(XferPacket));
-    XferPacket.reportBufferLen = Length;
-    XferPacket.reportBuffer = Irp->UserBuffer;
-    XferPacket.reportId = XferPacket.reportBuffer[0];
+    //
+    // the buffer of a write to a collection is used as is by the request (the device is neither
+    // buffered nor direct): the pointer of a user mode caller must not reach the bus driver
+    //
+    _SEH2_TRY
+    {
+        if (Irp->RequestorMode != KernelMode)
+            ProbeForRead(Irp->UserBuffer, 1, 1);
+        ReportId = *(volatile UCHAR *)Irp->UserBuffer;
+        Status = STATUS_SUCCESS;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = STATUS_INVALID_USER_BUFFER;
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+        goto Done;
 
-    CommonDeviceExtension = DeviceObject->DeviceExtension;
+    //
+    // the length of the output report of this collection with this report id, including the id byte
+    //
+    ReportIds = PDODeviceExtension->Common.DeviceDescription.ReportIDs;
+    for (Index = 0; Index < PDODeviceExtension->Common.DeviceDescription.ReportIDsLength; Index++)
+    {
+        if (ReportIds[Index].CollectionNumber == PDODeviceExtension->CollectionNumber &&
+            ReportIds[Index].ReportID == ReportId)
+        {
+            /* the length of a report without a report id does not count the id byte that the
+               caller still puts in front of it */
+            OutputLength = ReportIds[Index].OutputLength;
+            if (OutputLength != 0 && ReportId == 0)
+                OutputLength++;
+            break;
+        }
+    }
+    if (OutputLength == 0 || Length < OutputLength)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto Done;
+    }
+
+    Report = ExAllocatePoolWithTag(NonPagedPool, OutputLength, HIDCLASS_TAG);
+    if (!Report)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Done;
+    }
+
+    _SEH2_TRY
+    {
+        if (Irp->RequestorMode != KernelMode)
+            ProbeForRead(Irp->UserBuffer, OutputLength, 1);
+        RtlCopyMemory(Report, Irp->UserBuffer, OutputLength);
+        Status = STATUS_SUCCESS;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = STATUS_INVALID_USER_BUFFER;
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+        goto Done;
+
+    RtlZeroMemory(&XferPacket, sizeof(XferPacket));
+    XferPacket.reportBufferLen = OutputLength;
+    XferPacket.reportBuffer = Report;
+    XferPacket.reportId = Report[0];
+
+    /* the report goes to the minidriver of the device, like a read does: sending it to the
+       device object below the HID FDO would hand it to the bus driver */
+    KeInitializeEvent(&Event, SynchronizationEvent, FALSE);
     SubIrp = IoBuildDeviceIoControlRequest(
         IOCTL_HID_WRITE_REPORT,
-        CommonDeviceExtension->HidDeviceExtension.NextDeviceObject,
+        PDODeviceExtension->FDODeviceObject,
         NULL, 0,
         NULL, 0,
         TRUE,
@@ -865,19 +941,24 @@ HidClass_Write(
         &IoStatusBlock);
     if (!SubIrp)
     {
-        Irp->IoStatus.Status = STATUS_NO_MEMORY;
-        IoCompleteRequest(Irp, IO_NO_INCREMENT);
-        return STATUS_NOT_IMPLEMENTED;
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Done;
     }
     SubIrp->UserBuffer = &XferPacket;
-    KeInitializeEvent(&Event, SynchronizationEvent, FALSE);
-    Status = IoCallDriver(CommonDeviceExtension->HidDeviceExtension.NextDeviceObject, SubIrp);
+    IoSetNextIrpStackLocation(SubIrp);
+    IoGetCurrentIrpStackLocation(SubIrp)->DeviceObject = PDODeviceExtension->FDODeviceObject;
+    Status = PDODeviceExtension->Common.DriverExtension->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL](PDODeviceExtension->FDODeviceObject, SubIrp);
     if (Status == STATUS_PENDING)
     {
         KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
         Status = IoStatusBlock.Status;
     }
+
+Done:
+    if (Report)
+        ExFreePoolWithTag(Report, HIDCLASS_TAG);
     Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = NT_SUCCESS(Status) ? OutputLength : 0;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
     return Status;
 }

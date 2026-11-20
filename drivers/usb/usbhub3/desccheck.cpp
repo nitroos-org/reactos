@@ -2437,8 +2437,9 @@ HubDescCheckSerialNumber(
         if (Ch == 0)
             break;
 
-        /* Printable ASCII only, and no comma since it separates instance ID parts */
-        if (Ch < L' ' || Ch > 0x7F || Ch == L',')
+        /* Printable ASCII only, and neither a comma nor a backslash: they separate parts of an
+           instance ID or of the device instance path */
+        if (Ch < L' ' || Ch > 0x7F || Ch == L',' || Ch == L'\\')
         {
             HubDescLog(Context, HubDescCode::SerialNumberBadCharacter, FALSE);
             Valid = FALSE;

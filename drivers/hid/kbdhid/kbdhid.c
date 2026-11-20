@@ -48,6 +48,147 @@ KbdHid_DispatchInputData(
     KeLowerIrql(OldIrql);
 }
 
+/*
+ * Key repeat. A PS/2 keyboard repeats the make code of the key that is held on its
+ * own, a USB keyboard only reports changes. Repeat the last key that was pressed
+ * with the typematic delay and rate of the keyboard until it is released, as the
+ * PS/2 keyboard does (the default of a PS/2 keyboard is 500 ms and 10.9 cps).
+ */
+#define KBDHID_REPEAT_DELAY_DEFAULT 500
+#define KBDHID_REPEAT_RATE_DEFAULT  10
+
+static BOOLEAN
+KbdHid_IsRepeatable(
+    IN PKEYBOARD_INPUT_DATA InputData)
+{
+    if (InputData->Flags & KEY_E1)
+        return FALSE;
+
+    switch (InputData->MakeCode)
+    {
+        case 0x1D: /* control */
+        case 0x2A: /* left shift */
+        case 0x36: /* right shift */
+        case 0x38: /* alt */
+        case 0x3A: /* caps lock */
+        case 0x45: /* num lock */
+        case 0x46: /* scroll lock */
+            return FALSE;
+
+        case 0x5B: /* windows keys */
+        case 0x5C:
+            return !(InputData->Flags & KEY_E0);
+    }
+
+    return TRUE;
+}
+
+static VOID
+KbdHid_StopRepeat(
+    IN PKBDHID_DEVICE_EXTENSION DeviceExtension)
+{
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&DeviceExtension->RepeatLock, &OldIrql);
+    DeviceExtension->RepeatActive = FALSE;
+    KeCancelTimer(&DeviceExtension->RepeatTimer);
+    KeReleaseSpinLock(&DeviceExtension->RepeatLock, OldIrql);
+}
+
+/* stop the repeat for good until the device is started again */
+static VOID
+KbdHid_DisableRepeat(
+    IN PKBDHID_DEVICE_EXTENSION DeviceExtension,
+    IN BOOLEAN Disabled)
+{
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&DeviceExtension->RepeatLock, &OldIrql);
+    DeviceExtension->RepeatDisabled = Disabled;
+    DeviceExtension->RepeatActive = FALSE;
+    KeCancelTimer(&DeviceExtension->RepeatTimer);
+    KeReleaseSpinLock(&DeviceExtension->RepeatLock, OldIrql);
+}
+
+static VOID
+KbdHid_UpdateRepeat(
+    IN PKBDHID_DEVICE_EXTENSION DeviceExtension,
+    IN PKEYBOARD_INPUT_DATA InputData)
+{
+    KIRQL OldIrql;
+    ULONG Delay, Rate;
+    LARGE_INTEGER DueTime;
+
+    KeAcquireSpinLock(&DeviceExtension->RepeatLock, &OldIrql);
+
+    if (DeviceExtension->RepeatDisabled)
+    {
+        /* the device is stopping: a report that completes late must not arm the timer again */
+        KeReleaseSpinLock(&DeviceExtension->RepeatLock, OldIrql);
+        return;
+    }
+
+    if (InputData->Flags & KEY_BREAK)
+    {
+        /* the key that repeats was released */
+        if (DeviceExtension->RepeatActive &&
+            DeviceExtension->RepeatKey.MakeCode == InputData->MakeCode &&
+            (DeviceExtension->RepeatKey.Flags & (KEY_E0 | KEY_E1)) == (InputData->Flags & (KEY_E0 | KEY_E1)))
+        {
+            DeviceExtension->RepeatActive = FALSE;
+            KeCancelTimer(&DeviceExtension->RepeatTimer);
+        }
+    }
+    else if (KbdHid_IsRepeatable(InputData))
+    {
+        Delay = DeviceExtension->KeyboardTypematic.Delay;
+        Rate = DeviceExtension->KeyboardTypematic.Rate;
+        if (Delay == 0 || Rate == 0)
+        {
+            /* nobody has set the typematic parameters */
+            Delay = KBDHID_REPEAT_DELAY_DEFAULT;
+            Rate = KBDHID_REPEAT_RATE_DEFAULT;
+        }
+        if (Delay < KEYBOARD_TYPEMATIC_DELAY_MINIMUM)
+            Delay = KEYBOARD_TYPEMATIC_DELAY_MINIMUM;
+        if (Delay > KEYBOARD_TYPEMATIC_DELAY_MAXIMUM)
+            Delay = KEYBOARD_TYPEMATIC_DELAY_MAXIMUM;
+        if (Rate < KEYBOARD_TYPEMATIC_RATE_MINIMUM)
+            Rate = KEYBOARD_TYPEMATIC_RATE_MINIMUM;
+        if (Rate > KEYBOARD_TYPEMATIC_RATE_MAXIMUM)
+            Rate = KEYBOARD_TYPEMATIC_RATE_MAXIMUM;
+
+        /* the newest key is the one that repeats */
+        DeviceExtension->RepeatKey = *InputData;
+        DeviceExtension->RepeatActive = TRUE;
+        DueTime.QuadPart = -(LONGLONG)Delay * 10000;
+        KeSetTimerEx(&DeviceExtension->RepeatTimer, DueTime, 1000 / Rate, &DeviceExtension->RepeatDpc);
+    }
+
+    KeReleaseSpinLock(&DeviceExtension->RepeatLock, OldIrql);
+}
+
+static VOID
+NTAPI
+KbdHid_RepeatDpc(
+    IN PKDPC Dpc,
+    IN PVOID DeferredContext,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2)
+{
+    PKBDHID_DEVICE_EXTENSION DeviceExtension = DeferredContext;
+    KEYBOARD_INPUT_DATA InputData;
+    BOOLEAN Active;
+
+    KeAcquireSpinLockAtDpcLevel(&DeviceExtension->RepeatLock);
+    Active = DeviceExtension->RepeatActive;
+    InputData = DeviceExtension->RepeatKey;
+    KeReleaseSpinLockFromDpcLevel(&DeviceExtension->RepeatLock);
+
+    if (Active)
+        KbdHid_DispatchInputData(DeviceExtension, &InputData);
+}
+
 BOOLEAN
 NTAPI
 KbdHid_InsertScanCodes(
@@ -96,6 +237,9 @@ KbdHid_InsertScanCodes(
         /* store key code */
         InputData.MakeCode = NewScanCodes[Index] & 0x7F;
 
+        /* a USB keyboard does not repeat the keys by itself */
+        KbdHid_UpdateRepeat(DeviceExtension, &InputData);
+
         /* dispatch scan codes */
         KbdHid_DispatchInputData(Context, &InputData);
     }
@@ -126,6 +270,9 @@ KbdHid_ReadCompletion(
     {
         /* failed to read or should be stopped*/
         DPRINT1("[KBDHID] ReadCompletion terminating read Status %x\n", Irp->IoStatus.Status);
+
+        /* no more reports: nothing repeats */
+        KbdHid_StopRepeat(DeviceExtension);
 
         /* report no longer active */
         DeviceExtension->ReadReportActive = FALSE;
@@ -374,6 +521,66 @@ KbdHid_Close(
     return IoCallDriver(DeviceExtension->NextDeviceObject, Irp);
 }
 
+/*
+ * Send the indicators to the keyboard as an output report. The report layout is
+ * the one of the boot protocol keyboard: a report id of 0 and one byte with bit 0 =
+ * num lock, bit 1 = caps lock, bit 2 = scroll lock. Keyboards with another layout
+ * (report ids, more indicators) are left alone.
+ */
+static VOID
+KbdHid_SendIndicators(
+    IN PKBDHID_DEVICE_EXTENSION DeviceExtension)
+{
+    KEVENT Event;
+    IO_STATUS_BLOCK IoStatus;
+    LARGE_INTEGER Offset;
+    PIO_STACK_LOCATION IoStack;
+    PIRP Irp;
+    PUCHAR Report;
+
+    /* the report id byte and one byte of indicators */
+    if (DeviceExtension->OutputReportLength != 2 || !DeviceExtension->FileObject)
+        return;
+
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return;
+
+    Report = ExAllocatePoolWithTag(NonPagedPool, 2, KBDHID_TAG);
+    if (!Report)
+        return;
+
+    Report[0] = 0;
+    Report[1] = 0;
+    if (DeviceExtension->KeyboardIndicator.LedFlags & KEYBOARD_NUM_LOCK_ON)
+        Report[1] |= 0x01;
+    if (DeviceExtension->KeyboardIndicator.LedFlags & KEYBOARD_CAPS_LOCK_ON)
+        Report[1] |= 0x02;
+    if (DeviceExtension->KeyboardIndicator.LedFlags & KEYBOARD_SCROLL_LOCK_ON)
+        Report[1] |= 0x04;
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Offset.QuadPart = 0;
+    Irp = IoBuildSynchronousFsdRequest(IRP_MJ_WRITE,
+                                       DeviceExtension->NextDeviceObject,
+                                       Report,
+                                       2,
+                                       &Offset,
+                                       &Event,
+                                       &IoStatus);
+    if (Irp)
+    {
+        /* the HID class reads the report from the user buffer of the request */
+        Irp->UserBuffer = Report;
+        IoStack = IoGetNextIrpStackLocation(Irp);
+        IoStack->FileObject = DeviceExtension->FileObject;
+
+        if (IoCallDriver(DeviceExtension->NextDeviceObject, Irp) == STATUS_PENDING)
+            KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+    }
+
+    ExFreePoolWithTag(Report, KBDHID_TAG);
+}
+
 NTSTATUS
 NTAPI
 KbdHid_InternalDeviceControl(
@@ -523,6 +730,9 @@ KbdHid_InternalDeviceControl(
                           Irp->AssociatedIrp.SystemBuffer,
                           sizeof(KEYBOARD_INDICATOR_PARAMETERS));
 
+            /* light the indicators of the keyboard */
+            KbdHid_SendIndicators(DeviceExtension);
+
             /* done */
             Irp->IoStatus.Status = STATUS_SUCCESS;
             Irp->IoStatus.Information = 0;
@@ -552,10 +762,10 @@ KbdHid_InternalDeviceControl(
         case IOCTL_KEYBOARD_QUERY_INDICATOR_TRANSLATION:
             if (IoStack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(LOCAL_KEYBOARD_INDICATOR_TRANSLATION))
             {
-                /* buffer too small */
+                /* buffer too small: the caller asks again with a larger one only for this status */
                 Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
                 IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                return STATUS_INVALID_PARAMETER;
+                return STATUS_BUFFER_TOO_SMALL;
             }
 
             /* copy translations */
@@ -689,6 +899,9 @@ KbdHid_StartDevice(
     /* get device extension */
     DeviceExtension = DeviceObject->DeviceExtension;
 
+    /* a restarted device repeats keys again */
+    KbdHid_DisableRepeat(DeviceExtension, FALSE);
+
     /* query collection information */
     Status = KbdHid_SubmitRequest(DeviceObject,
                                   IOCTL_HID_GET_COLLECTION_INFORMATION,
@@ -738,6 +951,9 @@ KbdHid_StartDevice(
     }
 
     DPRINT("[KBDHID] Usage %x UsagePage %x InputReportLength %lu\n", Capabilities.Usage, Capabilities.UsagePage, Capabilities.InputReportByteLength);
+
+    /* the output report carries the indicators (num/caps/scroll lock) */
+    DeviceExtension->OutputReportLength = Capabilities.OutputReportByteLength;
 
     /* init input report */
     DeviceExtension->ReportLength = Capabilities.InputReportByteLength;
@@ -822,6 +1038,10 @@ KbdHid_FreeResources(
 
     /* get device extension */
     DeviceExtension = DeviceObject->DeviceExtension;
+
+    /* stop the key repeat, and wait for a repeat that runs right now */
+    KbdHid_DisableRepeat(DeviceExtension, TRUE);
+    KeFlushQueuedDpcs();
 
     /* free resources */
     if (DeviceExtension->PreparsedData)
@@ -1032,6 +1252,11 @@ KbdHid_AddDevice(
     /* init device extension */
     DeviceExtension->NextDeviceObject = NextDeviceObject;
     KeInitializeEvent(&DeviceExtension->ReadCompletionEvent, NotificationEvent, FALSE);
+
+    /* init key repeat */
+    KeInitializeSpinLock(&DeviceExtension->RepeatLock);
+    KeInitializeTimer(&DeviceExtension->RepeatTimer);
+    KeInitializeDpc(&DeviceExtension->RepeatDpc, KbdHid_RepeatDpc, DeviceExtension);
 
     /* init keyboard attributes */
     DeviceExtension->Attributes.KeyboardIdentifier.Type = KEYBOARD_TYPE_UNKNOWN;

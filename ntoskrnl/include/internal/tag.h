@@ -134,6 +134,7 @@
 
 /* Power Manager Tag */
 #define TAG_PO_DOPE 'EPOD'
+#define TAG_PO_NODELIST 'LNoP'
 
 /* Process Manager Tags */
 #define TAG_CIDOBJECT           'ODIC'

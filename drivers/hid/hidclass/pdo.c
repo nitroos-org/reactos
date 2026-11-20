@@ -468,6 +468,16 @@ HidClassPDO_PnP(
             IoStack->Parameters.DeviceCapabilities.Capabilities->SilentInstall = TRUE;
             IoStack->Parameters.DeviceCapabilities.Capabilities->SurpriseRemovalOK = TRUE;
 
+            //
+            // The instance id of a collection PDO is only the collection number, so it
+            // is unique only below its parent. The capabilities copied above come from the
+            // bus driver, which reports UniqueID when the USB device has a serial number:
+            // the same collection of two devices with the same VID/PID would then get the
+            // same instance path (bugcheck 0xCA). Have the PnP manager prefix the parent's
+            // identifier.
+            //
+            IoStack->Parameters.DeviceCapabilities.Capabilities->UniqueID = FALSE;
+
             Status = STATUS_SUCCESS;
             break;
         }

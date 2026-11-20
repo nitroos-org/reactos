@@ -33,6 +33,5 @@ target_compile_definitions(usbxhci PRIVATE
 target_link_libraries(usbxhci ucxstub ntoskrnl_vista libcntpr ${PSEH_LIB})
 add_importlibs(usbxhci wdfldr ntoskrnl hal)
 add_cd_file(TARGET usbxhci DESTINATION reactos/system32/drivers NO_CAB FOR all)
-# NITRO: INF not installed, see boot/bootdata/hivesys.inf (USB-xhci-0xCA-bugcheck-upstream-stack)
-#add_driver_inf(usbxhci usbxhci.inf)
+add_driver_inf(usbxhci usbxhci.inf)
 add_registry_inf(usbxhci_reg.inf)
