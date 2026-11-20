@@ -42,6 +42,7 @@ list(APPEND SOURCE
     NotifyRouteChange2.c
     PortProxy.c
     IpReleaseAddress.c
+    LeaseRenew.c
     NotifyStableUnicastIpAddressTable.c
     SendARP.c
     Tcp6Table2.c
