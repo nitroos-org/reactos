@@ -1473,7 +1473,7 @@ VfatQueryInformation(
         }
     }
 
-    switch (FileInformationClass)
+    switch ((ULONG)FileInformationClass)
     {
         case FileStandardInformation:
             Status = VfatGetStandardInformation(FCB,
