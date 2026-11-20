@@ -1560,8 +1560,12 @@ static UINT fetch_hkcu_component( const WCHAR *usersid, DWORD index, DWORD *idx,
     len_component = ARRAY_SIZE( component );
     while (!RegEnumKeyExW( key_components, i, component, &len_component, NULL, NULL, NULL, NULL ))
     {
-        if (*idx == index) goto found;
-        (*idx)++;
+        /* the hive is the user's: a key that is not a squashed GUID is not a component */
+        if (len_component == 32)
+        {
+            if (*idx == index) goto found;
+            (*idx)++;
+        }
         len_component = ARRAY_SIZE( component );
         i++;
     }
@@ -1619,6 +1623,7 @@ static UINT fetch_hku_component( const WCHAR *usersid, DWORD index, DWORD *idx, 
         {
             len_component = ARRAY_SIZE( component );
             if (RegEnumKeyExW( key_components, j, component, &len_component, NULL, NULL, NULL, NULL )) break;
+            if (len_component != 32) continue;  /* the hive is the user's: not a squashed GUID, not a component */
             if (*idx != index) { (*idx)++; continue; }
             if (sid_len)
             {
@@ -1992,6 +1997,7 @@ UINT WINAPI MsiEnumRelatedProductsW( const WCHAR *szUpgradeCode, DWORD dwReserve
             {
                 DWORD len = ARRAY_SIZE(name);
                 if (RegEnumValueW(user, i, name, &len, NULL, NULL, NULL, NULL)) break;
+                if (len != 32) continue;  /* not a squashed GUID: unsquash_guid would leave the caller's buffer alone */
                 if (machine && !RegQueryValueExW(machine, name, NULL, NULL, NULL, NULL)) continue;
                 if (seen++ != iProductIndex) continue;
                 unsquash_guid(name, lpProductBuf);
