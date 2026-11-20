@@ -1077,7 +1077,7 @@ CmpIsSafe(
     PCM_KEY_NODE DriverNode;
     PCM_KEY_VALUE KeyValue;
     HCELL_INDEX CellIndex;
-    ULONG Length;
+    ULONG Length, i;
     UNICODE_STRING Name;
     PWCHAR Buffer;
 
@@ -1169,10 +1169,19 @@ CmpIsSafe(
             if (!Buffer) return FALSE;
             if (Length < sizeof(WCHAR)) return FALSE;
 
-            /* Get the base image file name */
-            // FIXME: wcsrchr() may fail if Buffer is *not* NULL-terminated!
-            Name.Buffer = wcsrchr(Buffer, OBJ_NAME_PATH_SEPARATOR);
+            /*
+             * Get the base image file name: after the last separator within
+             * the data (which need not hold a NUL: wcsrchr would read past
+             * the cell), up to its first NUL if any
+             */
+            Name.Buffer = NULL;
+            for (i = 0; i < Length / sizeof(WCHAR) && Buffer[i] != UNICODE_NULL; i++)
+            {
+                if (Buffer[i] == OBJ_NAME_PATH_SEPARATOR)
+                    Name.Buffer = &Buffer[i];
+            }
             if (!Name.Buffer) return FALSE;
+            Length = i * sizeof(WCHAR);
             ++Name.Buffer;
 
             /* Length of the base name must be >=1 WCHAR */
