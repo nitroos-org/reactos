@@ -582,6 +582,28 @@ PartMgrUpdatePartitionDevices(
     FdoExtension->EnumeratedPartitionsTotal = totalPartitions;
 }
 
+// The partition style and the identifier of the disk that the partition manager keeps are those
+// of the layout it holds: a new layout (a new table written, or the table read) changes them.
+static
+CODE_SEG("PAGE")
+VOID
+PartMgrUpdateDiskData(
+    _In_ PFDO_EXTENSION FdoExtension,
+    _In_ PDRIVE_LAYOUT_INFORMATION_EX Layout)
+{
+    PAGED_CODE();
+
+    FdoExtension->DiskData.PartitionStyle = Layout->PartitionStyle;
+    if (Layout->PartitionStyle == PARTITION_STYLE_MBR)
+    {
+        FdoExtension->DiskData.Mbr.Signature = Layout->Mbr.Signature;
+    }
+    else
+    {
+        FdoExtension->DiskData.Gpt.DiskId = Layout->Gpt.DiskId;
+    }
+}
+
 /**
  * @brief
  * Retrieves the disk partition layout from the given disk FDO.
@@ -617,16 +639,7 @@ PartMgrGetDriveLayout(
     FdoExtension->LayoutCache = layoutEx;
     FdoExtension->LayoutValid = TRUE;
 
-    FdoExtension->DiskData.PartitionStyle = layoutEx->PartitionStyle;
-    if (FdoExtension->DiskData.PartitionStyle == PARTITION_STYLE_MBR)
-    {
-        FdoExtension->DiskData.Mbr.Signature = layoutEx->Mbr.Signature;
-        // FdoExtension->DiskData.Mbr.Checksum = geometryEx.Partition.Mbr.CheckSum;
-    }
-    else
-    {
-        FdoExtension->DiskData.Gpt.DiskId = layoutEx->Gpt.DiskId;
-    }
+    PartMgrUpdateDiskData(FdoExtension, layoutEx);
 
     FdoExtension->IsSuperFloppy = PartMgrIsDiskSuperFloppy(FdoExtension);
 
@@ -906,6 +919,7 @@ FdoIoctlDiskSetDriveLayout(
         }
         FdoExtension->LayoutCache = layoutEx;
         FdoExtension->LayoutValid = TRUE;
+        PartMgrUpdateDiskData(FdoExtension, layoutEx);
 
         // set updated partition numbers
         for (UINT32 i = 0; i < layoutInfo->PartitionCount; i++)
@@ -1044,6 +1058,7 @@ FdoIoctlDiskSetDriveLayoutEx(
         }
         FdoExtension->LayoutCache = layoutEx;
         FdoExtension->LayoutValid = TRUE;
+        PartMgrUpdateDiskData(FdoExtension, layoutEx);
 
         FdoExtension->IsSuperFloppy = PartMgrIsDiskSuperFloppy(FdoExtension);
 
