@@ -82,6 +82,10 @@ struct nd6_neighbor_cache_entry {
 #endif /* LWIP_ND6_QUEUEING */
   u8_t state;
   u8_t isrouter;
+  /* NitroOS: the neighbour said it is a router: the R flag of its last neighbor advertisement, or a router
+     advertisement from it (RFC 4861 7.2.5, 6.3.4). Unlike isrouter (an entry of the default router list) it stays
+     when the router lifetime goes to 0: it is what GetIpNetTable2 reports as IsRouter, as Windows does */
+  u8_t advrouter;
   union {
     u32_t reachable_time; /* in seconds */
     u32_t delay_time;     /* ticks (ND6_TMR_INTERVAL) */

@@ -112,7 +112,14 @@ TCPQueryIpv6Nd(PVOID Out, ULONG OutSize)
                 case ND6_DELAY:      Row->State = ND6INFO_DELAY; break;
                 default:             Row->State = ND6INFO_PROBE; break;
             }
-            Row->Flags = Entry->isrouter ? TCP_IPV6_NEIGHBOR_ROUTER : 0;
+            Row->Flags = (Entry->isrouter || Entry->advrouter) ? TCP_IPV6_NEIGHBOR_ROUTER : 0;
+            /* the time since the last confirmation (Windows: LastReachable grows from 0 while the entry is
+               Reachable and goes on growing while it is Stale): the reachable time minus what is left of it, or the
+               whole of it and the time spent Stale */
+            if (Entry->state == ND6_REACHABLE)
+                Row->LastReachable = (reachable_time > Entry->counter.reachable_time) ? reachable_time - Entry->counter.reachable_time : 0;
+            else if (Entry->state == ND6_STALE)
+                Row->LastReachable = reachable_time + min(Entry->counter.stale_time, 0x3FFFFFUL) * ND6_TMR_INTERVAL;
             if (Entry->state != ND6_INCOMPLETE)
             {
                 /* the entry keeps at most NETIF_MAX_HWADDR_LEN bytes, whatever the interface says */
