@@ -23,9 +23,10 @@
  * entry size other than 128 bytes, fewer than 128 or more than 4096 entries
  * (the specification asks for room for at least 16384 bytes for the array,
  * UEFI 2.10 section 5.3.1; the upper bound keeps a damaged header from
- * making the loader read without limit).
+ * making the loader read without limit). The header is exactly 92 bytes, as in
+ * the kernel reader: a table the kernel refuses must not boot either.
  */
-#define GPT_MIN_HEADER_SIZE     92
+#define GPT_HEADER_SIZE         92
 #define GPT_MIN_ENTRIES         128
 #define GPT_MAX_ENTRIES         4096
 #define GPT_MAX_U64             ((ULONGLONG)~0ULL)
@@ -79,8 +80,8 @@ GptCheckHeader(
         return FALSE;
     }
 
-    /* HeaderSize: at least 92 bytes and at most one logical block */
-    if (Header->HeaderSize < GPT_MIN_HEADER_SIZE || Header->HeaderSize > SectorSize)
+    /* HeaderSize: 92 bytes, the only size the kernel reader (and Windows) writes */
+    if (Header->HeaderSize != GPT_HEADER_SIZE || Header->HeaderSize > SectorSize)
     {
         TRACE("GPT header size %lu is out of range\n", Header->HeaderSize);
         return FALSE;
@@ -123,7 +124,7 @@ GptCheckHeader(
          Header->LastUsableLba >= DiskSectors))
         return FALSE;
     /* A block number that cannot be converted to a byte offset */
-    if (Header->PartitionEntryLba + EntrySectors > GPT_MAX_U64 / SectorSize ||
+    if (Header->PartitionEntryLba > GPT_MAX_U64 / SectorSize - EntrySectors ||
         Header->LastUsableLba >= GPT_MAX_U64 / SectorSize)
         return FALSE;
 
@@ -139,6 +140,96 @@ GptCheckEntry(
     return (Entry->StartingLba >= Header->FirstUsableLba &&
             Entry->EndingLba >= Entry->StartingLba &&
             Entry->EndingLba <= Header->LastUsableLba);
+}
+
+/* The most used entries a table may have: the kernel reader (FstubReadPartitionTableEFI) refuses a table with more */
+#ifndef GPT_MAX_USED_PARTITIONS
+#define GPT_MAX_USED_PARTITIONS 128
+#endif
+
+/*
+ * The entry array of a header that passed GptCheckHeader, read as the kernel reader does
+ * (FstubReadHeaderEFI, FstubReadPartitionTableEFI): the CRC-32 of the array must match the one in the
+ * header, every used entry must lie in the usable range and there are at most 128 of them. A table the
+ * kernel refuses (for example an array that a write cut short left half old, half new) is not used by
+ * the loader either: the loader would otherwise number the partitions of one table (partition(N) of
+ * freeldr.ini) and the kernel those of the other (the backup).
+ */
+static BOOLEAN
+GptCheckEntryArray(
+    _In_ UCHAR DriveNumber,
+    _In_ const GPT_TABLE_HEADER* Header,
+    _In_ ULONG SectorSize)
+{
+    GPT_PARTITION_ENTRY Entry;
+    GUID UnusedGuid = EFI_PART_TYPE_UNUSED_GUID;
+    ULONGLONG Remaining = (ULONGLONG)Header->NumberOfPartitionEntries * EFI_PARTITION_ENTRY_SIZE;
+    ULONGLONG Lba = Header->PartitionEntryLba;
+    ULONG PerRead = (ULONG)(DiskReadBufferSize / SectorSize);
+    ULONG Crc = 0, Used = 0, Count, Bytes, Index;
+
+    if (PerRead == 0)
+        return FALSE;
+    if (PerRead > 64)
+        PerRead = 64;
+
+    while (Remaining != 0)
+    {
+        Count = (ULONG)((Remaining + SectorSize - 1) / SectorSize);
+        if (Count > PerRead)
+            Count = PerRead;
+        if (!MachDiskReadLogicalSectors(DriveNumber, Lba, Count, DiskReadBuffer))
+            return FALSE;
+
+        Bytes = (ULONG)(((ULONGLONG)Count * SectorSize < Remaining) ? (ULONGLONG)Count * SectorSize : Remaining);
+        Crc = GptCrc32(Crc, (const UCHAR*)DiskReadBuffer, Bytes);
+
+        for (Index = 0; Index < Bytes / EFI_PARTITION_ENTRY_SIZE; Index++)
+        {
+            RtlCopyMemory(&Entry, (PUCHAR)DiskReadBuffer + Index * EFI_PARTITION_ENTRY_SIZE, sizeof(Entry));
+            if (RtlEqualMemory(&Entry.PartitionTypeGuid, &UnusedGuid, sizeof(UnusedGuid)))
+                continue;
+            if (!GptCheckEntry(Header, &Entry) || ++Used > GPT_MAX_USED_PARTITIONS)
+                return FALSE;
+        }
+
+        Lba += Count;
+        Remaining -= Bytes;
+    }
+
+    return (Crc == Header->PartitionEntryArrayCrc32);
+}
+
+/*
+ * GptCheckEntryArray for a header, remembering the answer: DiskReadGptHeader is called for every
+ * partition number and the check reads the whole array (up to 512 KB).
+ */
+static BOOLEAN
+GptCheckTable(
+    _In_ UCHAR DriveNumber,
+    _In_ const GPT_TABLE_HEADER* Header,
+    _In_ ULONG SectorSize)
+{
+    static struct
+    {
+        BOOLEAN Known;
+        BOOLEAN Result;
+        UCHAR DriveNumber;
+        ULONGLONG MyLba;
+        ULONG HeaderCrc32;
+    } Checked[2];
+    ULONG Slot = (Header->MyLba == EFI_HEADER_LOCATION) ? 0 : 1;
+
+    if (Checked[Slot].Known && Checked[Slot].DriveNumber == DriveNumber &&
+        Checked[Slot].MyLba == Header->MyLba && Checked[Slot].HeaderCrc32 == Header->HeaderCrc32)
+        return Checked[Slot].Result;
+
+    Checked[Slot].Result = GptCheckEntryArray(DriveNumber, Header, SectorSize);
+    Checked[Slot].Known = TRUE;
+    Checked[Slot].DriveNumber = DriveNumber;
+    Checked[Slot].MyLba = Header->MyLba;
+    Checked[Slot].HeaderCrc32 = Header->HeaderCrc32;
+    return Checked[Slot].Result;
 }
 
 //static // Used also in uefidisk.c
@@ -165,14 +256,18 @@ DiskReadGptHeader(
         GptCheckHeader((const UCHAR*)DiskReadBuffer, SectorSize, DiskSectors, EFI_HEADER_LOCATION))
     {
         RtlCopyMemory(GptHeader, DiskReadBuffer, sizeof(*GptHeader));
-        return TRUE;
+        /* The check reads the entry array into the same buffer: the header has been copied */
+        if (GptCheckTable(DriveNumber, GptHeader, SectorSize))
+            return TRUE;
     }
 
     /*
      * The primary header is not usable. As the kernel reader does, use the backup header in the last block
      * of the disk (UEFI 2.10 5.3.2: a copy of the header, with the copy of the entry array before it).
-     * Only for a disk that has a protective MBR: a disk that was an GPT disk once and was repartitioned
+     * Only for a disk that has a protective MBR, as the kernel reader (FstubDetectPartitionStyle) asks: the
+     * first entry of the type 0xEE and no other entry. A disk that was a GPT disk once and was repartitioned
      * with an MBR by a tool that does not wipe the last block must not become a GPT disk again.
+     * The same applies when the primary header is fine but its entry array is not.
      */
     if (DiskSectors > 2 && MachDiskReadLogicalSectors(DriveNumber, 0ULL, 1, DiskReadBuffer))
     {
@@ -180,13 +275,14 @@ DiskReadGptHeader(
         BOOLEAN Protective = FALSE;
         ULONG i;
 
-        /* Boot signature 0xAA55 and a partition entry of the GPT protective type (0xEE) */
-        if (Mbr[510] == 0x55 && Mbr[511] == 0xAA)
+        /* Boot signature 0xAA55, the first partition entry of the GPT protective type (0xEE), the others unused */
+        if (Mbr[510] == 0x55 && Mbr[511] == 0xAA && Mbr[446 + 4] == PARTITION_GPT)
         {
-            for (i = 0; i < 4; i++)
+            Protective = TRUE;
+            for (i = 1; i < 4; i++)
             {
-                if (Mbr[446 + 16 * i + 4] == PARTITION_GPT)
-                    Protective = TRUE;
+                if (Mbr[446 + 16 * i + 4] != 0)
+                    Protective = FALSE;
             }
         }
         if (Protective &&
@@ -194,7 +290,8 @@ DiskReadGptHeader(
             GptCheckHeader((const UCHAR*)DiskReadBuffer, SectorSize, DiskSectors, DiskSectors - 1))
         {
             RtlCopyMemory(GptHeader, DiskReadBuffer, sizeof(*GptHeader));
-            return TRUE;
+            if (GptCheckTable(DriveNumber, GptHeader, SectorSize))
+                return TRUE;
         }
     }
 
