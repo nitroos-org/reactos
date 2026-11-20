@@ -50,9 +50,10 @@ typedef struct
     /* Information to be filled during logon */
     WCHAR UserName[256];
     WCHAR DomainName[256];
-    /* The password lives here only while the logon dialog is working (bLogonInProgress): a stored automatic logon
-       password is read into it, the password typed is copied into it for the retry after a password change; it
-       is wiped when the logon attempt is over. Nothing compares against it (the unlock dialog asks the LSA). */
+    /* The password lives here only while the logon dialog is working (bLogonInProgress): the stored automatic logon
+       password is read into it at start-up (and the password change dialog replaces it by the new password when
+       it changes the one that is in it); it is wiped when the first logon attempt is over. The password typed in
+       the logon dialog is never copied here. Nothing compares against it (the unlock dialog asks the LSA). */
     WCHAR Password[256];
     BOOL bLogonInProgress;
     SYSTEMTIME LogonTime;
