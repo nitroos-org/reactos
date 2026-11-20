@@ -240,6 +240,7 @@ UefiGetBootPartitionEntry(
         EFI_BLOCK_IO* RootBlockIo;
         ULONG EntriesPerBlock;
         ULONG UsedIndex = 0;
+        ULONG SizeMatches = 0;
         EFI_STATUS Status;
         EFI_GUID UnusedGuid = EFI_PART_TYPE_UNUSED_GUID;
         EFI_GUID SystemGuid = EFI_PART_TYPE_EFI_SYSTEM_PART_GUID;
@@ -299,7 +300,12 @@ UefiGetBootPartitionEntry(
             TRACE("GPT Partition %lu: StartLba=%llu, EndLba=%llu, SizeBlocks=%llu\n",
                   UsedIndex, GptEntry.StartingLba, GptEntry.EndingLba, PartitionSizeBlocks);
 
-            /* Match partition by size (within 1 block tolerance for rounding) */
+            /*
+             * Last resort (the boot handle has no usable device path node, see UefiSetBootpath):
+             * match by size (within 1 block tolerance for rounding). Two partitions of that size are
+             * a guess between two partitions, and the loader reads its configuration from the result:
+             * the first one is remembered, a second one makes the answer refused.
+             */
             if (PartitionSizeBlocks == BootPartitionSize ||
                 (PartitionSizeBlocks > 0 &&
                  (PartitionSizeBlocks - 1 <= BootPartitionSize && 
@@ -307,6 +313,12 @@ UefiGetBootPartitionEntry(
             {
                 TRACE("Found matching GPT partition %lu: Size matches (%llu blocks)\n",
                       UsedIndex, BootPartitionSize);
+
+                if (SizeMatches++ != 0)
+                {
+                    ERR("More than one partition of the boot partition's size: cannot tell which one this loader was started from\n");
+                    return FALSE;
+                }
 
                 *BootPartition = UsedIndex; /* GPT partitions are 1-indexed, counted over the used entries */
 
@@ -322,13 +334,18 @@ UefiGetBootPartitionEntry(
                     PartitionEntry->RecognizedPartition = TRUE;
                     PartitionEntry->RewritePartition = FALSE;
                 }
-                return TRUE;
             }
         }
+
+        if (SizeMatches == 1)
+            return TRUE;
     }
     else
     {
-        /* MBR partition matching */
+        /* MBR partition matching (last resort, by size: the first match stands, a second one refuses the answer) */
+
+        BOOLEAN SizeMatched = FALSE;
+        PARTITION_INFORMATION MbrEntry = {0};
 
         BlockSize = BootBlockIo->Media->BlockSize;
 
@@ -352,13 +369,24 @@ UefiGetBootPartitionEntry(
                 TRACE("Found matching partition %lu: Size matches (%llu blocks)\n",
                       PartitionNum, BootPartitionSize);
 
+                if (SizeMatched)
+                {
+                    ERR("More than one partition of the boot partition's size: cannot tell which one this loader was started from\n");
+                    return FALSE;
+                }
+                SizeMatched = TRUE;
                 *BootPartition = PartitionNum;
-                if (PartitionEntry)
-                    RtlCopyMemory(PartitionEntry, &TempPartitionEntry, sizeof(*PartitionEntry));
-                return TRUE;
+                RtlCopyMemory(&MbrEntry, &TempPartitionEntry, sizeof(MbrEntry));
             }
 
             PartitionNum++;
+        }
+
+        if (SizeMatched)
+        {
+            if (PartitionEntry)
+                RtlCopyMemory(PartitionEntry, &MbrEntry, sizeof(*PartitionEntry));
+            return TRUE;
         }
     }
 
@@ -1098,9 +1126,9 @@ UefiSetBootpath(VOID)
             EFI_GUID DevicePathGuid = EFI_DEVICE_PATH_PROTOCOL_GUID;
             EFI_DEVICE_PATH_PROTOCOL *DevicePath = NULL;
             EFI_DEVICE_PATH_PROTOCOL *Node;
-            HARDDRIVE_DEVICE_PATH *HdNode;
-
-            BootPartition = FIRST_PARTITION; /* Fallback if the walk below fails */
+            HARDDRIVE_DEVICE_PATH HdNode;
+            BOOLEAN HaveNode = FALSE;
+            BOOLEAN Found = FALSE;
 
             Status = GlobalSystemTable->BootServices->HandleProtocol(
                 handles[UefiBootRootIndex],
@@ -1116,14 +1144,51 @@ UefiSetBootpath(VOID)
                         break; /* Malformed path */
 
                     if ((DevicePathType(Node) == MEDIA_DEVICE_PATH) &&
-                        (DevicePathSubType(Node) == MEDIA_HARDDRIVE_DP))
+                        (DevicePathSubType(Node) == MEDIA_HARDDRIVE_DP) &&
+                        (DevicePathNodeLength(Node) >= sizeof(HdNode)))
                     {
-                        HdNode = (HARDDRIVE_DEVICE_PATH*)Node;
-                        BootPartition = HdNode->PartitionNumber;
-                        TRACE("Found partition number %lu from device path\n", BootPartition);
+                        RtlCopyMemory(&HdNode, Node, sizeof(HdNode)); /* the node need not be aligned */
+                        HaveNode = TRUE;
                         break;
                     }
                 }
+            }
+
+            if (HaveNode)
+            {
+                /*
+                 * The node names the partition the firmware started us from by the unique GUID of its
+                 * GPT entry, its start and its size. Its PartitionNumber is the table SLOT (the position
+                 * in the entry array, UEFI 2.10 section 10.3.5.1), which is not the number the loader
+                 * and the kernel give the partition (numbered over the used entries): the slot is used
+                 * only to find the entry. For an MBR disk the number is the one of the node.
+                 */
+                if (HdNode.MBRType == MBR_TYPE_EFI_PARTITION_TABLE_HEADER &&
+                    HdNode.SignatureType == SIGNATURE_TYPE_GUID &&
+                    GptFindBootPartition(FrldrBootDrive, HdNode.Signature,
+                                         HdNode.PartitionStart, HdNode.PartitionSize, &BootPartition))
+                {
+                    Found = TRUE;
+                }
+                else if (HdNode.MBRType == MBR_TYPE_PCAT)
+                {
+                    BootPartition = HdNode.PartitionNumber;
+                    Found = TRUE;
+                }
+                else
+                {
+                    WARN("Boot partition not found in the table by its device path node, trying its size\n");
+                }
+            }
+
+            /* Last resort: no usable node, or one that names nothing in the table: compare sizes */
+            if (!Found && UefiGetBootPartitionEntry(FrldrBootDrive, NULL, &BootPartition))
+                Found = TRUE;
+
+            if (!Found)
+            {
+                ERR("Cannot tell which partition this loader was started from\n");
+                return FALSE;
             }
 
             TRACE("Boot handle is a logical partition, using partition %lu\n", BootPartition);

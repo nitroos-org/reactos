@@ -116,6 +116,14 @@ DiskGptFindPartitionByGuid(
     _In_ const GUID* PartitionGuid,
     _Out_ PGPT_PARTITION_MATCH Match);
 
+BOOLEAN
+GptFindBootPartition(
+    _In_ UCHAR DriveNumber,
+    _In_reads_bytes_(16) const UCHAR* Signature,
+    _In_ ULONGLONG Start,
+    _In_ ULONGLONG Size,
+    _Out_ PULONG Number);
+
 typedef enum _GPT_SYSPATH_STATUS
 {
     GPT_SYSPATH_RESOLVED,       /* the path names the partition with the GUID, at this boot */

@@ -620,6 +620,92 @@ DiskGptFindPartitionByGuid(
     return (Match->Count != 0);
 }
 
+/*
+ * The number (over the used entries of the table, as DiskGetGptPartitionEntry and the kernel count) of the
+ * GPT partition that the HARDDRIVE node of the loader's own device path names, on the disk it was started
+ * from (Signature = the unique GUID the firmware read from the entry, Start and Size in blocks). The
+ * partition is identified by that GUID; two entries with it (a duplicated GUID on the boot disk) are told
+ * apart by the node's start and size; if the GUID is in no entry of the table the loader reads (the firmware
+ * may have read the other copy of the table), a single entry with the node's start and size is taken. FALSE
+ * when the disk has no acceptable table or no unique entry fits: the caller decides what the last resort is.
+ * The node's PartitionNumber is not used: it is the table SLOT, not this number.
+ */
+typedef struct _GPT_BOOT_PART_SEARCH
+{
+    const UCHAR* Signature;
+    ULONGLONG Start;
+    ULONGLONG Size;
+    ULONG GuidMatches;      /* entries with the unique GUID of the node */
+    ULONG GuidNumber;
+    ULONG ExactMatches;     /* of those, the ones with the start and size of the node as well */
+    ULONG ExactNumber;
+    ULONG RangeMatches;     /* entries with the start and size of the node, whatever their GUID */
+    ULONG RangeNumber;
+} GPT_BOOT_PART_SEARCH;
+
+static BOOLEAN
+GptBootPartitionCallback(
+    _In_opt_ PVOID Context,
+    _In_ ULONG Number,
+    _In_ ULONG Slot,
+    _In_ const GPT_PARTITION_ENTRY* Entry,
+    _In_ ULONG SectorSize)
+{
+    GPT_BOOT_PART_SEARCH* Search = (GPT_BOOT_PART_SEARCH*)Context;
+    BOOLEAN SameRange = (Entry->StartingLba == Search->Start &&
+                         Entry->EndingLba - Entry->StartingLba + 1 == Search->Size);
+
+    if (RtlEqualMemory(&Entry->UniquePartitionGuid, Search->Signature, sizeof(GUID)))
+    {
+        if (Search->GuidMatches++ == 0)
+            Search->GuidNumber = Number;
+        if (SameRange && Search->ExactMatches++ == 0)
+            Search->ExactNumber = Number;
+    }
+    if (SameRange && Search->RangeMatches++ == 0)
+        Search->RangeNumber = Number;
+    return FALSE;
+}
+
+BOOLEAN
+GptFindBootPartition(
+    _In_ UCHAR DriveNumber,
+    _In_reads_bytes_(16) const UCHAR* Signature,
+    _In_ ULONGLONG Start,
+    _In_ ULONGLONG Size,
+    _Out_ PULONG Number)
+{
+    GPT_BOOT_PART_SEARCH Search;
+
+    RtlZeroMemory(&Search, sizeof(Search));
+    Search.Signature = Signature;
+    Search.Start = Start;
+    Search.Size = Size;
+    if (!DiskGptScan(DriveNumber, GptBootPartitionCallback, &Search, NULL))
+        return FALSE;
+
+    if (Search.GuidMatches == 1)
+    {
+        *Number = Search.GuidNumber;
+        return TRUE;
+    }
+    if (Search.GuidMatches > 1)
+    {
+        if (Search.ExactMatches == 1)
+        {
+            *Number = Search.ExactNumber;
+            return TRUE;
+        }
+        return FALSE;
+    }
+    if (Search.RangeMatches == 1)
+    {
+        *Number = Search.RangeNumber;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 /* The GUID the way a freeldr.ini entry spells it */
 static VOID
 GptFormatGuid(
