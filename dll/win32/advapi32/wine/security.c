@@ -101,9 +101,10 @@ static const WELLKNOWNSID WellKnownSids[] =
 };
 
 /*
- * Aliases of the SID string syntax that name a SID no CreateWellKnownSid type of this table covers
+ * Aliases of the SID string syntax that WellKnownSids has no entry for
  * (https://learn.microsoft.com/windows/win32/secauthz/sid-strings, rows measured on Windows Server 2022).
- * The type is not used for these.
+ * They are known to the SID strings only: CreateWellKnownSid and IsWellKnownSid do not see this table (some of these SIDs
+ * have a WELL_KNOWN_SID_TYPE that they do not build), so the type column is not used.
  */
 static const WELLKNOWNSID SddlOnlyAliases[] =
 {
@@ -2961,6 +2962,29 @@ static BOOL ParseAceStringGuid(LPCWSTR *StringAcl, GUID *guid, BOOL *present)
     return TRUE;
 }
 
+/* TRUE when the text starts with the numeric form of a SID (S-...) */
+static BOOL IsNumericSidText(LPCWSTR p)
+{
+    return (p[0] == 'S' || p[0] == 's') && p[1] == '-';
+}
+
+/*
+ * A SID written as a two-letter alias ends with the alias: only blanks may follow it before the ')' of the ACE (or the
+ * end of the field). Text glued to the alias ("LAx") is not an alias plus something to ignore, it is not a SID, and the
+ * descriptor must not be built from it.
+ */
+static BOOL AliasFieldEndsCleanly(LPCWSTR p)
+{
+    while (*p == ' ')
+        p++;
+    if (!p[0] || !p[1] || IsNumericSidText(p))
+        return TRUE; /* nothing to check here: the parser refuses what it cannot read */
+    p += 2;
+    while (*p == ' ')
+        p++;
+    return !*p || *p == ')' || *p == ';';
+}
+
 /******************************************************************************
  * ParseStringAclToAcl
  *
@@ -3057,8 +3081,21 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, LPDWORD lpdwFlags,
             }
 
             /* Parse ACE account sid */
-            if (!ParseStringSidToSid(StringAcl, pAce ? (PSID)((LPBYTE)pAce + sidoff) : NULL, &sidlen))
+            if (!AliasFieldEndsCleanly(StringAcl))
                 goto lerr;
+            if (!ParseStringSidToSid(StringAcl, pAce ? (PSID)((LPBYTE)pAce + sidoff) : NULL, &sidlen))
+            {
+                LPCWSTR sidtext = StringAcl;
+
+                /* an alias that names nothing here (a domain account on a machine that is no domain member, an unknown
+                 * one) is a bad SID, not a bad ACL */
+                while (*sidtext == ' ')
+                    sidtext++;
+                if (*sidtext && *sidtext != ')' && *sidtext != ';' && !IsNumericSidText(sidtext) &&
+                    GetLastError() == ERROR_INVALID_SID)
+                    error = ERROR_INVALID_SID;
+                goto lerr;
+            }
             while (*StringAcl && *StringAcl != ')')
                 StringAcl++;
 
@@ -3171,6 +3208,11 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
             {
                 DWORD bytes;
 
+                if (!AliasFieldEndsCleanly(tok))
+                {
+                    SetLastError(ERROR_INVALID_PARAMETER);
+                    goto lend;
+                }
                 if (!ParseStringSidToSid(tok, lpNext, &bytes))
                     goto lend;
 
@@ -3189,6 +3231,11 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
             {
                 DWORD bytes;
 
+                if (!AliasFieldEndsCleanly(tok))
+                {
+                    SetLastError(ERROR_INVALID_PARAMETER);
+                    goto lend;
+                }
                 if (!ParseStringSidToSid(tok, lpNext, &bytes))
                     goto lend;
 
@@ -4478,15 +4525,15 @@ static DWORD ComputeStringSidSize(LPCWSTR StringSid)
         unsigned int i;
 
         for (i = 0; i < sizeof(WellKnownSids)/sizeof(WellKnownSids[0]); i++)
-            if (!strncmpW(WellKnownSids[i].wstr, StringSid, 2))
+            if (!strncmpiW(WellKnownSids[i].wstr, StringSid, 2))
                 return GetSidLengthRequired(WellKnownSids[i].Sid.SubAuthorityCount);
 
         for (i = 0; i < sizeof(SddlOnlyAliases)/sizeof(SddlOnlyAliases[0]); i++)
-            if (!strncmpW(SddlOnlyAliases[i].wstr, StringSid, 2))
+            if (!strncmpiW(SddlOnlyAliases[i].wstr, StringSid, 2))
                 return GetSidLengthRequired(SddlOnlyAliases[i].Sid.SubAuthorityCount);
 
         for (i = 0; i < sizeof(WellKnownRids)/sizeof(WellKnownRids[0]); i++)
-            if (IsMachineRid(&WellKnownRids[i]) && !strncmpW(WellKnownRids[i].wstr, StringSid, 2))
+            if (IsMachineRid(&WellKnownRids[i]) && !strncmpiW(WellKnownRids[i].wstr, StringSid, 2))
             {
                 MAX_SID local;
                 if (!ADVAPI_GetComputerSid(&local)) break;
@@ -4575,7 +4622,7 @@ static BOOL ParseStringSidToSid(LPCWSTR StringSid, PSID pSid, LPDWORD cBytes)
         pisid->Revision = SDDL_REVISION;
 
         for (i = 0; i < sizeof(WellKnownSids)/sizeof(WellKnownSids[0]); i++)
-            if (!strncmpW(WellKnownSids[i].wstr, StringSid, 2))
+            if (!strncmpiW(WellKnownSids[i].wstr, StringSid, 2))
             {
                 DWORD j;
                 pisid->SubAuthorityCount = WellKnownSids[i].Sid.SubAuthorityCount;
@@ -4586,7 +4633,7 @@ static BOOL ParseStringSidToSid(LPCWSTR StringSid, PSID pSid, LPDWORD cBytes)
             }
 
         for (i = 0; i < sizeof(SddlOnlyAliases)/sizeof(SddlOnlyAliases[0]); i++)
-            if (!strncmpW(SddlOnlyAliases[i].wstr, StringSid, 2))
+            if (!strncmpiW(SddlOnlyAliases[i].wstr, StringSid, 2))
             {
                 DWORD j;
                 pisid->SubAuthorityCount = SddlOnlyAliases[i].Sid.SubAuthorityCount;
@@ -4597,7 +4644,7 @@ static BOOL ParseStringSidToSid(LPCWSTR StringSid, PSID pSid, LPDWORD cBytes)
             }
 
         for (i = 0; i < sizeof(WellKnownRids)/sizeof(WellKnownRids[0]); i++)
-            if (IsMachineRid(&WellKnownRids[i]) && !strncmpW(WellKnownRids[i].wstr, StringSid, 2))
+            if (IsMachineRid(&WellKnownRids[i]) && !strncmpiW(WellKnownRids[i].wstr, StringSid, 2))
             {
                 if (!ADVAPI_GetComputerSid(pisid))
                     break;

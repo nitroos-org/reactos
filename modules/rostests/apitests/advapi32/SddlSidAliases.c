@@ -272,9 +272,73 @@ static void TestMachineAccounts(void)
     ExpectOwnerString(L"O:S-1-5-21-1-2-3-500", L"O:S-1-5-21-1-2-3-500");
 }
 
+/* Windows Server 2022 reads the aliases in either case, refuses text glued to an alias, and reports a domain alias or an
+ * unknown one in an ACE as a bad SID (a glued one as a bad ACL) */
+static void ExpectConversion(const WCHAR *Sddl, BOOL Expected, DWORD ExpectedError)
+{
+    PSECURITY_DESCRIPTOR Descriptor = NULL;
+    BOOL Ok;
+
+    SetLastError(0xdeadbeef);
+    Ok = ConvertStringSecurityDescriptorToSecurityDescriptorW(Sddl, SDDL_REVISION_1, &Descriptor, NULL);
+    ok(Ok == Expected, "%ls: conversion %s\n", Sddl, Ok ? "worked" : "failed");
+    if (!Ok && !Expected)
+        ok(GetLastError() == ExpectedError, "%ls: error %lu, expected %lu\n", Sddl, GetLastError(), ExpectedError);
+    if (Descriptor)
+        LocalFree(Descriptor);
+}
+
+static void TestAliasSyntax(void)
+{
+    static const WCHAR *Lower[] = { L"la", L"lG", L"Ba", L"wd", L"sy", L"mu", L"wr" };
+    size_t i;
+
+    for (i = 0; i < ARRAYSIZE(Lower); i++)
+    {
+        PSID Sid = NULL;
+        WCHAR Upper[3] = { towupper(Lower[i][0]), towupper(Lower[i][1]), 0 }, A[64], B[64];
+        PSID SidUpper = NULL;
+
+        SetLastError(0xdeadbeef);
+        ok(ConvertStringSidToSidW(Lower[i], &Sid), "%ls: ConvertStringSidToSid failed: %lu\n", Lower[i], GetLastError());
+        ok(ConvertStringSidToSidW(Upper, &SidUpper), "%ls: ConvertStringSidToSid failed: %lu\n", Upper, GetLastError());
+        if (Sid && SidUpper)
+            ok(EqualSid(Sid, SidUpper), "%ls and %ls are not the same SID\n", Lower[i], Upper);
+        if (Sid)
+            LocalFree(Sid);
+        if (SidUpper)
+            LocalFree(SidUpper);
+
+        StringCchPrintfW(A, ARRAYSIZE(A), L"O:%ls", Lower[i]);
+        StringCchPrintfW(B, ARRAYSIZE(B), L"O:%ls", Upper);
+        ExpectOwnerString(A, B);
+        StringCchPrintfW(A, ARRAYSIZE(A), L"D:(A;;GA;;;%ls)", Lower[i]);
+        ExpectConversion(A, TRUE, 0);
+    }
+
+    /* text glued to an alias */
+    ExpectConversion(L"O:LAx", FALSE, ERROR_INVALID_PARAMETER);
+    ExpectConversion(L"O:BAx", FALSE, ERROR_INVALID_PARAMETER);
+    ExpectConversion(L"G:WDX", FALSE, ERROR_INVALID_PARAMETER);
+    ExpectConversion(L"D:(A;;GA;;;LAx)", FALSE, ERROR_INVALID_ACL);
+    ExpectConversion(L"D:(A;;GA;;;BAD)", FALSE, ERROR_INVALID_ACL);
+    ExpectConversion(L"D:(A;;GA;;;WDX)", FALSE, ERROR_INVALID_ACL);
+    /* blanks after one are fine */
+    ExpectConversion(L"D:(A;;GA;;;LA )", TRUE, 0);
+    ExpectConversion(L"O:LA G:BA", TRUE, 0);
+
+    /* an alias that names nothing in an ACE alone */
+    ExpectConversion(L"D:(A;;GA;;;DA)", FALSE, ERROR_INVALID_SID);
+    ExpectConversion(L"D:(D;;GA;;;EA)", FALSE, ERROR_INVALID_SID);
+    ExpectConversion(L"S:(AU;SA;GA;;;DU)", FALSE, ERROR_INVALID_SID);
+    ExpectConversion(L"D:(A;;GA;;;ZZ)", FALSE, ERROR_INVALID_SID);
+    ExpectConversion(L"D:(A;;GA;;;BA)(A;;GA;;;DA)(A;;GR;;;WD)", FALSE, ERROR_INVALID_SID);
+}
+
 START_TEST(SddlSidAliases)
 {
     TestAliasTable();
     TestDomainAliases();
     TestMachineAccounts();
+    TestAliasSyntax();
 }
