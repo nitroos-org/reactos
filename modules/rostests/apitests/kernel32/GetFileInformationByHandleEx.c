@@ -233,6 +233,69 @@ START_TEST(GetFileInformationByHandleEx)
         CloseHandle(hDir);
     }
 
+    /* a hard link in the same directory: each name gives its own (measured on Windows Server 2022: NTFS) */
+    {
+        WCHAR Link[MAX_PATH], Moved[MAX_PATH];
+
+        wcscpy(Link, Dir);
+        wcscat(Link, L"\\Second Link Name.txt");
+        if (CreateHardLinkW(Link, FilePath, NULL))
+        {
+            Len = GetLongPathNameW(Link, LongPath, _countof(LongPath));
+            if (!Len || Len >= _countof(LongPath))
+                wcscpy(LongPath, Link);
+            Remainder = LongPath;
+            while (*Remainder && *Remainder != L'\\')
+                Remainder++;
+            hFile = OpenForQuery(Link);
+            ok(hFile != INVALID_HANDLE_VALUE, "open of the link failed: %lu\n", GetLastError());
+            if (hFile != INVALID_HANDLE_VALUE)
+            {
+                if (QueryName(hFile, TestFileNormalizedNameInfo, Normalized, _countof(Normalized)))
+                    ok(!wcscmp(Normalized, Remainder), "normalized name of the link %ls, expected %ls\n", Normalized, Remainder);
+                CloseHandle(hFile);
+            }
+            hFile = OpenForQuery(FilePath);
+            if (hFile != INVALID_HANDLE_VALUE)
+            {
+                if (QueryName(hFile, TestFileNormalizedNameInfo, Normalized, _countof(Normalized)))
+                    ok(!wcscmp(Normalized, Expected), "normalized name of the first name %ls, expected %ls\n", Normalized, Expected);
+                CloseHandle(hFile);
+            }
+            DeleteFileW(Link);
+        }
+        else
+        {
+            skip("no hard links here: %lu\n", GetLastError());
+        }
+
+        /* an open file that is renamed: the new name */
+        wcscpy(Moved, Dir);
+        wcscat(Moved, L"\\Moved Name.txt");
+        hFile = OpenForQuery(FilePath);
+        if (hFile != INVALID_HANDLE_VALUE)
+        {
+            if (MoveFileW(FilePath, Moved))
+            {
+                Len = GetLongPathNameW(Moved, LongPath, _countof(LongPath));
+                if (!Len || Len >= _countof(LongPath))
+                    wcscpy(LongPath, Moved);
+                Remainder = LongPath;
+                while (*Remainder && *Remainder != L'\\')
+                    Remainder++;
+                if (QueryName(hFile, TestFileNormalizedNameInfo, Normalized, _countof(Normalized)))
+                    ok(!wcscmp(Normalized, Remainder), "normalized name after the rename %ls, expected %ls\n", Normalized, Remainder);
+                CloseHandle(hFile);
+                DeleteFileW(Moved);
+            }
+            else
+            {
+                skip("cannot rename an open file: %lu\n", GetLastError());
+                CloseHandle(hFile);
+            }
+        }
+    }
+
     DeleteFileW(FilePath);
     RemoveDirectoryW(Dir);
 }
