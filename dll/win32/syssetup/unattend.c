@@ -1175,6 +1175,16 @@ InstallConfiguredFeatures(VOID)
             StringCchPrintfW(szCmd, _countof(szCmd), L"cmd.exe /c featmgr.exe /enable %s > \"%s\\Panther\\feature-%s.log\" 2>&1",
                              tok, szWin, tok);
         }
+        {
+            WCHAR szComp[64];
+
+            /* A feature that cannot work without a component that setup left out is refused */
+            if (FeatureBlockedByComponent(tok, szComp, _countof(szComp)))
+            {
+                UnattendLog(L"feature \"%s\" is refused: it needs the component \"%s\", which is left out", tok, szComp);
+                continue;
+            }
+        }
         UnattendLog(L"installing feature \"%s\"", tok);
         hr = RunCommandAndWait(szCmd);
         if (SUCCEEDED(hr))

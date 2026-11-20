@@ -507,6 +507,21 @@ CheckUnattendedSetup(
         }
     }
 
+    /*
+     * [Components]: Profile and per-component yes/no. Only a file with this section
+     * opens components.inf; without it (and in an interactive setup) nothing changes
+     * and nothing is logged.
+     */
+    if (SpInfFindFirstLine(UnattendInf, L"Components", NULL, &Context))
+    {
+        PCOMPONENTS_STATE Components = ComponentsLoad(pSetupData->SourcePath.Buffer, pSetupData->LanguageId);
+        if (Components)
+            ComponentsApplyAnswerFile(Components, UnattendInf);
+        else
+            SetupLogLine("[Components] ignored: there is no components.inf on the installation medium");
+        pSetupData->Components = Components;
+    }
+
     SetupLogFormat("answer file read: disk %ld partition %ld, AutoPartition %ld, FormatPartition %ld, FsType %ld,"
                    " QuickFormat %ld, PartitionSizeMB %lu, BootLoaderLocation %ld, LocaleID %S",
                    pSetupData->DestinationDiskNumber, pSetupData->DestinationPartitionNumber,
