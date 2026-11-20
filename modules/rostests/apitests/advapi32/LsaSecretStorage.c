@@ -149,11 +149,7 @@ static VOID QuerySecretRow(PCSTR Row, LSA_HANDLE Secret, PCWSTR Name, PCWSTR Cur
     PLSA_UNICODE_STRING CurrentValue = NULL, OldValue = NULL;
     NTSTATUS Status;
 
-    /*
-     * Only secrets whose old value is set are queried: for an empty old value (what LsaStorePrivateData and a
-     * rotation without an old value store) the server's reply length for a value shorter than one character is
-     * not sound (a separate issue), and advapi32 always asks for the old value
-     */
+    /* An empty old value is queried in TestShortValues */
     CurrentTime->QuadPart = OldTime->QuadPart = 0;
     Status = LsaQuerySecret(Secret, &CurrentValue, CurrentTime, &OldValue, OldTime);
     ok(Status == STATUS_SUCCESS, "%s %ls: LsaQuerySecret 0x%08lx\n", Row, Name, Status);
@@ -397,7 +393,7 @@ static VOID TestShapes(VOID)
 {
     static const struct { USHORT Length, MaximumLength; } Shapes[] =
     {
-        /* not {0, 0} or {1, 1}: a stored value shorter than one character (see QuerySecretRow) */
+        /* {0, 0} and {1, 1} (a stored value shorter than one character): TestShortValues */
         {7, 7}, {7, 9}, {8, 8}, {4, 10}, {0, 2}, {2, 2}, {32766, 32768},
     };
     PCWSTR Name = L"SecretTestShape";
@@ -442,6 +438,82 @@ static VOID TestShapes(VOID)
     HeapFree(GetProcessHeap(), 0, Buffer);
 }
 
+/*
+ * Values shorter than one character: returned with Length 0 (and MaximumLength = the stored bytes), never with a
+ * Length above MaximumLength. An empty old value (a rotation without an old value) is queried too. What Windows
+ * returns for these is not documented in [MS-LSAD]: the bounded reply is checked here (verify on peer).
+ */
+static VOID TestShortValues(VOID)
+{
+    static const USHORT Lengths[] = {0, 1};
+    PCWSTR Name = L"SecretTestShort", ObjectName = L"G$SecretTestEmptyOld";
+    PLSA_UNICODE_STRING Back, CurrentValue, OldValue;
+    LARGE_INTEGER CurrentTime, OldTime;
+    LSA_UNICODE_STRING Data, Key;
+    LSA_HANDLE Policy, Secret = NULL;
+    BYTE Byte = 0x5a;
+    NTSTATUS Status;
+    ULONG i;
+
+    for (i = 0; i < RTL_NUMBER_OF(Lengths); i++)
+    {
+        Data.Buffer = (PWSTR)&Byte;
+        Data.Length = Data.MaximumLength = Lengths[i];
+        Status = Store(Name, &Data);
+        ok(Status == STATUS_SUCCESS, "short %u: store 0x%08lx\n", Lengths[i], Status);
+
+        Policy = OpenPolicy(POLICY_GET_PRIVATE_INFORMATION);
+        if (!Policy)
+            break;
+        InitString(&Key, Name);
+        Back = NULL;
+        Status = LsaRetrievePrivateData(Policy, &Key, &Back);
+        ok(Status == STATUS_SUCCESS, "short %u: retrieve 0x%08lx\n", Lengths[i], Status);
+        if (NT_SUCCESS(Status) && Back)
+        {
+            ok(Back->Length == 0, "short %u: Length %u, expected 0\n", Lengths[i], Back->Length);
+            ok(Back->MaximumLength == Lengths[i], "short %u: MaximumLength %u, expected %u\n",
+               Lengths[i], Back->MaximumLength, Lengths[i]);
+            LsaFreeMemory(Back);
+        }
+        LsaClose(Policy);
+    }
+    ok(Store(Name, NULL) == STATUS_SUCCESS, "short: delete failed\n");
+
+    Policy = OpenPolicy(POLICY_ALL_ACCESS);
+    if (!Policy)
+        return;
+    InitString(&Key, ObjectName);
+    Status = LsaCreateSecret(Policy, &Key, SECRET_ALL_ACCESS, &Secret);
+    ok(Status == STATUS_SUCCESS, "LsaCreateSecret(%ls) 0x%08lx\n", ObjectName, Status);
+    if (NT_SUCCESS(Status))
+    {
+        SetSecretValues("empty old", Secret, ObjectName, Values[1], NULL);
+        CurrentValue = OldValue = NULL;
+        Status = LsaQuerySecret(Secret, &CurrentValue, &CurrentTime, &OldValue, &OldTime);
+        ok(Status == STATUS_SUCCESS, "empty old: LsaQuerySecret 0x%08lx\n", Status);
+        if (NT_SUCCESS(Status))
+        {
+            CheckQueried("empty old", ObjectName, "current value", CurrentValue, Values[1]);
+            ok(OldValue != NULL, "empty old: the old value is NULL\n");
+            if (OldValue)
+            {
+                ok(OldValue->Length == 0, "empty old: Length %u, expected 0\n", OldValue->Length);
+                ok(OldValue->MaximumLength == 0, "empty old: MaximumLength %u, expected 0\n", OldValue->MaximumLength);
+            }
+        }
+        if (CurrentValue)
+            LsaFreeMemory(CurrentValue);
+        if (OldValue)
+            LsaFreeMemory(OldValue);
+        Status = LsaDelete(Secret);
+        ok(Status == STATUS_SUCCESS, "LsaDelete(%ls) 0x%08lx\n", ObjectName, Status);
+        if (!NT_SUCCESS(Status))
+            LsaClose(Secret);
+    }
+    LsaClose(Policy);
+}
+
 START_TEST(LsaSecretStorage)
 {
     ULONG i;
@@ -453,6 +525,7 @@ START_TEST(LsaSecretStorage)
 
     TestCreated();
     TestShapes();
+    TestShortValues();
     ExpectKeyFileClosed();
 
     SecureZeroMemory(Values, sizeof(Values));

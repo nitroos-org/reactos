@@ -2410,6 +2410,20 @@ done:
 }
 
 
+/*
+ * The lengths of a value returned in a cipher value: MaximumLength = the stored bytes, Length = two bytes fewer
+ * (a stored value is taken to end with a terminating character). A value shorter than one character gets Length 0,
+ * and Length never exceeds MaximumLength (the RPC runtime copies Length bytes of the buffer into the reply).
+ */
+static VOID
+LsapSetReplyLengths(PLSAPR_CR_CIPHER_VALUE Value,
+                    ULONG StoredLength)
+{
+    Value->MaximumLength = (USHORT)StoredLength;
+    Value->Length = (Value->MaximumLength >= sizeof(WCHAR)) ? Value->MaximumLength - sizeof(WCHAR) : 0;
+}
+
+
 /* Function 29 */
 NTSTATUS
 WINAPI
@@ -2586,8 +2600,7 @@ LsarQuerySecret(
         }
 
         /* FIXME: Encrypt the current value */
-        EncCurrentValue->Length = (USHORT)(CurrentValueLength - sizeof(WCHAR));
-        EncCurrentValue->MaximumLength = (USHORT)CurrentValueLength;
+        LsapSetReplyLengths(EncCurrentValue, CurrentValueLength);
         EncCurrentValue->Buffer = (PBYTE)CurrentValue;
     }
 
@@ -2638,8 +2651,7 @@ LsarQuerySecret(
         }
 
         /* FIXME: Encrypt the old value */
-        EncOldValue->Length = (USHORT)(OldValueLength - sizeof(WCHAR));
-        EncOldValue->MaximumLength = (USHORT)OldValueLength;
+        LsapSetReplyLengths(EncOldValue, OldValueLength);
         EncOldValue->Buffer = (PBYTE)OldValue;
     }
 
@@ -3988,8 +4000,7 @@ LsarRetrievePrivateData(
     }
 
     /* FIXME: Encrypt the current value */
-    EncCurrentValue->Length = (USHORT)(CurrentValueLength - sizeof(WCHAR));
-    EncCurrentValue->MaximumLength = (USHORT)CurrentValueLength;
+    LsapSetReplyLengths(EncCurrentValue, CurrentValueLength);
     EncCurrentValue->Buffer = midl_user_allocate(CurrentValueLength);
     if (EncCurrentValue->Buffer == NULL)
     {
