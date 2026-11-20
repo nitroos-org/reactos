@@ -2056,6 +2056,119 @@ void ngc_commit_wait(ngc_vol *v)
 	kshim_jnl_wait(v->bdev);
 }
 
+int ngc_checkpoint(ngc_vol *v)
+{
+	struct block_device *b = v->bdev;
+	if (!b->jnl || sb_rdonly(v->sb))
+		return 0;
+	if (!kshim_jnl_retained(b) && !kshim_jnl_busy(b))
+		return 0;
+	/* Waits for a commit's I/O in flight (it needs no lock), releases it, and puts the retained pages in place. */
+	kshim_jnl_settle(b);
+	if (v->failed || kshim_jnl_failed(b) || kshim_jnl_retained(b))
+		return -EIO;
+	return 0;
+}
+
+/* The next attribute of a fixed-up record at or after *pos, skipping $STANDARD_INFORMATION; NULL at its end, ERR_PTR when damaged. */
+static const struct attr_record *ngc_rec_next(const u8 *rec, u32 rs, u32 *pos)
+{
+	while (*pos + 8 <= rs) {
+		const struct attr_record *a = (const struct attr_record *)(rec + *pos);
+		u32 len;
+		if (a->type == AT_END)
+			return NULL;
+		len = le32_to_cpu(a->length);
+		if (len < 16 || (len & 7) || *pos + len > rs)
+			return ERR_PTR(-EIO);
+		*pos += len;
+		if (a->type != AT_STANDARD_INFORMATION)
+			return a;
+	}
+	return ERR_PTR(-EIO);
+}
+
+static int ngc_rec_open(u8 *rec, u32 rs, u32 *pos)
+{
+	const struct mft_record *m = (const struct mft_record *)rec;
+	if (m->magic != magic_FILE || post_read_mst_fixup((struct ntfs_record *)rec, rs))
+		return -EIO;
+	*pos = le16_to_cpu(m->attrs_offset);
+	if (!(m->flags & MFT_RECORD_IN_USE) || *pos < offsetof(struct mft_record, reserved) || *pos >= rs ||
+	    le32_to_cpu(m->bytes_in_use) > rs)
+		return -EIO;
+	return 0;
+}
+
+/*
+ * Whether a reader of the volume itself (no journal replay: the boot loader, another system, an offline tool) finds @n as it
+ * is now.  1: the base MFT record of @n on the device holds every attribute the record in memory holds, byte for byte, apart
+ * from $STANDARD_INFORMATION (times and file attributes): the same names (so the same directory entries), the same data
+ * attribute (size, initialized size, allocated size and runs, or the resident data), the same flags and link count.  The
+ * memory side is $MFT's page cache, which a commit wrote back.  0 in every other case and whenever it cannot tell: a
+ * directory, a named stream, a file with an attribute list or extension records, a record larger than a page or a cluster,
+ * a commit's I/O in flight, a read error.  Under the volume lock, between core operations, after a commit.
+ */
+int ngc_record_home(ngc_vol *v, ngc_node *n)
+{
+	struct inode *vi = (struct inode *)n;
+	struct ntfs_inode *ni = NTFS_I(vi), *mft_ni;
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct block_device *b = v->bdev;
+	u32 rs = vol->mft_record_size, pm, pd;
+	u64 off;
+	s64 lcn;
+	u8 *mem = NULL, *dev = NULL;
+	struct folio *f;
+	int home = 0;
+
+	if (!vi || S_ISDIR(vi->i_mode) || NInoAttr(ni) || NInoAttrList(ni) || ni->nr_extents ||
+	    rs > PAGE_SIZE || rs > vol->cluster_size || (b->jnl && kshim_jnl_busy(b)))
+		return 0;
+	off = (u64)ni->mft_no << vol->mft_record_size_bits;
+	mft_ni = NTFS_I(vol->mft_ino);
+	down_read(&mft_ni->runlist.lock);
+	lcn = ntfs_attr_vcn_to_lcn_nolock(mft_ni, (s64)(off >> vol->cluster_size_bits), false);
+	up_read(&mft_ni->runlist.lock);
+	if (lcn < 0)
+		return 0;
+	mem = kmalloc(rs, GFP_NOFS);
+	dev = kmalloc(rs, GFP_NOFS);
+	if (!mem || !dev)
+		goto out;
+	f = read_mapping_folio(vol->mft_ino->i_mapping, (pgoff_t)(off >> PAGE_SHIFT), NULL);
+	if (IS_ERR(f))
+		goto out;
+	memcpy(mem, (u8 *)folio_address(f) + (off & (PAGE_SIZE - 1)), rs);
+	folio_put(f);
+	/* The device itself, past every overlay of the journal: what a reader that does not replay it gets. */
+	if (ngos_dev_read(b->osdev, ((u64)lcn << vol->cluster_size_bits) + (off & vol->cluster_size_mask), dev, rs))
+		goto out;
+	if (ngc_rec_open(mem, rs, &pm) || ngc_rec_open(dev, rs, &pd))
+		goto out;
+	{
+		const struct mft_record *a = (const struct mft_record *)mem, *c = (const struct mft_record *)dev;
+		if (a->flags != c->flags || a->link_count != c->link_count || a->sequence_number != c->sequence_number ||
+		    a->base_mft_record != c->base_mft_record)
+			goto out;
+	}
+	for (;;) {
+		const struct attr_record *x = ngc_rec_next(mem, rs, &pm), *y = ngc_rec_next(dev, rs, &pd);
+		if (IS_ERR(x) || IS_ERR(y))
+			goto out;
+		if (!x || !y) {
+			home = !x && !y;
+			goto out;
+		}
+		if (x->length != y->length || memcmp(x, y, le32_to_cpu(x->length)))
+			goto out;
+	}
+out:
+	kfree(mem);
+	kfree(dev);
+	return home;
+}
+
 /* Overlay pages that make the next operation commit first: half the journal, at most NGC_JNL_COMMIT_PAGES. */
 static unsigned long ngc_commit_threshold(struct ngc_vol *v)
 {

@@ -138,6 +138,14 @@ int ngc_commit_begin(ngc_vol *v, int retain);	/* retain: the caller waits for du
 int ngc_commit_io(ngc_vol *v);
 void ngc_commit_end(ngc_vol *v);
 void ngc_commit_wait(ngc_vol *v);
+/*
+ * Under the volume lock, between core operations: every change committed so far is written to its place on the volume
+ * (the retained transaction checkpointed, kshim_jnl.c), so a reader that does not replay the journal sees it.  0, or
+ * <0 when a write failed (the journal still holds the changes; the next mount replays them).
+ */
+int ngc_checkpoint(ngc_vol *v);
+/* 1: the base MFT record of the file on the device already is the one in memory, apart from times and attributes (details at the definition); 0: not, or cannot tell. */
+int ngc_record_home(ngc_vol *v, ngc_node *n);
 /* The overlay is past its threshold, or (alloc_bytes > 0: a growth of about that many bytes) a free is not committed and an allocation follows that cannot go around the freed clusters. */
 int ngc_commit_wanted(ngc_vol *v, long long alloc_bytes);
 extern int ngc_free_reservation;	/* 0: an allocation after a free waits for the commit (registry NoFreeReservation=1) */
