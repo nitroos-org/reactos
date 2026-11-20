@@ -5617,8 +5617,15 @@ static UINT ACTION_UnpublishProduct(MSIPACKAGE *package)
     MSIREG_DeleteUninstallKey(package->ProductCode, package->platform);
 #endif
 
-    MSIREG_DeleteLocalClassesProductKey(package->ProductCode);
-    MSIREG_DeleteLocalClassesFeaturesKey(package->ProductCode);
+#ifdef __REACTOS__
+    /* a per-user product of a token that is not an administrator has no machine-wide registration, and the
+       machine keys are not its to change: do not ask for them (each refused open is a registry audit denial) */
+    if (package->Context == MSIINSTALLCONTEXT_MACHINE || msi_user_is_admin())
+#endif
+    {
+        MSIREG_DeleteLocalClassesProductKey(package->ProductCode);
+        MSIREG_DeleteLocalClassesFeaturesKey(package->ProductCode);
+    }
     MSIREG_DeleteUserProductKey(package->ProductCode);
     MSIREG_DeleteUserFeaturesKey(package->ProductCode);
 
