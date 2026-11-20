@@ -1591,6 +1591,10 @@ CmpAclStampHiveRoot(
     if (!Kcb || !CmpStoreKeySecurity())
         return;
 
+    /* Only the boot hives and the profile service's loads (review F16) */
+    if (Kcb->KeyHive && (CONTAINING_RECORD(Kcb->KeyHive, CMHIVE, Hive)->Flags & CMHIVE_FLAG_NO_ROOT_STAMP))
+        return;
+
     CmpLockRegistry();
     CmpAcquireKcbLockExclusive(Kcb);
     if (!Kcb->Delete && Kcb->KeyHive && !Kcb->KeyHive->ReadOnly &&

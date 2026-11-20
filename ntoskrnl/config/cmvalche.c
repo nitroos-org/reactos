@@ -670,7 +670,7 @@ CmpQueryKeyValueData(IN PCM_KEY_CONTROL_BLOCK Kcb,
     PCELL_DATA CellData;
     USHORT NameSize;
     ULONG Size, MinimumSize, SizeLeft, KeySize, AlignedData = 0, DataOffset;
-    PVOID Buffer;
+    PVOID Buffer = NULL;
     BOOLEAN IsSmall, BufferAllocated = FALSE;
     HCELL_INDEX CellToRelease = HCELL_NIL;
     VALUE_SEARCH_RETURN_TYPE Result = SearchSuccess;
@@ -848,9 +848,13 @@ CmpQueryKeyValueData(IN PCM_KEY_CONTROL_BLOCK Kcb,
                     /* Then the data is directly into the cell */
                     Buffer = &CellData->u.KeyValue.Data;
                 }
-                else
+                else if (Length > AlignedData)
                 {
-                    /* Otherwise, we must retrieve it from the value cache */
+                    /*
+                     * Otherwise, we must retrieve it from the value cache; only
+                     * if a byte of it will be copied: big data is put together
+                     * in a buffer of the whole length
+                     */
                     Result = CmpGetValueDataFromCache(Kcb,
                                                       CachedValue,
                                                       CellData,
@@ -864,36 +868,46 @@ CmpQueryKeyValueData(IN PCM_KEY_CONTROL_BLOCK Kcb,
                         ASSERT(Buffer == NULL);
                         ASSERT(BufferAllocated == FALSE);
                         *Status = STATUS_INSUFFICIENT_RESOURCES;
+                        break;
                     }
                 }
 
-                /* Now that we know we truly have data, set its offset */
-                Info->KeyValueFullInformation.DataOffset = AlignedData;
-
-                /* Only the data remains to be copied */
-                SizeLeft = (((LONG)Length - (LONG)AlignedData) < 0) ?
-                           0 : (Length - AlignedData);
-                Size = KeySize;
-
-                /* Check if the caller has no space for it */
-                if (SizeLeft < Size)
+                /* The caller's buffer may fault: a buffer of big data is freed below all the same */
+                _SEH2_TRY
                 {
-                    /* Truncate what we'll copy, and tell the caller */
-                    Size = SizeLeft;
-                    *Status = STATUS_BUFFER_OVERFLOW;
+                    /* Now that we know we truly have data, set its offset */
+                    Info->KeyValueFullInformation.DataOffset = AlignedData;
+
+                    /* Only the data remains to be copied */
+                    SizeLeft = (((LONG)Length - (LONG)AlignedData) < 0) ?
+                               0 : (Length - AlignedData);
+                    Size = KeySize;
+
+                    /* Check if the caller has no space for it */
+                    if (SizeLeft < Size)
+                    {
+                        /* Truncate what we'll copy, and tell the caller */
+                        Size = SizeLeft;
+                        *Status = STATUS_BUFFER_OVERFLOW;
+                    }
+
+                    /* Sanity check */
+                    ASSERT(IsSmall ? (Size <= CM_KEY_VALUE_SMALL) : TRUE);
+
+                    /* Make sure we have a valid buffer */
+                    if (Buffer)
+                    {
+                        /* Copy the data into the aligned offset */
+                        RtlCopyMemory((PVOID)((ULONG_PTR)Info + AlignedData),
+                                      Buffer,
+                                      Size);
+                    }
                 }
-
-                /* Sanity check */
-                ASSERT(IsSmall ? (Size <= CM_KEY_VALUE_SMALL) : TRUE);
-
-                /* Make sure we have a valid buffer */
-                if (Buffer)
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
                 {
-                    /* Copy the data into the aligned offset */
-                    RtlCopyMemory((PVOID)((ULONG_PTR)Info + AlignedData),
-                                  Buffer,
-                                  Size);
+                    *Status = _SEH2_GetExceptionCode();
                 }
+                _SEH2_END;
             }
             else
             {
@@ -958,9 +972,9 @@ CmpQueryKeyValueData(IN PCM_KEY_CONTROL_BLOCK Kcb,
                     /* Then the data is directly into the cell */
                     Buffer = &CellData->u.KeyValue.Data;
                 }
-                else
+                else if (Length > MinimumSize)
                 {
-                    /* Otherwise, we must retrieve it from the value cache */
+                    /* Otherwise, we must retrieve it from the value cache (only if a byte of it will be copied) */
                     Result = CmpGetValueDataFromCache(Kcb,
                                                       CachedValue,
                                                       CellData,
@@ -974,6 +988,7 @@ CmpQueryKeyValueData(IN PCM_KEY_CONTROL_BLOCK Kcb,
                         ASSERT(Buffer == NULL);
                         ASSERT(BufferAllocated == FALSE);
                         *Status = STATUS_INSUFFICIENT_RESOURCES;
+                        break;
                     }
                 }
 
@@ -995,19 +1010,28 @@ CmpQueryKeyValueData(IN PCM_KEY_CONTROL_BLOCK Kcb,
                 /* Make sure we have a valid buffer */
                 if (Buffer)
                 {
-                    /* Copy the data into the aligned offset */
-                    if (KeyValueInformationClass == KeyValuePartialInformationAlign64)
+                    /* The caller's buffer may fault: a buffer of big data is freed below all the same */
+                    _SEH2_TRY
                     {
-                        RtlCopyMemory(Info->KeyValuePartialInformationAlign64.Data,
-                                      Buffer,
-                                      Size);
+                        /* Copy the data into the aligned offset */
+                        if (KeyValueInformationClass == KeyValuePartialInformationAlign64)
+                        {
+                            RtlCopyMemory(Info->KeyValuePartialInformationAlign64.Data,
+                                          Buffer,
+                                          Size);
+                        }
+                        else
+                        {
+                            RtlCopyMemory(Info->KeyValuePartialInformation.Data,
+                                          Buffer,
+                                          Size);
+                        }
                     }
-                    else
+                    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
                     {
-                        RtlCopyMemory(Info->KeyValuePartialInformation.Data,
-                                      Buffer,
-                                      Size);
+                        *Status = _SEH2_GetExceptionCode();
                     }
+                    _SEH2_END;
                 }
             }
 
@@ -1022,6 +1046,10 @@ CmpQueryKeyValueData(IN PCM_KEY_CONTROL_BLOCK Kcb,
             *Status = STATUS_INVALID_PARAMETER;
             break;
     }
+
+    /* Big data was copied into a buffer of its own; the data cell is released */
+    if (BufferAllocated) CmpFree(Buffer, 0);
+    if (CellToRelease != HCELL_NIL) HvReleaseCell(Kcb->KeyHive, CellToRelease);
 
     /* Return the search result as well */
     return Result;

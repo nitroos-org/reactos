@@ -9,33 +9,59 @@
 #define NDEBUG
 #include <debug.h>
 
-/* STRUCTURES ****************************************************************/
-
-typedef struct _CMP_REGISTRY_STACK_WORK_STATE
-{
-    ULONG ChildCellIndex;
-    HCELL_INDEX Parent;
-    HCELL_INDEX Current;
-    HCELL_INDEX Sibling;
-} CMP_REGISTRY_STACK_WORK_STATE, *PCMP_REGISTRY_STACK_WORK_STATE;
+/*
+ * A hive read from a file is untrusted input: a user can edit its own
+ * profile hive while it is not loaded, an administrator loads any file. The
+ * check below is the only code that reads a hive before it is known to be
+ * sound; everything else (lookups, enumeration, value reads, deletes, the
+ * security cache, saves) trusts every cell index, count and length it finds.
+ * So when the check accepts a hive, these hold:
+ *
+ *  - The bins tile the storage: each bin is a whole number of blocks at the
+ *    offset it names, and its cells tile the bin (sizes multiples of 8, at
+ *    least 8, inside the bin). The free cells are what the free lists are
+ *    made of (HvpCreateHiveFreeCellList).
+ *  - Every cell index the tree holds is the start of an allocated cell of the
+ *    stable storage (of the volatile one too in a live hive), as large as
+ *    what is read from it. The check knows where cells start from a map of
+ *    the bins made first (one bit per 8 bytes).
+ *  - Every cell is used once: by one key (as its node, index, value list,
+ *    value, data or class), or as an 'sk' cell of one sound ring. A second use
+ *    of a cell (two keys sharing a list, a value cell that is also a key, an
+ *    index that names itself, a cycle) is found in O(1) from a second map, so
+ *    the tree has no cycle and its walk is linear in the size of the hive.
+ *  - Key nodes: signature 'nk', a name inside the cell, the right parent, no
+ *    flag a file key cannot have (hive exit, predefined handle, volatile), no
+ *    volatile subkey in a file, a subkey index whose counts fit its cells and
+ *    add up to the key's count, subkeys in the order lookups assume, a value
+ *    list whose count fits its cell, a class inside its cell.
+ *  - Values: signature 'vk', a name inside the cell, small data at most 4
+ *    bytes, no data cell only for no data, other data in one cell that holds
+ *    all of it or, in a hive of format 1.4 or later, in a sound big data
+ *    chain (a 'db' cell, its list, its segments; see CmpCheckBigData).
+ *  - Security: a key's 'sk' cell is in a ring of sound 'sk' cells (each named
+ *    by its neighbours, descriptor inside the cell) and holds a valid
+ *    self-relative descriptor; reference counts are recounted.
+ *
+ * What does not hold is either repaired by a write inside a cell the check
+ * has accepted (a count lowered, an entry removed from a list, a field
+ * cleared), when self-healing is allowed, or the hive is refused. The boot
+ * loader never repairs: it refuses. A live hive (CM_CHECK_REGISTRY_LIVE_HIVE)
+ * is only checked.
+ */
 
 /* DEFINES  ******************************************************************/
 
 #define GET_HHIVE(CmHive) (&((CmHive)->Hive))
-#define GET_HHIVE_ROOT_CELL(Hive) ((Hive)->BaseBlock->RootCell)
-#define GET_HHIVE_BIN(Hive, StorageIndex, BlockIndex) ((PHBIN)Hive->Storage[StorageIndex].BlockList[BlockIndex].BinAddress)
-#define GET_CELL_BIN(Bin) ((PHCELL)((PUCHAR)Bin + sizeof(HBIN)))
-
-#define IS_CELL_VOLATILE(Cell) (HvGetCellType(Cell) == Volatile)
 
 #if !defined(CMLIB_HOST) && !defined(_BLDR_)
 extern PCMHIVE CmiVolatileHive;
 #endif
 
-#define CMP_PRIOR_STACK 1
 #define CMP_REGISTRY_MAX_LEVELS_TREE_DEPTH 512
 
 #define CMP_KEY_SIZE_THRESHOLD 0x45C
+#define CMP_MAX(a, b) ((a) > (b) ? (a) : (b))
 #define CMP_VOLATILE_LIST_UNINTIALIZED 0xBAADF00D
 
 /* PRIVATE FUNCTIONS **********************************************************/
@@ -52,10 +78,9 @@ extern PCMHIVE CmiVolatileHive;
  * one too high; a hive that lost keys to a repair, or to a crash between the
  * write of a key and of its 'sk', could be either.
  *
- * Hive contents are not trusted: a cell is only counted after
- * CmpValidateSecurityCell has accepted it, and it is only written through
- * CmpGetCheckedSecurityCell. Nothing here can fail the load: if the table
- * cannot be built the counts are left as they are.
+ * Hive contents are not trusted: a cell is only counted after the check has
+ * accepted it. Nothing here can fail the load: if the table cannot be built
+ * the counts are left as they are.
  */
 typedef struct _CMP_SK_TALLY_ENTRY
 {
@@ -174,7 +199,7 @@ CmpSkTallyGrow(
     return TRUE;
 }
 
-/* One more key names Cell (a cell CmpValidateSecurityCell accepted) */
+/* One more key names Cell (a cell the check accepted) */
 static
 VOID
 CmpSkTallyAdd(
@@ -307,8 +332,7 @@ CmpSkMarkSeen(
  * installed before), and those cells must be found again to be shared. Runs
  * after the walk, which has reset every Security that is not a valid cell.
  * The walks share one set of visited cells, so that the work is linear in the
- * number of cells whatever the rings look like (a hive with many cells in one
- * ring, each named by its own key, made it quadratic). Never fails the load.
+ * number of cells whatever the rings look like. Never fails the load.
  */
 static
 VOID
@@ -367,20 +391,8 @@ CmpKeyNodeNameHasNonAscii(
 /**
  * @brief
  * Validates the lexicographical order between a child
- * and prior sibling of the said child.
- *
- * @param[in] Hive
- * A pointer to a hive descriptor of which lexicographical
- * order of keys are to be checked.
- *
- * @param[in] Child
- * A child subkey cell used for lexicographical order
- * validation checks.
- *
- * @param[in] Sibling
- * A subkey cell which is the prior sibling of the child.
- * This is used in conjuction with the child to perfrom
- * lexical order checks.
+ * and prior sibling of the said child. Both are key
+ * nodes the check has accepted.
  *
  * @return
  * Returns TRUE if the order is legal, FALSE otherwise.
@@ -388,33 +400,13 @@ CmpKeyNodeNameHasNonAscii(
 static
 BOOLEAN
 CmpValidateLexicalOrder(
-    _In_ PHHIVE Hive,
-    _In_ HCELL_INDEX Child,
-    _In_ HCELL_INDEX Sibling)
+    _In_ PCM_KEY_NODE ChildNode,
+    _In_ PCM_KEY_NODE SiblingNode)
 {
     LONG Result;
     UNICODE_STRING ChildString, SiblingString;
-    PCM_KEY_NODE ChildNode, SiblingNode;
 
     PAGED_CODE();
-
-    /* Obtain the child node */
-    ChildNode = (PCM_KEY_NODE)HvGetCell(Hive, Child);
-    if (!ChildNode)
-    {
-        /* Couldn't get the child node, bail out */
-        DPRINT1("Failed to get the child node\n");
-        return FALSE;
-    }
-
-    /* Obtain the sibling node */
-    SiblingNode = (PCM_KEY_NODE)HvGetCell(Hive, Sibling);
-    if (!SiblingNode)
-    {
-        /* Couldn't get the sibling node, bail out */
-        DPRINT1("Failed to get the sibling node\n");
-        return FALSE;
-    }
 
 #if defined(_BLDR_)
     /*
@@ -438,12 +430,10 @@ CmpValidateLexicalOrder(
     if ((ChildNode->Flags & KEY_COMP_NAME) == 0 &&
         (SiblingNode->Flags & KEY_COMP_NAME) == 0)
     {
-        /* Build the sibling string */
         SiblingString.Buffer = &(SiblingNode->Name[0]);
         SiblingString.Length = SiblingNode->NameLength;
         SiblingString.MaximumLength = SiblingNode->NameLength;
 
-        /* Build the child string */
         ChildString.Buffer = &(ChildNode->Name[0]);
         ChildString.Length = ChildNode->NameLength;
         ChildString.MaximumLength = ChildNode->NameLength;
@@ -524,1359 +514,1360 @@ CmpValidateLexicalOrder(
         }
     }
 
-    /*
-     * One of the cases above has met the conditions
-     * successfully, the lexicographical order is legal.
-     */
     return TRUE;
 }
 
-/**
- * @brief
- * Validates the class of a given key cell.
+/* THE CELL MAP ***************************************************************/
+
+/*
+ * Per storage type, one bit per 8 bytes of the storage (cells are 8-byte
+ * aligned and at least 8 bytes long):
  *
- * @param[in] Hive
- * A pointer to a hive descriptor of which
- * the registry call is to be validated.
- *
- * @param[in] CurrentCell
- * The current key cell that the class points to.
- *
- * @param[in] CellData
- * A pointer to cell data of the current key cell
- * that contains the class to be validated.
- *
- * @return
- * Returns CM_CHECK_REGISTRY_GOOD if the class is in good shape.
- * The same CM status code is returned if the class doesn't
- * but the class length says otherwise. CM_CHECK_REGISTRY_KEY_CLASS_UNALLOCATED
- * is returned if the class cell is not allocated.
+ *  Start  an allocated cell starts here (from the walk of the bins);
+ *  Used   the tree uses this cell (with Sk: an 'sk' cell of a sound ring);
+ *  Sk     an 'sk' cell (without Used: one that is not sound, or that a ring
+ *         walk in progress has passed).
+ */
+typedef struct _CMP_CELL_MAP
+{
+    PULONG Start[HTYPE_COUNT];
+    PULONG Used[HTYPE_COUNT];
+    PULONG Sk[HTYPE_COUNT];
+    ULONG Length[HTYPE_COUNT];      /* bytes of storage the map covers */
+    ULONG Bytes[HTYPE_COUNT];       /* size of each of the three bitmaps */
+} CMP_CELL_MAP, *PCMP_CELL_MAP;
+
+/* Memory the check frees before it returns */
+static
+PVOID
+CmpCheckAllocate(
+    _In_ SIZE_T Size)
+{
+#if defined(_BLDR_)
+    return CmpAllocateTemporary(Size);
+#else
+    return CmpAllocate(Size, TRUE, TAG_REGISTRY_STACK);
+#endif
+}
+
+static
+VOID
+CmpCheckFree(
+    _In_ PVOID Ptr,
+    _In_ SIZE_T Size)
+{
+#if defined(_BLDR_)
+    UNREFERENCED_PARAMETER(Size);
+    CmpFreeTemporary(Ptr);
+#else
+    CmpFree(Ptr, (ULONG)Size);
+#endif
+}
+
+#define CMP_BIT_TEST(Map, Bit)  (((Map)[(Bit) >> 5] >> ((Bit) & 31)) & 1)
+#define CMP_BIT_SET(Map, Bit)   ((Map)[(Bit) >> 5] |= (1UL << ((Bit) & 31)))
+
+/* The most a storage may hold: the offset of a cell index has 31 bits */
+#define CMP_MAX_STORAGE_LENGTH  0x80000000UL
+
+typedef struct _CMP_CHECK
+{
+    PHHIVE Hive;
+    ULONG Flags;
+    BOOLEAN Live;           /* a hive in use: check only, volatile keys too */
+    BOOLEAN Heal;           /* repairs are allowed (self-healing, not live) */
+    BOOLEAN FixHive;
+    CMP_CELL_MAP Map;
+    PCMP_SK_TALLY Tally;
+    CMP_CASE_REPAIR_STATS Stats;
+    ULONG KeysRemoved;
+    ULONG ValuesRemoved;
+    ULONG ListsPurged;
+    ULONG FieldsReset;
+    ULONG BigDataDropped;   /* of ValuesRemoved: values whose big data chain is not sound */
+} CMP_CHECK, *PCMP_CHECK;
+
+static
+VOID
+CmpFreeCellMap(
+    _Inout_ PCMP_CELL_MAP Map)
+{
+    ULONG Type;
+
+    for (Type = 0; Type < HTYPE_COUNT; Type++)
+    {
+        if (Map->Start[Type])
+            CmpCheckFree(Map->Start[Type], 3 * Map->Bytes[Type]);
+        Map->Start[Type] = Map->Used[Type] = Map->Sk[Type] = NULL;
+        Map->Length[Type] = Map->Bytes[Type] = 0;
+    }
+}
+
+/*
+ * The cells of one bin (at Offset in its storage, Length bytes of storage):
+ * the header, then cells that tile it. Marks the allocated cells in Start if
+ * given.
  */
 static
 CM_CHECK_REGISTRY_STATUS
-CmpValidateClass(
-    _In_ PHHIVE Hive,
-    _In_ HCELL_INDEX CurrentCell,
-    _Inout_ PCELL_DATA CellData)
+CmpCheckBinCells(
+    _In_ PHBIN Bin,
+    _In_ ULONG Offset,
+    _In_ ULONG Length,
+    _Inout_ PULONG Start OPTIONAL)
 {
-    ULONG ClassLength;
-    HCELL_INDEX ClassCell;
+    ULONG CellOffset, CellSize;
+    LONG RawSize;
 
-    PAGED_CODE();
-
-    ASSERT(CurrentCell != HCELL_NIL);
-    ASSERT(CellData);
-
-    /* Cache the class cell and validate it (if any) */
-    ClassCell = CellData->u.KeyNode.Class;
-    ClassLength = CellData->u.KeyNode.ClassLength;
-    if (ClassLength > 0)
+    if (Bin->Signature != HV_HBIN_SIGNATURE)
     {
-        if (ClassCell == HCELL_NIL)
-        {
-            /*
-             * Somebody has freed the class but left the
-             * length as is, reset it.
-             */
-            DPRINT1("The key node class is NIL but the class length is not 0, resetting it\n");
-            HvMarkCellDirty(Hive, CurrentCell, FALSE);
-            CellData->u.KeyNode.ClassLength = 0;
-            return CM_CHECK_REGISTRY_GOOD;
-        }
-
-        if (!HvIsCellAllocated(Hive, ClassCell))
-        {
-            DPRINT1("The key class is not allocated\n");
-            return CM_CHECK_REGISTRY_KEY_CLASS_UNALLOCATED;
-        }
+        DPRINT1("Bin at 0x%x: bad signature\n", Offset);
+        return CM_CHECK_REGISTRY_BIN_SIGNATURE_HEADER_CORRUPT;
     }
 
+    /* A whole number of blocks, at least one, where the bin says it is, inside the storage */
+    if (Bin->FileOffset != Offset ||
+        Bin->Size < HBLOCK_SIZE ||
+        (Bin->Size % HBLOCK_SIZE) != 0 ||
+        Bin->Size > Length - Offset)
+    {
+        DPRINT1("Bin at 0x%x: bad size 0x%x or offset 0x%x\n", Offset, Bin->Size, Bin->FileOffset);
+        return CM_CHECK_REGISTRY_BIN_SIZE_OR_OFFSET_CORRUPT;
+    }
+
+    for (CellOffset = sizeof(HBIN); CellOffset < Bin->Size; CellOffset += CellSize)
+    {
+        if (Bin->Size - CellOffset < sizeof(HCELL) + sizeof(HCELL_INDEX))
+        {
+            DPRINT1("Bin at 0x%x: a cell header at 0x%x runs past the bin\n", Offset, CellOffset);
+            return CM_CHECK_REGISTRY_BAD_FREE_CELL;
+        }
+        RawSize = ((PHCELL)((PUCHAR)Bin + CellOffset))->Size;
+        CellSize = RawSize < 0 ? 0 - (ULONG)RawSize : (ULONG)RawSize;
+        if (CellSize < sizeof(HCELL) + sizeof(HCELL_INDEX) ||
+            (CellSize & 7) != 0 ||
+            CellSize > Bin->Size - CellOffset)
+        {
+            DPRINT1("Bin at 0x%x: cell at 0x%x has a bad size %d\n", Offset, CellOffset, RawSize);
+            return RawSize < 0 ? CM_CHECK_REGISTRY_BAD_ALLOC_CELL : CM_CHECK_REGISTRY_BAD_FREE_CELL;
+        }
+        if (RawSize < 0 && Start)
+            CMP_BIT_SET(Start, (Offset + CellOffset) >> 3);
+    }
     return CM_CHECK_REGISTRY_GOOD;
 }
 
-/**
- * @brief
- * Validates each value in the list by count. A
- * value that is damaged gets removed from the list.
- * This routine performs self-healing process in
- * this case.
- *
- * @param[in] Hive
- * A pointer to a hive descriptor of which a list
- * of registry values is to be validated.
- *
- * @param[in] CurrentCell
- * The current key cell that the value list points to.
- *
- * @param[in] ListCount
- * The list count that describes the actual number of
- * values in the list.
- *
- * @param[in] ValueListData
- * A pointer to cell data of the current key cell
- * that contains the value list to be validated.
- *
- * @param[out] ValuesRemoved
- * When the function finishes doing its operations,
- * this parameter contains the amount of removed values
- * from the list. A value of 0 indicates no values have
- * been removed (which that would imply a self-healing
- * process of the value list has occurred).
- *
- * @param[in] FixHive
- * If set to TRUE, the target hive will be fixed.
- *
- * @return
- * Returns CM_CHECK_REGISTRY_GOOD if the value list is
- * sane. CM_CHECK_REGISTRY_VALUE_CELL_NIL is returned
- * if a certain value cell is HCELL_NIL at specific
- * count index. CM_CHECK_REGISTRY_VALUE_CELL_UNALLOCATED is
- * returned if a certain value cell is unallocated at specific
- * count index. CM_CHECK_REGISTRY_VALUE_CELL_DATA_NOT_FOUND is
- * returned if cell data could not be mapped from the value cell,
- * the value list is totally torn apart in this case.
- * CM_CHECK_REGISTRY_VALUE_CELL_SIZE_NOT_SANE is returned if the
- * value's size is bogus. CM_CHECK_REGISTRY_CORRUPT_VALUE_DATA
- * is returned if the data inside the value is HCELL_NIL.
- * CM_CHECK_REGISTRY_DATA_CELL_NOT_ALLOCATED is returned if the
- * data cell inside the value is not allocated.
- * CM_CHECK_REGISTRY_BAD_KEY_VALUE_SIGNATURE is returned if the
- * value's signature is not valid.
+/*
+ * The map of the cells of every storage the check covers: the stable one (a
+ * hive being loaded has nothing else), and the volatile one of a live hive.
+ * Every bin and every cell is checked on the way.
  */
 static
 CM_CHECK_REGISTRY_STATUS
-CmpValidateValueListByCount(
+CmpBuildCellMap(
     _In_ PHHIVE Hive,
-    _In_ HCELL_INDEX CurrentCell,
-    _In_ ULONG ListCount,
-    _In_ PCELL_DATA ValueListData,
-    _Out_ PULONG ValuesRemoved,
-    _In_ BOOLEAN FixHive)
+    _In_ BOOLEAN Live,
+    _Out_ PCMP_CELL_MAP Map)
 {
-    ULONG ValueDataSize;
-    ULONG ListCountIndex;
-    ULONG DataSize;
-    HCELL_INDEX DataCell;
-    HCELL_INDEX ValueCell;
-    PCELL_DATA ValueData;
-    ULONG ValueNameLength, TotalValueNameLength;
+    CM_CHECK_REGISTRY_STATUS Status;
+    ULONG Type, Types, Offset, Length, Block, i;
+    PHMAP_ENTRY Entry;
+    PHBIN Bin;
+    PULONG Bits;
 
-    PAGED_CODE();
-
-    ASSERT(ValueListData);
-    ASSERT(ListCount != 0);
-
-    /* Assume we haven't removed any value counts for now */
-    *ValuesRemoved = 0;
-
-    /*
-     * Begin looping each value in the list and
-     * validate it accordingly.
-     */
-    ListCountIndex = 0;
-    while (ListCountIndex < ListCount)
+    RtlZeroMemory(Map, sizeof(*Map));
+    Types = (Live && !Hive->Flat) ? HTYPE_COUNT : 1;
+    for (Type = 0; Type < Types; Type++)
     {
-        ValueCell = ValueListData->u.KeyList[ListCountIndex];
-        if (ValueCell == HCELL_NIL)
+        if (Hive->Flat)
         {
-            if (!CmpRepairValueListCount(Hive,
-                                         CurrentCell,
-                                         ListCountIndex,
-                                         ValueListData,
-                                         FixHive))
-            {
-                DPRINT1("The value cell is NIL (at index %u, list count %u)\n",
-                        ListCountIndex, ListCount);
-                return CM_CHECK_REGISTRY_VALUE_CELL_NIL;
-            }
-
-            /* Decrease the list count and go to the next value */
-            ListCount--;
-            *ValuesRemoved++;
-            DPRINT1("Damaged value removed, continuing with the next value...\n");
+            Length = Hive->BaseBlock->Length;
+            if ((Length % HBLOCK_SIZE) != 0)
+                return CM_CHECK_REGISTRY_BIN_SIZE_OR_OFFSET_CORRUPT;
+        }
+        else
+        {
+            if (Hive->Storage[Type].Length > CMP_MAX_STORAGE_LENGTH / HBLOCK_SIZE)
+                return CM_CHECK_REGISTRY_BIN_SIZE_OR_OFFSET_CORRUPT;
+            Length = Hive->Storage[Type].Length * HBLOCK_SIZE;
+        }
+        if (Length > CMP_MAX_STORAGE_LENGTH)
+            return CM_CHECK_REGISTRY_BIN_SIZE_OR_OFFSET_CORRUPT;
+        if (Length == 0)
             continue;
-        }
 
-        if (!HvIsCellAllocated(Hive, ValueCell))
+        /* One bit per 8 bytes, three bitmaps in one allocation */
+        Map->Length[Type] = Length;
+        Map->Bytes[Type] = ((Length / 8 + 31) / 32) * sizeof(ULONG);
+        Bits = CmpCheckAllocate(3 * Map->Bytes[Type]);
+        if (!Bits)
         {
-            if (!CmpRepairValueListCount(Hive,
-                                         CurrentCell,
-                                         ListCountIndex,
-                                         ValueListData,
-                                         FixHive))
+            DPRINT1("No memory for the cell map of the hive (%lu bytes)\n", (unsigned long)(3 * Map->Bytes[Type]));
+            CmpFreeCellMap(Map);
+            return CM_CHECK_REGISTRY_ALLOCATE_MEM_STACK_FAIL;
+        }
+        RtlZeroMemory(Bits, 3 * Map->Bytes[Type]);
+        Map->Start[Type] = Bits;
+        Map->Used[Type] = (PULONG)((PUCHAR)Bits + Map->Bytes[Type]);
+        Map->Sk[Type] = (PULONG)((PUCHAR)Bits + 2 * Map->Bytes[Type]);
+
+        for (Offset = 0; Offset < Length; Offset += Bin->Size)
+        {
+            if (Hive->Flat)
             {
-                DPRINT1("The value cell is not allocated (at index %u, list count %u)\n",
-                        ListCountIndex, ListCount);
-                return CM_CHECK_REGISTRY_VALUE_CELL_UNALLOCATED;
-            }
-
-            /* Decrease the list count and go to the next value */
-            ListCount--;
-            *ValuesRemoved++;
-            DPRINT1("Damaged value removed, continuing with the next value...\n");
-            continue;
-        }
-
-        /* Obtain a cell data from this value */
-        ValueData = (PCELL_DATA)HvGetCell(Hive, ValueCell);
-        if (!ValueData)
-        {
-            DPRINT1("Cell data of the value cell not found (at index %u, value count %u)\n",
-                    ListCountIndex, ListCount);
-            return CM_CHECK_REGISTRY_VALUE_CELL_DATA_NOT_FOUND;
-        }
-
-        /* Check that the value size is sane */
-        ValueDataSize = HvGetCellSize(Hive, ValueData);
-        ValueNameLength = ValueData->u.KeyValue.NameLength;
-        TotalValueNameLength = ValueNameLength + FIELD_OFFSET(CM_KEY_VALUE, Name);
-        if (TotalValueNameLength > ValueDataSize)
-        {
-            if (!CmpRepairValueListCount(Hive,
-                                         CurrentCell,
-                                         ListCountIndex,
-                                         ValueListData,
-                                         FixHive))
-            {
-                DPRINT1("The total size is bigger than the actual cell size (total size %u, cell size %u, at index %u)\n",
-                        TotalValueNameLength, ValueDataSize, ListCountIndex);
-                return CM_CHECK_REGISTRY_VALUE_CELL_SIZE_NOT_SANE;
-            }
-
-            /* Decrease the list count and go to the next value */
-            ListCount--;
-            *ValuesRemoved++;
-            DPRINT1("Damaged value removed, continuing with the next value...\n");
-            continue;
-        }
-
-        /*
-         * The value cell has a sane size. The last thing
-         * to validate is the actual data of the value cell.
-         * That is, we want that the data itself and length
-         * are consistent. Technically speaking, value keys
-         * that are small are directly located in the value
-         * cell and it's built-in, in other words, the data
-         * is immediately present in the cell so we don't have
-         * to bother validating them since they're alright on
-         * their own. This can't be said the same about normal
-         * values though.
-         */
-        DataCell = ValueData->u.KeyValue.Data;
-        if (!CmpIsKeyValueSmall(&DataSize, ValueData->u.KeyValue.DataLength))
-        {
-            /* Validate the actual data based on size */
-            if (DataSize == 0)
-            {
-                if (DataCell != HCELL_NIL)
-                {
-                    if (!CmpRepairValueListCount(Hive,
-                                                 CurrentCell,
-                                                 ListCountIndex,
-                                                 ValueListData,
-                                                 FixHive))
-                    {
-                        DPRINT1("The data is not NIL on a 0 length, data is corrupt\n");
-                        return CM_CHECK_REGISTRY_CORRUPT_VALUE_DATA;
-                    }
-
-                    /* Decrease the list count and go to the next value */
-                    ListCount--;
-                    *ValuesRemoved++;
-                    DPRINT1("Damaged value removed, continuing with the next value...\n");
-                    continue;
-                }
+                /* One run of bins right after the base block */
+                Bin = (PHBIN)((PUCHAR)Hive->BaseBlock + HBLOCK_SIZE + Offset);
             }
             else
             {
-                if (!HvIsCellAllocated(Hive, DataCell))
+                /* A bin's first block maps the bin, and so do all of its blocks */
+                Block = Offset / HBLOCK_SIZE;
+                Entry = &Hive->Storage[Type].BlockList[Block];
+                Bin = (PHBIN)Entry->BinAddress;
+                if (!Bin || Entry->BlockAddress != (ULONG_PTR)Bin)
                 {
-                    if (!CmpRepairValueListCount(Hive,
-                                                 CurrentCell,
-                                                 ListCountIndex,
-                                                 ValueListData,
-                                                 FixHive))
+                    DPRINT1("Block %lu of storage %lu does not start a bin\n", (unsigned long)Block, (unsigned long)Type);
+                    CmpFreeCellMap(Map);
+                    return CM_CHECK_REGISTRY_BIN_SIZE_OR_OFFSET_CORRUPT;
+                }
+            }
+
+            Status = CmpCheckBinCells(Bin, Offset, Length, Map->Start[Type]);
+            if (!CM_CHECK_REGISTRY_SUCCESS(Status))
+            {
+                CmpFreeCellMap(Map);
+                return Status;
+            }
+
+            if (!Hive->Flat)
+            {
+                for (i = 1; i < Bin->Size / HBLOCK_SIZE; i++)
+                {
+                    if (Entry[i].BinAddress != (ULONG_PTR)Bin ||
+                        Entry[i].BlockAddress != (ULONG_PTR)Bin + i * HBLOCK_SIZE)
                     {
-                        DPRINT1("The data is not NIL on a 0 length, data is corrupt\n");
-                        return CM_CHECK_REGISTRY_DATA_CELL_NOT_ALLOCATED;
+                        DPRINT1("Block %lu of storage %lu is not mapped to its bin\n",
+                                (unsigned long)(Block + i), (unsigned long)Type);
+                        CmpFreeCellMap(Map);
+                        return CM_CHECK_REGISTRY_BIN_SIZE_OR_OFFSET_CORRUPT;
                     }
-
-                    /* Decrease the list count and go to the next value */
-                    ListCount--;
-                    *ValuesRemoved++;
-                    DPRINT1("Damaged value removed, continuing with the next value...\n");
-                    continue;
                 }
             }
-
-            /* FIXME: Big values not supported yet */
-            ASSERT_VALUE_BIG(Hive, DataSize);
         }
-
-        /* Is the signature valid? */
-        if (ValueData->u.KeyValue.Signature != CM_KEY_VALUE_SIGNATURE)
-        {
-            if (!CmpRepairValueListCount(Hive,
-                                         CurrentCell,
-                                         ListCountIndex,
-                                         ValueListData,
-                                         FixHive))
-            {
-                DPRINT1("The key value signature is invalid\n");
-                return CM_CHECK_REGISTRY_BAD_KEY_VALUE_SIGNATURE;
-            }
-
-            /* Decrease the list count and go to the next value */
-            ListCount--;
-            *ValuesRemoved++;
-            DPRINT1("Damaged value removed, continuing with the next value...\n");
-            continue;
-        }
-
-        /* Advance to the next value */
-        ListCountIndex++;
     }
-
     return CM_CHECK_REGISTRY_GOOD;
 }
 
-/**
- * @brief
- * Validates the value list of a key. If the list
- * is damaged due to corruption, the whole list
- * is expunged. This function performs self-healing
- * procedures in this case.
- *
- * @param[in] Hive
- * A pointer to a hive descriptor of which a list of
- * registry values is to be validated.
- *
- * @param[in] CurrentCell
- * The current key cell that the value list points to.
- *
- * @param[in] CellData
- * The cell data of the current cell of which the value
- * list comes from.
- *
- * @param[in] FixHive
- * If set to TRUE, the target hive will be fixed.
- *
- * @return
- * Returns CM_CHECK_REGISTRY_GOOD if the value list is
- * sane. CM_CHECK_REGISTRY_VALUE_LIST_UNALLOCATED is returned
- * if the value list cell is not allocated. CM_CHECK_REGISTRY_VALUE_LIST_DATA_NOT_FOUND
- * is returned if cell data could not be mapped from the value
- * list cell. CM_CHECK_REGISTRY_VALUE_LIST_SIZE_NOT_SANE is returned
- * if the size of the value list is bogus. A failure CM status code
- * is returned otherwise.
+/*
+ * The data of Cell if it is the start of an allocated cell the map covers
+ * and holds at least MinSize bytes, else NULL. Only cells of the stable
+ * storage, unless the hive is live.
  */
 static
-CM_CHECK_REGISTRY_STATUS
-CmpValidateValueList(
-    _In_ PHHIVE Hive,
-    _In_ HCELL_INDEX CurrentCell,
-    _Inout_ PCELL_DATA CellData,
-    _In_ BOOLEAN FixHive)
+PVOID
+CmpMapCell(
+    _In_ PCMP_CHECK Ctx,
+    _In_ HCELL_INDEX Cell,
+    _In_ ULONG MinSize,
+    _Out_ PULONG Size OPTIONAL)
 {
-    CM_CHECK_REGISTRY_STATUS CmStatusCode;
-    ULONG TotalValueLength, ValueSize;
-    ULONG ValueListCount;
-    ULONG ValuesRemoved;
-    HCELL_INDEX ValueListCell;
-    PCELL_DATA ValueListData;
+    ULONG Type, Offset;
+    LONG CellSize;
+    PVOID Data;
 
-    PAGED_CODE();
-
-    ASSERT(CurrentCell != HCELL_NIL);
-    ASSERT(CellData);
-
-    /* Cache the value list and validate it */
-    ValueListCell = CellData->u.KeyNode.ValueList.List;
-    ValueListCount = CellData->u.KeyNode.ValueList.Count;
-    if (ValueListCount > 0)
+    if (Cell == HCELL_NIL)
+        return NULL;
+    Type = HvGetCellType(Cell);
+    Offset = Cell & ~HCELL_TYPE_MASK;
+    if ((Type != Stable && !Ctx->Live) ||
+        (Offset & 7) != 0 ||
+        Offset >= Ctx->Map.Length[Type] ||
+        !CMP_BIT_TEST(Ctx->Map.Start[Type], Offset >> 3))
     {
-        if (!HvIsCellAllocated(Hive, ValueListCell))
-        {
-            DPRINT1("The value list is not allocated\n");
-            return CM_CHECK_REGISTRY_VALUE_LIST_UNALLOCATED;
-        }
-
-        /* Obtain cell data from the value list cell */
-        ValueListData = (PCELL_DATA)HvGetCell(Hive, ValueListCell);
-        if (!ValueListData)
-        {
-            DPRINT1("Could not get cell data from the value list\n");
-            return CM_CHECK_REGISTRY_VALUE_LIST_DATA_NOT_FOUND;
-        }
-
-        /*
-         * Cache the value size and total length and
-         * assert ourselves this is a sane value list
-         * to begin with.
-         */
-        ValueSize = HvGetCellSize(Hive, ValueListData);
-        TotalValueLength = ValueListCount * sizeof(HCELL_INDEX);
-        /* The count comes from the hive: compare without the product, which can wrap */
-        if (ValueListCount > ValueSize / sizeof(HCELL_INDEX))
-        {
-            DPRINT1("The value list is bigger than the cell (value list size %u, cell size %u)\n",
-                    TotalValueLength, ValueSize);
-            return CM_CHECK_REGISTRY_VALUE_LIST_SIZE_NOT_SANE;
-        }
-
-        /*
-         * The value list is sane, now we would
-         * need to validate the actual list
-         * by its count.
-         */
-        CmStatusCode = CmpValidateValueListByCount(Hive,
-                                                   CurrentCell,
-                                                   ValueListCount,
-                                                   ValueListData,
-                                                   &ValuesRemoved,
-                                                   FixHive);
-        if (!CM_CHECK_REGISTRY_SUCCESS(CmStatusCode))
-        {
-            DPRINT1("One of the values is corrupt and couldn't be repaired\n");
-            return CmStatusCode;
-        }
-
-        /* Log how much values have been removed */
-        if (ValuesRemoved > 0)
-        {
-            DPRINT1("%u values removed in the list\n", ValuesRemoved);
-        }
+        return NULL;
     }
 
-    return CM_CHECK_REGISTRY_GOOD;
+    /* A cell start of the map: the header and the data lie inside one bin */
+    Data = (PVOID)HvGetCell(Ctx->Hive, Cell);
+    if (!Data)
+        return NULL;
+    CellSize = HvGetCellSize(Ctx->Hive, Data);
+    if (CellSize < 0 || (ULONG)CellSize < MinSize)
+        return NULL;
+    if (Size)
+        *Size = (ULONG)CellSize;
+    return Data;
 }
 
-/**
- * @brief
- * Validates the subkeys list of a key. If the list is
- * damaged from corruption, the function can either
- * salvage this list or purge the whole of it. The
- * function performs different validation steps for
- * different storage types.
- *
- * @param[in] Hive
- * A pointer to a hive descriptor of which a list of
- * subkeys is to be validated.
- *
- * @param[in] CurrentCell
- * The current key cell that the subkeys list points to.
- *
- * @param[in] CellData
- * The cell data of the current cell of which the subkeys
- * list comes from.
- *
- * @param[in] FixHive
- * If set to TRUE, the target hive will be fixed.
- *
- * @param[out] DoRepair
- * A pointer to a boolean value set up by the function itself.
- * The function automatically sets this to FALSE indicating
- * that repairs can't be done onto the list itself. If the
- * list can be salvaged, then the function sets this to TRUE.
- * See Remarks for further information.
- *
- * @return
- * Returns CM_CHECK_REGISTRY_GOOD if the subkeys list is in
- * perfect shape. CM_CHECK_REGISTRY_STABLE_KEYS_ON_VOLATILE is
- * returned if the volatile storage has stable data which
- * that should not happen (this is only for the case of volatile
- * cells). CM_CHECK_REGISTRY_SUBKEYS_LIST_UNALLOCATED is returned
- * if the subkeys list cell is not allocated. CM_CHECK_REGISTRY_CORRUPT_SUBKEYS_INDEX
- * is returned if a key index could not be mapped from the subkeys
- * list cell. CM_CHECK_REGISTRY_BAD_SUBKEY_COUNT is returned if
- * the key index is a leaf and the subkeys count doesn't match up
- * with that of the leaf. CM_CHECK_REGISTRY_KEY_INDEX_CELL_UNALLOCATED is
- * returned if the key index cell at the specific index in the list of
- * the index is not allocated. CM_CHECK_REGISTRY_CORRUPT_LEAF_ON_ROOT is
- * returned if a leaf could not be mapped from an index.
- * CM_CHECK_REGISTRY_CORRUPT_LEAF_SIGNATURE is returned if the leaf has
- * an invalid signature. CM_CHECK_REGISTRY_CORRUPT_KEY_INDEX_SIGNATURE
- * is returned if the key index has an invalid signature, that is, it's
- * not a leaf nor a root.
- *
- * @remarks
- * Deep subkeys list healing can be done in specific cases where only
- * a subkey doesn't actually affect the key itself. The function will
- * mark the subkeys list as repairable by setting DoRepair parameter
- * to TRUE and the caller is responsible to heal the key by purging
- * the whole subkeys list. If the damage is so bad that there's
- * possibility the key itself is even damaged, no healing is done.
- */
+/* Give Cell its one use in the tree; FALSE if it has one already */
 static
-CM_CHECK_REGISTRY_STATUS
-CmpValidateSubKeyList(
-    _In_ PHHIVE Hive,
-    _In_ HCELL_INDEX CurrentCell,
-    _Inout_ PCELL_DATA CellData,
-    _In_ BOOLEAN FixHive,
-    _Out_ PBOOLEAN DoRepair)
+BOOLEAN
+CmpClaimCell(
+    _In_ PCMP_CHECK Ctx,
+    _In_ HCELL_INDEX Cell)
 {
-    ULONG SubKeyCounts;
-    HCELL_INDEX KeyIndexCell, SubKeysListCell;
-    PCM_KEY_INDEX RootKeyIndex, LeafKeyIndex;
-    ULONG RootIndex;
-    ULONG TotalLeafCount;
+    ULONG Type = HvGetCellType(Cell);
+    ULONG Bit = (Cell & ~HCELL_TYPE_MASK) >> 3;
 
-    PAGED_CODE();
-
-    ASSERT(CurrentCell != HCELL_NIL);
-    ASSERT(CellData);
-
-    RootKeyIndex = NULL;
-    LeafKeyIndex = NULL;
-    TotalLeafCount = 0;
-
-    /*
-     * Assume for now that the caller should not
-     * do any kind of repairs on the subkeys list,
-     * unless explicitly given the consent by us.
-     */
-    *DoRepair = FALSE;
-
-    /*
-     * For volatile keys they have data that can
-     * fluctuate and change on the fly so there's
-     * pretty much nothing that we can validate those.
-     * But still, we would want that the volatile key
-     * is not damaged by external factors, like e.g.,
-     * having stable keys on a volatile space.
-     */
-    if (IS_CELL_VOLATILE(CurrentCell))
-    {
-        if (CellData->u.KeyNode.SubKeyCounts[Stable] != 0)
-        {
-            DPRINT1("The volatile key has stable subkeys\n");
-            return CM_CHECK_REGISTRY_STABLE_KEYS_ON_VOLATILE;
-        }
-
-        return CM_CHECK_REGISTRY_GOOD;
-    }
-
-    /*
-     * This is not a volatile key, cache the subkeys list
-     * and validate it.
-     */
-    SubKeysListCell = CellData->u.KeyNode.SubKeyLists[Stable];
-    SubKeyCounts = CellData->u.KeyNode.SubKeyCounts[Stable];
-    if (SubKeyCounts > 0)
-    {
-        if (!HvIsCellAllocated(Hive, SubKeysListCell))
-        {
-            DPRINT1("The subkeys list cell is not allocated\n");
-            *DoRepair = TRUE;
-            return CM_CHECK_REGISTRY_SUBKEYS_LIST_UNALLOCATED;
-        }
-
-        /* Obtain a root index and validate it */
-        RootKeyIndex = (PCM_KEY_INDEX)HvGetCell(Hive, SubKeysListCell);
-        if (!RootKeyIndex)
-        {
-            DPRINT1("Could not get the root key index of the subkeys list cell\n");
-            return CM_CHECK_REGISTRY_CORRUPT_SUBKEYS_INDEX;
-        }
-
-        /*
-         * For simple, fast and hashed leaves we would want
-         * that the corresponding root index count matches with
-         * that of the subkey counts itself. If this is not the
-         * case we can isolate this problem and fix the count.
-         */
-        if (RootKeyIndex->Signature == CM_KEY_INDEX_LEAF ||
-            RootKeyIndex->Signature == CM_KEY_FAST_LEAF ||
-            RootKeyIndex->Signature == CM_KEY_HASH_LEAF)
-        {
-            if (SubKeyCounts != RootKeyIndex->Count)
-            {
-                if (!CmpRepairSubKeyCounts(Hive,
-                                           CurrentCell,
-                                           RootKeyIndex->Count,
-                                           CellData,
-                                           FixHive))
-                {
-                    DPRINT1("The subkeys list has invalid count (subkeys count %u, root key index count %u)\n",
-                            SubKeyCounts, RootKeyIndex->Count);
-                    return CM_CHECK_REGISTRY_BAD_SUBKEY_COUNT;
-                }
-            }
-
-            return CM_CHECK_REGISTRY_GOOD;
-        }
-
-        /*
-         * The root index is not a leaf, check if the index
-         * is an actual root then.
-         */
-        if (RootKeyIndex->Signature == CM_KEY_INDEX_ROOT)
-        {
-            /*
-             * For the root we have to loop each leaf
-             * from it and increase the total leaf count
-             * in the root after we determined the validity
-             * of a leaf. This way we can see if the subcount
-             * matches with that of the subkeys list count.
-             */
-            for (RootIndex = 0; RootIndex < RootKeyIndex->Count; RootIndex++)
-            {
-                KeyIndexCell = RootKeyIndex->List[RootIndex];
-                if (!HvIsCellAllocated(Hive, KeyIndexCell))
-                {
-                    DPRINT1("The key index cell is not allocated at index %u\n", RootIndex);
-                    *DoRepair = TRUE;
-                    return CM_CHECK_REGISTRY_KEY_INDEX_CELL_UNALLOCATED;
-                }
-
-                /* Obtain a leaf from the root */
-                LeafKeyIndex = (PCM_KEY_INDEX)HvGetCell(Hive, KeyIndexCell);
-                if (!LeafKeyIndex)
-                {
-                    DPRINT1("The root key index's signature is invalid!\n");
-                    return CM_CHECK_REGISTRY_CORRUPT_LEAF_ON_ROOT;
-                }
-
-                /* Check that the leaf has valid signature */
-                if (LeafKeyIndex->Signature != CM_KEY_INDEX_LEAF &&
-                    LeafKeyIndex->Signature != CM_KEY_FAST_LEAF &&
-                    LeafKeyIndex->Signature != CM_KEY_HASH_LEAF)
-                {
-                    DPRINT1("The leaf's signature is invalid!\n");
-                    *DoRepair = TRUE;
-                    return CM_CHECK_REGISTRY_CORRUPT_LEAF_SIGNATURE;
-                }
-
-                /* Add up the count of the leaf */
-                TotalLeafCount += LeafKeyIndex->Count;
-            }
-
-            /*
-             * We have built up the total leaf count,
-             * we have to determine this count is exactly
-             * the same as the subkeys list count. Otherwise
-             * just fix it.
-             */
-            if (SubKeyCounts != TotalLeafCount)
-            {
-                if (!CmpRepairSubKeyCounts(Hive,
-                                           CurrentCell,
-                                           TotalLeafCount,
-                                           CellData,
-                                           FixHive))
-                {
-                    DPRINT1("The subkeys list has invalid count (subkeys count %u, total leaf count %u)\n",
-                            SubKeyCounts, TotalLeafCount);
-                    return CM_CHECK_REGISTRY_BAD_SUBKEY_COUNT;
-                }
-            }
-
-            return CM_CHECK_REGISTRY_GOOD;
-        }
-
-        /*
-         * None of the valid signatures match with that of
-         * the root key index. By definition, the whole subkey
-         * list is total toast.
-         */
-        DPRINT1("The root key index's signature is invalid\n");
-        *DoRepair = TRUE;
-        return CM_CHECK_REGISTRY_CORRUPT_KEY_INDEX_SIGNATURE;
-    }
-
-    /* If we reach here then this key has no subkeys */
-    return CM_CHECK_REGISTRY_GOOD;
+    if (CMP_BIT_TEST(Ctx->Map.Used[Type], Bit) || CMP_BIT_TEST(Ctx->Map.Sk[Type], Bit))
+        return FALSE;
+    CMP_BIT_SET(Ctx->Map.Used[Type], Bit);
+    return TRUE;
 }
 
-/**
- * @brief
- * Purges the volatile storage of a registry
- * hive. This operation is done mainly during
- * the bootup of the system.
- *
- * @param[in] Hive
- * A pointer to a hive descriptor of which volatiles
- * are to be purged.
- *
- * @param[in] CurrentCell
- * The current key cell that the volatile storage of
- * the hive points to.
- *
- * @param[in] CellData
- * The cell data of the current cell of which the volatile
- * subkeys storage comes from.
- *
- * @param[in] Flags
- * A bit mask flag that is used to influence how is the
- * purging operation to be done. See CmCheckRegistry documentation
- * below for more information.
+/* Take back the use CmpClaimCell gave Cell (a big data chain that is not sound) */
+static
+VOID
+CmpUnclaimCell(
+    _In_ PCMP_CHECK Ctx,
+    _In_ HCELL_INDEX Cell)
+{
+    ULONG Type = HvGetCellType(Cell);
+    ULONG Bit = (Cell & ~HCELL_TYPE_MASK) >> 3;
+
+    Ctx->Map.Used[Type][Bit >> 5] &= ~(1UL << (Bit & 31));
+}
+
+/* A cell checked and given its use; NULL if it is not a cell, too small, or in use */
+static
+PVOID
+CmpTakeCell(
+    _In_ PCMP_CHECK Ctx,
+    _In_ HCELL_INDEX Cell,
+    _In_ ULONG MinSize,
+    _Out_ PULONG Size OPTIONAL)
+{
+    PVOID Data = CmpMapCell(Ctx, Cell, MinSize, Size);
+
+    if (!Data || !CmpClaimCell(Ctx, Cell))
+        return NULL;
+    return Data;
+}
+
+/* A cell the check changes: dirty, so that a repair is written, if the hive can be written */
+static
+VOID
+CmpCheckDirty(
+    _In_ PCMP_CHECK Ctx,
+    _In_ HCELL_INDEX Cell)
+{
+    if (Ctx->Heal && !Ctx->Hive->ReadOnly && !Ctx->Hive->Flat)
+        HvMarkCellDirty(Ctx->Hive, Cell, FALSE);
+}
+
+/*
+ * A repair was made: the hive is self-healed. Only where repairs are allowed:
+ * the boot loader (no self-heal) only normalises a subkey count the index
+ * disagrees with (CmpEndIndex), which is no repair to report.
  */
 static
 VOID
-CmpPurgeVolatiles(
-    _In_ PHHIVE Hive,
-    _In_ HCELL_INDEX CurrentCell,
-    _Inout_ PCELL_DATA CellData,
-    _In_ ULONG Flags)
+CmpCheckHealed(
+    _In_ PCMP_CHECK Ctx)
 {
-    PAGED_CODE();
-
-    ASSERT(CellData);
-
-    /* Did the caller ask to purge volatiles? */
-    if (((Flags & CM_CHECK_REGISTRY_PURGE_VOLATILES) ||
-         (Flags & CM_CHECK_REGISTRY_BOOTLOADER_PURGE_VOLATILES)) &&
-        (CellData->u.KeyNode.SubKeyCounts[Volatile] != 0))
-    {
-        /*
-         * OK, the caller wants them cleaned from this
-         * hive. For XP Beta 1 or newer hives, we unintialize
-         * the whole volatile subkeys list. For older hives,
-         * we just do a cleanup.
-         */
-#if !defined(_BLDR_)
-        HvMarkCellDirty(Hive, CurrentCell, FALSE);
-#endif
-        if ((Flags & CM_CHECK_REGISTRY_BOOTLOADER_PURGE_VOLATILES) &&
-            (Hive->Version >= HSYS_WHISTLER_BETA1))
-        {
-            CellData->u.KeyNode.SubKeyLists[Volatile] = CMP_VOLATILE_LIST_UNINTIALIZED;
-        }
-        else
-        {
-            CellData->u.KeyNode.SubKeyLists[Volatile] = HCELL_NIL;
-        }
-
-        /* Clear the count */
-        CellData->u.KeyNode.SubKeyCounts[Volatile] = 0;
-    }
+    if (Ctx->Heal)
+        Ctx->Hive->BaseBlock->BootType |= HBOOT_TYPE_SELF_HEAL;
 }
 
-/**
- * @brief
- * Validates the key cell, ensuring that
- * the key in the registry is valid and not corrupted.
- *
- * @param[in] Hive
- * A pointer to a hive descriptor of the registry where
- * the key is to be validated.
- *
- * @param[in] SecurityDefaulted
- * If the caller sets this to TRUE, this indicates the
- * hive has its security property defaulted due to
- * heal recovery of the said security. If the caller
- * sets this to FALSE, the hive comes with its own
- * security details. This parameter is currently unused.
- *
- * @param[in] ParentCell
- * The parent key cell that comes before the current cell.
- * This parameter can be HCELL_NIL if the first cell is
- * the root cell which is the parent of its own.
- *
- * @param[in] CurrentCell
- * The current child key cell that is to be validated.
- *
- * @param[in] Flags
- * A bit mask flag that is used to influence how is the
- * purging operation of volatile keys in the volatile storage
- * to be done. See CmCheckRegistry documentation below for more
- * information.
- *
- * @param[in] FixHive
- * If set to TRUE, the target hive will be fixed.
- *
- * @return
- * Returns CM_CHECK_REGISTRY_GOOD if the key that has been validated
- * is valid and not corrupted. CM_CHECK_REGISTRY_KEY_CELL_NOT_ALLOCATED is
- * returned if the key cell is not allocated. CM_CHECK_REGISTRY_CELL_DATA_NOT_FOUND
- * is returned if cell data could not be mapped from the key cell.
- * CM_CHECK_REGISTRY_CELL_SIZE_NOT_SANE is returned if the key cell
- * has an abnormal size that is above the trehshold the validation checks
- * can permit. CM_CHECK_REGISTRY_KEY_NAME_LENGTH_ZERO is returned if the
- * name length of the key node is 0, meaning that the key has no name.
- * CM_CHECK_REGISTRY_KEY_TOO_BIG_THAN_CELL is returned if the key is too
- * big than the cell itself. CM_CHECK_REGISTRY_BAD_KEY_NODE_PARENT is
- * returned if the parent node of the key is incosistent and it couldn't
- * be fixed. CM_CHECK_REGISTRY_BAD_KEY_NODE_SIGNATURE is returned if
- * the signature of the key node is corrupt and it couldn't be fixed.
- * A failure CM status code is returned otherwise.
+/* For CmpRepairSubKeyIndexCase: an index entry it may read as a key node */
+static
+BOOLEAN
+CmpIsKeyCell(
+    _In_ PVOID Context,
+    _In_ HCELL_INDEX Cell)
+{
+    PCMP_CHECK Ctx = Context;
+    PCM_KEY_NODE Node;
+    ULONG Size;
+    ULONG Type = HvGetCellType(Cell);
+
+    Node = CmpMapCell(Ctx, Cell, FIELD_OFFSET(CM_KEY_NODE, Name), &Size);
+    if (!Node ||
+        CMP_BIT_TEST(Ctx->Map.Sk[Type], (Cell & ~HCELL_TYPE_MASK) >> 3) ||
+        Node->Signature != CM_KEY_NODE_SIGNATURE ||
+        Node->NameLength == 0 ||
+        Node->NameLength > Size - FIELD_OFFSET(CM_KEY_NODE, Name) ||
+        (!(Node->Flags & KEY_COMP_NAME) && (Node->NameLength % sizeof(WCHAR)) != 0))
+    {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* SECURITY *******************************************************************/
+
+/*
+ * Is the ring Cell is in sound: every cell of it an 'sk' cell of the same
+ * storage, its descriptor inside the cell, named by its neighbours both ways,
+ * and the ring closes. Each cell is walked once per check: a sound ring is
+ * marked Used+Sk, the cells of a walk that fails stay Sk only (not sound),
+ * so a key naming any of them is answered at once.
  */
 static
-CM_CHECK_REGISTRY_STATUS
-CmpValidateKey(
-    _In_ PHHIVE Hive,
-    _In_ BOOLEAN SecurityDefaulted,
-    _In_ HCELL_INDEX ParentCell,
-    _In_ HCELL_INDEX CurrentCell,
-    _In_ ULONG Flags,
-    _In_ BOOLEAN FixHive,
-    _Inout_ PCMP_CASE_REPAIR_STATS CaseStats)
+BOOLEAN
+CmpCheckSecurityRing(
+    _In_ PCMP_CHECK Ctx,
+    _In_ HCELL_INDEX Cell)
 {
-    CM_CHECK_REGISTRY_STATUS CmStatusCode;
-    PCELL_DATA CellData;
-    ULONG CellSize;
-    BOOLEAN DoSubkeysRepair;
-    ULONG TotalKeyNameLength, NameLength;
+    PCM_KEY_SECURITY Security, Next;
+    HCELL_INDEX Current, Flink;
+    ULONG Type = HvGetCellType(Cell), Bit, Size;
 
-    PAGED_CODE();
-
-    /* The current key cell mustn't be NIL here! */
-    ASSERT(CurrentCell != HCELL_NIL);
-
-    /* TODO: To be removed once we support security caching in Cm */
-    UNREFERENCED_PARAMETER(SecurityDefaulted);
-
-    /*
-     * We must ensure that the key cell is
-     * allocated in the first place before
-     * we go further.
-     */
-    if (!HvIsCellAllocated(Hive, CurrentCell))
+    Current = Cell;
+    for (;;)
     {
-        DPRINT1("The key cell is not allocated\n");
-        return CM_CHECK_REGISTRY_KEY_CELL_NOT_ALLOCATED;
-    }
+        Security = CmpMapCell(Ctx, Current, FIELD_OFFSET(CM_KEY_SECURITY, Descriptor), &Size);
+        if (!Security || HvGetCellType(Current) != Type)
+            return FALSE;
+        Bit = (Current & ~HCELL_TYPE_MASK) >> 3;
 
-    /* Obtain cell data from it */
-    CellData = (PCELL_DATA)HvGetCell(Hive, CurrentCell);
-    if (!CellData)
-    {
-        DPRINT1("Could not get cell data from the cell\n");
-        return CM_CHECK_REGISTRY_CELL_DATA_NOT_FOUND;
-    }
+        /* In use as something else, not sound, or met before in this walk (a loop that misses Cell) */
+        if (CMP_BIT_TEST(Ctx->Map.Used[Type], Bit) || CMP_BIT_TEST(Ctx->Map.Sk[Type], Bit))
+            return FALSE;
+        CMP_BIT_SET(Ctx->Map.Sk[Type], Bit);
 
-    /* Get the size of this cell and validate its size */
-    CellSize = HvGetCellSize(Hive, CellData);
-    if (CellSize > CMP_KEY_SIZE_THRESHOLD)
-    {
-        DPRINT1("The cell size is above the threshold size (size %u)\n", CellSize);
-        return CM_CHECK_REGISTRY_CELL_SIZE_NOT_SANE;
-    }
-
-    /*
-     * The cell size is OK but we must ensure
-     * the key is not bigger than the container
-     * of the cell.
-     */
-    NameLength = CellData->u.KeyNode.NameLength;
-    if (NameLength == 0)
-    {
-        DPRINT1("The key node name length is 0!\n");
-        return CM_CHECK_REGISTRY_KEY_NAME_LENGTH_ZERO;
-    }
-
-    TotalKeyNameLength = NameLength + FIELD_OFFSET(CM_KEY_NODE, Name);
-    if (TotalKeyNameLength > CellSize)
-    {
-        DPRINT1("The key is too big than the cell (key size %u, cell size %u)\n",
-                TotalKeyNameLength, CellSize);
-        return CM_CHECK_REGISTRY_KEY_TOO_BIG_THAN_CELL;
-    }
-
-    /* Is the parent cell consistent? */
-    if (ParentCell != HCELL_NIL &&
-        ParentCell != CellData->u.KeyNode.Parent)
-    {
-        if (!CmpRepairParentNode(Hive,
-                                 CurrentCell,
-                                 ParentCell,
-                                 CellData,
-                                 FixHive))
+        if (Security->Signature != CM_KEY_SECURITY_SIGNATURE ||
+            Security->DescriptorLength > Size - FIELD_OFFSET(CM_KEY_SECURITY, Descriptor))
         {
-            DPRINT1("The parent key node doesn't point to the actual parent\n");
-            return CM_CHECK_REGISTRY_BAD_KEY_NODE_PARENT;
+            return FALSE;
+        }
+
+        /* The next cell must name this one back */
+        Flink = Security->Flink;
+        Next = CmpMapCell(Ctx, Flink, FIELD_OFFSET(CM_KEY_SECURITY, Descriptor), NULL);
+        if (!Next || HvGetCellType(Flink) != Type || Next->Blink != Current)
+            return FALSE;
+
+        Current = Flink;
+        if (Current == Cell)
+            break;
+    }
+
+    /* Sound: every cell of the ring becomes an 'sk' cell in use */
+    do
+    {
+        CMP_BIT_SET(Ctx->Map.Used[Type], (Current & ~HCELL_TYPE_MASK) >> 3);
+        Current = ((PCM_KEY_SECURITY)HvGetCell(Ctx->Hive, Current))->Flink;
+    } while (Current != Cell);
+    return TRUE;
+}
+
+/* May a key name Cell as its security: a cell of a sound ring with a valid descriptor */
+static
+BOOLEAN
+CmpCheckKeySecurity(
+    _In_ PCMP_CHECK Ctx,
+    _In_ HCELL_INDEX Cell)
+{
+    PCM_KEY_SECURITY Security;
+    ULONG Type, Bit;
+
+    if (!CmpMapCell(Ctx, Cell, FIELD_OFFSET(CM_KEY_SECURITY, Descriptor), NULL))
+        return FALSE;
+    Type = HvGetCellType(Cell);
+    Bit = (Cell & ~HCELL_TYPE_MASK) >> 3;
+    if (!CMP_BIT_TEST(Ctx->Map.Sk[Type], Bit))
+    {
+        if (CMP_BIT_TEST(Ctx->Map.Used[Type], Bit) || !CmpCheckSecurityRing(Ctx, Cell))
+            return FALSE;
+    }
+    else if (!CMP_BIT_TEST(Ctx->Map.Used[Type], Bit))
+    {
+        /* Seen in a ring that is not sound */
+        return FALSE;
+    }
+
+    /* A cell no key holds a reference to is not one a key may name (as before the recount) */
+    Security = (PCM_KEY_SECURITY)HvGetCell(Ctx->Hive, Cell);
+    if (Security->ReferenceCount == 0)
+        return FALSE;
+    if (!CmpIsSaneRelativeDescriptor(&Security->Descriptor, Security->DescriptorLength))
+        return FALSE;
+#if !defined(CMLIB_HOST) && !defined(_BLDR_)
+    if (!RtlValidRelativeSecurityDescriptor(&Security->Descriptor, Security->DescriptorLength, 0))
+        return FALSE;
+#endif
+    return TRUE;
+}
+
+/* VALUES *********************************************************************/
+
+/*
+ * Is the big data of a value (Length bytes, more than CM_KEY_VALUE_BIG, in a
+ * hive of format 1.4 or later; see cmlib.h) a sound chain: Cell is a 'db'
+ * cell whose segment count is at least the number of segments the data
+ * needs and whose list cell holds that many entries; every entry is the start
+ * of an allocated cell, every segment but the last holds CM_KEY_VALUE_BIG
+ * bytes, the last one the rest. Every cell of the chain (the 'db' cell, the
+ * list, each segment) is taken for this value: a cell used twice (by another
+ * value, a key, an 'sk' ring, twice in the list, the list or the 'db' cell
+ * itself listed as a segment) makes the chain unsound, so there is no cycle.
+ * The readers (cmvalue.c) read only the segments the data needs; a chain
+ * that lists more keeps them (they are freed with the value).
+ *
+ * The cells are taken only once all of them are found to be what they must
+ * be, and a chain that turns out to use a cell twice gives back what it took:
+ * a value that is dropped leaves no cell taken, so a key or value that comes
+ * later in the walk and owns such a cell is not lost for it.
+ */
+static
+BOOLEAN
+CmpCheckBigData(
+    _In_ PCMP_CHECK Ctx,
+    _In_ HCELL_INDEX Cell,
+    _In_ ULONG Length)
+{
+    PCM_BIG_DATA BigData;
+    PHCELL_INDEX List;
+    ULONG Count, Needed, i, Want;
+
+    BigData = CmpMapCell(Ctx, Cell, sizeof(CM_BIG_DATA), NULL);
+    if (!BigData || BigData->Signature != CM_BIG_DATA_SIGNATURE)
+        return FALSE;
+
+    /* A length below 2^31 may need more segments than a 16-bit count holds */
+    Needed = CMP_BIG_DATA_SEGMENTS(Length);
+    Count = BigData->Count;
+    if (Needed > MAXUSHORT || Count < Needed)
+        return FALSE;
+
+    List = CmpMapCell(Ctx, BigData->List, Count * sizeof(HCELL_INDEX), NULL);
+    if (!List)
+        return FALSE;
+
+    for (i = 0; i < Count; i++)
+    {
+        /* Count >= Needed >= 2: the last segment holds what the others do not */
+        Want = (i + 1 < Count) ? CM_KEY_VALUE_BIG :
+               (Length > i * CM_KEY_VALUE_BIG) ? Length - i * CM_KEY_VALUE_BIG : 0;
+        if (!CmpMapCell(Ctx, List[i], Want, NULL))
+            return FALSE;
+    }
+
+    /* Every cell once: the 'db' cell, the list, the segments */
+    if (!CmpClaimCell(Ctx, Cell))
+        return FALSE;
+    if (!CmpClaimCell(Ctx, BigData->List))
+    {
+        CmpUnclaimCell(Ctx, Cell);
+        return FALSE;
+    }
+    for (i = 0; i < Count; i++)
+    {
+        if (!CmpClaimCell(Ctx, List[i]))
+        {
+            while (i-- > 0)
+                CmpUnclaimCell(Ctx, List[i]);
+            CmpUnclaimCell(Ctx, BigData->List);
+            CmpUnclaimCell(Ctx, Cell);
+            return FALSE;
         }
     }
+    return TRUE;
+}
 
-    /* Is the key node signature valid? */
-    if (CellData->u.KeyNode.Signature != CM_KEY_NODE_SIGNATURE)
+/* Is the value at Cell sound; its name length in bytes as a Unicode string, its data length */
+static
+BOOLEAN
+CmpCheckValue(
+    _In_ PCMP_CHECK Ctx,
+    _In_ HCELL_INDEX Cell,
+    _Out_ PULONG NameBytes,
+    _Out_ PULONG DataBytes)
+{
+    PCM_KEY_VALUE Value;
+    ULONG Size, Length, DataSize;
+
+    Value = CmpTakeCell(Ctx, Cell, FIELD_OFFSET(CM_KEY_VALUE, Name), &Size);
+    if (!Value ||
+        Value->Signature != CM_KEY_VALUE_SIGNATURE ||
+        Value->NameLength > Size - FIELD_OFFSET(CM_KEY_VALUE, Name) ||
+        (!(Value->Flags & VALUE_COMP_NAME) && (Value->NameLength % sizeof(WCHAR)) != 0))
     {
-        if (!CmpRepairKeyNodeSignature(Hive,
-                                       CurrentCell,
-                                       CellData,
-                                       FixHive))
+        return FALSE;
+    }
+
+    if (CmpIsKeyValueSmall(&Length, Value->DataLength))
+    {
+        /* The data is the Data field itself */
+        if (Length > CM_KEY_VALUE_SMALL)
+            return FALSE;
+    }
+    else if (Value->Data == HCELL_NIL)
+    {
+        /*
+         * No cell: only for no data. The kernel writes such values (the copy
+         * of a value without data, CmpCopyValue, e.g. in every saved hive),
+         * and the public format specification describes them too (a
+         * tombstone value: Data size 0, Data offset 0xFFFFFFFF). No reader
+         * looks a cell up for DataLength 0 (CmpGetValueData), so the value
+         * is kept as it is: a valid hive loads unchanged.
+         */
+        if (Length != 0)
+            return FALSE;
+    }
+    else if (CmpIsKeyValueBig(Ctx->Hive, Length) &&
+             CmpMapCell(Ctx, Value->Data, 0, &DataSize) &&
+             DataSize < Length)
+    {
+        /* Big data (1.4+, see cmlib.h): a 'db' cell and its chain */
+        if (!CmpCheckBigData(Ctx, Value->Data, Length))
         {
-            DPRINT1("The parent key node signature is not valid\n");
-            return CM_CHECK_REGISTRY_BAD_KEY_NODE_SIGNATURE;
+            DPRINT1("Value 0x%x: the big data chain at 0x%x (%lu bytes) is not sound\n",
+                    Cell, Value->Data, (unsigned long)Length);
+            Ctx->BigDataDropped++;
+            return FALSE;
         }
     }
-
-    /*
-     * A key of a hive file is never a hive exit (a link node of the master
-     * hive, made in memory when a hive is linked): its subkey fields would be
-     * taken for a pointer to another hive (CmpHandleExitNode). The flag comes
-     * from the file, which may have been edited (a user's profile hive): drop
-     * it, the key is checked as the ordinary key it is.
-     */
-    if (CellData->u.KeyNode.Flags & KEY_HIVE_EXIT)
+    else
     {
-        DPRINT1("Key 0x%x is marked as a hive exit in a hive file, flag dropped\n", CurrentCell);
-        CellData->u.KeyNode.Flags &= ~KEY_HIVE_EXIT;
-        if (FixHive)
-            HvMarkCellDirty(Hive, CurrentCell, FALSE);
+        /* One cell holds all of the data */
+        if (!CmpTakeCell(Ctx, Value->Data, Length, NULL))
+            return FALSE;
+    }
+
+    *NameBytes = (Value->Flags & VALUE_COMP_NAME) ? Value->NameLength * sizeof(WCHAR) : Value->NameLength;
+    *DataBytes = Length;
+    return TRUE;
+}
+
+/*
+ * The value list of a key: the list cell holds Count entries, every entry is
+ * a sound value. A value that is not is removed from the list (the list is
+ * compacted in place, in one pass); a list cell that is not sound is dropped.
+ * Gives the longest name (bytes, as Unicode) and data of the values kept.
+ */
+static
+BOOLEAN
+CmpCheckValueList(
+    _In_ PCMP_CHECK Ctx,
+    _In_ HCELL_INDEX KeyCell,
+    _Inout_ PCM_KEY_NODE Node,
+    _Out_ PULONG MaxNameBytes,
+    _Out_ PULONG MaxDataBytes)
+{
+    PHCELL_INDEX List;
+    ULONG Size, Count, i, Kept, NameBytes, DataBytes, MaxName = 0, MaxData = 0;
+
+    *MaxNameBytes = 0;
+    *MaxDataBytes = 0;
+    Count = Node->ValueList.Count;
+    if (Count == 0)
+    {
+        /* A new value would take this as a list cell to grow */
+        if (Node->ValueList.List != HCELL_NIL && !Ctx->Live)
+        {
+            Node->ValueList.List = HCELL_NIL;
+            CmpCheckDirty(Ctx, KeyCell);
+        }
+        return TRUE;
+    }
+
+    List = CmpTakeCell(Ctx, Node->ValueList.List, 0, &Size);
+    if (!List || Count > Size / sizeof(HCELL_INDEX))
+    {
+        DPRINT1("Key 0x%x: the value list (count %lu) is not sound\n", KeyCell, (unsigned long)Count);
+        if (!Ctx->Heal)
+            return FALSE;
+        CmpCheckDirty(Ctx, KeyCell);
+        Node->ValueList.List = HCELL_NIL;
+        Node->ValueList.Count = 0;
+        Ctx->ListsPurged++;
+        CmpCheckHealed(Ctx);
+        return TRUE;
+    }
+
+    for (i = 0, Kept = 0; i < Count; i++)
+    {
+        if (!CmpCheckValue(Ctx, List[i], &NameBytes, &DataBytes))
+        {
+            if (!Ctx->Heal)
+            {
+                DPRINT1("Key 0x%x: value %lu (cell 0x%x) is not sound\n", KeyCell, (unsigned long)i, List[i]);
+                return FALSE;
+            }
+            Ctx->ValuesRemoved++;
+            continue;
+        }
+        MaxName = CMP_MAX(MaxName, NameBytes);
+        MaxData = CMP_MAX(MaxData, DataBytes);
+        if (Kept != i)
+            List[Kept] = List[i];
+        Kept++;
+    }
+
+    if (Kept != Count)
+    {
+        CmpCheckDirty(Ctx, KeyCell);
+        CmpCheckDirty(Ctx, Node->ValueList.List);
+        Node->ValueList.Count = Kept;
+        if (Kept == 0)
+            Node->ValueList.List = HCELL_NIL;
+        CmpCheckHealed(Ctx);
+    }
+
+    *MaxNameBytes = MaxName;
+    *MaxDataBytes = MaxData;
+    return TRUE;
+}
+
+/* KEYS ***********************************************************************/
+
+/* The flags a key of a hive file may have */
+#define CMP_FILE_KEY_FLAGS_DROPPED (KEY_HIVE_EXIT | KEY_PREDEF_HANDLE | KEY_IS_VOLATILE)
+
+/* Does the name of a key node (inside its cell: checked by the caller) hold a path separator */
+static
+BOOLEAN
+CmpKeyNameHasSeparator(
+    _In_ PCM_KEY_NODE Node)
+{
+    ULONG i;
+
+    if (Node->Flags & KEY_COMP_NAME)
+    {
+        for (i = 0; i < Node->NameLength; i++)
+        {
+            if (((PUCHAR)Node->Name)[i] == '\\')
+                return TRUE;
+        }
+    }
+    else
+    {
+        for (i = 0; i < Node->NameLength / sizeof(WCHAR); i++)
+        {
+            if (Node->Name[i] == L'\\')
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/*
+ * Is the key at Cell sound by itself (its subkeys are checked by the walk):
+ * a key node cell not in use, its name inside it, its security, class and
+ * value list. Fields that are wrong but repairable are repaired; FALSE means
+ * the key cannot be kept (the caller removes it from its parent, or refuses
+ * the hive for the root).
+ */
+static
+BOOLEAN
+CmpCheckKey(
+    _In_ PCMP_CHECK Ctx,
+    _In_ HCELL_INDEX Cell,
+    _In_ HCELL_INDEX Parent,
+    _Out_ PCM_KEY_NODE *KeyNode)
+{
+    PCM_KEY_NODE Node;
+    ULONG Size, MaxValueName, MaxValueData;
+
+    *KeyNode = NULL;
+    Node = CmpTakeCell(Ctx, Cell, FIELD_OFFSET(CM_KEY_NODE, Name), &Size);
+    if (!Node)
+    {
+        DPRINT1("Key 0x%x is not a cell, or a cell in use\n", Cell);
+        return FALSE;
+    }
+    /* A Unicode name is a whole number of characters: the lookups compare lengths in bytes */
+    if (Node->Signature != CM_KEY_NODE_SIGNATURE ||
+        Size > CMP_KEY_SIZE_THRESHOLD ||
+        Node->NameLength == 0 ||
+        Node->NameLength > Size - FIELD_OFFSET(CM_KEY_NODE, Name) ||
+        (!(Node->Flags & KEY_COMP_NAME) && (Node->NameLength % sizeof(WCHAR)) != 0))
+    {
+        DPRINT1("Key 0x%x: bad signature, cell size %lu or name length %u\n",
+                Cell, (unsigned long)Size, Node->NameLength);
+        return FALSE;
     }
 
     /*
-     * Validate the security cell. A bad one is not a reason to refuse the hive
-     * or to stop the boot: the key loses its stored descriptor (Security is
-     * reset to HCELL_NIL, the state of every key of a hive that has none) and
-     * the hive loads. This is done with or without FixHive; FixHive only makes
-     * the change persistent. The orphaned cell stays in the ring.
+     * A name may begin with a NUL: names are counted, and the native API
+     * makes such a key (NtCreateKey with a path whose last component begins
+     * with one). It is a key like any other and is kept: dropping it would
+     * lose what a program wrote, and the check of a live hive would refuse
+     * every hive that holds one. Its name is no pointer or length; the code
+     * that reads names as C strings (RegDeleteTreeW) handles it by its
+     * counted name. (NtRenameKey makes such names as well.)
      */
-    if (CellData->u.KeyNode.Security != HCELL_NIL &&
-        !(CellData->u.KeyNode.Flags & KEY_HIVE_EXIT) &&
-        !CmpValidateSecurityCell(Hive, CellData->u.KeyNode.Security))
+
+    /*
+     * A name with a path separator, though, no create or rename makes: the
+     * parser splits names at it and NtRenameKey refuses it. No open reaches
+     * such a key, and a program that opens the subkeys it enumerates by
+     * their names opens the parent again instead (RegDeleteTreeW recursed
+     * until its stack overflowed, in-guest fuzz). The key is not one a hive
+     * written by the registry can hold: it goes. The root's name is not
+     * parsed.
+     */
+    if (Parent != HCELL_NIL && CmpKeyNameHasSeparator(Node))
     {
-        if (CaseStats->SecurityReset++ == 0)
+        DPRINT1("Key 0x%x: the name holds a path separator\n", Cell);
+        return FALSE;
+    }
+
+    /* The parent named by the key is the one it is found under */
+    if (Parent != HCELL_NIL && Node->Parent != Parent)
+    {
+        if (!Ctx->Heal)
+            return FALSE;
+        CmpCheckDirty(Ctx, Cell);
+        Node->Parent = Parent;
+        Ctx->FieldsReset++;
+        CmpCheckHealed(Ctx);
+    }
+
+    if (!Ctx->Live)
+    {
+        /*
+         * A key of a hive file is never a hive exit (its subkey fields would
+         * be taken for a pointer to another hive), a predefined handle (its
+         * value count would be taken for a handle) or volatile, and only the
+         * root is a hive entry. The flags come from the file: drop them.
+         */
+        if ((Node->Flags & CMP_FILE_KEY_FLAGS_DROPPED) ||
+            (Parent != HCELL_NIL && (Node->Flags & KEY_HIVE_ENTRY)) ||
+            (Parent == HCELL_NIL && (Node->Flags & KEY_SYM_LINK)))
+        {
+            DPRINT1("Key 0x%x: flags 0x%x a key of a hive file cannot have, dropped\n", Cell, Node->Flags);
+            CmpCheckDirty(Ctx, Cell);
+            Node->Flags &= ~CMP_FILE_KEY_FLAGS_DROPPED;
+            if (Parent != HCELL_NIL)
+                Node->Flags &= ~KEY_HIVE_ENTRY;
+            else
+                Node->Flags &= ~KEY_SYM_LINK;   /* the root is linked into the registry, never followed as a link */
+            Ctx->FieldsReset++;
+        }
+
+        /* A file holds no volatile key: whatever the volatile list says is gone */
+        if (Node->SubKeyCounts[Volatile] != 0)
+        {
+            CmpCheckDirty(Ctx, Cell);
+            Node->SubKeyCounts[Volatile] = 0;
+            Node->SubKeyLists[Volatile] = (Ctx->Flags & CM_CHECK_REGISTRY_BOOTLOADER_PURGE_VOLATILES) &&
+                                          Ctx->Hive->Version >= HSYS_WHISTLER_BETA1 ?
+                                          CMP_VOLATILE_LIST_UNINTIALIZED : HCELL_NIL;
+        }
+    }
+    else if (Node->Flags & KEY_HIVE_EXIT)
+    {
+        return FALSE;
+    }
+
+    /*
+     * Security. A bad 'sk' cell is not a reason to refuse the hive or to stop
+     * the boot: the key loses its stored descriptor (Security is reset to
+     * HCELL_NIL, the state of every key of a hive that has none) and inherits.
+     * Whoever can write the file can as well write a valid descriptor that
+     * grants anything, so refusing would protect nothing, and hives made by
+     * older setups (a zero length descriptor in SECURITY) must still boot.
+     * A live hive is only checked.
+     */
+    if (Node->Security != HCELL_NIL && !CmpCheckKeySecurity(Ctx, Node->Security))
+    {
+        if (Ctx->Live)
+            return FALSE;
+        if (Ctx->Stats.SecurityReset++ == 0)
         {
             DPRINT1("Key 0x%x: security cell 0x%x is not valid, reset to none "
-                    "(the first of this hive; the count follows)\n",
-                    CurrentCell, CellData->u.KeyNode.Security);
+                    "(the first of this hive; the count follows)\n", Cell, Node->Security);
         }
-        CellData->u.KeyNode.Security = HCELL_NIL;
-        if (FixHive)
-            HvMarkCellDirty(Hive, CurrentCell, FALSE);
+        CmpCheckDirty(Ctx, Cell);
+        Node->Security = HCELL_NIL;
     }
+
+    /* No class: no class cell either (CmpMarkKeyDirty dirties a Class that is not NIL) */
+    if (Node->ClassLength == 0 && Node->Class != HCELL_NIL && !Ctx->Live)
+    {
+        CmpCheckDirty(Ctx, Cell);
+        Node->Class = HCELL_NIL;
+    }
+
+    /* The class, all of it inside its cell */
+    if (Node->ClassLength > 0 && !CmpTakeCell(Ctx, Node->Class, Node->ClassLength, NULL))
+    {
+        if (!Ctx->Heal)
+            return FALSE;
+        CmpCheckDirty(Ctx, Cell);
+        Node->Class = HCELL_NIL;
+        Node->ClassLength = 0;
+        Ctx->FieldsReset++;
+        CmpCheckHealed(Ctx);
+    }
+
+    if (!CmpCheckValueList(Ctx, Cell, Node, &MaxValueName, &MaxValueData))
+        return FALSE;
 
     /*
-     * A Security that is still set is a valid cell: this key is one of the
-     * keys that name it. A hive exit node is not validated above, so it is
-     * not counted, and the counts are no longer known to be complete.
+     * The longest value name and data the key reports are hints, larger
+     * than the real ones after deletes, but programs size buffers by them
+     * (RegQueryInfoKey: advapi32's RegDeleteTreeW multiplies the name length
+     * in 32 bits) and the kernel keeps the name length in 16 bits in the key
+     * control block (and asserts that both agree). A name length that does not
+     * fit 16 bits, or a data length larger than the hive, becomes the real one.
      */
-    if (CaseStats->SecurityTally && CellData->u.KeyNode.Security != HCELL_NIL)
+    if (!Ctx->Live && Node->MaxValueNameLen > MAXUSHORT)
     {
-        if (CellData->u.KeyNode.Flags & KEY_HIVE_EXIT)
-            CaseStats->SecurityTally->Partial = TRUE;
-        else
-            CmpSkTallyAdd(CaseStats->SecurityTally, CellData->u.KeyNode.Security);
+        CmpCheckDirty(Ctx, Cell);
+        Node->MaxValueNameLen = MaxValueName;
+        Ctx->FieldsReset++;
+    }
+    if (!Ctx->Live && Node->MaxValueDataLen > Ctx->Map.Length[Stable])
+    {
+        CmpCheckDirty(Ctx, Cell);
+        Node->MaxValueDataLen = MaxValueData;
+        Ctx->FieldsReset++;
     }
 
-    /* Validate the class */
-    CmStatusCode = CmpValidateClass(Hive, CurrentCell, CellData);
-    if (!CM_CHECK_REGISTRY_SUCCESS(CmStatusCode))
-    {
-        if (!CmpRepairClassOfNodeKey(Hive,
-                                     CurrentCell,
-                                     CellData,
-                                     FixHive))
-        {
-            DPRINT1("Failed to repair the hive, the cell class is not valid\n");
-            return CmStatusCode;
-        }
-    }
-
-    /* Validate the value list */
-    CmStatusCode = CmpValidateValueList(Hive, CurrentCell, CellData, FixHive);
-    if (!CM_CHECK_REGISTRY_SUCCESS(CmStatusCode))
-    {
-        /*
-         * It happens that a certain value in the list
-         * is so bad like we couldn't map a cell data from it
-         * or the list itself is toast. In such cases what we
-         * can do here is to do a "value list sacrifice", aka
-         * purge the whole list.
-         */
-        if (!CmpRepairValueList(Hive, CurrentCell, FixHive))
-        {
-            DPRINT1("Failed to repair the hive, the value list is corrupt\n");
-            return CmStatusCode;
-        }
-    }
-
-    /* Validate the subkeys list */
-    CmStatusCode = CmpValidateSubKeyList(Hive, CurrentCell, CellData, FixHive, &DoSubkeysRepair);
-    if (!CM_CHECK_REGISTRY_SUCCESS(CmStatusCode))
-    {
-        /*
-         * The subkeys list is in trouble. Worse when the actual
-         * subkey list is so severed this key is also kaput on itself.
-         */
-        if (!DoSubkeysRepair)
-        {
-            DPRINT1("The subkeys list is totally corrupt, can't repair\n");
-            return CmStatusCode;
-        }
-
-        /*
-         * OK, there's still some salvation for this key.
-         * Purge the whole subkeys list in order to fix it.
-         */
-        if (!CmpRepairSubKeyList(Hive,
-                                 CurrentCell,
-                                 CellData,
-                                 FixHive))
-        {
-            DPRINT1("Failed to repair the hive, the subkeys list is corrupt!\n");
-            return CmStatusCode;
-        }
-    }
-
-    /*
-     * The hashes and the order of the subkey names depend on the Unicode
-     * case table. If an older release wrote the hive with another table,
-     * bring the index up to date before the names of the subkeys are checked
-     * against each other, or looked up.
-     */
-    if (!IS_CELL_VOLATILE(CurrentCell))
-        CmpRepairSubKeyIndexCase(Hive, &CellData->u.KeyNode, CaseStats);
-
-    /* Purge volatile data if needed */
-    CmpPurgeVolatiles(Hive, CurrentCell, CellData, Flags);
-    return CM_CHECK_REGISTRY_GOOD;
+    *KeyNode = Node;
+    return TRUE;
 }
 
-/**
- * @brief
- * Performs deep checking of the registry by walking
- * down the registry tree using a stack based pool.
- * This function is the guts of CmCheckRegistry.
- *
- * @param[in] Hive
- * A pointer to a hive descriptor of the registry where
- * the validation is to be performed.
- *
- * @param[in] Flags
- * Bit mask flag used for volatiles purging. Such
- * flags influence on how volatile purging is actually
- * done. See CmCheckRegistry documentation for more
- * information.
- *
- * @param[in] SecurityDefaulted
- * If the caller sets this to FALSE, the registry hive
- * uses its own unique security details. Otherwise
- * registry hive has the security details defaulted.
- *
- * @param[in] FixHive
- * If set to TRUE, the target hive will be fixed.
- *
- * @return
- * Returns CM_CHECK_REGISTRY_GOOD is returned if the function
- * has successfully performed deep registry checking and
- * the registry contents are valid. CM_CHECK_REGISTRY_ALLOCATE_MEM_STACK_FAIL
- * is returned if the function has failed to allocate the
- * stack work state buffer in memory which is necessary for
- * deep checking of the registry. CM_CHECK_REGISTRY_ROOT_CELL_NOT_FOUND
- * is returned if no root cell has been found of this hive.
- * CM_CHECK_REGISTRY_BAD_LEXICOGRAPHICAL_ORDER is returned if the lexical
- * order is not valid. CM_CHECK_REGISTRY_NODE_NOT_FOUND is returned if
- * the no key node could be mapped from the key. CM_CHECK_REGISTRY_SUBKEY_NOT_FOUND
- * is returned if no subkey child cell could be found. CM_CHECK_REGISTRY_TREE_TOO_MANY_LEVELS
- * is returned if we have reached the maximum stack limit which means the registry that
- * we have checked is too fat.
+/* SUBKEY INDEXES *************************************************************/
+
+static
+ULONG
+CmpIndexEntrySize(
+    _In_ USHORT Signature)
+{
+    return (Signature == CM_KEY_FAST_LEAF || Signature == CM_KEY_HASH_LEAF) ? sizeof(CM_INDEX) : sizeof(HCELL_INDEX);
+}
+
+/* A leaf of a subkey index: a leaf signature, at least one entry, all of them inside the cell */
+static
+PCM_KEY_INDEX
+CmpTakeLeaf(
+    _In_ PCMP_CHECK Ctx,
+    _In_ HCELL_INDEX Cell)
+{
+    PCM_KEY_INDEX Leaf;
+    ULONG Size;
+
+    Leaf = CmpTakeCell(Ctx, Cell, FIELD_OFFSET(CM_KEY_INDEX, List), &Size);
+    if (!Leaf ||
+        (Leaf->Signature != CM_KEY_INDEX_LEAF &&
+         Leaf->Signature != CM_KEY_FAST_LEAF &&
+         Leaf->Signature != CM_KEY_HASH_LEAF) ||
+        Leaf->Count == 0 ||
+        Leaf->Count > (Size - FIELD_OFFSET(CM_KEY_INDEX, List)) / CmpIndexEntrySize(Leaf->Signature))
+    {
+        return NULL;
+    }
+    return Leaf;
+}
+
+/*
+ * The subkey index of a key (one storage): a leaf, or a root of leaves; every
+ * count fits its cell, no leaf is empty, the entries add up without overflow.
+ * The entries themselves are checked by the walk, as it goes down to them.
+ */
+static
+BOOLEAN
+CmpCheckSubKeyIndex(
+    _In_ PCMP_CHECK Ctx,
+    _In_ PCM_KEY_NODE Node,
+    _In_ ULONG Type)
+{
+    PCM_KEY_INDEX Index;
+    ULONG Size, i;
+    ULONGLONG Total = 0;
+
+    Index = CmpMapCell(Ctx, Node->SubKeyLists[Type], FIELD_OFFSET(CM_KEY_INDEX, List), &Size);
+    if (!Index || HvGetCellType(Node->SubKeyLists[Type]) != Type)
+        return FALSE;
+    if (Index->Signature != CM_KEY_INDEX_ROOT)
+        return CmpTakeLeaf(Ctx, Node->SubKeyLists[Type]) != NULL;
+
+    if (!CmpClaimCell(Ctx, Node->SubKeyLists[Type]) ||
+        Index->Count == 0 ||
+        Index->Count > (Size - FIELD_OFFSET(CM_KEY_INDEX, List)) / sizeof(HCELL_INDEX))
+    {
+        return FALSE;
+    }
+    for (i = 0; i < Index->Count; i++)
+    {
+        PCM_KEY_INDEX Leaf = CmpTakeLeaf(Ctx, Index->List[i]);
+
+        if (!Leaf || HvGetCellType(Index->List[i]) != Type)
+            return FALSE;
+        Total += Leaf->Count;
+    }
+    return Total <= MAXULONG;
+}
+
+/* The hash and hint of a key node's name, as CmpAddToLeaf writes them */
+static
+ULONG
+CmpKeyNameHash(
+    _In_ PCM_KEY_NODE Node)
+{
+    ULONG i, Hash = 0;
+    ULONG Chars = (Node->Flags & KEY_COMP_NAME) ? Node->NameLength : Node->NameLength / sizeof(WCHAR);
+
+    for (i = 0; i < Chars; i++)
+    {
+        WCHAR Char = (Node->Flags & KEY_COMP_NAME) ? ((PUCHAR)Node->Name)[i] : Node->Name[i];
+        Hash = Hash * 37 + RtlUpcaseUnicodeChar(Char);
+    }
+    return Hash;
+}
+
+static
+ULONG
+CmpKeyNameHint(
+    _In_ PCM_KEY_NODE Node)
+{
+    UCHAR Hint[4] = { 0, 0, 0, 0 };
+    ULONG Chars = (Node->Flags & KEY_COMP_NAME) ? Node->NameLength : Node->NameLength / sizeof(WCHAR);
+    ULONG j = min(Chars, 4);
+    WCHAR Char;
+
+    /* The same loop as CmpAddToLeaf: backwards, stopping at a character above 0xFF */
+    while (j > 0)
+    {
+        Char = (Node->Flags & KEY_COMP_NAME) ? ((PUCHAR)Node->Name)[j - 1] : Node->Name[j - 1];
+        if (Char > 0xFF)
+            break;
+        Hint[j - 1] = (UCHAR)Char;
+        j--;
+    }
+    return Hint[0] | (Hint[1] << 8) | (Hint[2] << 16) | ((ULONG)Hint[3] << 24);
+}
+
+/* THE WALK *******************************************************************/
+
+/*
+ * Where the walk is in the subkey index of one key. The entries of a leaf are
+ * read at Entry and the ones kept written back at Kept (Kept <= Entry), and
+ * the leaves of a root likewise, so removing any number of keys from an index
+ * is one pass over it.
+ */
+typedef struct _CMP_WALK_LEVEL
+{
+    HCELL_INDEX Cell;           /* the key */
+    PCM_KEY_NODE Node;
+    ULONG Type;                 /* the storage whose index is walked */
+    HCELL_INDEX IndexCell;      /* the root or the leaf of that index */
+    PCM_KEY_INDEX Root;         /* NULL: the index is one leaf */
+    ULONG LeafNumber, LeavesKept;
+    HCELL_INDEX LeafCell;
+    PCM_KEY_INDEX Leaf;
+    ULONG Entry, Kept;
+    ULONG Total;                /* keys kept in this storage */
+    PCM_KEY_NODE Previous;      /* the last key kept, for the order */
+    ULONG MaxName;              /* the longest subkey name (bytes, as Unicode) and class kept */
+    ULONG MaxClass;
+} CMP_WALK_LEVEL, *PCMP_WALK_LEVEL;
+
+static
+HCELL_INDEX
+CmpLeafEntry(
+    _In_ PCM_KEY_INDEX Leaf,
+    _In_ ULONG i)
+{
+    return Leaf->Signature == CM_KEY_INDEX_LEAF ? Leaf->List[i] : ((PCM_KEY_FAST_INDEX)Leaf)->List[i].Cell;
+}
+
+/* Start the walk of the index of Level->Type; FALSE if the index is not sound */
+static
+BOOLEAN
+CmpStartIndex(
+    _In_ PCMP_CHECK Ctx,
+    _Inout_ PCMP_WALK_LEVEL Level)
+{
+    PCM_KEY_NODE Node = Level->Node;
+    PCM_KEY_INDEX Index;
+
+    Level->Root = NULL;
+    Level->Leaf = NULL;
+    Level->LeafNumber = Level->LeavesKept = 0;
+    Level->Entry = Level->Kept = 0;
+    Level->Total = 0;
+    Level->Previous = NULL;
+    Level->IndexCell = Node->SubKeyLists[Level->Type];
+    if (Node->SubKeyCounts[Level->Type] == 0)
+        return TRUE;
+
+    if (!CmpCheckSubKeyIndex(Ctx, Node, Level->Type))
+    {
+        DPRINT1("Key 0x%x: the subkey index (count %lu) is not sound\n",
+                Level->Cell, (unsigned long)Node->SubKeyCounts[Level->Type]);
+        if (!Ctx->Heal)
+            return FALSE;
+        CmpCheckDirty(Ctx, Level->Cell);
+        Node->SubKeyLists[Level->Type] = HCELL_NIL;
+        Node->SubKeyCounts[Level->Type] = 0;
+        Ctx->ListsPurged++;
+        CmpCheckHealed(Ctx);
+        return TRUE;
+    }
+
+#if !defined(_BLDR_)
+    /*
+     * The hashes and the order of the subkey names depend on the Unicode case
+     * table. If an older release wrote the hive with another table, bring the
+     * index up to date before the names of the subkeys are checked against
+     * each other. Its entries are read through the cell map.
+     */
+    if (!Ctx->Live && Level->Type == Stable)
+        CmpRepairSubKeyIndexCase(Ctx->Hive, Node, &Ctx->Stats);
+#endif
+
+    Index = (PCM_KEY_INDEX)HvGetCell(Ctx->Hive, Level->IndexCell);
+    if (Index->Signature == CM_KEY_INDEX_ROOT)
+    {
+        Level->Root = Index;
+        Level->LeafCell = Index->List[0];
+        Level->Leaf = (PCM_KEY_INDEX)HvGetCell(Ctx->Hive, Level->LeafCell);
+    }
+    else
+    {
+        Level->LeafCell = Level->IndexCell;
+        Level->Leaf = Index;
+    }
+    return TRUE;
+}
+
+/* The walk is done with a leaf: its kept entries stay, an emptied leaf leaves the root */
+static
+VOID
+CmpEndLeaf(
+    _In_ PCMP_CHECK Ctx,
+    _Inout_ PCMP_WALK_LEVEL Level)
+{
+    if (Level->Kept != Level->Leaf->Count)
+    {
+        CmpCheckDirty(Ctx, Level->LeafCell);
+        Level->Leaf->Count = (USHORT)Level->Kept;
+    }
+    if (Level->Root)
+    {
+        if (Level->Kept != 0)
+        {
+            if (Level->LeavesKept != Level->LeafNumber)
+            {
+                CmpCheckDirty(Ctx, Level->IndexCell);
+                Level->Root->List[Level->LeavesKept] = Level->LeafCell;
+            }
+            Level->LeavesKept++;
+        }
+        Level->LeafNumber++;
+        Level->Entry = Level->Kept = 0;
+        if (Level->LeafNumber < Level->Root->Count)
+        {
+            Level->LeafCell = Level->Root->List[Level->LeafNumber];
+            Level->Leaf = (PCM_KEY_INDEX)HvGetCell(Ctx->Hive, Level->LeafCell);
+            return;
+        }
+        if (Level->LeavesKept != Level->Root->Count)
+        {
+            CmpCheckDirty(Ctx, Level->IndexCell);
+            Level->Root->Count = (USHORT)Level->LeavesKept;
+        }
+    }
+    Level->Leaf = NULL;
+}
+
+/* The index of Level->Type is walked: the key's count is what was kept */
+static
+VOID
+CmpEndIndex(
+    _In_ PCMP_CHECK Ctx,
+    _Inout_ PCMP_WALK_LEVEL Level)
+{
+    PCM_KEY_NODE Node = Level->Node;
+
+    if (Node->SubKeyCounts[Level->Type] != Level->Total)
+    {
+        CmpCheckDirty(Ctx, Level->Cell);
+        Node->SubKeyCounts[Level->Type] = Level->Total;
+        if (Level->Total == 0)
+            Node->SubKeyLists[Level->Type] = HCELL_NIL;
+        CmpCheckHealed(Ctx);
+    }
+}
+
+/*
+ * The walk of the tree from the root, depth first, without recursion. Each
+ * key is checked once, when the walk comes to it from its parent's index;
+ * a key that is not sound, or out of order, is not kept in the index (or
+ * the hive is refused if repairs are not allowed).
  */
 static
 CM_CHECK_REGISTRY_STATUS
-CmpValidateRegistryWalk(
-    _In_ PHHIVE Hive,
-    _In_ ULONG Flags,
-    _In_ BOOLEAN SecurityDefaulted,
-    _In_ BOOLEAN FixHive,
-    _In_opt_ PCMP_SK_TALLY Tally)
+CmpWalkTree(
+    _In_ PCMP_CHECK Ctx)
 {
-    CM_CHECK_REGISTRY_STATUS CmStatusCode;
-    PCMP_REGISTRY_STACK_WORK_STATE WorkState;
-    HCELL_INDEX RootCell, ParentCell, CurrentCell;
-    HCELL_INDEX ChildSubKeyCell;
-    PCM_KEY_NODE KeyNode;
-    ULONG WorkStateLength;
-    LONG StackDepth;
-    BOOLEAN AllChildrenChecked;
-    CMP_CASE_REPAIR_STATS CaseStats = {0, 0, 0, 0};
+    PCMP_WALK_LEVEL Levels, Level;
+    PCM_KEY_NODE Node, Child;
+    HCELL_INDEX RootCell, ChildCell;
+    ULONG Size = CMP_REGISTRY_MAX_LEVELS_TREE_DEPTH * sizeof(CMP_WALK_LEVEL);
+    ULONG Types = Ctx->Live ? HTYPE_COUNT : 1, NameBytes;
+    LONG Depth;
+    CM_CHECK_REGISTRY_STATUS Status = CM_CHECK_REGISTRY_GOOD;
+    BOOLEAN Keep;
 
-    PAGED_CODE();
-
-    ASSERT(Hive);
-
-    CaseStats.SecurityTally = Tally;
-
-    /*
-     * Allocate some memory blocks for the stack
-     * state structure. We'll be using it to walk
-     * down the registry hive tree in a recursive
-     * way without worrying that we explode the
-     * kernel stack in the most gruesome and gross
-     * ways.
-     */
-    WorkStateLength = CMP_REGISTRY_MAX_LEVELS_TREE_DEPTH * sizeof(CMP_REGISTRY_STACK_WORK_STATE);
-    WorkState = CmpAllocate(WorkStateLength,
-                            TRUE,
-                            TAG_REGISTRY_STACK);
-    if (!WorkState)
+    RootCell = Ctx->Hive->BaseBlock->RootCell;
+    if (!CmpCheckKey(Ctx, RootCell, HCELL_NIL, &Node))
     {
-        DPRINT1("Couldn't allocate memory for registry stack work state\n");
-        return CM_CHECK_REGISTRY_ALLOCATE_MEM_STACK_FAIL;
-    }
-
-    /* Obtain the root cell of the hive */
-    RootCell = GET_HHIVE_ROOT_CELL(Hive);
-    if (RootCell == HCELL_NIL)
-    {
-        DPRINT1("Couldn't get the root cell of the hive\n");
-        CmpFree(WorkState, WorkStateLength);
+        DPRINT1("The root cell 0x%x is not a sound key\n", RootCell);
         return CM_CHECK_REGISTRY_ROOT_CELL_NOT_FOUND;
     }
 
-RestartValidation:
-    /* A repair that restarts the walk may have removed keys: count again */
-    if (Tally)
-        CmpSkTallyReset(Tally);
+    Levels = CmpCheckAllocate(Size);
+    if (!Levels)
+        return CM_CHECK_REGISTRY_ALLOCATE_MEM_STACK_FAIL;
 
-    /*
-     * Prepare the stack state and start from
-     * the root cell. Ensure that the root cell
-     * itself is OK before we go forward.
-     */
-    StackDepth = 0;
-    WorkState[StackDepth].ChildCellIndex = 0;
-    WorkState[StackDepth].Current = RootCell;
-    WorkState[StackDepth].Parent = HCELL_NIL;
-    WorkState[StackDepth].Sibling = HCELL_NIL;
+    /* A key is counted as naming its 'sk' cell once it is kept */
+    if (Ctx->Tally && Node->Security != HCELL_NIL)
+        CmpSkTallyAdd(Ctx->Tally, Node->Security);
 
-    /*
-     * As we start checking the root cell which
-     * is the top element of a registry hive,
-     * we'll be going to look for child keys
-     * in the course of walking down the tree.
-     */
-    AllChildrenChecked = FALSE;
-
-    while (StackDepth >= 0)
+    Depth = 0;
+    Level = &Levels[0];
+    RtlZeroMemory(Level, sizeof(*Level));
+    Level->Cell = RootCell;
+    Level->Node = Node;
+    Level->Type = Stable;
+    if (!CmpStartIndex(Ctx, Level))
     {
-        /* Cache the current and parent cells */
-        CurrentCell = WorkState[StackDepth].Current;
-        ParentCell = WorkState[StackDepth].Parent;
+        Status = CM_CHECK_REGISTRY_CORRUPT_SUBKEYS_INDEX;
+        goto Quit;
+    }
 
-        /* Do we have still have children to validate? */
-        if (!AllChildrenChecked)
+    while (Depth >= 0)
+    {
+        Level = &Levels[Depth];
+
+        /* The next entry of the index of this key */
+        if (Level->Leaf && Level->Entry >= Level->Leaf->Count)
         {
-            /* Check that the key is OK */
-            CmStatusCode = CmpValidateKey(Hive,
-                                          SecurityDefaulted,
-                                          ParentCell,
-                                          CurrentCell,
-                                          Flags,
-                                          FixHive,
-                                          &CaseStats);
-            if (!CM_CHECK_REGISTRY_SUCCESS(CmStatusCode))
-            {
-                /*
-                 * The key cell is damaged. We have to pray and
-                 * hope that this is not the root cell as any
-                 * damage done to the root is catastrophically
-                 * fatal.
-                 */
-                if (CurrentCell == RootCell)
-                {
-                    DPRINT1("THE ROOT CELL IS BROKEN\n");
-                    CmpFree(WorkState, WorkStateLength);
-                    return CmStatusCode;
-                }
-
-                /*
-                 * It is not the root, remove the faulting
-                 * damaged cell from the parent so that we
-                 * can heal the hive.
-                 */
-                if (!CmpRepairParentKey(Hive, CurrentCell, ParentCell, FixHive))
-                {
-                    DPRINT1("The key is corrupt (current cell 0x%x, parent cell 0x%x)\n",
-                            CurrentCell, ParentCell);
-                    CmpFree(WorkState, WorkStateLength);
-                    return CmStatusCode;
-                }
-
-                /* Damaged cell removed, restart the loop */
-                DPRINT1("Hive repaired, restarting the validation loop...\n");
-                goto RestartValidation;
-            }
-
-            /*
-             * The key is in perfect shape. If we have advanced
-             * the stack depth then check the lexicographical
-             * order of the keys as well.
-             */
-            if (StackDepth > 0 &&
-                CM_CHECK_REGISTRY_SUCCESS(CmStatusCode))
-            {
-                if (WorkState[StackDepth - CMP_PRIOR_STACK].Sibling != HCELL_NIL)
-                {
-                    if (!CmpValidateLexicalOrder(Hive,
-                                                 CurrentCell,
-                                                 WorkState[StackDepth - CMP_PRIOR_STACK].Sibling))
-                    {
-                        /*
-                         * The lexicographical order is bad,
-                         * attempt to heal the hive.
-                         */
-                        if (!CmpRepairParentKey(Hive, CurrentCell, ParentCell, FixHive))
-                        {
-                            DPRINT1("The lexicographical order is invalid (sibling 0x%x, current cell 0x%x)\n",
-                                    CurrentCell, WorkState[StackDepth - CMP_PRIOR_STACK].Sibling);
-                            CmpFree(WorkState, WorkStateLength);
-                            return CM_CHECK_REGISTRY_BAD_LEXICOGRAPHICAL_ORDER;
-                        }
-
-                        /* Damaged cell removed, restart the loop */
-                        DPRINT1("Hive repaired, restarting the validation loop...\n");
-                        goto RestartValidation;
-                    }
-                }
-
-                /* Assign the prior sibling for upcoming iteration */
-                WorkState[StackDepth - CMP_PRIOR_STACK].Sibling = CurrentCell;
-            }
+            CmpEndLeaf(Ctx, Level);
+            continue;
         }
-
-        /* Obtain a node for this key */
-        KeyNode = (PCM_KEY_NODE)HvGetCell(Hive, CurrentCell);
-        if (!KeyNode)
+        if (!Level->Leaf)
         {
-            DPRINT1("Couldn't get the node of key (current cell 0x%x)\n", CurrentCell);
-            CmpFree(WorkState, WorkStateLength);
-            return CM_CHECK_REGISTRY_NODE_NOT_FOUND;
-        }
-
-        /*
-         * If we have processed all the children from this
-         * node then adjust the stack depth work state by
-         * going back and restart the loop to lookup for
-         * the rest of the tree. Acknowledge the code path
-         * above that we checked all the children so that
-         * we don't have to validate the same subkey again.
-         */
-        if (WorkState[StackDepth].ChildCellIndex < KeyNode->SubKeyCounts[Stable])
-        {
-            /*
-             * We have children to process, obtain the
-             * child subkey in question so that we can
-             * cache it later for the next key validation.
-             */
-            ChildSubKeyCell = CmpFindSubKeyByNumber(Hive, KeyNode, WorkState[StackDepth].ChildCellIndex);
-            if (ChildSubKeyCell == HCELL_NIL)
+            CmpEndIndex(Ctx, Level);
+            if (Level->Type + 1 < Types)
             {
-                DPRINT1("Couldn't get the child subkey cell (at stack index %d)\n", StackDepth);
-                CmpFree(WorkState, WorkStateLength);
-                return CM_CHECK_REGISTRY_SUBKEY_NOT_FOUND;
+                Level->Type++;
+                if (!CmpStartIndex(Ctx, Level))
+                {
+                    Status = CM_CHECK_REGISTRY_CORRUPT_SUBKEYS_INDEX;
+                    goto Quit;
+                }
+                continue;
             }
 
             /*
-             * As we got the subkey advance the child index as
-             * well as the stack depth work state for the next
-             * key validation. However we must ensure since
-             * we're advancing the stack depth that we don't
-             * go over the maximum tree level depth. A registry
-             * tree can be at maximum 512 levels deep.
-             *
-             * For more information see https://docs.microsoft.com/en-us/windows/win32/sysinfo/registry-element-size-limits.
+             * All subkeys done. The kernel keeps the longest subkey name in 16
+             * bits in the key control block (and asserts that both agree): a
+             * value that does not fit becomes the real one.
              */
-            WorkState[StackDepth].ChildCellIndex++;
-            StackDepth++;
-            if (StackDepth >= CMP_REGISTRY_MAX_LEVELS_TREE_DEPTH - 1)
+            if (!Ctx->Live && Level->Node->MaxNameLen > MAXUSHORT)
             {
-                /*
-                 * This registry has so many levels it's
-                 * so fat. We don't want to explode our
-                 * kernel stack, so just simply bail out...
-                 */
-                DPRINT1("The registry tree has so many levels!\n");
-                CmpFree(WorkState, WorkStateLength);
-                return CM_CHECK_REGISTRY_TREE_TOO_MANY_LEVELS;
+                CmpCheckDirty(Ctx, Level->Cell);
+                Level->Node->MaxNameLen = Level->MaxName;
+                Ctx->FieldsReset++;
             }
-
-            /* Prepare the work state for the next key */
-            WorkState[StackDepth].ChildCellIndex = 0;
-            WorkState[StackDepth].Current = ChildSubKeyCell;
-            WorkState[StackDepth].Parent = WorkState[StackDepth - CMP_PRIOR_STACK].Current;
-            WorkState[StackDepth].Sibling = HCELL_NIL;
-
-            /*
-             * As we prepared the work state, acknowledge the
-             * code path at the top of the loop that we need
-             * to process and validate the next child subkey.
-             */
-            AllChildrenChecked = FALSE;
+            /* A class is at most 64 KB (ClassLength): so is the longest one reported */
+            if (!Ctx->Live && Level->Node->MaxClassLen > MAXUSHORT)
+            {
+                CmpCheckDirty(Ctx, Level->Cell);
+                Level->Node->MaxClassLen = Level->MaxClass;
+                Ctx->FieldsReset++;
+            }
+            Depth--;
             continue;
         }
 
-        /*
-         * We have validated all the child subkeys
-         * of the node. Decrease the stack depth
-         * and tell the above code we looked for all
-         * children so that we don't need to validate
-         * the same children again but go for the next
-         * node.
-         */
-        AllChildrenChecked = TRUE;
-        StackDepth--;
-        continue;
+        ChildCell = CmpLeafEntry(Level->Leaf, Level->Entry);
+        Keep = CmpCheckKey(Ctx, ChildCell, Level->Cell, &Child);
+        if (Keep && HvGetCellType(ChildCell) != Level->Type)
+            Keep = FALSE;
+        if (Keep && Level->Previous && !CmpValidateLexicalOrder(Child, Level->Previous))
+            Keep = FALSE;
+
+        if (!Keep)
+        {
+            if (!Ctx->Heal)
+            {
+                DPRINT1("Key 0x%x: subkey 0x%x is not sound or not in order\n", Level->Cell, ChildCell);
+                Status = CM_CHECK_REGISTRY_BAD_LEXICOGRAPHICAL_ORDER;
+                goto Quit;
+            }
+            Ctx->KeysRemoved++;
+            Level->Entry++;
+            CmpCheckHealed(Ctx);
+            continue;
+        }
+
+        /* Kept: at its place in the leaf, with the hash or hint of its name (a live hive is only read) */
+        if (!Ctx->Live && (Level->Kept != Level->Entry || Level->Leaf->Signature != CM_KEY_INDEX_LEAF))
+        {
+            PCM_KEY_FAST_INDEX Fast = (PCM_KEY_FAST_INDEX)Level->Leaf;
+
+            if (Level->Leaf->Signature == CM_KEY_INDEX_LEAF)
+            {
+                CmpCheckDirty(Ctx, Level->LeafCell);
+                Level->Leaf->List[Level->Kept] = ChildCell;
+            }
+            else
+            {
+                ULONG Hash = Level->Leaf->Signature == CM_KEY_HASH_LEAF ? CmpKeyNameHash(Child) : CmpKeyNameHint(Child);
+
+                if (Level->Kept != Level->Entry || Fast->List[Level->Kept].HashKey != Hash)
+                {
+                    CmpCheckDirty(Ctx, Level->LeafCell);
+                    if (Fast->List[Level->Kept].HashKey != Hash && Level->Kept == Level->Entry)
+                        Ctx->Stats.Hashes++;
+                    Fast->List[Level->Kept].Cell = ChildCell;
+                    Fast->List[Level->Kept].HashKey = Hash;
+                }
+            }
+        }
+        if (Ctx->Tally && Child->Security != HCELL_NIL)
+            CmpSkTallyAdd(Ctx->Tally, Child->Security);
+        Level->Kept++;
+        Level->Entry++;
+        Level->Total++;
+        Level->Previous = Child;
+        NameBytes = (Child->Flags & KEY_COMP_NAME) ? Child->NameLength * sizeof(WCHAR) : Child->NameLength;
+        Level->MaxName = CMP_MAX(Level->MaxName, NameBytes);
+        Level->MaxClass = CMP_MAX(Level->MaxClass, Child->ClassLength);
+
+        /* Down to the child */
+        if (Depth + 1 >= CMP_REGISTRY_MAX_LEVELS_TREE_DEPTH - 1)
+        {
+            DPRINT1("The registry tree has too many levels\n");
+            Status = CM_CHECK_REGISTRY_TREE_TOO_MANY_LEVELS;
+            goto Quit;
+        }
+        Depth++;
+        Level = &Levels[Depth];
+        RtlZeroMemory(Level, sizeof(*Level));
+        Level->Cell = ChildCell;
+        Level->Node = Child;
+        Level->Type = Stable;
+        if (!CmpStartIndex(Ctx, Level))
+        {
+            Status = CM_CHECK_REGISTRY_CORRUPT_SUBKEYS_INDEX;
+            goto Quit;
+        }
     }
 
-    CmpFree(WorkState, WorkStateLength);
-
-    if (CaseStats.Hashes || CaseStats.Sorted || CaseStats.Skipped)
-    {
-        DPRINT1("Subkey indexes brought up to date with the Unicode case table: "
-                "%lu hashes, %lu indexes sorted, %lu not sorted\n",
-                CaseStats.Hashes, CaseStats.Sorted, CaseStats.Skipped);
-    }
-
-    if (CaseStats.SecurityReset)
-    {
-        DPRINT1("Hive 0x%p: %lu keys had a security cell that is not valid; reset to none\n",
-                Hive, (unsigned long)CaseStats.SecurityReset);
-    }
-    return CM_CHECK_REGISTRY_GOOD;
-}
-
-/* The walk, then the recount of the 'sk' references if asked for. It never fails the check. */
-static
-CM_CHECK_REGISTRY_STATUS
-CmpValidateRegistryInternal(
-    _In_ PHHIVE Hive,
-    _In_ ULONG Flags,
-    _In_ BOOLEAN SecurityDefaulted,
-    _In_ BOOLEAN FixHive)
-{
-    CM_CHECK_REGISTRY_STATUS CmStatusCode;
-    CMP_SK_TALLY Tally;
-
-    RtlZeroMemory(&Tally, sizeof(Tally));
-    CmStatusCode = CmpValidateRegistryWalk(Hive, Flags, SecurityDefaulted, FixHive,
-                                           (Flags & CM_CHECK_REGISTRY_RECOUNT_SECURITY) ? &Tally : NULL);
-    if (CM_CHECK_REGISTRY_SUCCESS(CmStatusCode) && (Flags & CM_CHECK_REGISTRY_RECOUNT_SECURITY))
-    {
-        CmpApplySecurityRecount(Hive, &Tally, FixHive);
-        if (Flags & CM_CHECK_REGISTRY_CACHE_SECURITY)
-            CmpCacheSecurityRings(Hive, &Tally);
-    }
-    CmpSkTallyReset(&Tally);
-    return CmStatusCode;
+Quit:
+    CmpCheckFree(Levels, Size);
+    return Status;
 }
 
 /* PUBLIC FUNCTIONS ***********************************************************/
 
 /**
  * @brief
- * Validates a bin from a hive. It performs checks
- * against the cells from this bin, ensuring the
- * bin is not corrupt and that the cells are consistent
- * with each other.
- *
- * @param[in] Hive
- * A pointer to a hive descriptor of which a hive bin
- * is to be validated.
- *
- * @param[in] Bin
- * A pointer to a bin where its cells are to be
- * validated.
+ * Validates a bin from a hive: its header, and cells that tile it (each at
+ * least 8 bytes, a multiple of 8, inside the bin).
  *
  * @return
- * CM_CHECK_REGISTRY_GOOD is returned if the bin is
- * valid and not corrupt. CM_CHECK_REGISTRY_BIN_SIGNATURE_HEADER_CORRUPT
- * is returned if this bin has a corrupt signature. CM_CHECK_REGISTRY_BAD_FREE_CELL
- * is returned if the free cell has a bogus size. CM_CHECK_REGISTRY_BAD_ALLOC_CELL
- * is returned for the allocated cell has a bogus size.
+ * CM_CHECK_REGISTRY_GOOD if the bin is sound, a failure code otherwise.
  */
 CM_CHECK_REGISTRY_STATUS
 NTAPI
@@ -1884,222 +1875,65 @@ HvValidateBin(
     _In_ PHHIVE Hive,
     _In_ PHBIN Bin)
 {
-    PHCELL Cell, Basket;
-
     PAGED_CODE();
 
     ASSERT(Bin);
     ASSERT(Hive);
+    UNREFERENCED_PARAMETER(Hive);
 
-    /* Ensure that this bin we got has valid signature header */
-    if (Bin->Signature != HV_HBIN_SIGNATURE)
-    {
-        DPRINT1("The bin's signature header is corrupt\n");
-        return CM_CHECK_REGISTRY_BIN_SIGNATURE_HEADER_CORRUPT;
-    }
-
-    /*
-     * Walk over all the cells from this bin and
-     * validate that they're consistent with the bin.
-     * Namely we want that each cell from this bin doesn't
-     * have a bogus size.
-     */
-    Basket = (PHCELL)((PUCHAR)Bin + Bin->Size);
-    for (Cell = GET_CELL_BIN(Bin);
-         Cell < Basket;
-         Cell = (PHCELL)((PUCHAR)Cell + abs(Cell->Size)))
-    {
-        if (IsFreeCell(Cell))
-        {
-            /*
-             * This cell is free, check that
-             * the size of this cell is not bogus.
-             */
-            if (Cell->Size > Bin->Size ||
-                Cell->Size == 0)
-            {
-                /*
-                 * This cell has too much free space that
-                 * exceeds the boundary of the bin size.
-                 * Otherwise the cell doesn't have actual
-                 * free space (aka Size == 0) which is a
-                 * no go for a bin.
-                 */
-                DPRINT1("The free cell exceeds the bin size or cell size equal to 0 (cell 0x%p, cell size %d, bin size %u)\n",
-                        Cell, Cell->Size, Bin->Size);
-                return CM_CHECK_REGISTRY_BAD_FREE_CELL;
-            }
-        }
-        else
-        {
-            /*
-             * This cell is allocated, make sure that
-             * the size of this cell is not bogus.
-             */
-            if (abs(Cell->Size) > Bin->Size)
-            {
-                /*
-                 * This cell allocated too much space
-                 * that exceeds the boundary of the
-                 * bin size.
-                 */
-                DPRINT1("The allocated cell exceeds the bin size (cell 0x%p, cell size %d, bin size %u)\n",
-                        Cell, abs(Cell->Size), Bin->Size);
-                return CM_CHECK_REGISTRY_BAD_ALLOC_CELL;
-            }
-        }
-    }
-
-    return CM_CHECK_REGISTRY_GOOD;
+    return CmpCheckBinCells(Bin, Bin->FileOffset, MAXULONG, NULL);
 }
 
 /**
  * @brief
- * Validates a registry hive. This function ensures
- * that the storage of this hive has valid bins.
- *
- * @param[in] Hive
- * A pointer to a hive descriptor where validation on
- * its hive bins is to be performed.
+ * Validates the storage of a hive: every bin and cell (see CmpBuildCellMap).
  *
  * @return
- * CM_CHECK_REGISTRY_GOOD is returned if the hive
- * is valid. CM_CHECK_REGISTRY_HIVE_CORRUPT_SIGNATURE is
- * returned if the hive has a corrupted signature.
- * CM_CHECK_REGISTRY_BIN_SIZE_OR_OFFSET_CORRUPT is returned
- * if the captured bin has a bad size. A failure CM status
- * code is returned otherwise.
+ * CM_CHECK_REGISTRY_GOOD if the hive storage is sound, a failure code otherwise.
  */
 CM_CHECK_REGISTRY_STATUS
 NTAPI
 HvValidateHive(
     _In_ PHHIVE Hive)
 {
-    CM_CHECK_REGISTRY_STATUS CmStatusCode;
-    ULONG StorageIndex;
-    ULONG BlockIndex;
-    ULONG StorageLength;
-    PHBIN Bin;
+    CM_CHECK_REGISTRY_STATUS Status;
+    CMP_CELL_MAP Map;
 
     PAGED_CODE();
 
     ASSERT(Hive);
 
-    /* Is the hive signature valid? */
     if (Hive->Signature != HV_HHIVE_SIGNATURE)
     {
         DPRINT1("Hive's signature corrupted (signature %u)\n", Hive->Signature);
         return CM_CHECK_REGISTRY_HIVE_CORRUPT_SIGNATURE;
     }
 
-    /*
-     * Now loop each bin in the storage of this
-     * hive.
-     */
-    for (StorageIndex = 0; StorageIndex < Hive->StorageTypeCount; StorageIndex++)
-    {
-        /* Get the storage length at this index */
-        StorageLength = Hive->Storage[StorageIndex].Length;
-
-        for (BlockIndex = 0; BlockIndex < StorageLength;)
-        {
-            /* Go to the next if this bin does not exist */
-            if (Hive->Storage[StorageIndex].BlockList[BlockIndex].BinAddress == (ULONG_PTR)NULL)
-            {
-                BlockIndex++;
-                continue;
-            }
-
-            /*
-             * Capture this bin and ensure that such
-             * bin is within the offset and the size
-             * is not bogus.
-             */
-            Bin = GET_HHIVE_BIN(Hive, StorageIndex, BlockIndex);
-            /* The loop advances by the bin's size: less than a block would never end it */
-            if (Bin->Size < HBLOCK_SIZE || (Bin->Size % HBLOCK_SIZE) != 0 ||
-                Bin->Size > (StorageLength * HBLOCK_SIZE) ||
-                (Bin->FileOffset / HBLOCK_SIZE) != BlockIndex)
-            {
-                DPRINT1("Bin size or offset is corrupt (bin size %u, file offset %u, storage length %u)\n",
-                        Bin->Size, Bin->FileOffset, StorageLength);
-                return CM_CHECK_REGISTRY_BIN_SIZE_OR_OFFSET_CORRUPT;
-            }
-
-            /* Validate the rest of the bin */
-            CmStatusCode = HvValidateBin(Hive, Bin);
-            if (!CM_CHECK_REGISTRY_SUCCESS(CmStatusCode))
-            {
-                DPRINT1("This bin is not valid (bin 0x%p)\n", Bin);
-                return CmStatusCode;
-            }
-
-            /* Go to the next block */
-            BlockIndex += Bin->Size / HBLOCK_SIZE;
-        }
-    }
-
-    return CM_CHECK_REGISTRY_GOOD;
+    Status = CmpBuildCellMap(Hive, TRUE, &Map);
+    CmpFreeCellMap(&Map);
+    return Status;
 }
 
 /**
  * @brief
- * Checks the registry that is consistent and its
- * contents valid and not corrupted. More specifically
- * this function performs a deep check of the registry
- * for the following properties:
+ * Checks that a registry hive is sound before anything else uses it, see the
+ * rules at the top of this file. Repairs what can be repaired safely when
+ * self-healing is allowed (or FIX_HIVE is given), refuses the hive otherwise.
  *
- * - That the security cache cell of the registry is OK
- * - That bins and cells are consistent with each other
- * - That the child subkey cell points to the parent
- * - That the key itself has sane sizes
- * - That the class, values and subkeys lists are valid
- * - Much more
- *
- * @param[in] Hive
- * A pointer to a CM hive of the registry to be checked
- * in question.
+ * @param[in] RegistryHive
+ * The hive.
  *
  * @param[in] Flags
- * A bit mask flag used to influence the process of volatile
- * keys purging. See Remarks for further information.
+ * CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES / PURGE_VOLATILES: a hive being
+ * loaded holds no volatile key, whichever is given. BOOTLOADER_PURGE_VOLATILES:
+ * the boot loader's image (the volatile lists are marked uninitialized).
+ * VALIDATE_HIVE: kept for the callers, the bins are always checked. FIX_HIVE:
+ * repair and make the repairs persistent. RECOUNT_SECURITY, CACHE_SECURITY:
+ * see cmlib.h. LIVE_HIVE: a hive in use, only checked.
  *
  * @return
- * This function returns a CM (Configuration Manager) check
- * registry status code. A code of CM_CHECK_REGISTRY_GOOD of
- * value 0 indicates the registry hive is valid and not corrupted.
- * A non zero unsigned integer value indicates a failure. Consult
- * other private routines in this file for other failure status
- * codes.
- *
- * @remarks
- * During a load operation CmCheckRegistry can purge the volatile
- * data of registry (or not) depending on the submitted flag bit mask
- * by the caller. The following supported flags are:
- *
- * CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES -- Tells the function that
- * volatile data purging must not be done.
- *
- * CM_CHECK_REGISTRY_PURGE_VOLATILES - Tells the function to purge out
- * volatile information data from a registry hive, on demand. Purging
- * doesn't come into action if no volatile data has been found.
- *
- * CM_CHECK_REGISTRY_BOOTLOADER_PURGE_VOLATILES - A special flag used
- * by FreeLdr and Environ. When this flag is set the function will not
- * clean up the volatile storage but it will unintialize the storage
- * instead (this is the case if the given registry hive for validation
- * is a XP Beta 1 hive or newer). Otherwise it will perform a normal
- * cleanup of the volatile storage.
- *
- * CM_CHECK_REGISTRY_VALIDATE_HIVE - Tells the function to perform a
- * thorough analysation of the underlying hive's bins and cells before
- * doing validation of the registry tree. HvValidateHive function is called
- * in this case.
- *
- * CM_CHECK_REGISTRY_FIX_HIVE - Tells the function to fix the target registry
- * hive if it is damaged. Usually this flag comes from a registry repair tool
- * where the user asked to for its damaged hive to be fixed. In this case
- * a self-heal procedure against the hive is performed.
+ * CM_CHECK_REGISTRY_GOOD (0) if the hive is sound (as it is, or repaired), a
+ * failure code otherwise.
  */
 CM_CHECK_REGISTRY_STATUS
 NTAPI
@@ -2107,13 +1941,13 @@ CmCheckRegistry(
     _In_ PCMHIVE RegistryHive,
     _In_ ULONG Flags)
 {
-    CM_CHECK_REGISTRY_STATUS CmStatusCode;
+    CM_CHECK_REGISTRY_STATUS Status;
+    CMP_SK_TALLY Tally;
+    CMP_CHECK Ctx;
     PHHIVE Hive;
-    BOOLEAN ShouldFixHive = FALSE;
 
     PAGED_CODE();
 
-    /* Bail out if the caller did not give a hive */
     if (!RegistryHive)
     {
         DPRINT1("No registry hive given for check\n");
@@ -2121,67 +1955,81 @@ CmCheckRegistry(
     }
 
 #if !defined(CMLIB_HOST) && !defined(_BLDR_)
-    /*
-     * The master hive is the root of the registry,
-     * it holds all other hives together. So do not
-     * do any validation checks.
-     */
+    /* The master hive holds the others together; it is made in memory */
     if (RegistryHive == CmiVolatileHive)
-    {
-        DPRINT("This is master registry hive, don't do anything\n");
         return CM_CHECK_REGISTRY_GOOD;
-    }
 #endif
 
-    /* Bail out if no valid flag is given */
     if (Flags & ~(CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES       |
                   CM_CHECK_REGISTRY_PURGE_VOLATILES            |
                   CM_CHECK_REGISTRY_BOOTLOADER_PURGE_VOLATILES |
                   CM_CHECK_REGISTRY_VALIDATE_HIVE              |
                   CM_CHECK_REGISTRY_FIX_HIVE                   |
                   CM_CHECK_REGISTRY_RECOUNT_SECURITY           |
-                  CM_CHECK_REGISTRY_CACHE_SECURITY))
+                  CM_CHECK_REGISTRY_CACHE_SECURITY             |
+                  CM_CHECK_REGISTRY_LIVE_HIVE))
     {
         DPRINT1("Invalid flag for registry check given (flag %u)\n", Flags);
         return CM_CHECK_REGISTRY_INVALID_PARAMETER;
     }
 
-    /*
-     * Obtain the hive and check if the caller wants
-     * that the hive to be validated.
-     */
     Hive = GET_HHIVE(RegistryHive);
-    if (Flags & CM_CHECK_REGISTRY_VALIDATE_HIVE)
+    if (Hive->Signature != HV_HHIVE_SIGNATURE)
+        return CM_CHECK_REGISTRY_HIVE_CORRUPT_SIGNATURE;
+
+    RtlZeroMemory(&Ctx, sizeof(Ctx));
+    RtlZeroMemory(&Tally, sizeof(Tally));
+    Ctx.Hive = Hive;
+    Ctx.Flags = Flags;
+    Ctx.Live = (Flags & CM_CHECK_REGISTRY_LIVE_HIVE) != 0;
+    Ctx.FixHive = (Flags & CM_CHECK_REGISTRY_FIX_HIVE) != 0;
+    Ctx.Heal = !Ctx.Live && CmIsSelfHealEnabled(Ctx.FixHive);
+    Ctx.Tally = (!Ctx.Live && (Flags & CM_CHECK_REGISTRY_RECOUNT_SECURITY)) ? &Tally : NULL;
+    Ctx.Stats.SecurityTally = Ctx.Tally;
+    Ctx.Stats.IsKeyCell = CmpIsKeyCell;
+    Ctx.Stats.CheckContext = &Ctx;
+
+    /* The bins and cells first: the map of where cells start */
+    Status = CmpBuildCellMap(Hive, Ctx.Live, &Ctx.Map);
+    if (!CM_CHECK_REGISTRY_SUCCESS(Status))
     {
-        CmStatusCode = HvValidateHive(Hive);
-        if (!CM_CHECK_REGISTRY_SUCCESS(CmStatusCode))
-        {
-            DPRINT1("The hive is not valid (hive 0x%p, check status code %u)\n",
-                    Hive, CmStatusCode);
-            return CmStatusCode;
-        }
+        DPRINT1("The hive is not valid (hive 0x%p, check status code %u)\n", Hive, Status);
+        return Status;
     }
 
-    /*
-     * A registry repair tool such as the ReactOS Check Registry
-     * Utility wants the damaged hive to be fixed as we check the
-     * target hive.
-     */
-    if (Flags & CM_CHECK_REGISTRY_FIX_HIVE)
+    /* Then the tree */
+    Status = CmpWalkTree(&Ctx);
+    CmpFreeCellMap(&Ctx.Map);
+    if (!CM_CHECK_REGISTRY_SUCCESS(Status))
     {
-        ShouldFixHive = TRUE;
+        DPRINT1("The hive is not valid (hive 0x%p, check status code %u)\n", Hive, Status);
+        CmpSkTallyReset(&Tally);
+        return Status;
     }
 
-    /* Call the internal API to do the rest of the work bulk */
-    CmStatusCode = CmpValidateRegistryInternal(Hive, Flags, FALSE, ShouldFixHive);
-    if (!CM_CHECK_REGISTRY_SUCCESS(CmStatusCode))
+    if (Ctx.KeysRemoved || Ctx.ValuesRemoved || Ctx.ListsPurged || Ctx.FieldsReset || Ctx.Stats.SecurityReset)
     {
-        DPRINT1("The hive is not valid (hive 0x%p, check status code %u)\n",
-                Hive, CmStatusCode);
-        return CmStatusCode;
+        DPRINT1("Hive 0x%p repaired: %lu keys and %lu values removed (%lu of them big data chains that are "
+                "not sound), %lu lists dropped, %lu fields reset, %lu keys lost a security cell that is not valid\n",
+                Hive, (unsigned long)Ctx.KeysRemoved, (unsigned long)Ctx.ValuesRemoved,
+                (unsigned long)Ctx.BigDataDropped, (unsigned long)Ctx.ListsPurged, (unsigned long)Ctx.FieldsReset,
+                (unsigned long)Ctx.Stats.SecurityReset);
+    }
+    if (Ctx.Stats.Hashes || Ctx.Stats.Sorted || Ctx.Stats.Skipped)
+    {
+        DPRINT1("Subkey indexes brought up to date: %lu hashes, %lu indexes sorted, %lu not sorted\n",
+                Ctx.Stats.Hashes, Ctx.Stats.Sorted, Ctx.Stats.Skipped);
     }
 
-    return CmStatusCode;
+    /* The 'sk' references, then the security cache of a hive being loaded */
+    if (Ctx.Tally)
+    {
+        CmpApplySecurityRecount(Hive, &Tally, Ctx.FixHive);
+        if (Flags & CM_CHECK_REGISTRY_CACHE_SECURITY)
+            CmpCacheSecurityRings(Hive, &Tally);
+    }
+    CmpSkTallyReset(&Tally);
+    return CM_CHECK_REGISTRY_GOOD;
 }
 
 /* EOF */

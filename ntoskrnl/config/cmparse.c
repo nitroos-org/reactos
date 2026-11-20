@@ -89,8 +89,16 @@ CmpGetSymbolicLink(IN PHHIVE Hive,
     PCM_KEY_NODE Node;
     UNICODE_STRING NewObjectName;
 
+    /*
+     * The callers hold no KCB lock here (the registry lock only). A set of
+     * the link value holds this KCB's lock exclusively while it replaces the
+     * data (a data length and a data cell written one after the other, an
+     * old big data chain freed): read the value under the lock, shared.
+     */
+    CmpAcquireKcbLockShared(SymbolicKcb);
+
     /* Make sure we're not being deleted */
-    if (SymbolicKcb->Delete) return FALSE;
+    if (SymbolicKcb->Delete) goto Exit;
 
     /* Get the key node */
     Node = (PCM_KEY_NODE)HvGetCell(SymbolicKcb->KeyHive, SymbolicKcb->KeyCell);
@@ -196,6 +204,7 @@ Exit:
 
     /* Check if we had an active cell and release it, then return the result */
     if (CellToRelease != HCELL_NIL) HvReleaseCell(Hive, CellToRelease);
+    CmpReleaseKcbLock(SymbolicKcb);
     return Result;
 }
 
@@ -1173,6 +1182,20 @@ CmpCreateLinkNode(IN PHHIVE Hive,
                            Context->CreateOptions,
                            Object);
         HvReleaseCell(Context->ChildHive.KeyHive, KeyCell);
+
+        /*
+         * A root flagged as a symbolic link: CmpDoOpen made the link's KCB, no
+         * key body, and returned STATUS_REPARSE, which is a success code. A
+         * hive is never linked through such a root (the hive check drops the
+         * flag); refuse rather than use the key body that is not there.
+         */
+        if (Status == STATUS_REPARSE)
+        {
+            if (Kcb != ParentKcb)
+                CmpDereferenceKeyControlBlockWithLock(Kcb, FALSE);
+            Status = STATUS_REGISTRY_CORRUPT;
+            goto Exit;
+        }
     }
     else
     {
@@ -2760,6 +2783,18 @@ KeyCachedOpenNow:
                             {
                                 /* A link in a user's hive stays in that user's hives */
                                 Status = STATUS_ACCESS_DENIED;
+                            }
+
+                            /*
+                             * CmpDoOpen made (or found and referenced) the KCB of the link for this open,
+                             * and no key body takes that reference: give it back, or the KCB stays
+                             * referenced and the hive can never be unloaded (review F13). A cached link
+                             * KCB was not referenced (CMP_OPEN_KCB_NO_CREATE).
+                             */
+                            if (!IsKeyCached && Kcb != ParentKcb)
+                            {
+                                CmpDereferenceKeyControlBlock(Kcb);
+                                Kcb = ParentKcb;
                             }
                         }
 

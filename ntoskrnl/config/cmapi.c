@@ -152,7 +152,8 @@ CmpCheckLiveHive(
     BOOLEAN Acquired;
 
     Acquired = CmpAcquireHiveSecurityLock(&Hive->Hive);
-    Status = CmCheckRegistry(Hive, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE);
+    Status = CmCheckRegistry(Hive, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE |
+                                   CM_CHECK_REGISTRY_LIVE_HIVE);
     CmpReleaseHiveSecurityLock(&Hive->Hive, Acquired);
     return Status;
 }
@@ -293,98 +294,20 @@ CmpSetValueKeyExisting(IN PHHIVE Hive,
                        IN ULONG StorageType,
                        IN ULONG TempData)
 {
-    HCELL_INDEX DataCell, NewCell;
-    PCELL_DATA CellData;
-    ULONG Length;
-    BOOLEAN WasSmall, IsSmall;
-
     /* Registry writes must be blocked */
     CMP_ASSERT_FLUSH_LOCK(Hive);
 
     /* Mark the old child cell dirty */
     if (!HvMarkCellDirty(Hive, OldChild, FALSE)) return STATUS_NO_LOG_SPACE;
 
-    /* See if this is a small or normal key */
-    WasSmall = CmpIsKeyValueSmall(&Length, Value->DataLength);
-
-    /* See if our new data can fit in a small key */
-    IsSmall = (DataSize <= CM_KEY_VALUE_SMALL) ? TRUE: FALSE;
-
-    /* Big keys are unsupported */
-    ASSERT_VALUE_BIG(Hive, Length);
-    ASSERT_VALUE_BIG(Hive, DataSize);
-
-    /* Mark the old value dirty */
-    if (!CmpMarkValueDataDirty(Hive, Value)) return STATUS_NO_LOG_SPACE;
-
-    /* Check if we have a small key */
-    if (IsSmall)
-    {
-        /* Check if we had a normal key with some data in it */
-        if (!(WasSmall) && (Length > 0))
-        {
-            /* Free the previous data */
-            CmpFreeValueData(Hive, Value->Data, Length);
-        }
-
-        /* Write our data directly */
-        Value->DataLength = DataSize + CM_KEY_VALUE_SPECIAL_SIZE;
-        Value->Data = TempData;
-        Value->Type = Type;
-        return STATUS_SUCCESS;
-    }
-
-    /* We have a normal key. Was the old cell also normal and had data? */
-    if (!(WasSmall) && (Length > 0))
-    {
-        /* Get the current data cell and actual data inside it */
-        DataCell = Value->Data;
-        ASSERT(DataCell != HCELL_NIL);
-        CellData = HvGetCell(Hive, DataCell);
-        if (!CellData) return STATUS_INSUFFICIENT_RESOURCES;
-
-        /* Immediately release the cell */
-        HvReleaseCell(Hive, DataCell);
-
-        /* Make sure that the data cell actually has a size */
-        ASSERT(HvGetCellSize(Hive, CellData) > 0);
-
-        /* Check if the previous data cell could fit our new data */
-        if (DataSize <= (ULONG)(HvGetCellSize(Hive, CellData)))
-        {
-            /* Re-use it then */
-            NewCell = DataCell;
-        }
-        else
-        {
-            /* Otherwise, re-allocate the current data cell */
-            NewCell = HvReallocateCell(Hive, DataCell, DataSize);
-            if (NewCell == HCELL_NIL) return STATUS_INSUFFICIENT_RESOURCES;
-        }
-    }
-    else
-    {
-        /* This was a small key, or a key with no data, allocate a cell */
-        NewCell = HvAllocateCell(Hive, DataSize, StorageType, HCELL_NIL);
-        if (NewCell == HCELL_NIL) return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    /* Now get the actual data for our data cell */
-    CellData = HvGetCell(Hive, NewCell);
-    ASSERT(CellData);
-
-    /* Release it immediately */
-    HvReleaseCell(Hive, NewCell);
-
-    /* Copy our data into the data cell's buffer, and set up the value */
-    RtlCopyMemory(CellData, Data, DataSize);
-    Value->Data = NewCell;
-    Value->DataLength = DataSize;
-    Value->Type = Type;
-
-    /* Return success */
-    ASSERT(HvIsCellDirty(Hive, NewCell));
-    return STATUS_SUCCESS;
+    /* The data itself (cmlib: small, one cell, or big data in a 1.4+ hive) */
+    return CmpReplaceValueData(Hive,
+                               Value,
+                               Type,
+                               Data,
+                               DataSize,
+                               (HSTORAGE_TYPE)StorageType,
+                               TempData);
 }
 
 NTSTATUS
@@ -2468,6 +2391,27 @@ CmFlushKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
     return Status;
 }
 
+/* Is the caller (its thread's token, impersonated or not) LocalSystem */
+static
+BOOLEAN
+CmpCallerIsSystem(VOID)
+{
+    SECURITY_SUBJECT_CONTEXT SubjectContext;
+    PTOKEN_USER User = NULL;
+    BOOLEAN Result = FALSE;
+
+    SeCaptureSubjectContext(&SubjectContext);
+    if (NT_SUCCESS(SeQueryInformationToken(SeQuerySubjectContextToken(&SubjectContext),
+                                           TokenUser,
+                                           (PVOID*)&User)))
+    {
+        Result = RtlEqualSid(User->User.Sid, SeLocalSystemSid);
+        ExFreePool(User);
+    }
+    SeReleaseSubjectContext(&SubjectContext);
+    return Result;
+}
+
 NTSTATUS
 NTAPI
 CmLoadKey(IN POBJECT_ATTRIBUTES TargetKey,
@@ -2566,6 +2510,16 @@ CmLoadKey(IN POBJECT_ATTRIBUTES TargetKey,
 
     /* Set flag */
     if (Flags & REG_NO_LAZY_FLUSH) CmHive->Hive.HiveFlags |= HIVE_NOLAZYFLUSH;
+
+    /*
+     * The root of a hive is stamped with the descriptor of the place it is
+     * linked at, and the file keeps it. Only the system's loads (the profile
+     * service, the boot hive list) do that: an administrator who loads a
+     * user's hive under another name would give the file that name's
+     * descriptor.
+     */
+    if (!CmpCallerIsSystem())
+        CmHive->Flags |= CMHIVE_FLAG_NO_ROOT_STAMP;
 
     /* Link the hive */
     Status = CmpLinkHiveToMaster(TargetKey->ObjectName,
@@ -3437,12 +3391,6 @@ CmSaveKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
         goto Cleanup;
     }
 
-#if DBG
-    /* Make sure this control block has a sane hive */
-    CheckStatus = CmpCheckLiveHive(HiveToValidate);
-    ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
-#endif
-
     /* Create a new hive that will hold the key */
     Status = CmpInitializeHive(&KeyHive,
                                HINIT_CREATE,
@@ -3457,12 +3405,29 @@ CmSaveKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
                                CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES);
     if (!NT_SUCCESS(Status)) goto Cleanup;
 
+    /*
+     * The copy reads every key and value below this one without their KCB
+     * locks, and a writer of any of them holds only its own KCB lock and the
+     * flusher lock of the hive shared: hold that lock exclusively while the
+     * hive is read (as NtFlushKey does), so that no value is read while it
+     * changes (a data length and a data cell of two different writes, a big
+     * data chain being freed).
+     */
+    CmpLockHiveFlusherExclusive((PCMHIVE)Kcb->KeyHive);
+
+#if DBG
+    /* Make sure this control block has a sane hive */
+    CheckStatus = CmpCheckLiveHive(HiveToValidate);
+    ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
+#endif
+
     /* Copy the key recursively into the new hive */
     Status = CmpDeepCopyKey(Kcb->KeyHive,
                             Kcb->KeyCell,
                             &KeyHive->Hive,
                             Stable,
                             &KeyHive->Hive.BaseBlock->RootCell);
+    CmpUnlockHiveFlusher((PCMHIVE)Kcb->KeyHive);
     if (!NT_SUCCESS(Status)) goto Cleanup;
 
     /* Set the primary handle of the hive */
@@ -3483,7 +3448,9 @@ Cleanup:
     if (NT_SUCCESS(Status))
     {
         /* Before we say goodbye, make sure the hive is still OK */
+        CmpLockHiveFlusherExclusive(HiveToValidate);
         CheckStatus = CmpCheckLiveHive(HiveToValidate);
+        CmpUnlockHiveFlusher(HiveToValidate);
         ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
     }
 #endif
@@ -3709,10 +3676,14 @@ CmSaveMergedKeys(IN PCM_KEY_CONTROL_BLOCK HighKcb,
     }
 
 #if DBG
-    /* Make sure that both the high and low precedence hives are OK */
+    /* Make sure that both the high and low precedence hives are OK (each read with no writer in it, see below) */
+    CmpLockHiveFlusherExclusive(HighHiveToValidate);
     CheckStatus = CmpCheckLiveHive(HighHiveToValidate);
+    CmpUnlockHiveFlusher(HighHiveToValidate);
     ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
+    CmpLockHiveFlusherExclusive(LowHiveToValidate);
     CheckStatus = CmpCheckLiveHive(LowHiveToValidate);
+    CmpUnlockHiveFlusher(LowHiveToValidate);
     ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
 #endif
 
@@ -3732,7 +3703,9 @@ CmSaveMergedKeys(IN PCM_KEY_CONTROL_BLOCK HighKcb,
         goto done;
 
     /* Copy the high precedence key into the new hive without its volatile subkeys. Its values come first in the
-     * result, in its order */
+     * result, in its order. The subtree is read without the KCB locks of its keys: the flusher lock of its hive,
+     * which every writer of the hive holds shared, is held exclusively meanwhile (one hive at a time) */
+    CmpLockHiveFlusherExclusive((PCMHIVE)HighKcb->KeyHive);
     Status = CmpDeepCopyKeyInternal(HighKcb->KeyHive,
                                     HighKcb->KeyCell,
                                     &KeyHive->Hive,
@@ -3740,16 +3713,19 @@ CmSaveMergedKeys(IN PCM_KEY_CONTROL_BLOCK HighKcb,
                                     Stable,
                                     TRUE,
                                     &KeyHive->Hive.BaseBlock->RootCell);
+    CmpUnlockHiveFlusher((PCMHIVE)HighKcb->KeyHive);
     if (!NT_SUCCESS(Status))
         goto done;
 
     /* Merge the low precedence key into the copy: it adds the values of other names (compared without case, the
      * high key's spelling stays) after those, and the subkeys the copy does not have; subkeys of both are merged */
+    CmpLockHiveFlusherExclusive((PCMHIVE)LowKcb->KeyHive);
     Status = CmpMergeKeyInternal(LowKcb->KeyHive,
                                  LowKcb->KeyCell,
                                  &KeyHive->Hive,
                                  KeyHive->Hive.BaseBlock->RootCell,
                                  Stable);
+    CmpUnlockHiveFlusher((PCMHIVE)LowKcb->KeyHive);
     if (!NT_SUCCESS(Status))
         goto done;
 
@@ -3771,9 +3747,13 @@ done:
     if (NT_SUCCESS(Status))
     {
         /* Check those hives again before we say goodbye */
+        CmpLockHiveFlusherExclusive(HighHiveToValidate);
         CheckStatus = CmpCheckLiveHive(HighHiveToValidate);
+        CmpUnlockHiveFlusher(HighHiveToValidate);
         ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
+        CmpLockHiveFlusherExclusive(LowHiveToValidate);
         CheckStatus = CmpCheckLiveHive(LowHiveToValidate);
+        CmpUnlockHiveFlusher(LowHiveToValidate);
         ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
     }
 #endif

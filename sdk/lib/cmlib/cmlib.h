@@ -65,6 +65,7 @@
     #define STATUS_REGISTRY_IO_FAILED        ((NTSTATUS)0xC000014D)
     #define STATUS_NOT_REGISTRY_FILE         ((NTSTATUS)0xC000015C)
     #define STATUS_REGISTRY_RECOVERED        ((NTSTATUS)0x40000009)
+    #define STATUS_NO_LOG_SPACE              ((NTSTATUS)0xC000017D)
 
     #define REG_OPTION_VOLATILE              1
     #define OBJ_CASE_INSENSITIVE             0x00000040L
@@ -250,6 +251,14 @@ typedef ULONG CM_CHECK_REGISTRY_STATUS;
  * (CmpBuildSecurityCache) and from the ring of every other cell a key names.
  */
 #define CM_CHECK_REGISTRY_CACHE_SECURITY              0x40
+/*
+ * The hive is in use (the Debug builds' check after a flush, an unload or a
+ * replace): its keys are only read, never repaired, volatile keys and cells are
+ * checked as well. Without this flag the hive is one being loaded from a file
+ * (or the boot loader's image of one): a file holds no volatile key, and what
+ * the check finds wrong is repaired where that is safe or makes it fail.
+ */
+#define CM_CHECK_REGISTRY_LIVE_HIVE                   0x80
 
 //
 // Check Registry status codes
@@ -433,15 +442,21 @@ typedef struct _HV_TRACK_CELL_REF
 extern ULONG CmlibTraceLevel;
 
 //
-// Hack since big keys are not yet supported
+// Big data. In a hive of format 1.4 or later (Hive->Version >= 4) the data of
+// a value longer than CM_KEY_VALUE_BIG (16344) bytes is stored as big data:
+// the value's Data names a 'db' cell (CM_BIG_DATA) with the number of
+// segments and a list cell of that many cell indexes; every listed cell holds
+// a segment of CM_KEY_VALUE_BIG bytes of the data, the last one the rest
+// (layout: the public "Windows registry file format specification" by Maxim
+// Suhanov, github.com/msuhanov/regf, section "Big data"). Older formats hold
+// such data in one cell. So does a 1.4+ hive into which a ReactOS kernel
+// without big data support wrote a long value: a data cell that holds all of
+// the data is read as one cell whatever the version, only a data cell smaller
+// than the data is a 'db' cell (CmpIsBigValueData). The check (cmcheck.c)
+// keeps a value only if its data is one of the two.
 //
-#ifdef _BLDR_ 
-#define ASSERT_VALUE_BIG(h, s) \
-    do { if (CmpIsKeyValueBig(h,s)) DbgPrint("Big keys aren't supported!\n"); } while (0)
-#else 
-#define ASSERT_VALUE_BIG(h, s)  \
-    ASSERTMSG("Big keys not supported!\n", !CmpIsKeyValueBig(h, s));
-#endif
+#define CMP_BIG_DATA_SEGMENTS(Length) \
+    (((Length) + CM_KEY_VALUE_BIG - 1) / CM_KEY_VALUE_BIG)
 
 //
 // Returns whether or not this is a small valued key
@@ -708,6 +723,13 @@ typedef struct _CMP_CASE_REPAIR_STATS
     ULONG Skipped;  /* subkey indexes out of order that could not be sorted */
     ULONG SecurityReset;    /* keys whose bad Security was reset to HCELL_NIL (not a case repair) */
     struct _CMP_SK_TALLY *SecurityTally; /* private to cmcheck.c: the recount of the 'sk' references, or NULL */
+    /*
+     * Private to cmcheck.c: is Cell a key node cell of the hive (an allocated
+     * cell, as large as a key node with its name, signature 'nk')? The entries
+     * of a subkey index are read before the keys they name are checked.
+     */
+    BOOLEAN (*IsKeyCell)(PVOID Context, HCELL_INDEX Cell);
+    PVOID CheckContext;
 } CMP_CASE_REPAIR_STATS, *PCMP_CASE_REPAIR_STATS;
 
 VOID
@@ -932,6 +954,26 @@ CmpGetValueData(
     OUT PHCELL_INDEX CellToRelease
 );
 
+BOOLEAN
+NTAPI
+CmpIsBigValueData(
+    _In_ PHHIVE Hive,
+    _In_ HCELL_INDEX DataCell,
+    _In_ ULONG Length
+);
+
+NTSTATUS
+NTAPI
+CmpReplaceValueData(
+    _In_ PHHIVE Hive,
+    _Inout_ PCM_KEY_VALUE Value,
+    _In_ ULONG Type,
+    _In_ PVOID Data,
+    _In_ ULONG DataSize,
+    _In_ HSTORAGE_TYPE StorageType,
+    _In_ ULONG TempData
+);
+
 HCELL_INDEX
 NTAPI
 CmpCopyValue(
@@ -984,6 +1026,14 @@ CmpGetCheckedSecurityCell(
     IN PHHIVE Hive,
     IN HCELL_INDEX Cell,
     OUT PULONG CellSize OPTIONAL
+);
+
+/* The offsets of a self-relative descriptor lie inside Length (the ACEs are not interpreted) */
+BOOLEAN
+NTAPI
+CmpIsSaneRelativeDescriptor(
+    IN PVOID Descriptor,
+    IN ULONG Length
 );
 
 BOOLEAN
@@ -1087,5 +1137,24 @@ CmpFree(
     IN PVOID Ptr,
     IN ULONG Quota
 );
+
+#if defined(_BLDR_)
+/*
+ * The boot loader's memory for the check of a hive (cmcheck.c), which is
+ * freed before the check returns: its default heap is too small for the
+ * cell map of a large hive.
+ */
+PVOID
+NTAPI
+CmpAllocateTemporary(
+    IN SIZE_T Size
+);
+
+VOID
+NTAPI
+CmpFreeTemporary(
+    IN PVOID Ptr
+);
+#endif
 
 #endif /* _CMLIB_H_ */

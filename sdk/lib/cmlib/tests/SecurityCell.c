@@ -929,15 +929,15 @@ static void TestRecountNoMemory(void)
     ULONG n;
 
     printf("-- recount: no memory for the table\n");
-    for (n = 1; n <= 2; n++)
+    for (n = 1; n <= 3; n++)
     {
         LONG Pool0 = g_PoolOut;
 
         CHECK(BuildCounted(1, 5), "build");
         CHECK(NT_SUCCESS(OpenHive(&Cm, HINIT_MEMORY)), "load");
         InitCache(&Cm);
-        g_FailAllocIn = n;      /* the work stack of the walk, then the table */
-        CHECK(n == 1 ? !CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS)) : CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS)),
+        g_FailAllocIn = n;      /* the cell map, the work stack of the walk (both fail the check), then the table */
+        CHECK(n < 3 ? !CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS)) : CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS)),
               "check with the allocation %lu failing", (unsigned long)n);
         g_FailAllocIn = 0;
         CHECK(Refs(Hive, g_RcS1) == 1 && Refs(Hive, g_RcS2) == 5, "[%lu] counts left as they were: %lu and %lu", (unsigned long)n,
@@ -981,7 +981,11 @@ static void TestRecountRestart(void)
     CmpFreeSecurityCache(&Cm);
 }
 
-/* A hive exit node names a cell and is not counted: raise, but never lower */
+/*
+ * A key of a hive file marked as a hive exit: the check drops the flag (a
+ * file key is never one) and the key is checked and counted as any other, so
+ * the count is complete and an over-count is lowered.
+ */
 static void TestRecountExitNode(void)
 {
     static CMHIVE Cm;
@@ -997,7 +1001,8 @@ static void TestRecountExitNode(void)
     ((PCM_KEY_NODE)HvGetCell(Hive, Exit))->Security = g_RcS2;
     CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS)), "check");
     CHECK(Refs(Hive, g_RcS1) == 3, "S1 was under-counted: raised: %lu", (unsigned long)Refs(Hive, g_RcS1));
-    CHECK(Refs(Hive, g_RcS2) == 4, "S2 is above what was counted, and the count is not complete: left: %lu", (unsigned long)Refs(Hive, g_RcS2));
+    CHECK(!(((PCM_KEY_NODE)HvGetCell(Hive, Exit))->Flags & KEY_HIVE_EXIT), "the hive exit flag was dropped");
+    CHECK(Refs(Hive, g_RcS2) == 2, "S2: the key is counted with the others, the over-count lowered: %lu", (unsigned long)Refs(Hive, g_RcS2));
     CmpFreeSecurityCache(&Cm);
 }
 

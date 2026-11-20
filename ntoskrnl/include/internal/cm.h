@@ -859,6 +859,14 @@ CmpAclStampHiveRoot(
     _In_ PCM_KEY_CONTROL_BLOCK Kcb
 );
 
+/*
+ * CMHIVE::Flags: a hive file loaded by a caller other than the system (an
+ * administrator's NtLoadKey, not the boot hive list or the profile service,
+ * which run as SYSTEM): its root is not stamped with the descriptor of the
+ * place it is loaded at, which the file would keep.
+ */
+#define CMHIVE_FLAG_NO_ROOT_STAMP 0x80000000
+
 NTSTATUS
 NTAPI
 CmpStampKeySecurity(

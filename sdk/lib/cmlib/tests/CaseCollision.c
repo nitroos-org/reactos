@@ -203,7 +203,9 @@ static int BuildHive(ULONG Version, const WCHAR **Names, ULONG NameCount, BOOLEA
     for (i = 0; i < NameCount; i++)
     {
         CHECK(AddS(Hive, P, Names[i], &Child), "add %lu", (unsigned long)i);
-        Id[0] = L'i'; Id[1] = L'd'; Id[2] = L'0' + (i / 10); Id[3] = L'0' + (i % 10); Id[4] = 0;
+        /* four decimal digits: a list holds up to MAX_SIB names (two digits went past '9', also to '\') */
+        Id[0] = L'i'; Id[1] = L'd'; Id[2] = L'0' + (i / 1000 % 10); Id[3] = L'0' + (i / 100 % 10);
+        Id[4] = L'0' + (i / 10 % 10); Id[5] = L'0' + (i % 10); Id[6] = 0;
         CHECK(AddS(Hive, Child, Id, &Marker), "marker %lu", (unsigned long)i);
     }
     if (SortOneLeaf)
