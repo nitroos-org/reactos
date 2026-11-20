@@ -243,7 +243,7 @@ TUILockedSAS(
 {
     WCHAR UserName[256];
     WCHAR Password[256];
-    BOOL IsSessionUser, IsAdmin;
+    BOOL IsSessionUser;
     NTSTATUS SubStatus;
     NTSTATUS Status;
     INT Action = WLX_SAS_ACTION_NONE;
@@ -259,19 +259,21 @@ TUILockedSAS(
     if (!ReadString(IDS_ASKFORPASSWORD, Password, _countof(Password), FALSE))
         return WLX_SAS_ACTION_NONE;
 
-    /* The LSA checks the password (an Unlock logon): only the session's user unlocks, an administrator
-       logs the user off, as in the graphical unlock dialog */
-    Status = DoUnlockLogon(pgContext, UserName, Password, &IsSessionUser, &IsAdmin, &SubStatus);
-    if (NT_SUCCESS(Status))
+    /* Only the user of the session unlocks. The name of another account is refused without a logon attempt (no
+       password is checked, nothing is counted against any account); the LSA checks the password of the session's
+       user (an Unlock logon) */
+    if (_wcsicmp(UserName, pgContext->UserName) == 0)
     {
-        if (IsSessionUser)
-            Action = WLX_SAS_ACTION_UNLOCK_WKSTA;
-        else if (IsAdmin)
-            Action = WLX_SAS_ACTION_FORCE_LOGOFF;
-    }
-    else
-    {
-        WARN("DoUnlockLogon() failed (Status 0x%08lx)\n", Status);
+        Status = DoUnlockLogon(pgContext, UserName, Password, &IsSessionUser, &SubStatus);
+        if (NT_SUCCESS(Status))
+        {
+            if (IsSessionUser)
+                Action = WLX_SAS_ACTION_UNLOCK_WKSTA;
+        }
+        else
+        {
+            WARN("DoUnlockLogon() failed (Status 0x%08lx)\n", Status);
+        }
     }
 
     SecureZeroMemory(Password, sizeof(Password));

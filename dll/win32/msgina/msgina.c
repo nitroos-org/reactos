@@ -35,8 +35,6 @@ HINSTANCE hDllInstance;
 extern GINA_UI GinaGraphicalUI;
 extern GINA_UI GinaTextUI;
 static PGINA_UI pGinaUI;
-static SID_IDENTIFIER_AUTHORITY SystemAuthority = {SECURITY_NT_AUTHORITY};
-static PSID AdminSid;
 
 /*
  * @implemented
@@ -722,9 +720,9 @@ GetTokenInfo(
  * wrong password is counted by the account lockout, a locked out account cannot unlock, a password that was changed
  * meanwhile is the one that counts, and no copy of the password is kept for the comparison.
  *
- * On success the user of the session (IsSessionUser) or an administrator (IsAdmin) has proved the password. The
- * token of the unlock logon is used for those two questions only and is closed before the function returns: it
- * is never kept, never given to winlogon and does not become the token of the session.
+ * Only the user of the session can unlock: on success IsSessionUser is TRUE when the logon proved the password of
+ * the session's user. The token of the unlock logon is used for that one question only and is closed before the
+ * function returns: it is never kept, never given to winlogon and does not become the token of the session.
  */
 NTSTATUS
 DoUnlockLogon(
@@ -732,18 +730,14 @@ DoUnlockLogon(
     IN PWSTR UserName,
     IN PWSTR Password,
     OUT PBOOL IsSessionUser,
-    OUT PBOOL IsAdmin,
     OUT PNTSTATUS SubStatus)
 {
     HANDLE hToken = NULL;
     PTOKEN_USER UnlockUser = NULL;
     PTOKEN_USER SessionUser = NULL;
-    PTOKEN_GROUPS Groups = NULL;
-    ULONG i;
     NTSTATUS Status;
 
     *IsSessionUser = FALSE;
-    *IsAdmin = FALSE;
     *SubStatus = STATUS_SUCCESS;
 
     Status = ConnectToLsa(pgContext);
@@ -786,27 +780,9 @@ DoUnlockLogon(
         (SessionUser == NULL && _wcsicmp(UserName, pgContext->UserName) == 0))
     {
         *IsSessionUser = TRUE;
-        goto done;
-    }
-
-    Groups = GetTokenInfo(hToken, TokenGroups);
-    if (Groups != NULL && AdminSid != NULL)
-    {
-        for (i = 0; i < Groups->GroupCount; i++)
-        {
-            if (RtlEqualSid(Groups->Groups[i].Sid, AdminSid) &&
-                (Groups->Groups[i].Attributes & SE_GROUP_ENABLED))
-            {
-                TRACE("Member of Admins group\n");
-                *IsAdmin = TRUE;
-                break;
-            }
-        }
     }
 
 done:
-    if (Groups != NULL)
-        HeapFree(GetProcessHeap(), 0, Groups);
     if (SessionUser != NULL)
         HeapFree(GetProcessHeap(), 0, SessionUser);
     if (UnlockUser != NULL)
@@ -1202,24 +1178,6 @@ DllMain(
     if (dwReason == DLL_PROCESS_ATTACH)
     {
         hDllInstance = hinstDLL;
-
-        RtlAllocateAndInitializeSid(&SystemAuthority,
-                                    2,
-                                    SECURITY_BUILTIN_DOMAIN_RID,
-                                    DOMAIN_ALIAS_RID_ADMINS,
-                                    SECURITY_NULL_RID,
-                                    SECURITY_NULL_RID,
-                                    SECURITY_NULL_RID,
-                                    SECURITY_NULL_RID,
-                                    SECURITY_NULL_RID,
-                                    SECURITY_NULL_RID,
-                                    &AdminSid);
-
-    }
-    else if (dwReason == DLL_PROCESS_DETACH)
-    {
-        if (AdminSid != NULL)
-            RtlFreeSid(AdminSid);
     }
 
     return TRUE;

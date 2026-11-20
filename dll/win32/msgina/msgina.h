@@ -139,7 +139,6 @@ DoUnlockLogon(
     IN PWSTR UserName,
     IN PWSTR Password,
     OUT PBOOL IsSessionUser,
-    OUT PBOOL IsAdmin,
     OUT PNTSTATUS SubStatus);
 
 NTSTATUS
