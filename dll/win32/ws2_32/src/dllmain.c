@@ -42,8 +42,12 @@ DllMain(HANDLE hModule,
     PWSPROCESS WsProcess;
 
 #if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
-    /* Initialize ws2help */
-    if (!Ws2HelpDllMain(hModule, dwReason, lpReserved))
+    /* Initialize ws2help. On process detach it goes last (below): the cleanup
+     * of ws2_32 still calls into it (WahCloseThread), and a call into a
+     * ws2help whose startup lock was already deleted waits for it forever,
+     * with the loader lock held */
+    if (dwReason != DLL_PROCESS_DETACH &&
+        !Ws2HelpDllMain(hModule, dwReason, lpReserved))
     {
         /* Should never happen */
         ASSERT(FALSE);
@@ -124,6 +128,12 @@ DllMain(HANDLE hModule,
             WsDllHandle = NULL;
             break;
     }
+
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+    /* Now ws2help can go, whether or not ws2_32 was initialized */
+    if (dwReason == DLL_PROCESS_DETACH)
+        Ws2HelpDllMain(hModule, dwReason, lpReserved);
+#endif
 
     /* Return to OS */
     return TRUE;
