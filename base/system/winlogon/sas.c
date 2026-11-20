@@ -1359,6 +1359,28 @@ DispatchSAS(
             return;
 
         case WLX_SAS_TYPE_SCRNSVR_TIMEOUT:
+            /*
+             * The screen saver is the logged-on user's: it does not start when nobody is logged on, when
+             * the workstation is locked or while a SAS dialog is shown (it would run on the application
+             * desktop, out of sight, and hold up this thread until it ends).
+             */
+            if (Session->LogonState != STATE_LOGGED_ON)
+            {
+                SetEvent(Session->hEndOfScreenSaver);
+                return;
+            }
+
+            /*
+             * Requests for a start that were queued while a screen saver was running (the idle timeout is
+             * detected in two places) reach us right after it ended: the user has just woken it, do not
+             * start it again.
+             */
+            if (Session->bScreenSaverRan && (GetTickCount() - Session->LastScreenSaverEnd) < 2000)
+            {
+                SetEvent(Session->hEndOfScreenSaver);
+                return;
+            }
+
             if (!Session->Gina.Functions.WlxScreenSaverNotify(Session->Gina.Context, &bSecure))
             {
                 /* Skip start of screen saver */
@@ -1366,12 +1388,9 @@ DispatchSAS(
             }
             else
             {
-                StartScreenSaver(Session);
-                if (bSecure)
-                {
+                /* Runs the saver until it ends; when it was a password protected one, lock the workstation */
+                if (StartScreenSaver(Session, bSecure))
                     wlxAction = WLX_SAS_ACTION_LOCK_WKSTA;
-//                    DoGenericAction(Session, WLX_SAS_ACTION_LOCK_WKSTA);
-                }
             }
             break;
 

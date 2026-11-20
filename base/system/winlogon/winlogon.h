@@ -251,6 +251,8 @@ typedef struct _WLSESSION
     HANDLE hScreenSaverParametersChanged;
     HANDLE hUserActivity;
     HANDLE hEndOfScreenSaver;
+    BOOL bScreenSaverRan; /* a screen saver ended at LastScreenSaverEnd (GetTickCount) */
+    DWORD LastScreenSaverEnd;
 #ifndef USE_GETLASTINPUTINFO
     DWORD LastActivity;
 #endif
@@ -352,8 +354,8 @@ InitializeScreenSaver(IN OUT PWLSESSION Session);
 VOID
 TerminateScreenSaverThread(IN OUT PWLSESSION Session);
 
-VOID
-StartScreenSaver(IN PWLSESSION Session);
+BOOL
+StartScreenSaver(IN PWLSESSION Session, IN BOOL bSecure);
 
 /* security.c */
 PSECURITY_DESCRIPTOR
