@@ -498,6 +498,107 @@ SetSystemEnvironment(PWSTR* Environment)
 }
 
 
+/* TRUE when the token's user is LocalSystem */
+static
+BOOL
+IsLocalSystemToken(HANDLE hToken)
+{
+    PSID Sid = GetUserSid(hToken);
+    BOOL Result;
+
+    if (Sid == NULL)
+        return FALSE;
+    Result = IsWellKnownSid(Sid, WinLocalSystemSid);
+    LocalFree(Sid);
+    return Result;
+}
+
+
+/* A LocalAlloc'ed copy of a variable of an environment block, NULL if it has none */
+static
+PWSTR
+CopyVariable(PWSTR Environment, PCWSTR lpName)
+{
+    UNICODE_STRING Name, Value;
+    NTSTATUS Status;
+    PWSTR Copy;
+
+    RtlInitUnicodeString(&Name, lpName);
+    Value.Length = 0;
+    Value.MaximumLength = 0;
+    Value.Buffer = NULL;
+    Status = RtlQueryEnvironmentVariable_U(Environment, &Name, &Value);
+    if (Status != STATUS_BUFFER_TOO_SMALL || Value.Length == 0)
+        return NULL;
+
+    Copy = LocalAlloc(LPTR, Value.Length + sizeof(WCHAR));
+    if (Copy == NULL)
+        return NULL;
+    Value.MaximumLength = Value.Length + sizeof(WCHAR);
+    Value.Buffer = Copy;
+    if (!NT_SUCCESS(RtlQueryEnvironmentVariable_U(Environment, &Name, &Value)))
+    {
+        LocalFree(Copy);
+        return NULL;
+    }
+    return Copy;
+}
+
+
+/*
+ * 'APPDATA' and 'LOCALAPPDATA': the user's AppData and Local AppData shell folders, expanded
+ * against the block (they name %USERPROFILE%), else the folders under the profile directory.
+ * Windows sets them for every user it finds a profile for, also for LocalSystem, whose hive has
+ * no Volatile Environment (measured on Windows Server 2022).
+ */
+static
+VOID
+SetAppDataVariables(PWSTR* Environment,
+                    HKEY hKeyUser,
+                    PCWSTR ProfileDirectory)
+{
+    static const struct
+    {
+        PCWSTR Variable;
+        PCWSTR ShellFolder;
+        PCWSTR Default;
+    } Folders[] =
+    {
+        {L"APPDATA", L"AppData", L"AppData\\Roaming"},
+        {L"LOCALAPPDATA", L"Local AppData", L"AppData\\Local"},
+    };
+    WCHAR Value[MAX_PATH];
+    DWORD i, Size, Type;
+    LONG Error;
+
+    for (i = 0; i < ARRAYSIZE(Folders); i++)
+    {
+        Error = ERROR_FILE_NOT_FOUND;
+        if (hKeyUser != NULL)
+        {
+            Size = sizeof(Value) - sizeof(WCHAR);
+            Error = RegGetValueW(hKeyUser,
+                                 L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders",
+                                 Folders[i].ShellFolder,
+                                 RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND,
+                                 &Type,
+                                 Value,
+                                 &Size);
+        }
+
+        if (Error == ERROR_SUCCESS && Value[0] != UNICODE_NULL)
+        {
+            SetUserEnvironmentVariable(Environment, Folders[i].Variable, Value, Type == REG_EXPAND_SZ);
+        }
+        else if (SUCCEEDED(StringCchPrintfW(Value, ARRAYSIZE(Value), L"%s\\%s",
+                                            ProfileDirectory, Folders[i].Default)))
+        {
+            SetUserEnvironmentVariable(Environment, Folders[i].Variable, Value, FALSE);
+        }
+    }
+}
+
+
 BOOL
 WINAPI
 CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
@@ -517,6 +618,7 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
     WCHAR PublicDirectory[MAX_PATH];
     WCHAR szValue[1024];
     BOOL Wow64 = FALSE, HasWow64 = FALSE;
+    BOOL ProfileFound;
 
     DPRINT("CreateEnvironmentBlock() called\n");
 
@@ -718,7 +820,8 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
 
     /* Set 'USERPROFILE' variable */
     Length = ARRAYSIZE(Buffer);
-    if (GetUserProfileDirectoryW(hToken, Buffer, &Length) ||
+    ProfileFound = GetUserProfileDirectoryW(hToken, Buffer, &Length);
+    if (ProfileFound ||
         (hKeyUser == NULL && (Length = ARRAYSIZE(Buffer), GetDefaultUserProfileDirectoryW(Buffer, &Length))))
     {
         DWORD MinLen = 2;
@@ -728,12 +831,18 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
                                    Buffer,
                                    FALSE);
 
+        /* 'APPDATA' and 'LOCALAPPDATA' of the user's own profile */
+        if (ProfileFound)
+            SetAppDataVariables(Environment, hKeyUser, Buffer);
+
         // FIXME: Strangely enough the following two environment variables
         // are not set by userenv.dll in Windows... See r68284 / CORE-9875
         // FIXME2: This is done by msgina.dll !!
 
-        /* At least <drive letter>:<path> */
-        if (Length > MinLen)
+        /* At least <drive letter>:<path>. LocalSystem has no HOMEDRIVE and HOMEPATH, as before this
+         * block named its own profile and as on Windows (measured on Windows Server 2022: unset for
+         * a LocalSystem service and task and for CreateEnvironmentBlock with the LocalSystem token) */
+        if (Length > MinLen && !IsLocalSystemToken(hToken))
         {
             /* Set 'HOMEDRIVE' variable */
             StringCchCopyNW(szValue, ARRAYSIZE(Buffer), Buffer, MinLen);
@@ -780,10 +889,29 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
 
     if (hKeyUser != NULL)
     {
+        /* LocalSystem keeps the system TEMP and TMP: on Windows its environment has %SystemRoot%\TEMP
+         * although its hive's Environment key names %USERPROFILE%\AppData\Local\Temp (measured on
+         * Windows Server 2022 for a LocalSystem service, a LocalSystem task and CreateEnvironmentBlock
+         * with the LocalSystem token) */
+        BOOL KeepTemp = IsLocalSystemToken(hToken);
+        PWSTR SystemTemp = KeepTemp ? CopyVariable(*Environment, L"TEMP") : NULL;
+        PWSTR SystemTmp = KeepTemp ? CopyVariable(*Environment, L"TMP") : NULL;
+
         /* Set user environment variables */
         SetUserEnvironment(Environment,
                            hKeyUser,
                            L"Environment");
+
+        if (SystemTemp)
+        {
+            SetUserEnvironmentVariable(Environment, L"TEMP", SystemTemp, FALSE);
+            LocalFree(SystemTemp);
+        }
+        if (SystemTmp)
+        {
+            SetUserEnvironmentVariable(Environment, L"TMP", SystemTmp, FALSE);
+            LocalFree(SystemTmp);
+        }
 
         /* Set user volatile environment variables */
         SetUserEnvironment(Environment,

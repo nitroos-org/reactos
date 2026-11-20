@@ -1216,8 +1216,21 @@ static HANDLE start_action(const struct task *task, const struct action *action,
         wcscat(cmdline, arguments);
     }
 
-    /* a task of a user never gets the environment of this service */
-    if (!CreateEnvironmentBlock(&env, token, FALSE) && token)
+    /* a task of a user never gets the environment of this service; a LocalSystem task gets the one of
+     * LocalSystem's own profile (as on Windows), not the Default user's that a NULL token gives */
+    if (!token)
+    {
+        HANDLE self = NULL;
+
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE, &self) ||
+            !CreateEnvironmentBlock(&env, self, FALSE))
+        {
+            env = NULL;
+            CreateEnvironmentBlock(&env, NULL, FALSE);
+        }
+        if (self) CloseHandle(self);
+    }
+    else if (!CreateEnvironmentBlock(&env, token, FALSE))
     {
         ERR("task %s: no environment for its user (%lu), not starting it\n", debugstr_w(task->path), GetLastError());
         free(command);

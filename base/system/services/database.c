@@ -3542,14 +3542,22 @@ ScmStartUserModeService(PSERVICE Service,
     else
     {
         /* No user token: Run the service under the LocalSystem account */
+        HANDLE hSystemToken = NULL;
 
-        if (!CreateEnvironmentBlock(&lpEnvironment, NULL, TRUE))
+        /* The environment of LocalSystem: its own profile (USERPROFILE, APPDATA, LOCALAPPDATA of
+         * system32\config\systemprofile), as on Windows; without a token the block would name the
+         * Default user's profile, and what a service writes there ends up in every new profile */
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE, &hSystemToken))
+            hSystemToken = NULL;
+        if (!CreateEnvironmentBlock(&lpEnvironment, hSystemToken, TRUE))
         {
             /* We failed, run the service with the current environment */
             DPRINT1("CreateEnvironmentBlock() failed with error %d; service '%S' will run with current environment\n",
                     GetLastError(), Service->lpServiceName);
             lpEnvironment = NULL;
         }
+        if (hSystemToken)
+            CloseHandle(hSystemToken);
 
         /* Use the interactive desktop if the service is interactive */
         if ((NoInteractiveServices == 0) &&
