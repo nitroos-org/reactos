@@ -208,11 +208,75 @@ Test_Find(void)
     ok(ComponentFindIndex(0, d, L"gl") == -1, "empty list\n");
 }
 
+/* Patterns that must not reach a file outside their directory, and very long inputs */
+static void
+Test_GlobBoundaries(void)
+{
+    static WCHAR LongPath[4096], LongPattern[4096];
+    ULONG i;
+
+    ok(!ComponentGlobMatch(L"bin\\*", L"binx\\a.exe"), "bin\\* is not binx\\a.exe\n");
+    ok(!ComponentGlobMatch(L"bin\\*", L"system32\\bin\\a.exe"), "bin\\* is anchored at the start\n");
+    ok(!ComponentGlobMatch(L"system32\\sol.exe", L"system32\\sol.exe\\x"), "no match past the end\n");
+    ok(!ComponentGlobMatch(L"system32\\sol.exe", L"system32\\xsol.exe"), "no match in the middle of a name\n");
+    ok(ComponentGlobMatch(L"system32\\?ol.exe", L"system32\\sol.exe"), "? is one character\n");
+    ok(!ComponentGlobMatch(L"system32\\?ol.exe", L"system32\\ol.exe"), "? is not nothing\n");
+    ok(!ComponentGlobMatch(L"games", L"system32\\games.exe"), "a bare word matches only that whole path\n");
+    ok(!ComponentGlobMatch(L"tests", L"bin\\tests"), "a bare word is anchored\n");
+
+    for (i = 0; i < RTL_NUMBER_OF(LongPath) - 1; ++i)
+        LongPath[i] = (i % 17 == 16) ? L'\\' : L'a';
+    LongPath[RTL_NUMBER_OF(LongPath) - 1] = UNICODE_NULL;
+    for (i = 0; i < RTL_NUMBER_OF(LongPattern) - 1; ++i)
+        LongPattern[i] = (i % 2) ? L'a' : L'*';
+    LongPattern[RTL_NUMBER_OF(LongPattern) - 2] = L'b';
+    LongPattern[RTL_NUMBER_OF(LongPattern) - 1] = UNICODE_NULL;
+    ok(ComponentGlobMatch(L"*", LongPath), "* matches a very long path\n");
+    ok(ComponentGlobMatch(L"a*", LongPath), "a* matches a very long path\n");
+    ok(!ComponentGlobMatch(L"a*b", LongPath), "a*b does not match a path without b\n");
+    /* many stars (*a*a*...*b) against a long path without a b: must end (no exponential search) and not match */
+    ok(!ComponentGlobMatch(LongPattern, LongPath), "many stars against a long path\n");
+}
+
+/* The 32-component limit of the masks */
+static void
+Test_ResolveLimits(void)
+{
+    COMPONENT_DESC d[COMPONENT_MAX + 4];
+    COMPONENT_CHOICE ex[COMPONENT_MAX + 4];
+    ULONG i, sel;
+    const ULONG std = BIT(COMPONENT_PROFILE_STANDARD);
+
+    for (i = 0; i < RTL_NUMBER_OF(d); ++i)
+    {
+        InitDesc(d, i, L"c", std, 0, 0, TRUE);
+        ex[i] = COMPONENT_UNSET;
+    }
+    /* component 31 needs 30, which needs 29 ... 0: refusing 0 takes the whole chain, including the top bit */
+    for (i = 1; i < COMPONENT_MAX; ++i)
+        d[i].Depends = BIT(i - 1);
+    sel = ComponentsResolve(COMPONENT_MAX, d, COMPONENT_PROFILE_STANDARD, ex);
+    ok(sel == 0xFFFFFFFFUL, "32 components, all on: 0x%lx\n", sel);
+    ex[0] = COMPONENT_NO;
+    sel = ComponentsResolve(COMPONENT_MAX, d, COMPONENT_PROFILE_STANDARD, ex);
+    ok(sel == 0, "32 components, chain broken at the root: 0x%lx\n", sel);
+    /* the 32nd component refused alone */
+    ex[0] = COMPONENT_UNSET; ex[COMPONENT_MAX - 1] = COMPONENT_NO;
+    sel = ComponentsResolve(COMPONENT_MAX, d, COMPONENT_PROFILE_STANDARD, ex);
+    ok(sel == 0x7FFFFFFFUL, "32nd component refused: 0x%lx\n", sel);
+    /* a list longer than the limit is cut, nothing beyond bit 31 is read or set */
+    ex[COMPONENT_MAX - 1] = COMPONENT_UNSET;
+    sel = ComponentsResolve(COMPONENT_MAX + 4, d, COMPONENT_PROFILE_STANDARD, ex);
+    ok(sel == 0xFFFFFFFFUL, "longer than the limit: 0x%lx\n", sel);
+}
+
 START_TEST(ComponentsList)
 {
     Test_Glob();
+    Test_GlobBoundaries();
     Test_Profiles();
     Test_Answers();
     Test_Resolve();
+    Test_ResolveLimits();
     Test_Find();
 }
