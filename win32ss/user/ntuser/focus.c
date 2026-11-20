@@ -840,6 +840,14 @@ co_IntSetForegroundMessageQueue(
       return FALSE;
    }
 
+   // The same for a window of another desktop than the input desktop, whatever the desktop of its queue says (a queue
+   // that has not been on a desktop yet has none): the keyboard would go to a program that cannot be seen, while a
+   // screen saver on its own desktop or the lock screen has the input.
+   if (Wnd && Wnd->head.rpdesk && Wnd->head.rpdesk != IntGetActiveDesktop())
+   {
+      return FALSE;
+   }
+
    if ( !gptiForeground || gptiForeground->TIF_flags & TIF_INCLEANUP )
       ptiPrev = NULL;
    else
