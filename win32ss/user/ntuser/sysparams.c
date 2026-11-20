@@ -71,6 +71,7 @@ static const WCHAR* VAL_SENSITIVITY = L"MouseSensitivity";
 #endif
 
 static const WCHAR* KEY_DESKTOP = L"Control Panel\\Desktop";
+static const WCHAR* KEY_DESKTOP_POLICY = L"Software\\Policies\\Microsoft\\Windows\\Control Panel\\Desktop";
 static const WCHAR* VAL_SCRTO = L"ScreenSaveTimeOut";
 static const WCHAR* VAL_SCRNSV = L"SCRNSAVE.EXE";
 static const WCHAR* VAL_SCRACT = L"ScreenSaveActive";
@@ -166,15 +167,31 @@ SpiLoadUserPrefMask(DWORD dValue)
 static
 DWORD
 SpiLoadTimeOut(VOID)
-{   // Must have the string!
+{
     WCHAR szApplicationName[MAX_PATH];
+    INT iTimeOut;
+
+    /* The user policy "Screen saver timeout" overrides the user's value (0 = never) */
+    iTimeOut = SpiLoadInt(KEY_DESKTOP_POLICY, VAL_SCRTO, -1);
+    if (iTimeOut >= 0)
+        return iTimeOut;
+
+    /* A stored timeout counts with or without a saver file: "(None)" with the password protection of the saver
+     * locks the workstation when the time has passed (measured on Windows Server 2022) */
+    iTimeOut = SpiLoadInt(KEY_DESKTOP, VAL_SCRTO, -1);
+    if (iTimeOut >= 0)
+        return iTimeOut;
+
+    /* No timeout stored: 10 minutes when there is a saver (the user's, or that of the policy), else none */
     RtlZeroMemory(&szApplicationName, sizeof(szApplicationName));
-    if (!RegReadUserSetting(KEY_DESKTOP, VAL_SCRNSV, REG_SZ, &szApplicationName, sizeof(szApplicationName)))
+    if ((RegReadUserSetting(KEY_DESKTOP_POLICY, VAL_SCRNSV, REG_SZ, &szApplicationName, sizeof(szApplicationName)) &&
+         szApplicationName[0] != 0) ||
+        (RegReadUserSetting(KEY_DESKTOP, VAL_SCRNSV, REG_SZ, &szApplicationName, sizeof(szApplicationName)) &&
+         szApplicationName[0] != 0))
     {
-        return 0;
+        return 600;
     }
-    if (szApplicationName[0] == 0) return 0;
-    return SpiLoadInt(KEY_DESKTOP, VAL_SCRTO, 600);
+    return 0;
 }
 
 static
@@ -335,7 +352,10 @@ SpiUpdatePerUserSystemParameters(VOID)
     gspv.dwForegroundFlashCount = 3;
 
     gspv.iScrSaverTimeout = SpiLoadTimeOut();
-    gspv.bScrSaverActive = SpiLoadInt(KEY_DESKTOP, VAL_SCRACT, 0) != 0;
+    /* The stored ScreenSaveActive does not count at logon on Windows Server 2022 (measured: a profile with the value 0
+     * or none and a timeout has an active saver): a saver with a timeout is active, one without is not (see
+     * SPI_GETSCREENSAVEACTIVE) */
+    gspv.bScrSaverActive = TRUE;
     gspv.bScrSaverRunning = FALSE;
     gspv.bScrSaverSecure = SpiLoadInt(KEY_DESKTOP, L"ScreenSaverIsSecure", 0) != 0;
 
