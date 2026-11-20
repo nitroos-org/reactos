@@ -315,6 +315,38 @@ TestCreateAndSet(VOID)
     }
 }
 
+/*
+ * A subkey made by its absolute path (RegCreateKeyEx on HKEY_LOCAL_MACHINE, no handle of the parent) needs the same right on the
+ * parent as the create through a handle of it (measured on Windows Server 2022 for the keys P0, C1, C2 and C3: the rows of
+ * Create above), and so for a restricted token it must not succeed where the open for creating a subkey does not
+ */
+static VOID
+TestPathCreate(VOID)
+{
+    ULONG i;
+    WCHAR Path[110];
+    HKEY hSub;
+    LONG Error;
+    DWORD Disposition;
+
+    for (i = 0; i < ARRAYSIZE(Rows); i++)
+    {
+        if (Rows[i].Key == KEY_C4 || (Rows[i].Token == TOK_N && Rows[i].Key == KEY_C2))
+            continue;
+        KeyPath(Rows[i].Key, Path, ARRAYSIZE(Path));
+        StringCchCatW(Path, ARRAYSIZE(Path), L"\\pcsub");
+        Impersonate(Rows[i].Token);
+        hSub = NULL;
+        Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, Path, 0, NULL, 0, KEY_READ, NULL, &hSub, &Disposition);
+        SetThreadToken(NULL, NULL);
+        if (hSub)
+            RegCloseKey(hSub);
+        ok(Rows[i].Create == (Error == ERROR_SUCCESS), "token %d key %d: creating a subkey by its path gave %ld, expected %s\n",
+           Rows[i].Token, Rows[i].Key, Error, Rows[i].Create ? "success" : "access denied");
+        RegDeleteKeyW(HKEY_LOCAL_MACHINE, Path);
+    }
+}
+
 START_TEST(RegistryRestrictedOpen)
 {
     ULONG i;
@@ -333,6 +365,7 @@ START_TEST(RegistryRestrictedOpen)
 
     TestOpens();
     TestCreateAndSet();
+    TestPathCreate();
 
     DeleteKeys();
     for (i = 0; i < TOK_COUNT; i++)

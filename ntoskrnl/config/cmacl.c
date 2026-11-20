@@ -4289,8 +4289,9 @@ CmpAclCheckKeyOpen(
  * gets the access it asked for on the new key, whatever the new key's DACL
  * says (oracle, design 2.2): the handle of a new key is not checked again.
  * STATUS_SUCCESS when allowed or not enforced (mode 1: the create checks
- * nothing and the audit records the decision after it), else the status of
- * the denial.
+ * nothing, except for a restricted token, which is decided like its opens,
+ * and the audit records the decision after it), else the status of the
+ * denial.
  */
 NTSTATUS
 NTAPI
@@ -4305,7 +4306,11 @@ CmpAclCheckKeyCreate(
     ACCESS_MASK Granted;
     NTSTATUS AccessStatus;
 
-    if (AccessMode == KernelMode || !CmpAclEnforcing() || !ParentKcb || !AccessState)
+    if (AccessMode == KernelMode || !ParentKcb || !AccessState)
+        return STATUS_SUCCESS;
+
+    /* A restricted token is decided by the descriptor also while key access is not enforced, as its opens are */
+    if (!CmpAclEnforcing() && !CmpAclRestrictedSubject(AccessState))
         return STATUS_SUCCESS;
 
     if (CmpAclDecide(ParentKcb, ChildName, Operation, AccessState,
