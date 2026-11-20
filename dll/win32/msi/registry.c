@@ -1864,6 +1864,51 @@ UINT WINAPI MsiEnumRelatedProductsW( const WCHAR *szUpgradeCode, DWORD dwReserve
     if (NULL == lpProductBuf)
         return ERROR_INVALID_PARAMETER;
 
+#ifdef __REACTOS__
+    {
+        /* the machine list first, then the products a non-elevated user registered under HKEY_CURRENT_USER and
+           that are not in the machine list (a per-user product is published in both for an administrator) */
+        DWORD count = 0, i;
+        HKEY machine = NULL, user;
+        WCHAR name[SQUASHED_GUID_SIZE];
+
+        if (MSIREG_OpenUpgradeCodesKey(szUpgradeCode, &machine, FALSE) == ERROR_SUCCESS)
+        {
+            RegQueryInfoKeyW( machine, NULL, NULL, NULL, NULL, NULL, NULL, &count, NULL, NULL, NULL, NULL );
+            r = RegEnumValueW(machine, iProductIndex, szKeyName, &dwSize, NULL, NULL, NULL, NULL);
+            if (r == ERROR_SUCCESS)
+            {
+                unsquash_guid(szKeyName, lpProductBuf);
+                RegCloseKey(machine);
+                return r;
+            }
+            if (r != ERROR_NO_MORE_ITEMS)
+            {
+                RegCloseKey(machine);
+                return r;
+            }
+        }
+        r = ERROR_NO_MORE_ITEMS;
+        if (!MSIREG_OpenUserUpgradeCodesKey(szUpgradeCode, &user, FALSE))
+        {
+            DWORD seen = count;
+
+            for (i = 0;; i++)
+            {
+                DWORD len = ARRAY_SIZE(name);
+                if (RegEnumValueW(user, i, name, &len, NULL, NULL, NULL, NULL)) break;
+                if (machine && !RegQueryValueExW(machine, name, NULL, NULL, NULL, NULL)) continue;
+                if (seen++ != iProductIndex) continue;
+                unsquash_guid(name, lpProductBuf);
+                r = ERROR_SUCCESS;
+                break;
+            }
+            RegCloseKey(user);
+        }
+        if (machine) RegCloseKey(machine);
+        return r;
+    }
+#endif
     r = MSIREG_OpenUpgradeCodesKey(szUpgradeCode, &hkey, FALSE);
     if (r != ERROR_SUCCESS)
         return ERROR_NO_MORE_ITEMS;

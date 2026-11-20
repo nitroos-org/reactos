@@ -5494,6 +5494,12 @@ static UINT ACTION_RegisterProduct(MSIPACKAGE *package)
     upgrade_code = msi_dup_property(package->db, L"UpgradeCode");
     if (upgrade_code)
     {
+#ifdef __REACTOS__
+        /* a non-elevated per-user product cannot create the machine key: its link goes to the user's own */
+        if (package->Context != MSIINSTALLCONTEXT_MACHINE && !msi_user_is_admin())
+            rc = MSIREG_OpenUserUpgradeCodesKey( upgrade_code, &upgrade_key, TRUE );
+        else
+#endif
         rc = MSIREG_OpenUpgradeCodesKey( upgrade_code, &upgrade_key, TRUE );
         if (rc == ERROR_SUCCESS)
         {
