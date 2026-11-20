@@ -456,13 +456,27 @@ static LONG msi_userdata_delete( const WCHAR *parent, REGSAM access, const WCHAR
             if (r == ERROR_FILE_NOT_FOUND) r = ERROR_SUCCESS;
         }
     }
-    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, parent, 0, access, &hkey )) return r;
     if (is_own && !userdata_is_admin())
     {
-        /* a standard user cannot change the machine key; an old entry there is left to an administrator */
-        RegCloseKey( hkey );
+        /* data of a per-user installation made before this layout (default mode, or by an elevated run): remove it
+           when it is there and the key can be changed; a refusal is not an error of the removal, and nothing is
+           asked of the machine key when no such data exists (a refused open is a registry audit entry) */
+        WCHAR old[0x200];
+        HKEY probe;
+
+        swprintf( old, ARRAY_SIZE(old), L"%s\\%s", parent, child );
+        if (!RegOpenKeyExW( HKEY_LOCAL_MACHINE, old, 0, KEY_READ | (access & KEY_WOW64_64KEY), &probe ))
+        {
+            RegCloseKey( probe );
+            if (!RegOpenKeyExW( HKEY_LOCAL_MACHINE, parent, 0, access, &hkey ))
+            {
+                RegDeleteTreeW( hkey, child );
+                RegCloseKey( hkey );
+            }
+        }
         return r;
     }
+    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, parent, 0, access, &hkey )) return r;
     r = RegDeleteTreeW( hkey, child );
     RegCloseKey( hkey );
     return r;
