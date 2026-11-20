@@ -8,6 +8,8 @@ extern void func_AddMandatoryAce(void);
 extern void func_AuditCategories(void);
 extern void func_CveEventWrite(void);
 extern void func_DynamicTimeZone(void);
+extern void func_EnumerateTraceGuidsEx(void);
+extern void func_NotifyServiceStatusChange(void);
 extern void func_TimeZoneKeys(void);
 extern void func_PerfCounterValues(void);
 extern void func_BuildSecurityDescriptor(void);
@@ -171,6 +173,8 @@ const struct test winetest_testlist[] =
     { "AuditCategories", func_AuditCategories },
     { "CveEventWrite", func_CveEventWrite },
     { "DynamicTimeZone", func_DynamicTimeZone },
+    { "EnumerateTraceGuidsEx", func_EnumerateTraceGuidsEx },
+    { "NotifyServiceStatusChange", func_NotifyServiceStatusChange },
     { "TimeZoneKeys", func_TimeZoneKeys },
     { "PerfCounterValues", func_PerfCounterValues },
     { "BuildSecurityDescriptor", func_BuildSecurityDescriptor },

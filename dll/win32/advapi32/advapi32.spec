@@ -228,6 +228,7 @@
 @ stdcall EnumServicesStatusW(long long long ptr long ptr ptr ptr)
 @ stdcall -version=0x502 EnumerateTraceGuids(ptr long ptr) ntdll.EtwEnumerateTraceGuids
 @ stdcall -stub -version=0x600+ EnumerateTraceGuids(ptr long ptr) # EtwEnumerateTraceGuids
+@ stdcall -version=0x600+ EnumerateTraceGuidsEx(long ptr long ptr long ptr)
 @ stdcall EqualDomainSid(ptr ptr ptr)
 @ stdcall EqualPrefixSid(ptr ptr)
 @ stdcall EqualSid(ptr ptr)
@@ -450,6 +451,8 @@
 @ stdcall MapGenericMask(ptr ptr) ntdll.RtlMapGenericMask
 @ stdcall NotifyBootConfigStatus(long)
 @ stdcall NotifyChangeEventLog(long long)
+@ stdcall NotifyServiceStatusChangeA(long long ptr)
+@ stdcall NotifyServiceStatusChangeW(long long ptr)
 @ stdcall ObjectCloseAuditAlarmA(str ptr long)
 @ stdcall ObjectCloseAuditAlarmW(wstr ptr long)
 @ stdcall ObjectDeleteAuditAlarmA(str ptr long)

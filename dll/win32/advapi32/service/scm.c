@@ -28,6 +28,8 @@ SystemFunction028(
 
 /* FUNCTIONS *****************************************************************/
 
+VOID ScmCancelServiceNotifications(SC_HANDLE hService);
+
 handle_t __RPC_USER
 SVCCTL_HANDLEA_bind(SVCCTL_HANDLEA szMachineName)
 {
@@ -665,6 +667,8 @@ CloseServiceHandle(SC_HANDLE hSCObject)
         SetLastError(ERROR_INVALID_HANDLE);
         return FALSE;
     }
+
+    ScmCancelServiceNotifications(hSCObject);
 
     RpcTryExcept
     {

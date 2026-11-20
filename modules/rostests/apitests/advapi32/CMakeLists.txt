@@ -6,6 +6,8 @@ list(APPEND SOURCE
     AuditCategories.c
     CveEventWrite.c
     DynamicTimeZone.c
+    EnumerateTraceGuidsEx.c
+    NotifyServiceStatusChange.c
     TimeZoneKeys.c
     BuildSecurityDescriptor.c
     NamedPipeSD.c
