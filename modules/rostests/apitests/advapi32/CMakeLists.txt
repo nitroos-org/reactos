@@ -56,6 +56,7 @@ list(APPEND SOURCE
     LsaLogonUserS4U.c
     LsaTrustedClientToken.c
     LsaManageSidNameMapping.c
+    LsaSecretStorage.c
     ProcessThreadLabel.c
     QueryServiceConfig.c
     QueryServiceConfig2.c
