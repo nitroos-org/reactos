@@ -1666,8 +1666,9 @@ DoUnlock(
     WCHAR Buffer2[512];
     LPWSTR UserName = NULL;
     LPWSTR Password = NULL;
+    PCWSTR AccountName;
     BOOL res = FALSE;
-    BOOL IsSessionUser = FALSE, IsAdmin = FALSE;
+    BOOL IsSessionUser = FALSE;
     NTSTATUS Status, SubStatus = STATUS_SUCCESS;
 
     if (GetTextboxText(hwndDlg, IDC_UNLOCK_USERNAME, &UserName) && *UserName == '\0')
@@ -1678,64 +1679,77 @@ DoUnlock(
 
     if (GetTextboxText(hwndDlg, IDC_UNLOCK_PASSWORD, &Password) && UserName != NULL && Password != NULL)
     {
-        /* The LSA checks the password: the session's user or an administrator unlocks. A wrong password is
-           counted by the account lockout and a locked out account does not unlock */
-        Status = DoUnlockLogon(pgContext, UserName, Password, &IsSessionUser, &IsAdmin, &SubStatus);
-        if (NT_SUCCESS(Status) && IsSessionUser)
+        AccountName = GetUnlockUserName(pgContext, UserName);
+        if (AccountName == NULL)
         {
-            *Action = WLX_SAS_ACTION_UNLOCK_WKSTA;
-            res = TRUE;
-        }
-        else if (NT_SUCCESS(Status) && IsAdmin)
-        {
-            /* An administrator's unlock logs the user of the session off (the contract of WlxWkstaLockedSAS) */
-            *Action = WLX_SAS_ACTION_FORCE_LOGOFF;
-            res = TRUE;
-        }
-        else if (Status == STATUS_ACCOUNT_LOCKED_OUT ||
-                 (Status == STATUS_ACCOUNT_RESTRICTION && SubStatus == STATUS_ACCOUNT_LOCKED_OUT))
-        {
-            /* The system message of ERROR_ACCOUNT_LOCKED_OUT */
-            LoadStringW(pgContext->hDllInstance, IDS_COMPUTERLOCKED, Buffer1, _countof(Buffer1));
-            if (!FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                                NULL,
-                                ERROR_ACCOUNT_LOCKED_OUT,
-                                0,
-                                Buffer2,
-                                _countof(Buffer2),
-                                NULL))
-            {
-                LoadStringW(pgContext->hDllInstance, IDS_ACCOUNTLOCKED, Buffer2, _countof(Buffer2));
-            }
-            MessageBoxW(hwndDlg, Buffer2, Buffer1, MB_OK | MB_ICONERROR);
-        }
-        else if (Status == STATUS_ACCOUNT_RESTRICTION &&
-                 (SubStatus == STATUS_PASSWORD_EXPIRED || SubStatus == STATUS_PASSWORD_MUST_CHANGE) &&
-                 _wcsicmp(UserName, pgContext->UserName) == 0)
-        {
-            /* The password of the session's user is right but has expired meanwhile: say so and offer the
-               change (the logon dialog does the same); the new password is then typed here */
-            ResourceMessageBox(pgContext,
-                               hwndDlg,
-                               MB_OK | MB_ICONSTOP,
-                               IDS_COMPUTERLOCKED,
-                               (SubStatus == STATUS_PASSWORD_MUST_CHANGE) ? IDS_PASSWORDMUSTCHANGE : IDS_PASSWORDEXPIRED);
-            OnChangePassword(hwndDlg, pgContext);
-        }
-        else if (!NT_SUCCESS(Status) && _wcsicmp(UserName, pgContext->UserName) == 0)
-        {
-            /* Wrong Password */
-            LoadStringW(pgContext->hDllInstance, IDS_LOCKEDWRONGPASSWORD, Buffer2, _countof(Buffer2));
+            /* Only the user of the session can unlock the workstation. The name of another account is refused
+               without a logon attempt: no password is checked and nothing is counted against any account */
+            LoadStringW(pgContext->hDllInstance, IDS_LOCKEDWRONGUSER, Buffer1, _countof(Buffer1));
+            wsprintfW(Buffer2, Buffer1, pgContext->DomainName, pgContext->UserName);
             LoadStringW(pgContext->hDllInstance, IDS_COMPUTERLOCKED, Buffer1, _countof(Buffer1));
             MessageBoxW(hwndDlg, Buffer2, Buffer1, MB_OK | MB_ICONERROR);
         }
         else
         {
-            /* Wrong user name (or a user who is neither the session's user nor an administrator) */
-            LoadStringW(pgContext->hDllInstance, IDS_LOCKEDWRONGUSER, Buffer1, _countof(Buffer1));
-            wsprintfW(Buffer2, Buffer1, pgContext->DomainName, pgContext->UserName);
-            LoadStringW(pgContext->hDllInstance, IDS_COMPUTERLOCKED, Buffer1, _countof(Buffer1));
-            MessageBoxW(hwndDlg, Buffer2, Buffer1, MB_OK | MB_ICONERROR);
+            /* The LSA checks the password of the session's user: a wrong password is counted by the account
+               lockout and a locked out account does not unlock */
+            Status = DoUnlockLogon(pgContext, (PWSTR)AccountName, Password, &IsSessionUser, &SubStatus);
+            if (NT_SUCCESS(Status) && IsSessionUser)
+            {
+                *Action = WLX_SAS_ACTION_UNLOCK_WKSTA;
+                res = TRUE;
+            }
+            else if (Status == STATUS_ACCOUNT_LOCKED_OUT ||
+                     (Status == STATUS_ACCOUNT_RESTRICTION && SubStatus == STATUS_ACCOUNT_LOCKED_OUT))
+            {
+                /* The system message of ERROR_ACCOUNT_LOCKED_OUT */
+                LoadStringW(pgContext->hDllInstance, IDS_COMPUTERLOCKED, Buffer1, _countof(Buffer1));
+                if (!FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                    NULL,
+                                    ERROR_ACCOUNT_LOCKED_OUT,
+                                    0,
+                                    Buffer2,
+                                    _countof(Buffer2),
+                                    NULL))
+                {
+                    LoadStringW(pgContext->hDllInstance, IDS_ACCOUNTLOCKED, Buffer2, _countof(Buffer2));
+                }
+                MessageBoxW(hwndDlg, Buffer2, Buffer1, MB_OK | MB_ICONERROR);
+            }
+            else if (Status == STATUS_ACCOUNT_RESTRICTION &&
+                     (SubStatus == STATUS_ACCOUNT_DISABLED || SubStatus == STATUS_ACCOUNT_EXPIRED ||
+                      SubStatus == STATUS_INVALID_LOGON_HOURS || SubStatus == STATUS_INVALID_WORKSTATION))
+            {
+                /* The password is right but the account may not log on: the texts of the logon dialog. They
+                   come after the password was verified, so they tell nothing to someone who guesses */
+                ResourceMessageBox(pgContext,
+                                   hwndDlg,
+                                   MB_OK | MB_ICONEXCLAMATION,
+                                   IDS_COMPUTERLOCKED,
+                                   (SubStatus == STATUS_ACCOUNT_DISABLED) ? IDS_LOGONUSERDISABLED :
+                                   (SubStatus == STATUS_ACCOUNT_EXPIRED) ? IDS_ACCOUNTEXPIRED :
+                                   (SubStatus == STATUS_INVALID_LOGON_HOURS) ? IDS_INVALIDLOGONHOURS :
+                                   IDS_INVALIDWORKSTATION);
+            }
+            else if (Status == STATUS_ACCOUNT_RESTRICTION &&
+                     (SubStatus == STATUS_PASSWORD_EXPIRED || SubStatus == STATUS_PASSWORD_MUST_CHANGE))
+            {
+                /* The password of the session's user is right but has expired meanwhile: say so and offer the
+                   change (the logon dialog does the same); the new password is then typed here */
+                ResourceMessageBox(pgContext,
+                                   hwndDlg,
+                                   MB_OK | MB_ICONSTOP,
+                                   IDS_COMPUTERLOCKED,
+                                   (SubStatus == STATUS_PASSWORD_MUST_CHANGE) ? IDS_PASSWORDMUSTCHANGE : IDS_PASSWORDEXPIRED);
+                OnChangePassword(hwndDlg, pgContext);
+            }
+            else
+            {
+                /* Wrong Password */
+                LoadStringW(pgContext->hDllInstance, IDS_LOCKEDWRONGPASSWORD, Buffer2, _countof(Buffer2));
+                LoadStringW(pgContext->hDllInstance, IDS_COMPUTERLOCKED, Buffer1, _countof(Buffer1));
+                MessageBoxW(hwndDlg, Buffer2, Buffer1, MB_OK | MB_ICONERROR);
+            }
         }
     }
 

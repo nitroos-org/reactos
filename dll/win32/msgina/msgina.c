@@ -35,8 +35,6 @@ HINSTANCE hDllInstance;
 extern GINA_UI GinaGraphicalUI;
 extern GINA_UI GinaTextUI;
 static PGINA_UI pGinaUI;
-static SID_IDENTIFIER_AUTHORITY SystemAuthority = {SECURITY_NT_AUTHORITY};
-static PSID AdminSid;
 
 /*
  * @implemented
@@ -718,13 +716,65 @@ GetTokenInfo(
 
 
 /*
+ * What was typed at the unlock dialog names the user of the session or it does not. The accepted forms are the
+ * ones the logon of Windows takes for a local account: the name alone, DOMAIN\name and .\name, whatever the case.
+ * DOMAIN is the domain of the session, the name of this computer or ".", and on a stand-alone computer (the domain
+ * of the session is the name of the computer) any domain name, as the logon of Windows ignores a domain name it does
+ * not know there. Not accepted: name@host (a user principal name) and anything else that is not the name of the
+ * session's user.
+ *
+ * Returns the part of Typed that is the account name, or NULL when Typed does not name the session's user. The
+ * logon that follows is made for that name in the domain of the session, so the account that is checked is the
+ * session's user in every case.
+ */
+PCWSTR
+GetUnlockUserName(
+    IN PGINA_CONTEXT pgContext,
+    IN PCWSTR Typed)
+{
+    WCHAR ComputerName[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD Size = _countof(ComputerName);
+    PCWSTR Name = Typed;
+    PCWSTR Separator;
+    SIZE_T DomainLength;
+
+    Separator = wcschr(Typed, L'\\');
+    if (Separator != NULL)
+    {
+        DomainLength = Separator - Typed;
+        Name = Separator + 1;
+
+        if (DomainLength == 0)
+            return NULL;
+
+        if (!(DomainLength == 1 && Typed[0] == L'.') &&
+            !(_wcsnicmp(Typed, pgContext->DomainName, DomainLength) == 0 &&
+              pgContext->DomainName[DomainLength] == UNICODE_NULL))
+        {
+            /* Another domain: only a stand-alone computer takes it (and logs the local account on) */
+            if (!GetComputerNameW(ComputerName, &Size) ||
+                _wcsicmp(pgContext->DomainName, ComputerName) != 0)
+            {
+                return NULL;
+            }
+        }
+    }
+
+    if (*Name == UNICODE_NULL || _wcsicmp(Name, pgContext->UserName) != 0)
+        return NULL;
+
+    return Name;
+}
+
+
+/*
  * The logon of the unlock dialog: the LSA decides (an Unlock logon, like the logon of the logon dialog), so that a
  * wrong password is counted by the account lockout, a locked out account cannot unlock, a password that was changed
  * meanwhile is the one that counts, and no copy of the password is kept for the comparison.
  *
- * On success the user of the session (IsSessionUser) or an administrator (IsAdmin) has proved the password. The
- * token of the unlock logon is used for those two questions only and is closed before the function returns: it
- * is never kept, never given to winlogon and does not become the token of the session.
+ * Only the user of the session can unlock: on success IsSessionUser is TRUE when the logon proved the password of
+ * the session's user. The token of the unlock logon is used for that one question only and is closed before the
+ * function returns: it is never kept, never given to winlogon and does not become the token of the session.
  */
 NTSTATUS
 DoUnlockLogon(
@@ -732,18 +782,14 @@ DoUnlockLogon(
     IN PWSTR UserName,
     IN PWSTR Password,
     OUT PBOOL IsSessionUser,
-    OUT PBOOL IsAdmin,
     OUT PNTSTATUS SubStatus)
 {
     HANDLE hToken = NULL;
     PTOKEN_USER UnlockUser = NULL;
     PTOKEN_USER SessionUser = NULL;
-    PTOKEN_GROUPS Groups = NULL;
-    ULONG i;
     NTSTATUS Status;
 
     *IsSessionUser = FALSE;
-    *IsAdmin = FALSE;
     *SubStatus = STATUS_SUCCESS;
 
     Status = ConnectToLsa(pgContext);
@@ -786,27 +832,9 @@ DoUnlockLogon(
         (SessionUser == NULL && _wcsicmp(UserName, pgContext->UserName) == 0))
     {
         *IsSessionUser = TRUE;
-        goto done;
-    }
-
-    Groups = GetTokenInfo(hToken, TokenGroups);
-    if (Groups != NULL && AdminSid != NULL)
-    {
-        for (i = 0; i < Groups->GroupCount; i++)
-        {
-            if (RtlEqualSid(Groups->Groups[i].Sid, AdminSid) &&
-                (Groups->Groups[i].Attributes & SE_GROUP_ENABLED))
-            {
-                TRACE("Member of Admins group\n");
-                *IsAdmin = TRUE;
-                break;
-            }
-        }
     }
 
 done:
-    if (Groups != NULL)
-        HeapFree(GetProcessHeap(), 0, Groups);
     if (SessionUser != NULL)
         HeapFree(GetProcessHeap(), 0, SessionUser);
     if (UnlockUser != NULL)
@@ -1202,24 +1230,6 @@ DllMain(
     if (dwReason == DLL_PROCESS_ATTACH)
     {
         hDllInstance = hinstDLL;
-
-        RtlAllocateAndInitializeSid(&SystemAuthority,
-                                    2,
-                                    SECURITY_BUILTIN_DOMAIN_RID,
-                                    DOMAIN_ALIAS_RID_ADMINS,
-                                    SECURITY_NULL_RID,
-                                    SECURITY_NULL_RID,
-                                    SECURITY_NULL_RID,
-                                    SECURITY_NULL_RID,
-                                    SECURITY_NULL_RID,
-                                    SECURITY_NULL_RID,
-                                    &AdminSid);
-
-    }
-    else if (dwReason == DLL_PROCESS_DETACH)
-    {
-        if (AdminSid != NULL)
-            RtlFreeSid(AdminSid);
     }
 
     return TRUE;
