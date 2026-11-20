@@ -1,0 +1,167 @@
+; Optional components of the installation (setup reads it from the installation medium).
+;
+; One place decides what a component is: which cabinet files belong to it, what has to be
+; changed in the registry when it is left out, what it needs, and what is on in each profile.
+; Text mode setup (base/setup/lib/components.c) uses it only when the answer file has a
+; [Components] section; a default installation never opens this file and installs everything.
+; The later add/remove of components (feature manager) reads the same ids.
+;
+; [Components]       id = display name (the id is what the answer file and the registry use)
+; [<id>]             one section per component:
+;   Description      one line, what it is
+;   Compat           one line, what breaks when it is left out
+;   Arch             amd64, x86 or any (default any): the component exists only for that edition
+;   Profiles         the profiles in which it is ON: standard, minimal, core
+;   Depends          ids that must be installed when this one is
+;   Conflicts        ids that cannot be installed together with this one
+;   Files            file patterns, matched against the destination path relative to the
+;                    installation directory, as listed in reactos.dff (dir\name); '*' is any run
+;                    of characters (also across '\'), '?' one character; case does not matter
+;   FeaturesNeed     feature manager ids that do not work without this component (refused in
+;                    [Features] Install, skipped at first start)
+;   FeaturesOwn      feature manager ids that are the installed form of this component (not
+;                    installed automatically at first start when the component is left out)
+; [<id>.Off]         AddReg-style lines applied to the new registry when the component is left out
+; [Profile.<name>]   AddReg-style lines applied for that profile (setup does this after the hives are built)
+;
+; Not here on purpose: boot, storage and network drivers, the shell, the core fonts, the C library
+; and everything else that a system needs to start and to log on. A component that is not in this
+; list cannot be left out.
+;
+; Windows-compatibility: every component names what breaks without it (Compat). Nothing here is
+; the default: "standard" is everything, as before.
+
+[Version]
+Signature = "$Windows NT$"
+
+[Components]
+wow64        = %wow64.name%
+powershell7  = %powershell7.name%
+gl           = %gl.name%
+vulkan       = %vulkan.name%
+gl-wow64     = %gl-wow64.name%
+fonts-cjk    = %fonts-cjk.name%
+fonts-emoji  = %fonts-emoji.name%
+games        = %games.name%
+accessories  = %accessories.name%
+net-legacy   = %net-legacy.name%
+tests        = %tests.name%
+
+[wow64]
+Description  = %wow64.desc%
+Compat       = %wow64.compat%
+Arch         = amd64
+Profiles     = standard
+FeaturesNeed = wine-gecko, dotnet-framework-4.8
+Files        = SysWOW64\*, Microsoft.NET\Framework\v4.0.30319\wminet_utils.dll, winsxs\x86_*, winsxs\manifests\x86_*
+
+[powershell7]
+Description  = %powershell7.desc%
+Compat       = %powershell7.compat%
+Arch         = amd64
+Profiles     = standard
+FeaturesOwn  = powershell-7
+Files        = Featmgr\Payload\powershell-7\*
+
+[gl]
+Description  = %gl.desc%
+Compat       = %gl.compat%
+Profiles     = standard, minimal, core
+Files        = system32\libgallium_wgl.dll, system32\mesa3d-licenses.txt, system32\llvm-licenses.txt
+
+[vulkan]
+Description  = %vulkan.desc%
+Compat       = %vulkan.compat%
+Arch         = amd64
+Profiles     = standard
+Depends      = gl
+Files        = system32\vulkan_lvp.dll, system32\lvp_icd.json, system32\vulkan-1.dll, system32\vulkan-loader-licenses.txt
+
+[gl-wow64]
+Description  = %gl-wow64.desc%
+Compat       = %gl-wow64.compat%
+Arch         = amd64
+Profiles     = standard
+Depends      = wow64
+Files        = SysWOW64\libgallium_wgl.dll, SysWOW64\mesa3d-licenses.txt
+
+[fonts-cjk]
+Description  = %fonts-cjk.desc%
+Compat       = %fonts-cjk.compat%
+Profiles     = standard
+Files        = Fonts\NotoSansSC-Regular.otf, Fonts\NotoSansKR-Regular.otf
+
+[fonts-emoji]
+Description  = %fonts-emoji.desc%
+Compat       = %fonts-emoji.compat%
+Profiles     = standard
+Files        = Fonts\NotoEmoji-Regular.ttf, Fonts\NotoSansSymbols2-Regular.ttf
+
+[games]
+Description  = %games.desc%
+Compat       = %games.compat%
+Profiles     = standard
+Files        = system32\sol.exe, system32\spider.exe, system32\winmine.exe, system32\cards.dll
+
+[accessories]
+Description  = %accessories.desc%
+Compat       = %accessories.compat%
+Profiles     = standard
+Files        = system32\calc.exe, system32\charmap.exe, system32\clipbrd.exe, system32\fontview.exe, system32\mplay32.exe, system32\mspaint.exe, system32\sndrec32.exe, system32\wordpad.exe, system32\write.exe, SysWOW64\calc.exe, SysWOW64\charmap.exe, SysWOW64\mspaint.exe, SysWOW64\write.exe
+
+[net-legacy]
+Description  = %net-legacy.desc%
+Compat       = %net-legacy.compat%
+Profiles     = standard
+Files        = system32\finger.exe, system32\ftp.exe, system32\telnet.exe, system32\telnet.ini, system32\telnet.cfg, system32\whois.exe, system32\telnetd.exe, system32\tftpd.exe, system32\tcpsvcs.exe, system32\drivers\etc\quotes, SysWOW64\ftp.exe
+
+; The two services of this block are registered with demand start: they stay registered and cannot be started.
+[net-legacy.Off]
+HKLM,"SYSTEM\CurrentControlSet\Services\tcpsvcs","Start",0x00010001,4
+HKLM,"SYSTEM\CurrentControlSet\Services\telnetd","Start",0x00010001,4
+
+[tests]
+Description  = %tests.desc%
+Compat       = %tests.compat%
+Profiles     = standard
+Files        = bin\*, system32\rosautotest.exe
+
+; "core": the logon shell is the command prompt (Winlogon\Shell, the same value that the Server Core
+; installation type of the graphical stage sets). Files stay; only the shell value changes.
+[Profile.core]
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon","Shell",0x00000000,"cmd.exe"
+
+[Strings]
+wow64.name = "32-bit program support"
+wow64.desc = "The 32-bit system folder (SysWOW64) and the 32-bit side-by-side assemblies, so that 32-bit programs can run."
+wow64.compat = "32-bit programs and most installers do not start (the loader reports that WoW64 could not start, status 0xC0000034); the Wine Gecko and .NET Framework features need it."
+powershell7.name = "PowerShell 7"
+powershell7.desc = "The PowerShell 7 installer package that setup installs on the 64-bit edition."
+powershell7.compat = "Scripts that call pwsh do not run until it is added later; the first-start installer does not add it."
+gl.name = "OpenGL software renderer"
+gl.desc = "The software OpenGL driver (Mesa llvmpipe class) of the native edition and its license texts."
+gl.compat = "OpenGL programs fall back to the built-in OpenGL 1.1 or fail; browsers and toolkits that need a GL context lose hardware-class features."
+vulkan.name = "Vulkan software renderer"
+vulkan.desc = "The Vulkan loader and the software Vulkan driver (lavapipe) with its ICD file."
+vulkan.compat = "Vulkan programs (wgpu based tools, some games) report no Vulkan device; OpenGL and the desktop are not affected."
+gl-wow64.name = "32-bit OpenGL software renderer"
+gl-wow64.desc = "The software OpenGL driver for 32-bit programs (73 MB)."
+gl-wow64.compat = "32-bit OpenGL programs fall back to the built-in OpenGL 1.1."
+fonts-cjk.name = "Chinese and Korean fonts"
+fonts-cjk.desc = "Noto Sans SC and Noto Sans KR (13 MB)."
+fonts-cjk.compat = "Chinese, Japanese and Korean text shows boxes or falls back to another face."
+fonts-emoji.name = "Emoji and symbol fonts"
+fonts-emoji.desc = "Noto Emoji and Noto Sans Symbols 2."
+fonts-emoji.compat = "Emoji and some symbol glyphs show as boxes."
+games.name = "Games"
+games.desc = "Solitaire, Spider Solitaire and Minesweeper with the card library."
+games.compat = "The games are gone from the Start menu and the disk; nothing else uses them."
+accessories.name = "Accessories"
+accessories.desc = "Calculator, Paint, WordPad, Write, Character Map, ClipBook, Font Viewer, Media Player, Sound Recorder."
+accessories.compat = "These programs are gone (file types such as .bmp and .rtf keep their associations to programs that no longer exist); Notepad stays."
+net-legacy.name = "Legacy network tools"
+net-legacy.desc = "telnet, ftp, finger, whois, the TFTP and telnet servers and the simple TCP/IP services."
+net-legacy.compat = "Scripts that call ftp or telnet fail; the telnetd and tcpsvcs services cannot start."
+tests.name = "Test programs"
+tests.desc = "The regression test programs of a development build (bin) and the test runner."
+tests.compat = "Nothing on a deployed system; development builds cannot run their tests without it."

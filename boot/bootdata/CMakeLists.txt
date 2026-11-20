@@ -4,6 +4,9 @@ add_subdirectory(packages)
 # Setup settings file
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/txtsetup.sif DESTINATION reactos NO_CAB FOR bootcd regtest)
 
+# Optional components (read by setup only when the answer file has a [Components] section)
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/components.inf DESTINATION reactos NO_CAB FOR bootcd regtest)
+
 add_custom_target(converted_caroots_inf DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/caroots.inf)
 utf16le_convert(${CMAKE_CURRENT_SOURCE_DIR}/caroots.inf ${CMAKE_CURRENT_BINARY_DIR}/caroots.inf)
 add_cd_file(TARGET converted_caroots_inf FILE ${CMAKE_CURRENT_BINARY_DIR}/caroots.inf DESTINATION reactos NO_CAB FOR bootcd regtest)
