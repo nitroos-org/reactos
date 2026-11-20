@@ -406,6 +406,14 @@ static void R_NulInsideName(PBYTE Buf, DWORD Size)
 {
     CELL(Buf, K(Buf, Size, "m0000"))[NK_NAME + 4] = 0;   /* Many\m0000 -> "m000<NUL>": still first in its index */
 }
+/*
+ * A subkey name that is a path separator: no create or rename makes one, and an open by the enumerated name opened the
+ * parent again (RegDeleteTreeW of the parent recursed until its stack overflowed, in-guest fuzz). The check drops it.
+ */
+static void R_SeparatorName(PBYTE Buf, DWORD Size)
+{
+    CELL(Buf, K(Buf, Size, "0"))[NK_NAME] = '\\';     /* C\0 -> C\"\" */
+}
 /* An allocated cell whose size runs past its bin */
 static void R_CellPastBin(PBYTE Buf, DWORD Size)
 {
@@ -441,6 +449,7 @@ static const RECIPE g_Recipes[] =
     { "root flagged as a link", R_RootIsLink, TRUE },
     { "subkey name beginning with a NUL", R_NulInName, TRUE },
     { "subkey name with a NUL inside", R_NulInsideName, TRUE },
+    { "subkey name that is a path separator", R_SeparatorName, TRUE },
     { "cell size past its bin", R_CellPastBin, FALSE },
 };
 
@@ -604,10 +613,10 @@ static void Run(const RECIPE *Recipe)
                         RegCloseKey(Key);
                 }
                 Error = RegDeleteTreeW(Root, L"C");
-                if (Recipe->Apply == R_NulInName)
+                if (Recipe->Apply == R_NulInName || Recipe->Apply == R_SeparatorName)
                     ok(Error == ERROR_SUCCESS, "[%s] RegDeleteTreeW(C): %ld\n", Recipe->Name, Error);
                 RegDeleteKeyW(Root, L"C");
-                if (Recipe->Apply == R_NulInName)
+                if (Recipe->Apply == R_NulInName || Recipe->Apply == R_SeparatorName)
                 {
                     Error = RegOpenKeyExW(Root, L"C", 0, KEY_READ, &Key);
                     ok(Error == ERROR_FILE_NOT_FOUND, "[%s] C after its deletion: %ld\n", Recipe->Name, Error);
