@@ -30,6 +30,7 @@
 #include <math.h>
 #include <ntstrsafe.h>
 
+#include <../lib/components.h>
 #include "cmdcons.h"
 #include "devinst.h"
 #include "fmtchk.h"
@@ -3438,6 +3439,459 @@ InitInstallDir:
         return INSTALL_DIRECTORY_PAGE;
     }
 
+    return COMPONENTS_PAGE;
+}
+
+
+/*
+ * The page "Choose what to install" (text in English only, as the other pages added after the translations
+ * were taken: the names and descriptions come from components.inf on the medium).
+ *
+ * The profile (Standard, Minimal, Core) and, behind C = Customise, the list of components with a check
+ * mark each, the size it takes (the sum of its files in the cabinet), its description and what stops working
+ * without it. Turning a component on or off turns on what it needs / off what needs it, with a line saying
+ * so (the same code as the [Components] section of the answer file: setuplib components.c). ENTER with
+ * nothing changed installs exactly what an installation without this page installs.
+ *
+ * Next pages:
+ *  PrepareCopyPage (at once, also when the page is not shown)
+ *  QuitPage
+ */
+#define COMP_X          4
+#define COMP_WIDTH      74
+#define COMP_LIST_TOP   7
+
+/* Rows of the list on the screen: all components when they fit, else as many as the screen leaves above the
+ * lines that describe the selected one (7 rows) and the status bar; set by CompList */
+static ULONG CompListRows = 10;
+
+static VOID
+CompNarrow(PCWSTR Text, PCHAR Out, ULONG Size)
+{
+    ULONG i;
+
+    for (i = 0; i + 1 < Size && Text[i]; ++i)
+        Out[i] = (Text[i] < 0x80) ? (CHAR)Text[i] : '?';
+    Out[i] = '\0';
+}
+
+/* One line of Width characters: Text padded with blanks (a longer text is cut), so that it overwrites what was there */
+static VOID
+CompRow(SHORT Y, PCSTR Text, BOOLEAN Highlight)
+{
+    CHAR Line[COMP_WIDTH + 1];
+    ULONG Length = (ULONG)strlen(Text);
+
+    memset(Line, ' ', COMP_WIDTH);
+    memcpy(Line, Text, min(Length, COMP_WIDTH));
+    Line[COMP_WIDTH] = '\0';
+    CONSOLE_SetTextXY(COMP_X, Y, Line);
+    if (Highlight)
+        CONSOLE_InvertTextXY(COMP_X, Y, COMP_WIDTH, 1);
+    else
+        CONSOLE_NormalTextXY(COMP_X, Y, COMP_WIDTH, 1);
+}
+
+/* Word-wrapped text into Lines rows from Y (a leading Prefix on the first row); the rest is blanked */
+static VOID
+CompWrap(SHORT Y, ULONG Lines, PCSTR Prefix, PCWSTR Text)
+{
+    CHAR Narrow[400];
+    CHAR Row[COMP_WIDTH + 1];
+    PCSTR p = Narrow;
+    ULONG Used, Line = 0, Indent = (ULONG)strlen(Prefix), Limit = COMP_WIDTH - 2;
+    BOOLEAN Fresh = TRUE;       /* no word in this row yet */
+
+    CompNarrow(Text, Narrow, sizeof(Narrow));
+    if (Narrow[0])
+        RtlStringCbCopyA(Row, sizeof(Row), Prefix);
+    else
+        Row[0] = '\0';
+    Used = (ULONG)strlen(Row);
+
+    while (*p && Line < Lines)
+    {
+        ULONG WordLen = 0, Take;
+        PCSTR w;
+
+        while (*p == ' ')
+            ++p;
+        for (w = p; *w && *w != ' '; ++w)
+            ++WordLen;
+        if (!WordLen)
+            break;
+
+        if (!Fresh && Used + 1 + WordLen > Limit)
+        {
+            /* next row, indented like the first word of the first row */
+            CompRow(Y + (SHORT)Line, Row, FALSE);
+            ++Line;
+            if (Line >= Lines)
+                return;
+            memset(Row, ' ', Indent);
+            Row[Indent] = '\0';
+            Used = Indent;
+            Fresh = TRUE;
+        }
+        if (!Fresh)
+            Row[Used++] = ' ';
+        Take = min(WordLen, Limit - Used);
+        memcpy(Row + Used, p, Take);
+        Used += Take;
+        Row[Used] = '\0';
+        Fresh = FALSE;
+        p = w;
+    }
+    if (!Fresh && Line < Lines)
+    {
+        CompRow(Y + (SHORT)Line, Row, FALSE);
+        ++Line;
+    }
+    for (; Line < Lines; ++Line)
+        CompRow(Y + (SHORT)Line, "", FALSE);
+}
+
+static VOID
+CompFormatSize(ULONGLONG Bytes, PCHAR Out, ULONG Size)
+{
+    ULONGLONG Tenths = (Bytes * 10 + (1024 * 1024) / 2) / (1024 * 1024);
+
+    if (Bytes && Tenths < 100)
+        RtlStringCbPrintfA(Out, Size, "%lu.%lu MB", (ULONG)(Tenths / 10), (ULONG)(Tenths % 10));
+    else
+        RtlStringCbPrintfA(Out, Size, "%lu MB", (ULONG)((Bytes + (1024 * 1024) / 2) / (1024 * 1024)));
+}
+
+/* "name, name and name" of the components in Mask */
+static VOID
+CompNames(PCOMPONENTS_STATE S, ULONG Mask, PCHAR Out, ULONG Size)
+{
+    WCHAR Name[120];
+    CHAR Narrow[120];
+    ULONG i;
+
+    Out[0] = '\0';
+    for (i = 0; i < S->Count; ++i)
+    {
+        if (!(Mask & (1UL << i)))
+            continue;
+        ComponentsGetName(S, i, Name, ARRAYSIZE(Name));
+        CompNarrow(Name[0] ? Name : S->Desc[i].Id, Narrow, sizeof(Narrow));
+        if (Out[0])
+            RtlStringCbCatA(Out, Size, ", ");
+        RtlStringCbCatA(Out, Size, Narrow);
+    }
+}
+
+static VOID
+CompTitle(PCSTR Heading)
+{
+    CONSOLE_ClearScreen();
+    CONSOLE_SetUnderlinedTextXY(4, 3, " " BRAND_PRODUCT_NAME " " BRAND_VERSION_STR " Setup ");
+    CONSOLE_SetTextXY(COMP_X, 5, Heading);
+}
+
+static VOID
+CompDrawProfiles(PCOMPONENTS_STATE S, ULONG Cursor, BOOLEAN Custom, ULONG Selected)
+{
+    ULONG p;
+    WCHAR Wide[400];
+    CHAR Line[100], Size[32];
+
+    CompTitle("Choose what to install");
+    CONSOLE_SetTextXY(COMP_X, 6, "Select the installation type with the UP and DOWN keys.");
+
+    for (p = 0; p < COMPONENT_PROFILE_COUNT; ++p)
+    {
+        CHAR Name[40];
+
+        ComponentsGetProfileText(S, p, 1, Wide, ARRAYSIZE(Wide));
+        CompNarrow(Wide[0] ? Wide : ComponentProfileName(p), Name, sizeof(Name));
+        Size[0] = '\0';
+        if (S->SizesKnown)
+        {
+            CHAR Value[24];
+
+            CompFormatSize(ComponentsBytesLeftOut(S, (Custom && p == Cursor) ? Selected : ComponentsProfileSelection(S, p)),
+                           Value, sizeof(Value));
+            RtlStringCbPrintfA(Size, sizeof(Size), "saves %s", Value);
+        }
+        RtlStringCbPrintfA(Line, sizeof(Line), " (%c) %-14s %s%s", (p == Cursor) ? '*' : ' ', Name, Size,
+                           (Custom && p == Cursor) ? "  (customised)" : "");
+        CompRow((SHORT)(8 + 3 * p), Line, p == Cursor);
+        ComponentsGetProfileText(S, p, 2, Wide, ARRAYSIZE(Wide));
+        CompWrap((SHORT)(9 + 3 * p), 2, "     ", Wide);
+    }
+
+    CONSOLE_SetTextXY(COMP_X, 19, "Press ENTER to install with this choice.");
+    CONSOLE_SetTextXY(COMP_X, 20, "Press C to choose the components one by one (Customise).");
+    CONSOLE_SetStatusText("   ENTER = Continue   C = Customise   F3 = Quit");
+}
+
+static VOID
+CompListHead(ULONG Count)
+{
+    CompTitle("Components");
+    CONSOLE_SetTextXY(COMP_X, 6, "UP/DOWN = select   SPACE = install or leave out");
+    if (Count > CompListRows)
+        CONSOLE_SetTextXY(COMP_X + 14, 5, "(the list continues: DOWN shows the rest)");
+    CONSOLE_SetStatusText("   SPACE = On/Off   ENTER = Continue   ESC = Back   F3 = Quit");
+}
+
+static VOID
+CompDrawList(PCOMPONENTS_STATE S, const ULONG *Visible, ULONG VisibleCount, ULONG Top, ULONG Cursor,
+             ULONG Selected, PCSTR Message)
+{
+    ULONG Row;
+    WCHAR Wide[400];
+    CHAR Line[100], Size[32], Name[60];
+    ULONG Off = ComponentsApplicableMask(S->Count, S->Desc) & ~Selected, OffCount = 0, i;
+
+    for (Row = 0; Row < CompListRows; ++Row)
+    {
+        ULONG n = Top + Row;
+
+        if (n >= VisibleCount)
+        {
+            CompRow((SHORT)(COMP_LIST_TOP + Row), "", FALSE);
+            continue;
+        }
+        i = Visible[n];
+        ComponentsGetName(S, i, Wide, ARRAYSIZE(Wide));
+        CompNarrow(Wide[0] ? Wide : S->Desc[i].Id, Name, sizeof(Name));
+        Size[0] = '\0';
+        if (S->SizesKnown)
+            CompFormatSize(S->OwnBytes[i], Size, sizeof(Size));
+        RtlStringCbPrintfA(Line, sizeof(Line), " [%c] %-40s %12s", (Selected & (1UL << i)) ? 'x' : ' ', Name, Size);
+        CompRow((SHORT)(COMP_LIST_TOP + Row), Line, n == Cursor);
+    }
+
+    for (i = 0; i < S->Count; ++i)
+        if (Off & (1UL << i))
+            ++OffCount;
+    if (S->SizesKnown)
+    {
+        CHAR Value[24];
+
+        CompFormatSize(ComponentsBytesLeftOut(S, Selected), Value, sizeof(Value));
+        RtlStringCbPrintfA(Line, sizeof(Line), "Left out: %lu of %lu components, about %s less on the disk",
+                           OffCount, VisibleCount, Value);
+    }
+    else
+    {
+        RtlStringCbPrintfA(Line, sizeof(Line), "Left out: %lu of %lu components", OffCount, VisibleCount);
+    }
+    CompRow((SHORT)(COMP_LIST_TOP + CompListRows), Line, FALSE);
+    CompRow((SHORT)(COMP_LIST_TOP + CompListRows + 1), Message, FALSE);
+
+    i = Visible[Cursor];
+    ComponentsGetText(S, i, L"Description", Wide, ARRAYSIZE(Wide));
+    CompWrap((SHORT)(COMP_LIST_TOP + CompListRows + 2), 2, "", Wide);
+    ComponentsGetText(S, i, L"Compat", Wide, ARRAYSIZE(Wide));
+    CompWrap((SHORT)(COMP_LIST_TOP + CompListRows + 4), 3, "Without it: ", Wide);
+}
+
+static VOID
+CompList(PINPUT_RECORD Ir, PCOMPONENTS_STATE S, PULONG pSelected, PBOOLEAN pQuit, PBOOLEAN pBack)
+{
+    ULONG Visible[COMPONENT_MAX], VisibleCount = 0, i, Cursor = 0, Top = 0;
+    ULONG Selected = *pSelected;
+    CHAR Message[COMP_WIDTH + 1] = "";
+    CHAR Names[200];
+    BOOLEAN Redraw = TRUE;
+
+    for (i = 0; i < S->Count; ++i)
+        if (S->Desc[i].Applicable)
+            Visible[VisibleCount++] = i;
+    if (!VisibleCount)
+        return;
+
+    CompListRows = (yScreen > 20) ? (ULONG)(yScreen - 15) : 5;
+    if (CompListRows > VisibleCount)
+        CompListRows = VisibleCount;
+
+    *pQuit = FALSE;
+    *pBack = FALSE;
+    CompListHead(VisibleCount);
+
+    for (;;)
+    {
+        if (Redraw)
+        {
+            CompDrawList(S, Visible, VisibleCount, Top, Cursor, Selected, Message);
+            Redraw = FALSE;
+        }
+        CONSOLE_ConInKey(Ir);
+        Message[0] = '\0';
+
+        if (Ir->Event.KeyEvent.wVirtualKeyCode == VK_F3)
+        {
+            if (ConfirmQuit(Ir))
+            {
+                *pQuit = TRUE;
+                break;
+            }
+            CompListHead(VisibleCount);
+            Redraw = TRUE;
+        }
+        else if (Ir->Event.KeyEvent.wVirtualKeyCode == VK_ESCAPE)
+        {
+            *pBack = TRUE;
+            break;
+        }
+        else if (Ir->Event.KeyEvent.wVirtualKeyCode == VK_RETURN || Ir->Event.KeyEvent.uChar.AsciiChar == 0x0D)
+        {
+            break;
+        }
+        else if (Ir->Event.KeyEvent.wVirtualKeyCode == VK_DOWN)
+        {
+            if (Cursor + 1 < VisibleCount)
+                ++Cursor;
+            if (Cursor >= Top + CompListRows)
+                Top = Cursor - CompListRows + 1;
+            Redraw = TRUE;
+        }
+        else if (Ir->Event.KeyEvent.wVirtualKeyCode == VK_UP)
+        {
+            if (Cursor > 0)
+                --Cursor;
+            if (Cursor < Top)
+                Top = Cursor;
+            Redraw = TRUE;
+        }
+        else if (Ir->Event.KeyEvent.wVirtualKeyCode == VK_HOME)
+        {
+            Cursor = Top = 0;
+            Redraw = TRUE;
+        }
+        else if (Ir->Event.KeyEvent.wVirtualKeyCode == VK_END)
+        {
+            Cursor = VisibleCount - 1;
+            Top = (Cursor >= CompListRows) ? Cursor - CompListRows + 1 : 0;
+            Redraw = TRUE;
+        }
+        else if (Ir->Event.KeyEvent.uChar.AsciiChar == ' ' || Ir->Event.KeyEvent.wVirtualKeyCode == VK_SPACE)
+        {
+            ULONG Index = Visible[Cursor], New, AlsoOn, AlsoOff, Result;
+            BOOLEAN On = !(Selected & (1UL << Index));
+
+            Result = ComponentsToggle(S->Count, S->Desc, Selected, Index, On, &New, &AlsoOn, &AlsoOff);
+            if (Result == COMPONENT_TOGGLE_OK)
+            {
+                Selected = New;
+                if (AlsoOn)
+                {
+                    CompNames(S, AlsoOn, Names, sizeof(Names));
+                    RtlStringCbPrintfA(Message, sizeof(Message), "Also turned on, this one needs it: %s", Names);
+                }
+                else if (AlsoOff)
+                {
+                    CompNames(S, AlsoOff, Names, sizeof(Names));
+                    RtlStringCbPrintfA(Message, sizeof(Message), "Also left out, it needs this one: %s", Names);
+                }
+            }
+            else
+            {
+                RtlStringCbCopyA(Message, sizeof(Message), "This cannot be turned on: it needs something this edition does not have.");
+            }
+            Redraw = TRUE;
+        }
+    }
+    *pSelected = Selected;
+}
+
+static PAGE_NUMBER
+ComponentsPage(PINPUT_RECORD Ir)
+{
+    PCOMPONENTS_STATE S;
+    ULONG Cursor = COMPONENT_PROFILE_STANDARD, Selected, All;
+    BOOLEAN Custom = FALSE, Back;
+
+    /* Nobody to ask: an unattended installation, an update (it keeps what the installation has), an answer file
+     * that has its own [Components], a medium without components.inf */
+    if (IsUnattendedSetup || RepairUpdateFlag || USetupData.Components)
+        return PREPARE_COPY_PAGE;
+
+    S = ComponentsLoad(USetupData.SourcePath.Buffer, USetupData.LanguageId);
+    if (!S)
+        return PREPARE_COPY_PAGE;
+
+    USetupData.Components = S;
+    CONSOLE_ClearScreen();
+    CONSOLE_SetTextXY(COMP_X, 5, "Reading the component sizes...");
+    CONSOLE_Flush();
+    ComponentsMeasure(&USetupData);
+    USetupData.Components = NULL;   /* until the choice is made: nothing is left out */
+
+    All = ComponentsApplicableMask(S->Count, S->Desc);
+    Selected = ComponentsProfileSelection(S, Cursor);
+
+    for (;;)
+    {
+        CompDrawProfiles(S, Cursor, Custom, Selected);
+        for (;;)
+        {
+            CONSOLE_ConInKey(Ir);
+
+            if (Ir->Event.KeyEvent.wVirtualKeyCode == VK_F3)
+            {
+                if (ConfirmQuit(Ir))
+                {
+                    ComponentsFree(S);
+                    return QUIT_PAGE;
+                }
+                break;      /* draw again */
+            }
+            else if (Ir->Event.KeyEvent.wVirtualKeyCode == VK_RETURN || Ir->Event.KeyEvent.uChar.AsciiChar == 0x0D)
+            {
+                goto Choose;
+            }
+            else if (Ir->Event.KeyEvent.wVirtualKeyCode == VK_DOWN || Ir->Event.KeyEvent.wVirtualKeyCode == VK_UP)
+            {
+                if (Ir->Event.KeyEvent.wVirtualKeyCode == VK_DOWN && Cursor + 1 < COMPONENT_PROFILE_COUNT)
+                    ++Cursor;
+                else if (Ir->Event.KeyEvent.wVirtualKeyCode == VK_UP && Cursor > 0)
+                    --Cursor;
+                else
+                    continue;
+                Custom = FALSE;
+                Selected = ComponentsProfileSelection(S, Cursor);
+                break;
+            }
+            else if (Ir->Event.KeyEvent.uChar.AsciiChar == 'c' || Ir->Event.KeyEvent.uChar.AsciiChar == 'C')
+            {
+                BOOLEAN WasQuit = FALSE;
+                ULONG Before = Selected;
+
+                Back = FALSE;
+                CompList(Ir, S, &Selected, &WasQuit, &Back);
+                if (WasQuit)
+                {
+                    ComponentsFree(S);
+                    return QUIT_PAGE;
+                }
+                if (Selected != Before)
+                    Custom = TRUE;
+                if (!Back)
+                    goto Choose;        /* ENTER in the list continues the installation */
+                break;
+            }
+        }
+    }
+
+Choose:
+    /* A customised choice with everything on and a profile that leaves things out is the standard installation */
+    if (Custom && Selected == All && Cursor == COMPONENT_PROFILE_MINIMAL)
+        Cursor = COMPONENT_PROFILE_STANDARD;
+    if (ComponentsSetChoice(S, Cursor, Selected))
+    {
+        SetupLogLine("components: chosen on the setup page");
+        USetupData.Components = S;
+    }
+    else
+    {
+        ComponentsFree(S);
+    }
     return PREPARE_COPY_PAGE;
 }
 
@@ -4578,6 +5032,10 @@ RunUSetup(VOID)
             /* Installation pages */
             case INSTALL_DIRECTORY_PAGE:
                 Page = InstallDirectoryPage(&Ir);
+                break;
+
+            case COMPONENTS_PAGE:
+                Page = ComponentsPage(&Ir);
                 break;
 
             case PREPARE_COPY_PAGE:

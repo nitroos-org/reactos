@@ -2,8 +2,11 @@
 ;
 ; One place decides what a component is: which cabinet files belong to it, what has to be
 ; changed in the registry when it is left out, what it needs, and what is on in each profile.
-; Text mode setup (base/setup/lib/components.c) uses it only when the answer file has a
-; [Components] section; a default installation never opens this file and installs everything.
+; Text mode setup (base/setup/lib/components.c) uses it when the answer file has a [Components]
+; section and on the page "Choose what to install" (an interactive installation); an unattended
+; installation without the section never opens this file and installs everything. The sizes
+; the page shows are not kept here: they are the sizes of the files of the cabinet, read from
+; reactos.sizes (written by the cabinet tool at build time next to reactos.inf), added up per component.
 ; The later add/remove of components (feature manager) reads the same ids.
 ;
 ; [Components]       id = display name (the id is what the answer file and the registry use)
@@ -126,12 +129,24 @@ Compat       = %tests.compat%
 Profiles     = standard
 Files        = bin\*, system32\rosautotest.exe
 
+; The profile choice of the interactive page: name and one line per profile (%tokens% are in [Strings]).
+[ProfileText]
+standard = %profile.standard.name%, %profile.standard.desc%
+minimal  = %profile.minimal.name%, %profile.minimal.desc%
+core     = %profile.core.name%, %profile.core.desc%
+
 ; "core": the logon shell is the command prompt (Winlogon\Shell, the same value that the Server Core
 ; installation type of the graphical stage sets). Files stay; only the shell value changes.
 [Profile.core]
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon","Shell",0x00000000,"cmd.exe"
 
 [Strings]
+profile.standard.name = "Standard"
+profile.standard.desc = "Everything, as in every earlier installation."
+profile.minimal.name = "Minimal"
+profile.minimal.desc = "The system, the desktop and the command line; the optional components are left out (Customise shows which)."
+profile.core.name = "Core"
+profile.core.desc = "Minimal, and the command prompt instead of the desktop shell."
 wow64.name = "32-bit program support"
 wow64.desc = "The 32-bit system folder (SysWOW64) and the 32-bit side-by-side assemblies, so that 32-bit programs can run."
 wow64.compat = "32-bit programs and most installers do not start (the loader reports that WoW64 could not start, status 0xC0000034); the Wine Gecko and .NET Framework features need it."
