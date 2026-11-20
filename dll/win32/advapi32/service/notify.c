@@ -10,9 +10,19 @@
  * service is one of the requested states (also when it already is at the time
  * of the call). Closing the service handle cancels its registrations.
  *
- * Not implemented: notifications of the service control manager handle
- * (SERVICE_NOTIFY_CREATED, SERVICE_NOTIFY_DELETED) and of
- * SERVICE_NOTIFY_DELETE_PENDING; they report ERROR_CALL_NOT_IMPLEMENTED.
+ * The caller's notification structure is written by the APC, on the calling
+ * thread, just before the callback runs: the worker never touches it, so a
+ * thread that exits (and frees the structure on its stack) with a notification
+ * pending cannot make the worker write to freed memory. As on Windows, the
+ * small block of a notification that is never delivered is lost with the thread.
+ *
+ * Limits: a registration made in a state that is already requested is queued at once every time (Windows
+ * queues it again only when the state changed since it was last queued: not reproduced); the state is polled (100 ms), so a state that lasts less than that
+ * can be missed; the notifications of the service control manager handle
+ * (SERVICE_NOTIFY_CREATED, SERVICE_NOTIFY_DELETED) and SERVICE_NOTIFY_DELETE_PENDING
+ * report ERROR_CALL_NOT_IMPLEMENTED; a service marked for deletion is not
+ * detected. When the service cannot be queried any more (the service control
+ * manager is gone) the callback is queued with that error in dwNotificationStatus.
  */
 
 #include <advapi32.h>
@@ -26,15 +36,34 @@ WINE_DEFAULT_DEBUG_CHANNEL(advapi);
 typedef struct _SVC_NOTIFY_REG
 {
     struct _SVC_NOTIFY_REG *Next;
+    ULONG Id;                   /* never reused: the worker finds its registration again by it */
     SC_HANDLE hService;
     DWORD dwMask;
     HANDLE hThread;
     PSERVICE_NOTIFY_2W Notify;
 } SVC_NOTIFY_REG;
 
-static volatile LONG g_NotifyLock;     /* a spin lock: needs no initialization and no Vista-only import */
+/* What the APC needs: allocated by the one who queues it, freed by the APC */
+typedef struct _SVC_NOTIFY_DELIVERY
+{
+    PSERVICE_NOTIFY_2W Notify;
+    SERVICE_STATUS_PROCESS Status;
+    DWORD dwTriggered;
+    DWORD dwNotificationStatus;
+} SVC_NOTIFY_DELIVERY;
+
+typedef struct _SVC_NOTIFY_SNAP
+{
+    ULONG Id;
+    SC_HANDLE hService;
+    SERVICE_STATUS_PROCESS Status;
+    DWORD dwError;
+} SVC_NOTIFY_SNAP;
+
+static volatile LONG g_NotifyLock;     /* a spin lock: needs no initialization and no Vista-only import. Never held across an RPC. */
 static SVC_NOTIFY_REG *g_NotifyList;
 static BOOL g_NotifyWorker;
+static volatile LONG g_NotifyNextId;
 
 static VOID
 NotifyLock(VOID)
@@ -65,21 +94,67 @@ StateToNotifyBit(DWORD dwState)
     return 0;
 }
 
-/* Fills the notification and queues the callback. Returns FALSE when the thread is gone. */
-static BOOL
-FireNotification(HANDLE hThread,
-                 PSERVICE_NOTIFY_2W Notify,
-                 const SERVICE_STATUS_PROCESS *Status,
-                 DWORD dwTriggered)
+/* Runs on the registering thread, in its alertable wait */
+static VOID WINAPI
+NotifyApc(ULONG_PTR Parameter)
 {
-    Notify->dwNotificationStatus = ERROR_SUCCESS;
-    Notify->ServiceStatus = *Status;
-    if (Notify->dwVersion >= SERVICE_NOTIFY_STATUS_CHANGE_2)
+    SVC_NOTIFY_DELIVERY *Delivery = (SVC_NOTIFY_DELIVERY *)Parameter;
+    PSERVICE_NOTIFY_2W Notify = Delivery->Notify;
+
+    Notify->dwNotificationStatus = Delivery->dwNotificationStatus;
+    if (Delivery->dwNotificationStatus == ERROR_SUCCESS)
     {
-        Notify->dwNotificationTriggered = dwTriggered;
-        Notify->pszServiceNames = NULL;
+        Notify->ServiceStatus = Delivery->Status;
+        if (Notify->dwVersion >= SERVICE_NOTIFY_STATUS_CHANGE_2)
+        {
+            Notify->dwNotificationTriggered = Delivery->dwTriggered;
+            Notify->pszServiceNames = NULL;
+        }
     }
-    return QueueUserAPC((PAPCFUNC)Notify->pfnNotifyCallback, hThread, (ULONG_PTR)Notify) != 0;
+    HeapFree(GetProcessHeap(), 0, Delivery);
+
+    Notify->pfnNotifyCallback(Notify);
+}
+
+/* Queues the callback of a notification. Returns the error, ERROR_SUCCESS when queued. */
+static DWORD
+QueueNotification(HANDLE hThread,
+                  PSERVICE_NOTIFY_2W Notify,
+                  const SERVICE_STATUS_PROCESS *Status,
+                  DWORD dwTriggered,
+                  DWORD dwNotificationStatus)
+{
+    SVC_NOTIFY_DELIVERY *Delivery;
+    DWORD dwError;
+
+    Delivery = HeapAlloc(GetProcessHeap(), 0, sizeof(*Delivery));
+    if (Delivery == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    Delivery->Notify = Notify;
+    if (Status)
+        Delivery->Status = *Status;
+    else
+        RtlZeroMemory(&Delivery->Status, sizeof(Delivery->Status));
+    Delivery->dwTriggered = dwTriggered;
+    Delivery->dwNotificationStatus = dwNotificationStatus;
+
+    if (QueueUserAPC(NotifyApc, hThread, (ULONG_PTR)Delivery))
+        return ERROR_SUCCESS;
+
+    dwError = GetLastError();
+    HeapFree(GetProcessHeap(), 0, Delivery);
+    return dwError;
+}
+
+static VOID
+NotifyDropReg(SVC_NOTIFY_REG **pp)
+{
+    SVC_NOTIFY_REG *Reg = *pp;
+
+    *pp = Reg->Next;
+    CloseHandle(Reg->hThread);
+    HeapFree(GetProcessHeap(), 0, Reg);
 }
 
 static DWORD WINAPI
@@ -87,54 +162,93 @@ NotifyWorkerThread(PVOID Context)
 {
     for (;;)
     {
-        SVC_NOTIFY_REG **pp;
+        SVC_NOTIFY_SNAP *Snap = NULL;
+        SVC_NOTIFY_REG *Reg;
+        ULONG Count = 0, i, j;
 
         Sleep(NOTIFY_POLL_MS);
 
+        /* Take a copy of what to look at: the service control manager is asked without the lock */
         NotifyLock();
-        pp = &g_NotifyList;
-        while (*pp)
-        {
-            SVC_NOTIFY_REG *Reg = *pp;
-            SERVICE_STATUS_PROCESS Status;
-            DWORD cbNeeded, dwBit;
-            BOOL bDone = FALSE;
-
-            if (!QueryServiceStatusEx(Reg->hService, SC_STATUS_PROCESS_INFO,
-                                      (LPBYTE)&Status, sizeof(Status), &cbNeeded))
-            {
-                /* The handle is not usable any more: drop the registration. */
-                bDone = TRUE;
-            }
-            else
-            {
-                dwBit = StateToNotifyBit(Status.dwCurrentState);
-                if (dwBit & Reg->dwMask)
-                {
-                    FireNotification(Reg->hThread, Reg->Notify, &Status, dwBit);
-                    bDone = TRUE;
-                }
-            }
-
-            if (bDone)
-            {
-                *pp = Reg->Next;
-                CloseHandle(Reg->hThread);
-                HeapFree(GetProcessHeap(), 0, Reg);
-            }
-            else
-            {
-                pp = &Reg->Next;
-            }
-        }
-
-        if (!g_NotifyList)
+        for (Reg = g_NotifyList; Reg; Reg = Reg->Next)
+            Count++;
+        if (Count == 0)
         {
             g_NotifyWorker = FALSE;
             NotifyUnlock();
             return 0;
         }
         NotifyUnlock();
+
+        Snap = HeapAlloc(GetProcessHeap(), 0, Count * sizeof(*Snap));
+        if (Snap == NULL)
+            continue;
+
+        NotifyLock();
+        for (Reg = g_NotifyList, i = 0; Reg && i < Count; Reg = Reg->Next, i++)
+        {
+            Snap[i].Id = Reg->Id;
+            Snap[i].hService = Reg->hService;
+        }
+        Count = i;
+        NotifyUnlock();
+
+        for (i = 0; i < Count; i++)
+        {
+            DWORD cbNeeded;
+
+            /* one question per service handle */
+            for (j = 0; j < i; j++)
+            {
+                if (Snap[j].hService == Snap[i].hService)
+                {
+                    Snap[i].Status = Snap[j].Status;
+                    Snap[i].dwError = Snap[j].dwError;
+                    break;
+                }
+            }
+            if (j < i)
+                continue;
+
+            Snap[i].dwError = ERROR_SUCCESS;
+            if (!QueryServiceStatusEx(Snap[i].hService, SC_STATUS_PROCESS_INFO,
+                                      (LPBYTE)&Snap[i].Status, sizeof(Snap[i].Status), &cbNeeded))
+            {
+                Snap[i].dwError = GetLastError();
+            }
+        }
+
+        NotifyLock();
+        for (i = 0; i < Count; i++)
+        {
+            SVC_NOTIFY_REG **pp = &g_NotifyList;
+
+            while (*pp && (*pp)->Id != Snap[i].Id)
+                pp = &(*pp)->Next;
+            Reg = *pp;
+            if (Reg == NULL)
+                continue;       /* cancelled while the service control manager was asked */
+
+            if (Snap[i].dwError != ERROR_SUCCESS)
+            {
+                /* The service cannot be observed any more: say so instead of never answering */
+                QueueNotification(Reg->hThread, Reg->Notify, NULL, 0, Snap[i].dwError);
+                NotifyDropReg(pp);
+            }
+            else
+            {
+                DWORD dwBit = StateToNotifyBit(Snap[i].Status.dwCurrentState);
+
+                if (dwBit & Reg->dwMask)
+                {
+                    QueueNotification(Reg->hThread, Reg->Notify, &Snap[i].Status, dwBit, ERROR_SUCCESS);
+                    NotifyDropReg(pp);
+                }
+            }
+        }
+        NotifyUnlock();
+
+        HeapFree(GetProcessHeap(), 0, Snap);
     }
 }
 
@@ -148,19 +262,12 @@ ScmCancelServiceNotifications(SC_HANDLE hService)
     pp = &g_NotifyList;
     while (*pp)
     {
-        SVC_NOTIFY_REG *Reg = *pp;
-
-        if (Reg->hService == hService)
-        {
-            *pp = Reg->Next;
-            CloseHandle(Reg->hThread);
-            HeapFree(GetProcessHeap(), 0, Reg);
-        }
+        if ((*pp)->hService == hService)
+            NotifyDropReg(pp);
         else
-        {
-            pp = &Reg->Next;
-        }
+            pp = &(*pp)->Next;
     }
+
     NotifyUnlock();
 }
 
@@ -172,7 +279,7 @@ NotifyServiceStatusChange(SC_HANDLE hService,
     SERVICE_STATUS_PROCESS Status;
     SVC_NOTIFY_REG *Reg;
     HANDLE hThread;
-    DWORD cbNeeded, dwBit;
+    DWORD cbNeeded, dwBit, dwError;
 
     if (hService == NULL || Notify == NULL || dwNotifyMask == 0 ||
         (dwNotifyMask & ~NOTIFY_ALL_MASK) != 0 ||
@@ -191,7 +298,7 @@ NotifyServiceStatusChange(SC_HANDLE hService,
     if (!QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO,
                               (LPBYTE)&Status, sizeof(Status), &cbNeeded))
     {
-        DWORD dwError = GetLastError();
+        dwError = GetLastError();
 
         if (dwError == ERROR_INVALID_HANDLE && (dwNotifyMask & ~NOTIFY_SCM_MASK) == 0)
         {
@@ -211,13 +318,14 @@ NotifyServiceStatusChange(SC_HANDLE hService,
                          &hThread, THREAD_SET_CONTEXT, FALSE, 0))
         return GetLastError();
 
-    /* The service is already in a requested state: notify at once. */
+    /* The registration clears the status of the structure (measured); the other fields are written when it fires */
+    Notify->dwNotificationStatus = ERROR_SUCCESS;
+
+    /* The service is already in a requested state: notify at once (measured on Windows Server 2022) */
     dwBit = StateToNotifyBit(Status.dwCurrentState);
     if (dwBit & dwNotifyMask)
     {
-        BOOL bOk = FireNotification(hThread, Notify, &Status, dwBit);
-        DWORD dwError = bOk ? ERROR_SUCCESS : GetLastError();
-
+        dwError = QueueNotification(hThread, Notify, &Status, dwBit, ERROR_SUCCESS);
         CloseHandle(hThread);
         return dwError;
     }
@@ -228,9 +336,8 @@ NotifyServiceStatusChange(SC_HANDLE hService,
         CloseHandle(hThread);
         return ERROR_NOT_ENOUGH_MEMORY;
     }
-    /* The registration clears the status of the structure (measured); the other fields are written when it fires */
-    Notify->dwNotificationStatus = ERROR_SUCCESS;
 
+    Reg->Id = (ULONG)InterlockedIncrement(&g_NotifyNextId);
     Reg->hService = hService;
     Reg->dwMask = dwNotifyMask;
     Reg->hThread = hThread;
@@ -245,7 +352,7 @@ NotifyServiceStatusChange(SC_HANDLE hService,
 
         if (hWorker == NULL)
         {
-            DWORD dwError = GetLastError();
+            dwError = GetLastError();
 
             g_NotifyList = Reg->Next;
             NotifyUnlock();
