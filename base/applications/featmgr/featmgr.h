@@ -110,6 +110,17 @@ HRESULT FmUninstallEx(LPCWSTR id, DWORD flags, FILE *log);   /* flags as FmDisab
 /* Enabled features whose Dependencies name id (comma-separated into buf). */
 int     FmGetDependents(LPCWSTR id, LPWSTR buf, DWORD cch);
 
+/* ---- operating system components (oscomp.c) -------------------------------
+ * Setup records every optional component of the installation under HKLM\SOFTWARE\ReactOS\Nitro\Components (answer file
+ * [Components], or a choice on the setup page). They are listed as features (group "Components"); one that was left out
+ * is turned on by copying it from the installation medium: a CD/DVD drive, or the folder / drive given with /source:
+ * (FmOsCompSetSource). Removing a component after setup is not supported. */
+void   FmOsCompSetSource(LPCWSTR source);
+BOOL   FmOsCompIsComponent(LPCWSTR id);
+BOOL   FmOsCompFind(LPCWSTR id, FM_FEATURE *out);
+int    FmOsCompList(FM_FEATURE *out, int max);
+HRESULT FmOsCompEnable(LPCWSTR id, FILE *log);
+
 /* ---- software tier (design section 6, phases 1-2) ------------------------
  * Software features differ from OS features in where the payload comes from:
  * FmEnable on a Tier=software feature DOWNLOADS + RUNS an installer (install !=

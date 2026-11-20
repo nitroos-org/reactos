@@ -42,6 +42,11 @@ static void Usage(void)
     Out(L"  featmgr /disable <id> [/cascade] [/force]  disable (revert); refused while enabled\n");
     Out(L"                               features depend on it unless /cascade. Software tier:\n");
     Out(L"                               runs the app's uninstaller; /force = proceed if it fails\n");
+    Out(L"  featmgr /enable  <component> [/source:<folder or drive>]\n");
+    Out(L"                               an operating system component that setup left out (listed by /list /tier:os, group\n");
+    Out(L"                               Components): copied from the installation disc in a CD/DVD drive, or from /source: (a\n");
+    Out(L"                               drive or folder with the amd64/i386 folder of the disc, no network needed). What it needs is\n");
+    Out(L"                               added first. Removing a component after setup is not supported.\n");
     Out(L"  featmgr /install <id>        alias for /enable (software tier: download + run installer)\n");
     Out(L"  featmgr /uninstall <id> [/force]  disable, then forget the record (-> NotInstalled)\n");
     Out(L"  featmgr /shell-defaults [/browser]\n");
@@ -503,6 +508,10 @@ int wmain(int argc, WCHAR **argv)
         || !_wcsicmp(cmd, L"enable") || !_wcsicmp(cmd, L"install"))
     {
         WCHAR rid[FM_MAX_ID];
+        int a;
+        /* /source:<folder or drive>: where an operating system component is copied from (default: the CD/DVD drives) */
+        for (a = 3; a < argc; a++)
+            if (!_wcsnicmp(argv[a], L"/source:", 8)) FmOsCompSetSource(argv[a] + 8);
         if (!ResolveInstallId(argv[2], rid, ARRAYSIZE(rid)))
         { Out(L"error: unknown feature '%s'\n", argv[2]); return 3; }
         {
