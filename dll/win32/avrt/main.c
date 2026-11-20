@@ -266,7 +266,7 @@ static HANDLE join_tasks(const WCHAR *name1, const WCHAR *name2, DWORD *index)
         reap_ended();
     task = calloc(1, sizeof(*task));
     if (task)
-        task->Thread = OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION, FALSE, thread_id);
+        task->Thread = OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION | SYNCHRONIZE, FALSE, thread_id);
     if (!task || !task->Thread)
     {
         if (task) free(task);
