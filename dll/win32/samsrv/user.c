@@ -937,4 +937,226 @@ done:
     return Status;
 }
 
+
+/* ACCOUNT LOCKOUT **********************************************************
+ *
+ * [MS-SAMR] 3.1.5.13.7.1 (SamValidateAuthentication) gives the rules, the measurements on Windows Server 2022
+ * (evidence samlock-20261120) the details:
+ * - a wrong password counts (LastBadPasswordTime, BadPasswordCount); the count starts again at 1 when the last bad
+ *   password is older than the observation window, and reads as 0 once the window has passed;
+ * - the attempt that reaches a nonzero threshold locks the account (LockoutTime = now); while it is locked, its
+ *   logons fail before the password is checked and do not count (msv1_0, password change); the built-in
+ *   Administrator, whose logons are not refused, keeps counting and shows the flag;
+ * - the lock ends by itself after the duration (TIMEQ_FOREVER: never), or when an administrator clears
+ *   UF_LOCKOUT (USER_ACCOUNT_AUTO_LOCKED); then the count is 0 as well. Setting the flag does not lock an account;
+ * - a successful logon sets the count to 0 (and ends an expired lock).
+ * The stored UserAccountControl never keeps USER_ACCOUNT_AUTO_LOCKED: the flag is reported from LockoutTime.
+ * LockoutTime is the user attribute "LockoutTime" (8 bytes, absent = 0).
+ */
+
+static
+VOID
+SampGetLockoutPolicy(IN PSAM_DB_OBJECT UserObject,
+                     OUT PSAM_DOMAIN_FIXED_DATA DomainData)
+{
+    ULONG Length = sizeof(SAM_DOMAIN_FIXED_DATA);
+
+    if (UserObject->ParentObject == NULL ||
+        !NT_SUCCESS(SampGetObjectAttribute(UserObject->ParentObject, L"F", NULL, DomainData, &Length)))
+    {
+        /* No policy readable: no lockout */
+        RtlZeroMemory(DomainData, sizeof(SAM_DOMAIN_FIXED_DATA));
+    }
+}
+
+
+static
+LONGLONG
+SampGetUserLockoutTime(IN PSAM_DB_OBJECT UserObject)
+{
+    LARGE_INTEGER LockoutTime;
+    ULONG Length = sizeof(LockoutTime);
+
+    if (!NT_SUCCESS(SampGetObjectAttribute(UserObject, L"LockoutTime", NULL, &LockoutTime, &Length)) ||
+        Length != sizeof(LockoutTime))
+        return 0;
+
+    return LockoutTime.QuadPart;
+}
+
+
+static
+NTSTATUS
+SampSetUserLockoutTime(IN PSAM_DB_OBJECT UserObject,
+                       IN LONGLONG Time)
+{
+    LARGE_INTEGER LockoutTime;
+
+    /* Nothing to write for an account that was never locked */
+    if (Time == 0 && SampGetUserLockoutTime(UserObject) == 0)
+        return STATUS_SUCCESS;
+
+    LockoutTime.QuadPart = Time;
+    return SampSetObjectAttribute(UserObject, L"LockoutTime", REG_BINARY, &LockoutTime, sizeof(LockoutTime));
+}
+
+
+/* Has the relative (negative) interval Delta passed since Time? A delta that does not fit is "never" */
+static
+BOOLEAN
+SampIntervalPassed(IN LONGLONG Time,
+                   IN LONGLONG Delta,
+                   IN LONGLONG Now)
+{
+    if (Delta == SAMP_LOCKOUT_FOREVER || Delta > 0)
+        return FALSE;
+
+    if (-Delta > MAXLONGLONG - Time)
+        return FALSE;
+
+    return Now > Time - Delta;
+}
+
+
+static
+BOOLEAN
+SampIsLocked(IN LONGLONG LockoutTime,
+             IN PSAM_DOMAIN_FIXED_DATA DomainData,
+             IN LONGLONG Now)
+{
+    if (LockoutTime == 0)
+        return FALSE;
+
+    return !SampIntervalPassed(LockoutTime, DomainData->LockoutDuration.QuadPart, Now);
+}
+
+
+BOOLEAN
+SampIsUserLockedOut(IN PSAM_DB_OBJECT UserObject,
+                    IN PLARGE_INTEGER CurrentTime)
+{
+    SAM_DOMAIN_FIXED_DATA DomainData;
+    LONGLONG LockoutTime = SampGetUserLockoutTime(UserObject);
+
+    if (LockoutTime == 0)
+        return FALSE;
+
+    SampGetLockoutPolicy(UserObject, &DomainData);
+    return SampIsLocked(LockoutTime, &DomainData, CurrentTime->QuadPart);
+}
+
+
+/* The lockout flag and the bad password count as a caller sees them now (FixedData read from "F") */
+VOID
+SampReportLockoutState(IN PSAM_DB_OBJECT UserObject,
+                       IN OUT PSAM_USER_FIXED_DATA FixedData)
+{
+    SAM_DOMAIN_FIXED_DATA DomainData;
+    LARGE_INTEGER Now;
+
+    FixedData->UserAccountControl &= ~USER_ACCOUNT_AUTO_LOCKED;
+
+    NtQuerySystemTime(&Now);
+    SampGetLockoutPolicy(UserObject, &DomainData);
+
+    if (SampIsLocked(SampGetUserLockoutTime(UserObject), &DomainData, Now.QuadPart))
+        FixedData->UserAccountControl |= USER_ACCOUNT_AUTO_LOCKED;
+
+    if (FixedData->BadPasswordCount != 0 &&
+        SampIntervalPassed(FixedData->LastBadPasswordTime.QuadPart,
+                           DomainData.LockoutObservationWindow.QuadPart,
+                           Now.QuadPart))
+    {
+        FixedData->BadPasswordCount = 0;
+    }
+}
+
+
+/*
+ * A wrong password. Updates FixedData (the caller writes "F") and LockoutTime. Called under the exclusive
+ * SampResource: the read-modify-write of the count is atomic with respect to every other logon.
+ */
+NTSTATUS
+SampRegisterBadPassword(IN PSAM_DB_OBJECT UserObject,
+                        IN OUT PSAM_USER_FIXED_DATA FixedData,
+                        IN PLARGE_INTEGER CurrentTime)
+{
+    SAM_DOMAIN_FIXED_DATA DomainData;
+    LONGLONG LockoutTime = SampGetUserLockoutTime(UserObject);
+    LONGLONG Now = CurrentTime->QuadPart;
+
+    BOOLEAN Locked;
+
+    SampGetLockoutPolicy(UserObject, &DomainData);
+
+    /* A locked account's logons are refused before the password is checked: they never get here. Only the
+       built-in Administrator, which is not locked out, keeps counting (measured) */
+    Locked = SampIsLocked(LockoutTime, &DomainData, Now);
+
+    /* A lock that has ended is gone */
+    if (LockoutTime != 0 && !Locked)
+    {
+        NTSTATUS Status = SampSetUserLockoutTime(UserObject, 0);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    if (FixedData->BadPasswordCount == 0 ||
+        SampIntervalPassed(FixedData->LastBadPasswordTime.QuadPart,
+                           DomainData.LockoutObservationWindow.QuadPart,
+                           Now))
+    {
+        FixedData->BadPasswordCount = 1;
+    }
+    else if (FixedData->BadPasswordCount < MAXUSHORT)
+    {
+        FixedData->BadPasswordCount++;
+    }
+
+    FixedData->LastBadPasswordTime.QuadPart = Now;
+
+    if (!Locked &&
+        DomainData.LockoutThreshold != 0 &&
+        FixedData->BadPasswordCount >= DomainData.LockoutThreshold)
+    {
+        TRACE("User %lx locked out after %u bad passwords\n", UserObject->RelativeId, FixedData->BadPasswordCount);
+        return SampSetUserLockoutTime(UserObject, Now);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+
+/* A successful logon or an administrator's unlock: no lock, count 0 (the caller writes "F") */
+NTSTATUS
+SampClearLockout(IN PSAM_DB_OBJECT UserObject,
+                 IN OUT PSAM_USER_FIXED_DATA FixedData)
+{
+    FixedData->BadPasswordCount = 0;
+    FixedData->UserAccountControl &= ~USER_ACCOUNT_AUTO_LOCKED;
+    return SampSetUserLockoutTime(UserObject, 0);
+}
+
+
+/*
+ * A write of UserAccountControl (the caller writes "F" afterwards): clearing USER_ACCOUNT_AUTO_LOCKED unlocks a
+ * locked account; setting it does not lock one; the bit itself is never stored.
+ */
+NTSTATUS
+SampApplyAccountControlLockout(IN PSAM_DB_OBJECT UserObject,
+                               IN OUT PSAM_USER_FIXED_DATA FixedData,
+                               IN ULONG NewUserAccountControl)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    if ((NewUserAccountControl & USER_ACCOUNT_AUTO_LOCKED) == 0 &&
+        SampGetUserLockoutTime(UserObject) != 0)
+    {
+        Status = SampClearLockout(UserObject, FixedData);
+    }
+
+    FixedData->UserAccountControl = NewUserAccountControl & ~USER_ACCOUNT_AUTO_LOCKED;
+    return Status;
+}
+
 /* EOF */

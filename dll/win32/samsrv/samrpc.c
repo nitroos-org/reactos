@@ -2006,6 +2006,16 @@ SampSetDomainLockout(PSAM_DB_OBJECT DomainObject,
     if (!NT_SUCCESS(Status))
         goto done;
 
+    /* Relative (not positive) times; the duration is at least the observation window (measured with
+       NetUserModalsSet level 3: a shorter duration is ERROR_INVALID_PARAMETER) */
+    if (Buffer->Lockout.LockoutDuration.QuadPart > 0 ||
+        Buffer->Lockout.LockoutObservationWindow.QuadPart > 0 ||
+        Buffer->Lockout.LockoutDuration.QuadPart > Buffer->Lockout.LockoutObservationWindow.QuadPart)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto done;
+    }
+
     FixedData.LockoutDuration = Buffer->Lockout.LockoutDuration;
     FixedData.LockoutObservationWindow = Buffer->Lockout.LockoutObservationWindow;
     FixedData.LockoutThreshold = Buffer->Lockout.LockoutThreshold;
@@ -5993,6 +6003,8 @@ SampQueryUserLogon(PSAM_DB_OBJECT UserObject,
     if (!NT_SUCCESS(Status))
         goto done;
 
+    SampReportLockoutState(UserObject, &FixedData);
+
     InfoBuffer->Logon.UserId = FixedData.UserId;
     InfoBuffer->Logon.PrimaryGroupId = FixedData.PrimaryGroupId;
     InfoBuffer->Logon.LastLogon.LowPart = FixedData.LastLogon.LowPart;
@@ -6157,6 +6169,8 @@ SampQueryUserAccount(PSAM_DB_OBJECT UserObject,
                                     &Length);
     if (!NT_SUCCESS(Status))
         goto done;
+
+    SampReportLockoutState(UserObject, &FixedData);
 
     InfoBuffer->Account.UserId = FixedData.UserId;
     InfoBuffer->Account.PrimaryGroupId = FixedData.PrimaryGroupId;
@@ -6770,6 +6784,8 @@ SampQueryUserControl(PSAM_DB_OBJECT UserObject,
     if (!NT_SUCCESS(Status))
         goto done;
 
+    SampReportLockoutState(UserObject, &FixedData);
+
     InfoBuffer->Control.UserAccountControl = FixedData.UserAccountControl;
 
     *Buffer = InfoBuffer;
@@ -6949,6 +6965,8 @@ SampQueryUserInternal2(PSAM_DB_OBJECT UserObject,
     if (!NT_SUCCESS(Status))
         goto done;
 
+    SampReportLockoutState(UserObject, &FixedData);
+
     InfoBuffer->Internal2.Flags = 0;
     InfoBuffer->Internal2.LastLogon.LowPart = FixedData.LastLogon.LowPart;
     InfoBuffer->Internal2.LastLogon.HighPart = FixedData.LastLogon.HighPart;
@@ -7050,6 +7068,8 @@ SampQueryUserAll(PSAM_DB_OBJECT UserObject,
                                     &Length);
     if (!NT_SUCCESS(Status))
         goto done;
+
+    SampReportLockoutState(UserObject, &FixedData);
 
     /* Set the fields to be returned */
     if (UserObject->Trusted)
@@ -7720,7 +7740,9 @@ SampSetUserControl(PSAM_DB_OBJECT UserObject,
     if (!NT_SUCCESS(Status))
         goto done;
 
-    FixedData.UserAccountControl = Buffer->Control.UserAccountControl;
+    Status = SampApplyAccountControlLockout(UserObject, &FixedData, Buffer->Control.UserAccountControl);
+    if (!NT_SUCCESS(Status))
+        goto done;
 
     Status = SampSetObjectAttribute(UserObject,
                                     L"F",
@@ -7846,18 +7868,31 @@ SampSetUserInternal2(PSAM_DB_OBJECT UserObject,
             goto done;
 
         FixedData.LogonCount++;
-        FixedData.BadPasswordCount = 0;
-    }
 
-    if ((Buffer->Internal2.Flags & USER_LOGON_BAD_PASSWORD) &&
-        ((Buffer->Internal2.Flags & ~USER_LOGON_BAD_PASSWORD) == 0))
+        /* A successful logon: count 0, a lock that has ended (or the one of the built-in Administrator, whose
+           logons are not refused for it) is gone */
+        Status = SampClearLockout(UserObject, &FixedData);
+        if (!NT_SUCCESS(Status))
+            goto done;
+    }
+    else if ((Buffer->Internal2.Flags & USER_LOGON_BAD_PASSWORD) &&
+             ((Buffer->Internal2.Flags & ~USER_LOGON_BAD_PASSWORD) == 0))
     {
-        /* Update the LastBadPasswordTime */
-        Status = NtQuerySystemTime(&FixedData.LastBadPasswordTime);
+        LARGE_INTEGER Now;
+
+        /* A wrong password: count it, lock the account at the threshold (under the exclusive SampResource) */
+        Status = NtQuerySystemTime(&Now);
         if (!NT_SUCCESS(Status))
             goto done;
 
-        FixedData.BadPasswordCount++;
+        Status = SampRegisterBadPassword(UserObject, &FixedData, &Now);
+        if (!NT_SUCCESS(Status))
+            goto done;
+    }
+    else
+    {
+        /* Nothing else is known: nothing to write */
+        goto done;
     }
 
     /* Set the fixed user attributes */
@@ -8010,7 +8045,9 @@ SampSetUserAll(PSAM_DB_OBJECT UserObject,
 
     if (WhichFields & USER_ALL_USERACCOUNTCONTROL)
     {
-        FixedData.UserAccountControl = Buffer->All.UserAccountControl;
+        Status = SampApplyAccountControlLockout(UserObject, &FixedData, Buffer->All.UserAccountControl);
+        if (!NT_SUCCESS(Status))
+            goto done;
         WriteFixedData = TRUE;
     }
 
@@ -8282,6 +8319,15 @@ SamrChangePasswordUser(IN SAMPR_HANDLE UserHandle,
         goto done;
     }
 
+    /* A locked account cannot change its password (measured: NetUserChangePassword 1909 with the right old
+       password), and the attempt does not count. The built-in Administrator is not locked out */
+    if (UserObject->RelativeId != DOMAIN_USER_RID_ADMIN &&
+        SampIsUserLockedOut(UserObject, &SystemTime))
+    {
+        Status = STATUS_ACCOUNT_LOCKED_OUT;
+        goto done;
+    }
+
     /* Check if we can change the password at this time */
     if ((StoredLmEmpty == FALSE) || (StoredNtEmpty == FALSE))
     {
@@ -8431,9 +8477,10 @@ SamrChangePasswordUser(IN SAMPR_HANDLE UserHandle,
     {
         NTSTATUS UpdateStatus;
 
-        /* Update BadPasswordCount and LastBadPasswordTime */
-        UserFixedData.BadPasswordCount++;
-        UserFixedData.LastBadPasswordTime.QuadPart = SystemTime.QuadPart;
+        /* A wrong old password counts like a wrong logon password (measured), up to the lockout */
+        UpdateStatus = SampRegisterBadPassword(UserObject, &UserFixedData, &SystemTime);
+        if (!NT_SUCCESS(UpdateStatus))
+            TRACE("SampRegisterBadPassword failed (Status 0x%08lx)\n", UpdateStatus);
 
         /* Set the fixed size user data. The caller still gets STATUS_WRONG_PASSWORD:
            returning the status of this write told it the password had been changed. */
