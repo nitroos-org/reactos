@@ -410,6 +410,7 @@ StartScreenSaver(
     STARTUPINFOW StartupInfo;
     PROCESS_INFORMATION ProcessInformation;
     HANDLE HandleArray[2];
+    MSG Message;
     LONG rc;
     DWORD Status;
     BOOL ret = FALSE;
@@ -518,7 +519,24 @@ StartScreenSaver(
     ResetEvent(Session->hUserActivity);
     HandleArray[0] = ProcessInformation.hProcess;
     HandleArray[1] = Session->hUserActivity;
-    Status = WaitForMultipleObjects(2, HandleArray, FALSE, INFINITE);
+    for (;;)
+    {
+        Status = WaitForMultipleObjects(2, HandleArray, FALSE, 100);
+        if (Status != WAIT_TIMEOUT)
+            break;
+
+        /*
+         * This thread owns the SAS window: a Ctrl-Alt-Delete or Win+L (hot keys of that window) pressed while
+         * a saver that does not end on input (it hangs, or it never created a window) shows the empty screen
+         * saver desktop would otherwise wait behind the saver for ever. End the saver; the key is handled
+         * when this function has returned (after the lock, if the saver was password protected).
+         */
+        if (PeekMessageW(&Message, Session->SASWindow, WM_HOTKEY, WM_HOTKEY, PM_NOREMOVE))
+        {
+            Status = WAIT_OBJECT_0 + 1;
+            break;
+        }
+    }
     if (Status == WAIT_OBJECT_0 + 1)
     {
         /* Kill the screen saver */
