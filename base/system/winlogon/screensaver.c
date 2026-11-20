@@ -435,8 +435,9 @@ StartScreenSaver(
     StartupInfo.cb = sizeof(STARTUPINFOW);
     StartupInfo.dwFlags = STARTF_SCREENSAVER;
 
-    /* FIXME: Run the screen saver on the secure screen saver desktop if required */
-    StartupInfo.lpDesktop = L"WinSta0\\Default";
+    /* The screen saver runs on its own desktop, so that nothing typed or clicked while it runs
+     * (and nothing typed to wake it) can reach the application desktop */
+    StartupInfo.lpDesktop = L"WinSta0\\Screen-Saver";
 
     ret = CreateProcessAsUserW(Session->UserToken,
                                szApplicationName,
@@ -457,6 +458,9 @@ StartScreenSaver(
 
     CloseHandle(ProcessInformation.hThread);
     StartTick = GetTickCount();
+
+    /* Show the screen saver desktop: the application desktop is out of reach until the saver ends */
+    SwitchDesktop(Session->ScreenSaverDesktop);
 
     SystemParametersInfoW(SPI_SETSCREENSAVERRUNNING, TRUE, NULL, 0);
 
@@ -486,6 +490,11 @@ StartScreenSaver(
     /* The end of the saver locks the workstation, unless it ended within the grace period */
     if (bSecure && (GetTickCount() - StartTick) >= GracePeriod)
         bLock = TRUE;
+
+    /* A locked workstation goes from the screen saver desktop to the Winlogon desktop without showing the
+     * application desktop in between: the caller locks */
+    if (!bLock)
+        SwitchDesktop(Session->ApplicationDesktop);
 
     CallNotificationDlls(Session, StopScreenSaverHandler);
 
