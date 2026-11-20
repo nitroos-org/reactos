@@ -201,12 +201,115 @@ static void test_TwoThreads(void)
     DestroyWindow(g_hShared);
 }
 
+/*
+ * A DC of a window of another process, taken with a region (the system takes
+ * the region): that process destroys the window while the DC is held, then the
+ * DC is released. The release ran in the destroying process, which can neither
+ * clean nor free the DC and region of this one, and the entry was refused to
+ * this process's ReleaseDC after that: the DC and the region stayed with this
+ * process, one more each round.
+ */
+#define XP_MADE L"user32_apitest_WindowRgnHandles_made"
+#define XP_KILL L"user32_apitest_WindowRgnHandles_kill"
+#define XP_GONE L"user32_apitest_WindowRgnHandles_gone"
+#define XP_PROP L"WindowRgnHandlesWnd"
+#define XP_ROUNDS 60
+
+static void RunCrossProcessChild(void)
+{
+    HANDLE hMade = OpenEventW(EVENT_MODIFY_STATE, FALSE, XP_MADE);
+    HANDLE hKill = OpenEventW(SYNCHRONIZE, FALSE, XP_KILL);
+    HANDLE hGone = OpenEventW(EVENT_MODIFY_STATE, FALSE, XP_GONE);
+    int i;
+
+    if (!hMade || !hKill || !hGone)
+        return;
+    for (i = 0; i < XP_ROUNDS; i++)
+    {
+        HWND hWnd = CreateWindowExW(0, L"STATIC", L"xp", WS_POPUP | WS_VISIBLE, 50, 50, 120, 90,
+                                    NULL, NULL, NULL, NULL);
+        SetPropW(GetDesktopWindow(), XP_PROP, (HANDLE)hWnd);
+        SetEvent(hMade);
+        while (MsgWaitForMultipleObjects(1, &hKill, FALSE, 10000, QS_ALLINPUT) == WAIT_OBJECT_0 + 1)
+            Pump();
+        DestroyWindow(hWnd);
+        SetEvent(hGone);
+    }
+}
+
+static void test_CrossProcessDestroyed(void)
+{
+    HANDLE hMade, hKill, hGone;
+    WCHAR FileName[MAX_PATH], CommandLine[MAX_PATH + 64];
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    DWORD Before, After;
+    int i;
+
+    hMade = CreateEventW(NULL, FALSE, FALSE, XP_MADE);
+    hKill = CreateEventW(NULL, FALSE, FALSE, XP_KILL);
+    hGone = CreateEventW(NULL, FALSE, FALSE, XP_GONE);
+    GetModuleFileNameW(NULL, FileName, _countof(FileName));
+    _snwprintf(CommandLine, _countof(CommandLine), L"\"%s\" WindowRgnHandles child", FileName);
+    CommandLine[_countof(CommandLine) - 1] = 0;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    if (!hMade || !hKill || !hGone ||
+        !CreateProcessW(FileName, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+    {
+        skip("No child process (%lu)\n", GetLastError());
+        return;
+    }
+
+    Pump();
+    Before = GdiCount();
+    for (i = 0; i < XP_ROUNDS; i++)
+    {
+        HWND hWnd;
+        HDC hdc;
+        HRGN hRgn;
+
+        if (WaitForSingleObject(hMade, 10000) != WAIT_OBJECT_0)
+            break;
+        hWnd = (HWND)GetPropW(GetDesktopWindow(), XP_PROP);
+        hRgn = CreateRectRgn(0, 0, 40, 40);
+        hdc = GetDCEx(hWnd, hRgn, DCX_CACHE | ((i & 1) ? DCX_INTERSECTRGN : (DCX_WINDOW | DCX_EXCLUDERGN)));
+        if (!hdc)
+            DeleteObject(hRgn);
+        SetEvent(hKill);
+        WaitForSingleObject(hGone, 10000);
+        if (hdc)
+            ReleaseDC(hWnd, hdc);
+    }
+    Pump();
+    After = GdiCount();
+    ok(i == XP_ROUNDS, "Only %d rounds\n", i);
+    ok(After == Before, "DC of another process's window destroyed meanwhile: %lu GDI objects before, %lu after\n",
+       Before, After);
+
+    WaitForSingleObject(pi.hProcess, 30000);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(hMade);
+    CloseHandle(hKill);
+    CloseHandle(hGone);
+}
+
 START_TEST(WindowRgnHandles)
 {
     HWND hTop, hHidden, hChild;
     HRGN hRgn, hQuery;
     RECT rc;
     int Ret;
+    char **argv;
+    int argc;
+
+    argc = winetest_get_mainargs(&argv);
+    if (argc >= 3 && !strcmp(argv[2], "child"))
+    {
+        RunCrossProcessChild();
+        return;
+    }
 
     hTop = CreateWindowExW(0, L"STATIC", L"top", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                            10, 10, 200, 200, NULL, NULL, NULL, NULL);
@@ -262,5 +365,6 @@ START_TEST(WindowRgnHandles)
     DestroyWindow(hTop);
 
     test_TwoThreads();
+    test_CrossProcessDestroyed();
     test_DestroyedDuringSetWindowRgn();
 }

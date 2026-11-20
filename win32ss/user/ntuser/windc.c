@@ -1042,6 +1042,23 @@ DceFreeWindowDCE(PWND Window)
                * (for 1.0?).
                */
               ERR("[%p] GetDC() without ReleaseDC()!\n", UserHMGetHandle(Window));
+
+              /* A DC that another process holds can only be cleaned and released by
+                 that process: its user attribute and the region it gave GetDCEx are
+                 that process's. DceReleaseDC failed here and left the entry busy and
+                 empty, so the holder's own ReleaseDC was refused as well: the DC and
+                 its region stayed with the holder until its thread ended, one more
+                 on every round. The entry leaves the window, draws nothing, and stays
+                 checked out until the holder releases it (or DceFreeThreadDCE). */
+              if (GreGetObjectOwner(pDCE->hDC) == GDI_OBJ_HMGR_RESTRICTED)
+              {
+                 GdiSelectVisRgn(pDCE->hDC, prgnDefault);
+                 pDCE->DCXFlags |= DCX_DCEDIRTY;
+                 pDCE->hwndCurrent = 0;
+                 pDCE->pwndOrg = pDCE->pwndClip = NULL;
+                 continue;
+              }
+
               DceReleaseDC(pDCE, FALSE);
            }
            pDCE->DCXFlags |= DCX_DCEEMPTY;
@@ -1260,6 +1277,13 @@ UserReleaseDC(PWND Window, HDC hDc, BOOL EndPaint)
 
   if ( Hit && (dce->DCXFlags & DCX_DCEBUSY))
   {
+     /* A cache DC is released by the process that holds it, which owns its
+        user attribute and the region it gave GetDCEx. A late ReleaseDC of a
+        handle whose window went (and whose DC is now some other process's)
+        released that process's DC from here, and its region was lost. */
+     if ((dce->DCXFlags & DCX_CACHE) && GreGetObjectOwner(hDc) == GDI_OBJ_HMGR_RESTRICTED)
+        return 0;
+
      nRet = DceReleaseDC(dce, EndPaint);
   }
 
