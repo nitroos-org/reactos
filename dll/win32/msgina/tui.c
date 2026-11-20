@@ -224,18 +224,17 @@ static INT
 TUILockedSAS(
     IN OUT PGINA_CONTEXT pgContext)
 {
-    HANDLE hToken;
     WCHAR UserName[256];
     WCHAR Password[256];
+    BOOL IsSessionUser, IsAdmin;
     NTSTATUS SubStatus;
     NTSTATUS Status;
+    INT Action = WLX_SAS_ACTION_NONE;
 
     TRACE("TUILockedSAS()\n");
 
-    UNREFERENCED_PARAMETER(pgContext);
-
-    if (!DisplayResourceText(IDS_LOGGEDOUTSAS, TRUE))
-        return WLX_SAS_ACTION_UNLOCK_WKSTA;
+    /* A notice that cannot be shown does not unlock the workstation: the credentials are asked for all the same */
+    DisplayResourceText(IDS_LOGGEDOUTSAS, TRUE);
 
     /* Ask the user for credentials */
     if (!ReadString(IDS_ASKFORUSER, UserName, _countof(UserName), TRUE))
@@ -243,28 +242,23 @@ TUILockedSAS(
     if (!ReadString(IDS_ASKFORPASSWORD, Password, _countof(Password), FALSE))
         return WLX_SAS_ACTION_NONE;
 
-    Status = ConnectToLsa(pgContext);
-    if (!NT_SUCCESS(Status))
+    /* The LSA checks the password (an Unlock logon): only the session's user unlocks, an administrator
+       logs the user off, as in the graphical unlock dialog */
+    Status = DoUnlockLogon(pgContext, UserName, Password, &IsSessionUser, &IsAdmin, &SubStatus);
+    if (NT_SUCCESS(Status))
     {
-        WARN("ConnectToLsa() failed\n");
-        return WLX_SAS_ACTION_NONE;
+        if (IsSessionUser)
+            Action = WLX_SAS_ACTION_UNLOCK_WKSTA;
+        else if (IsAdmin)
+            Action = WLX_SAS_ACTION_FORCE_LOGOFF;
+    }
+    else
+    {
+        WARN("DoUnlockLogon() failed (Status 0x%08lx)\n", Status);
     }
 
-    Status = MyLogonUser(pgContext->LsaHandle,
-                         pgContext->AuthenticationPackage,
-                         UserName,
-                         NULL,
-                         Password,
-                         &hToken,
-                         &SubStatus);
-    if (!NT_SUCCESS(Status))
-    {
-        WARN("MyLogonUser() failed\n");
-        return WLX_SAS_ACTION_NONE;
-    }
-
-    CloseHandle(hToken);
-    return WLX_SAS_ACTION_UNLOCK_WKSTA;
+    SecureZeroMemory(Password, sizeof(Password));
+    return Action;
 }
 
 static VOID
