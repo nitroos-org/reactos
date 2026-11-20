@@ -870,7 +870,7 @@ RegOpenKey(
 }
 
 static
-VOID
+LONG
 RepGetValueData(
     _In_ PHHIVE Hive,
     _In_ PCM_KEY_VALUE ValueCell,
@@ -888,11 +888,18 @@ RepGetValueData(
     /* Does the caller provide DataSize? */
     if (DataSize != NULL)
     {
-        // NOTE: CmpValueToData doesn't support big data (the function will
-        // bugcheck if so), FreeLdr is not supposed to read such data.
-        // If big data is needed, use instead CmpGetValueData.
-        // CmpGetValueData(Hive, ValueCell, DataSize, &DataCell, ...);
+        /*
+         * The data in place. FreeLdr reads no big data (a value longer than
+         * 16344 bytes in a hive of format 1.4 or later): CmpValueToData gives
+         * NULL for it, and the value is an error to the caller.
+         */
         DataCell = CmpValueToData(Hive, ValueCell, &DataLength);
+        if (!DataCell)
+        {
+            WARN("RegQueryValue: the data of the value cannot be read here (big data)\n");
+            *DataSize = 0;
+            return ERROR_INVALID_DATA;
+        }
 
         /* Does the caller want the data? */
         if ((Data != NULL) && (*DataSize != 0))
@@ -905,6 +912,8 @@ RepGetValueData(
         /* Return the actual data length */
         *DataSize = DataLength;
     }
+
+    return ERROR_SUCCESS;
 }
 
 LONG
@@ -920,6 +929,7 @@ RegQueryValue(
     PCM_KEY_VALUE ValueCell;
     HCELL_INDEX CellIndex;
     UNICODE_STRING ValueNameString;
+    LONG Result;
 
     TRACE("RegQueryValue(%p, '%S', %p, %p, %p)\n",
           Key, ValueName, Type, Data, DataSize);
@@ -945,11 +955,11 @@ RegQueryValue(
     ValueCell = (PCM_KEY_VALUE)HvGetCell(Hive, CellIndex);
     ASSERT(ValueCell != NULL);
 
-    RepGetValueData(Hive, ValueCell, Type, Data, DataSize);
+    Result = RepGetValueData(Hive, ValueCell, Type, Data, DataSize);
 
     HvReleaseCell(Hive, CellIndex);
 
-    return ERROR_SUCCESS;
+    return Result;
 }
 
 /*

@@ -221,7 +221,6 @@ CmpFindTagIndex(
     HCELL_INDEX OrderCell;
     PULONG DriverTag, TagOrder;
     ULONG CurrentTag, Length;
-    BOOLEAN BufferAllocated;
 
     /* Sanity check: We shouldn't need to release any acquired cells */
     ASSERT(Hive->ReleaseCellRoutine == NULL);
@@ -240,34 +239,27 @@ CmpFindTagIndex(
     OrderCell = CmpFindValueByName(Hive, Node, GroupName);
     if (OrderCell == HCELL_NIL) return -2;
 
-    /* And read it */
+    /* And read it (in place: a list held as big data is not read at boot) */
     TagValue = (PCM_KEY_VALUE)HvGetCell(Hive, OrderCell);
     if (!TagValue) return -2;
-    if (!CmpGetValueData(Hive,
-                         TagValue,
-                         &Length,
-                         (PVOID*)&TagOrder,
-                         &BufferAllocated,
-                         &OrderCell)
-        || !TagOrder)
-    {
-        return -2;
-    }
+    TagOrder = (PULONG)CmpValueToData(Hive, TagValue, &Length);
+    if (!TagOrder) return -2;
+    if (Length < sizeof(ULONG)) return -2;
 
-    /* Parse each tag */
-    for (CurrentTag = 1; CurrentTag <= TagOrder[0]; CurrentTag++)
+    /* Parse each tag: the count first, then that many tags, as many as the data holds */
+    for (CurrentTag = 1;
+         (CurrentTag <= TagOrder[0]) && (CurrentTag < Length / sizeof(ULONG));
+         CurrentTag++)
     {
         /* Find a match */
         if (TagOrder[CurrentTag] == *DriverTag)
         {
             /* Found it -- return the tag */
-            if (BufferAllocated) Hive->Free(TagOrder, Length);
             return CurrentTag;
         }
     }
 
     /* No matches, so assume next to last ordering */
-    if (BufferAllocated) Hive->Free(TagOrder, Length);
     return -2;
 }
 

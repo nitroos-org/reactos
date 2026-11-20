@@ -111,7 +111,7 @@ CmGetSystemControlValues(IN PVOID SystemHiveData,
     PCM_KEY_NODE Node;
     PCM_KEY_VALUE ValueData;
     UNICODE_STRING KeyName;
-    BOOLEAN Auto, IsSmallKey;
+    BOOLEAN Auto;
     PVOID Buffer;
 
     /* LUDDDIIIICRROOOUUSSSS KI^H^H HACKKKK */
@@ -186,39 +186,34 @@ CmGetSystemControlValues(IN PVOID SystemHiveData,
                 /* Get the actual data */
                 ValueData = (PCM_KEY_VALUE)HvGetCell(SystemHive, ValueCell);
 
-                /* Check if this is a small key */
-                IsSmallKey = CmpIsKeyValueSmall(&Length, ValueData->DataLength);
-
-                /* If the length is bigger then our buffer, normalize it */
-                if (DataSize < Length) Length = DataSize;
-
-                /* Make sure we have some data */
-                if (Length > 0)
+                /*
+                 * The data in place: small data, or the data cell. Big data
+                 * (a 1.4+ hive) is not read at boot: the value is taken as
+                 * missing, its default stays.
+                 */
+                Buffer = (PVOID)CmpValueToData(SystemHive, ValueData, &Length);
+                if (!Buffer)
                 {
-                    /* Check if this was a small key */
-                    if (IsSmallKey)
-                    {
-                        /* The buffer is directly safe to read */
-                        Buffer = (PVOID)(&(ValueData->Data));
-                    }
-                    else
-                    {
-                        /* Use the longer path */
-                        Buffer = (PVOID)HvGetCell(SystemHive, ValueData->Data);
-                    }
-
-                    /* Sanity check if this is a small key */
-                    ASSERT(IsSmallKey ? (Length <= CM_KEY_VALUE_SMALL) : TRUE);
-
-                    /* Copy the data in the buffer */
-                    RtlCopyMemory(ControlVector->Buffer, Buffer, Length);
+                    Length = -1;
                 }
-
-                /* Check if we should return the data type */
-                if (ControlVector->Type)
+                else
                 {
-                    /* Return the type that we read */
-                    *ControlVector->Type = ValueData->Type;
+                    /* If the length is bigger then our buffer, normalize it */
+                    if (DataSize < Length) Length = DataSize;
+
+                    /* Make sure we have some data */
+                    if (Length > 0)
+                    {
+                        /* Copy the data in the buffer */
+                        RtlCopyMemory(ControlVector->Buffer, Buffer, Length);
+                    }
+
+                    /* Check if we should return the data type */
+                    if (ControlVector->Type)
+                    {
+                        /* Return the type that we read */
+                        *ControlVector->Type = ValueData->Type;
+                    }
                 }
             }
         }
