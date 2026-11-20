@@ -66,6 +66,11 @@ DeltaTimeToSeconds(LARGE_INTEGER DeltaTime)
     if (DeltaTime.QuadPart == 0)
         return 0;
 
+    /* The "never" delta (TIMEQ_FOREVER written by NetUserModalsSet) and any other value that is not a relative
+       time: negating 0x8000000000000000 overflows */
+    if (DeltaTime.QuadPart == MINLONGLONG || DeltaTime.QuadPart > 0)
+        return TIMEQ_FOREVER;
+
     Seconds.QuadPart = -DeltaTime.QuadPart / 10000000;
 
     if (Seconds.HighPart != 0)
@@ -4167,7 +4172,8 @@ NetUserModalsGet(LPCWSTR servername,
             umi0 = (PUSER_MODALS_INFO_0)*bufptr;
 
             umi0->usrmod0_min_passwd_len = PasswordInfo->MinPasswordLength;
-            umi0->usrmod0_max_passwd_age = (ULONG)(-PasswordInfo->MaxPasswordAge.QuadPart / 10000000);
+            umi0->usrmod0_max_passwd_age =
+                DeltaTimeToSeconds(PasswordInfo->MaxPasswordAge);
             umi0->usrmod0_min_passwd_age =
                 DeltaTimeToSeconds(PasswordInfo->MinPasswordAge);
             umi0->usrmod0_force_logoff =

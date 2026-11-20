@@ -282,12 +282,53 @@ SampAddRelativeTimeToTime(IN LARGE_INTEGER AbsoluteTime,
 {
     LARGE_INTEGER NewTime;
 
+    /* A relative time is not positive. 0x8000000000000000 (NetUserModals TIMEQ_FOREVER) and every sum that does not
+       fit are "never": 0x7FFFFFFFFFFFFFFF ([MS-ADTS] msDS-UserPasswordExpiryTimeComputed). Without this the sum
+       overflowed to a negative time, clamped to 0: "net accounts /maxpwage:unlimited" expired every password */
+    if (RelativeTime.QuadPart > 0)
+        RelativeTime.QuadPart = 0;
+
+    if (RelativeTime.QuadPart == MINLONGLONG ||
+        AbsoluteTime.QuadPart > MAXLONGLONG + RelativeTime.QuadPart)
+    {
+        NewTime.QuadPart = MAXLONGLONG;
+        return NewTime;
+    }
+
     NewTime.QuadPart = AbsoluteTime.QuadPart - RelativeTime.QuadPart;
 
     if (NewTime.QuadPart < 0)
         NewTime.QuadPart = 0;
 
     return NewTime;
+}
+
+
+/*
+ * [MS-SAMR] 3.1.5.14.4 PasswordMustChange Generation: never (0x7FFFFFFFFFFFFFFF) for an account whose password does
+ * not expire (UF_DONT_EXPIRE_PASSWD, UF_SMARTCARD_REQUIRED, trust accounts); 0 when the password was never set
+ * (PasswordLastSet 0: must change); never when the maximum password age is 0; else PasswordLastSet plus the age.
+ */
+static
+LARGE_INTEGER
+SampGetPasswordMustChange(IN PSAM_USER_FIXED_DATA UserFixedData,
+                          IN PSAM_DOMAIN_FIXED_DATA DomainFixedData)
+{
+    LARGE_INTEGER Never = {.QuadPart = MAXLONGLONG};
+    LARGE_INTEGER Zero = {.QuadPart = 0};
+
+    if (UserFixedData->UserAccountControl & (USER_DONT_EXPIRE_PASSWORD | USER_SMARTCARD_REQUIRED |
+                                             USER_INTERDOMAIN_TRUST_ACCOUNT | USER_WORKSTATION_TRUST_ACCOUNT |
+                                             USER_SERVER_TRUST_ACCOUNT))
+        return Never;
+
+    if (UserFixedData->PasswordLastSet.QuadPart == 0)
+        return Zero;
+
+    if (DomainFixedData->MaxPasswordAge.QuadPart == 0)
+        return Never;
+
+    return SampAddRelativeTimeToTime(UserFixedData->PasswordLastSet, DomainFixedData->MaxPasswordAge);
 }
 
 
@@ -6022,8 +6063,7 @@ SampQueryUserLogon(PSAM_DB_OBJECT UserObject,
     InfoBuffer->Logon.PasswordCanChange.LowPart = PasswordCanChange.LowPart;
     InfoBuffer->Logon.PasswordCanChange.HighPart = PasswordCanChange.HighPart;
 
-    PasswordMustChange = SampAddRelativeTimeToTime(FixedData.PasswordLastSet,
-                                                   DomainFixedData.MaxPasswordAge);
+    PasswordMustChange = SampGetPasswordMustChange(&FixedData, &DomainFixedData);
     InfoBuffer->Logon.PasswordMustChange.LowPart = PasswordMustChange.LowPart;
     InfoBuffer->Logon.PasswordMustChange.HighPart = PasswordMustChange.HighPart;
 
@@ -7283,8 +7323,7 @@ SampQueryUserAll(PSAM_DB_OBJECT UserObject,
     /* Get the PasswordMustChange attribute */
     if (InfoBuffer->All.WhichFields & USER_ALL_PASSWORDMUSTCHANGE)
     {
-        PasswordMustChange = SampAddRelativeTimeToTime(FixedData.PasswordLastSet,
-                                                       DomainFixedData.MaxPasswordAge);
+        PasswordMustChange = SampGetPasswordMustChange(&FixedData, &DomainFixedData);
         InfoBuffer->All.PasswordMustChange.LowPart = PasswordMustChange.LowPart;
         InfoBuffer->All.PasswordMustChange.HighPart = PasswordMustChange.HighPart;
     }
