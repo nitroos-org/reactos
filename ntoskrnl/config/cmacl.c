@@ -4195,6 +4195,30 @@ CmpAclEnforcing(VOID)
 }
 
 /*
+ * Is the subject of an open a restricted token (restricting SIDs, or write restricted) while key access
+ * is not enforced but not off (audit mode)? The legacy descriptor that the open is otherwise decided
+ * against grants Everyone and nobody else, so a second pass over restricting SIDs that are not Everyone
+ * (S-1-5-33, the logon SID, a group of the account) would refuse every open, where Windows decides by
+ * the key's own descriptor (measured on Windows Server 2022: a key that grants S-1-5-33 is opened by a
+ * restricted and by a write restricted token holding that restricting SID, with every access mask). The
+ * open of such a subject is therefore decided like an enforced one. Legacy mode has no decision on key
+ * descriptors at all and is left alone.
+ */
+static
+BOOLEAN
+CmpAclRestrictedSubject(
+    _In_ PACCESS_STATE AccessState)
+{
+    PACCESS_TOKEN Token;
+
+    if (!CmpAclReady || CmpRegistryAclEffectiveMode == CM_REGACL_MODE_LEGACY)
+        return FALSE;
+
+    Token = SeQuerySubjectContextToken(&AccessState->SubjectSecurityContext);
+    return Token && SeTokenIsRestricted(Token);
+}
+
+/*
  * The access decision of a key open (CmpDoOpen). Kernel-mode opens, and every
  * open unless key access is enforced, are decided by CmpCheckKeyOpenAccess
  * (the descriptor keys always had: it grants what it always granted), and the
@@ -4221,7 +4245,7 @@ CmpAclCheckKeyOpen(
     PPRIVILEGE_SET Privileges;
     BOOLEAN Result;
 
-    if (AccessMode == KernelMode || !CmpAclEnforcing())
+    if (AccessMode == KernelMode || !(CmpAclEnforcing() || CmpAclRestrictedSubject(AccessState)))
     {
         Result = CmpCheckKeyOpenAccess(Object, AccessState, AccessMode, AccessStatus);
         if (Result)
@@ -4265,8 +4289,9 @@ CmpAclCheckKeyOpen(
  * gets the access it asked for on the new key, whatever the new key's DACL
  * says (oracle, design 2.2): the handle of a new key is not checked again.
  * STATUS_SUCCESS when allowed or not enforced (mode 1: the create checks
- * nothing and the audit records the decision after it), else the status of
- * the denial.
+ * nothing, except for a restricted token, which is decided like its opens,
+ * and the audit records the decision after it), else the status of the
+ * denial.
  */
 NTSTATUS
 NTAPI
@@ -4281,7 +4306,11 @@ CmpAclCheckKeyCreate(
     ACCESS_MASK Granted;
     NTSTATUS AccessStatus;
 
-    if (AccessMode == KernelMode || !CmpAclEnforcing() || !ParentKcb || !AccessState)
+    if (AccessMode == KernelMode || !ParentKcb || !AccessState)
+        return STATUS_SUCCESS;
+
+    /* A restricted token is decided by the descriptor also while key access is not enforced, as its opens are */
+    if (!CmpAclEnforcing() && !CmpAclRestrictedSubject(AccessState))
         return STATUS_SUCCESS;
 
     if (CmpAclDecide(ParentKcb, ChildName, Operation, AccessState,

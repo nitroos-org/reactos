@@ -490,9 +490,14 @@ PsOpenTokenOfProcess(IN HANDLE ProcessHandle,
     PAGED_CODE();
     PSTRACE(PS_SECURITY_DEBUG, "Process: %p\n", ProcessHandle);
 
-    /* Get the Token */
+    /*
+     * Get the Token. The process handle only has to allow PROCESS_QUERY_LIMITED_INFORMATION (measured on
+     * Windows Server 2022: the same token rights are granted through a handle with it as through one with
+     * PROCESS_QUERY_INFORMATION; a handle with neither is refused with STATUS_ACCESS_DENIED); what the caller
+     * may do with the token is decided by the token's own security descriptor.
+     */
     Status = ObReferenceObjectByHandle(ProcessHandle,
-                                       PROCESS_QUERY_INFORMATION,
+                                       PROCESS_QUERY_LIMITED_INFORMATION,
                                        PsProcessType,
                                        ExGetPreviousMode(),
                                        (PVOID*)&Process,

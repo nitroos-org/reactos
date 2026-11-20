@@ -843,7 +843,7 @@ Quit:
  * which nobody else can see yet.
  */
 static
-VOID
+BOOLEAN
 SepMakeTokenLua(
     _Inout_ PTOKEN AccessToken)
 {
@@ -864,6 +864,7 @@ SepMakeTokenLua(
         ULONG SubAuthority[1];
     } LocalAccountAndAdminSid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { 114 } };
     ULONG i, j;
+    BOOLEAN Changed = FALSE;
 
     for (i = 1; i < AccessToken->UserAndGroupCount; i++)
     {
@@ -879,6 +880,8 @@ SepMakeTokenLua(
         if (AccessToken->DefaultOwnerIndex == i)
             AccessToken->DefaultOwnerIndex = 0;
 
+        if (Group->Attributes != SE_GROUP_USE_FOR_DENY_ONLY)
+            Changed = TRUE;
         Group->Attributes = SE_GROUP_USE_FOR_DENY_ONLY;
     }
 
@@ -905,8 +908,37 @@ SepMakeTokenLua(
             SepUpdateSinglePrivilegeFlagToken(AccessToken, i);
             SepRemovePrivilegeToken(AccessToken, i);
             i--;
+            Changed = TRUE;
         }
     }
+
+    return Changed;
+}
+
+/*
+ * Whether the caller of NtFilterToken may ask for SANDBOX_INERT. Measured on Windows Server 2022: the flag is stored
+ * when the calling process runs as LocalSystem, LocalService or NetworkService (also with SeTcbPrivilege deleted or
+ * disabled, with the thread impersonating another user, and as the TrustedInstaller service, whose token is the SYSTEM
+ * user's) and is ignored when it runs as an administrator or another user, whatever the token that is filtered.
+ * Kernel callers may.
+ */
+static
+BOOLEAN
+SepCallerMaySetSandboxInert(
+    _In_ KPROCESSOR_MODE PreviousMode)
+{
+    PACCESS_TOKEN PrimaryToken;
+    BOOLEAN Allowed;
+
+    if (PreviousMode == KernelMode)
+        return TRUE;
+
+    PrimaryToken = PsReferencePrimaryToken(PsGetCurrentProcess());
+    Allowed = RtlEqualSid(((PTOKEN)PrimaryToken)->UserAndGroups[0].Sid, SeLocalSystemSid) ||
+              RtlEqualSid(((PTOKEN)PrimaryToken)->UserAndGroups[0].Sid, SeLocalServiceSid) ||
+              RtlEqualSid(((PTOKEN)PrimaryToken)->UserAndGroups[0].Sid, SeNetworkServiceSid);
+    PsDereferencePrimaryToken(PrimaryToken);
+    return Allowed;
 }
 
 /**
@@ -1124,8 +1156,11 @@ SepPerformTokenFiltering(
      */
     AccessToken->TokenFlags = Token->TokenFlags & ~(TOKEN_SESSION_NOT_REFERENCED | SEP_TOKEN_WRITE_RESTRICTED);
 
-    /* Every token NtFilterToken makes is a filtered one, restricting SIDs or not (TokenHasRestrictions reports it) */
-    AccessToken->TokenFlags |= TOKEN_IS_FILTERED;
+    /*
+     * TOKEN_IS_FILTERED comes with the source token's and is set below only when the filtering took something
+     * from the token or added restricting SIDs (measured on Windows Server 2022: a call that changes nothing,
+     * SANDBOX_INERT alone and WRITE_RESTRICTED alone leave the token unfiltered).
+     */
 
     /* A filtered token runs at the same level; its object gets the default label of that level */
     AccessToken->IntegrityLevel = Token->IntegrityLevel;
@@ -1350,9 +1385,9 @@ SepPerformTokenFiltering(
 
         /*
          * As we added restricted SIDs into the token, mark
-         * it as restricted.
+         * it as restricted (and filtered).
          */
-        AccessToken->TokenFlags |= TOKEN_IS_RESTRICTED;
+        AccessToken->TokenFlags |= (TOKEN_IS_RESTRICTED | TOKEN_IS_FILTERED);
     }
 
     /* Search for the primary group */
@@ -1418,7 +1453,7 @@ SepPerformTokenFiltering(
         WantPrivilegesDisabled = TRUE;
     }
 
-    if (PrivilegeFlags & SANDBOX_INERT)
+    if ((PrivilegeFlags & SANDBOX_INERT) && SepCallerMaySetSandboxInert(PreviousMode))
     {
         /* The caller wants an inert token, store the TOKEN_SANDBOX_INERT flag now */
         AccessToken->TokenFlags |= TOKEN_SANDBOX_INERT;
@@ -1468,6 +1503,7 @@ SepPerformTokenFiltering(
                 /* Remove the privileges now */
                 SepRemovePrivilegeToken(AccessToken, PrivsInToken);
                 PrivsInToken--;
+                AccessToken->TokenFlags |= TOKEN_IS_FILTERED;
             }
         }
         else
@@ -1509,6 +1545,7 @@ SepPerformTokenFiltering(
 
             /* Delete the privilege */
             SepRemovePrivilegeToken(AccessToken, PrivsInToken);
+            AccessToken->TokenFlags |= TOKEN_IS_FILTERED;
 
             /*
              * Adjust the index and reset the FoundPrivilege indicator
@@ -1578,6 +1615,12 @@ SepPerformTokenFiltering(
                  * SE_GROUP_USE_FOR_DENY_ONLY. This renders
                  * SID a "Deny only" SID.
                  */
+                if ((AccessToken->UserAndGroups[GroupsInToken].Attributes &
+                     (SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT)) ||
+                    !(AccessToken->UserAndGroups[GroupsInToken].Attributes & SE_GROUP_USE_FOR_DENY_ONLY))
+                {
+                    AccessToken->TokenFlags |= TOKEN_IS_FILTERED;
+                }
                 AccessToken->UserAndGroups[GroupsInToken].Attributes &= ~(SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT);
                 AccessToken->UserAndGroups[GroupsInToken].Attributes |= SE_GROUP_USE_FOR_DENY_ONLY;
 
@@ -1595,9 +1638,9 @@ SepPerformTokenFiltering(
     }
 
     /* A LUA token loses its administrative groups and privileges on top of the requested filtering */
-    if (PrivilegeFlags & LUA_TOKEN)
+    if ((PrivilegeFlags & LUA_TOKEN) && SepMakeTokenLua(AccessToken))
     {
-        SepMakeTokenLua(AccessToken);
+        AccessToken->TokenFlags |= TOKEN_IS_FILTERED;
     }
 
     /* We've finally filtered the token, return it to the caller */

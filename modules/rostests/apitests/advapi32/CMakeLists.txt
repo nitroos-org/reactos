@@ -100,12 +100,15 @@ list(APPEND SOURCE
     RngCallersFailure.c
     RngKnownAnswer.c
     SaferIdentifyLevel.c
+    TokenFilteredFlags.c
     TokenDefaultDacl.c
     TokenElevation.c
     TokenIntegrity.c
+    TraverseRestricted.c
     TokenLogonSid.c
     WriteRestrictedToken.c
     TokenQueryParity.c
+    OpenProcessTokenLimited.c
     ServiceAccessCheck.c
     ServiceArgs.c
     ServiceControllerQuery.c
@@ -118,6 +121,7 @@ list(APPEND SOURCE
     SetEntriesInAclOld.c
     SetSecurityInfoKey.c
     SetSecurityInfoKeyInherit.c
+    RegistryRestrictedOpen.c
     SetNamedSecurityInfoInherit.c
     SddlRights.c
     SddlSids.c

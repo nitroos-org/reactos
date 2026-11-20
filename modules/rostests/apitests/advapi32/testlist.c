@@ -117,12 +117,15 @@ extern void func_KsecUnknownIoctl(void);
 extern void func_RngKnownAnswer(void);
 extern void func_RngCallersFailure(void);
 extern void func_SaferIdentifyLevel(void);
+extern void func_TokenFilteredFlags(void);
 extern void func_TokenDefaultDacl(void);
 extern void func_TokenElevation(void);
 extern void func_TokenIntegrity(void);
+extern void func_TraverseRestricted(void);
 extern void func_TokenLogonSid(void);
 extern void func_WriteRestrictedToken(void);
 extern void func_TokenQueryParity(void);
+extern void func_OpenProcessTokenLimited(void);
 extern void func_ServiceAccessCheck(void);
 extern void func_ServiceArgs(void);
 extern void func_ServiceControllerQuery(void);
@@ -135,6 +138,7 @@ extern void func_ServiceNetwork(void);
 extern void func_SetEntriesInAclOld(void);
 extern void func_SetSecurityInfoKey(void);
 extern void func_SetSecurityInfoKeyInherit(void);
+extern void func_RegistryRestrictedOpen(void);
 extern void func_SetNamedSecurityInfoInherit(void);
 extern void func_SddlRights(void);
 extern void func_SddlSids(void);
@@ -286,12 +290,15 @@ const struct test winetest_testlist[] =
     { "RngKnownAnswer", func_RngKnownAnswer },
     { "RngCallersFailure", func_RngCallersFailure },
     { "SaferIdentifyLevel", func_SaferIdentifyLevel },
+    { "TokenFilteredFlags", func_TokenFilteredFlags },
     { "TokenDefaultDacl", func_TokenDefaultDacl },
     { "TokenElevation", func_TokenElevation },
     { "TokenIntegrity", func_TokenIntegrity },
+    { "TraverseRestricted", func_TraverseRestricted },
     { "TokenLogonSid", func_TokenLogonSid },
     { "WriteRestrictedToken", func_WriteRestrictedToken },
     { "TokenQueryParity", func_TokenQueryParity },
+    { "OpenProcessTokenLimited", func_OpenProcessTokenLimited },
     { "ServiceAccessCheck", func_ServiceAccessCheck },
     { "ServiceArgs", func_ServiceArgs },
     { "ServiceControllerQuery", func_ServiceControllerQuery },
@@ -304,6 +311,7 @@ const struct test winetest_testlist[] =
     { "SetEntriesInAclOld", func_SetEntriesInAclOld },
     { "SetSecurityInfoKey", func_SetSecurityInfoKey },
     { "SetSecurityInfoKeyInherit", func_SetSecurityInfoKeyInherit },
+    { "RegistryRestrictedOpen", func_RegistryRestrictedOpen },
     { "SetNamedSecurityInfoInherit", func_SetNamedSecurityInfoInherit },
     { "SddlRights", func_SddlRights },
     { "SddlSids", func_SddlSids },

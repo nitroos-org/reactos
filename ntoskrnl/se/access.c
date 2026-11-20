@@ -84,7 +84,17 @@ SeCreateAccessStateEx(
     if (Token->TokenFlags & TOKEN_HAS_TRAVERSE_PRIVILEGE)
     {
         /* Preserve the Traverse Privilege */
-        AccessState->Flags = TOKEN_HAS_TRAVERSE_PRIVILEGE;
+        AccessState->Flags |= TOKEN_HAS_TRAVERSE_PRIVILEGE;
+    }
+
+    /*
+     * A restricted token (restricting SIDs, or write restricted) is never decided by the fast traverse
+     * check, which only looks at the ACEs of Everyone: the traverse checks of the object manager and of
+     * the I/O manager test this flag and do the full access check, with the restricting SIDs, instead.
+     */
+    if (Token->TokenFlags & TOKEN_IS_RESTRICTED)
+    {
+        AccessState->Flags |= TOKEN_IS_RESTRICTED;
     }
 
     /* Set the Auxiliary Data */
