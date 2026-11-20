@@ -2711,6 +2711,27 @@ static const WCHAR *get_root_key( MSIPACKAGE *package, INT root, HKEY *root_key 
         }
         break;
     case 0:
+#ifdef __REACTOS__
+        /* a per-user installation writes the classes of its Registry table under HKEY_CURRENT_USER\Software\Classes
+           (Windows Installer, Installation Context: Registry Redirection); HKEY_CLASSES_ROOT here is merged and
+           writes the machine's classes, which a standard user may not change */
+        if (!msi_get_property_int( package->db, L"ALLUSERS", 0 ))
+        {
+            static HKEY user_classes;
+            HKEY key;
+
+            if (!user_classes && !RegCreateKeyExW( HKEY_CURRENT_USER, L"Software\\Classes", 0, NULL, 0, KEY_ALL_ACCESS,
+                                                    NULL, &key, NULL ) &&
+                InterlockedCompareExchangePointer( (void **)&user_classes, key, NULL ))
+                RegCloseKey( key );
+            if (user_classes)
+            {
+                *root_key = user_classes;
+                ret = L"HKEY_CURRENT_USER\\Software\\Classes\\";
+                break;
+            }
+        }
+#endif
         *root_key = HKEY_CLASSES_ROOT;
         ret = L"HKEY_CLASSES_ROOT\\";
         break;
