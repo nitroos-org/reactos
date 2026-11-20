@@ -21,6 +21,17 @@ IoSetThreadHardErrorMode(
     _In_ BOOLEAN HardErrorEnabled);
 #endif
 
+/* hiveinit.c */
+BOOLEAN
+CMAPI
+HvpQueryFileSize(
+    _In_ PHHIVE Hive,
+    _In_ ULONG FileType,
+    _Out_ PLARGE_INTEGER FileSize);
+
+/* The stale part of a log is overwritten in writes of this size */
+#define HV_LOG_SCRUB_CHUNK  (16 * HBLOCK_SIZE)
+
 /* GLOBALS ******************************************************************/
 
 /* PRIVATE FUNCTIONS ********************************************************/
@@ -70,6 +81,11 @@ HvpValidateBaseHeader(
  * belongs to and of which we write data into the
  * said log.
  *
+ * @param[out] LogEnd
+ * Receives the end of what this write puts in the log
+ * (the base block, the dirty vector and the dirty blocks).
+ * A recovery reads nothing of the log beyond it.
+ *
  * @return
  * Returns TRUE if log transaction writing has succeeded,
  * FALSE otherwise.
@@ -83,16 +99,20 @@ static
 BOOLEAN
 CMAPI
 HvpWriteLog(
-    _In_ PHHIVE RegistryHive)
+    _In_ PHHIVE RegistryHive,
+    _Out_ PULONG LogEnd)
 {
     BOOLEAN Success;
     ULONG FileOffset;
     ULONG BlockIndex;
     ULONG LastIndex;
+    ULONG DirtyBlocks = 0;
     PVOID Block;
     UINT32 BitmapSize, BufferSize;
     PUCHAR HeaderBuffer, Ptr;
     ULONG OldType;
+
+    *LogEnd = 0;
 
     /*
      * The hive log we are going to write data into
@@ -193,8 +213,17 @@ HvpWriteLog(
          * by hand.
          */
         Ptr[BlockIndex] = HV_LOG_DIRTY_BLOCK;
+        DirtyBlocks++;
         BlockIndex++;
     }
+
+    /*
+     * From here on the log may hold this write up to its end: a known
+     * high-water mark of the log (see HvpScrubLog) must cover it.
+     */
+    *LogEnd = BufferSize + DirtyBlocks * HBLOCK_SIZE;
+    if (RegistryHive->LogSize != 0 && RegistryHive->LogSize < *LogEnd)
+        RegistryHive->LogSize = *LogEnd;
 
     /* Now write the hive header and block bitmap into the log */
     FileOffset = 0;
@@ -291,6 +320,107 @@ RetryLater:
     RegistryHive->BaseBlock->Sequence1 = RegistryHive->BaseBlock->Sequence2;
     RegistryHive->BaseBlock->CheckSum = HvpHiveHeaderChecksum(RegistryHive->BaseBlock);
     return FALSE;
+}
+
+/**
+ * @brief
+ * Overwrites with zeros what earlier writes left in a hive
+ * log beyond the end of the last write, once the hive file
+ * holds that write.
+ *
+ * @param[in] RegistryHive
+ * A pointer to a hive descriptor whose log was written by
+ * HvpWriteLog and whose hive file was then written completely.
+ *
+ * @param[in] LogEnd
+ * The end of the last write of the log (HvpWriteLog).
+ *
+ * @remarks
+ * Every log write starts at offset 0 and is as long as its dirty
+ * blocks, so a write shorter than an earlier one leaves the tail of
+ * that one in the file: older registry data that nothing reads, as a
+ * recovery reads only what the base block and dirty vector of the
+ * log describe, and only while the hive file is dirty. The hive file
+ * is clean when this runs, so the tail is not needed by anything.
+ *
+ * Hive->LogSize is the high-water mark: no byte of the log beyond it
+ * holds data. Unknown (0) after the hive is loaded, when the file size
+ * stands for it; then the file is also cut to LogEnd after the zeros
+ * are written, so that the next load does not zero it again. Later
+ * writes zero only between their end and the mark, so a sync costs at
+ * most as many zeros as the previous log write was longer. On any
+ * failure the mark stays where it is and the next sync tries again.
+ */
+static
+VOID
+CMAPI
+HvpScrubLog(
+    _In_ PHHIVE RegistryHive,
+    _In_ ULONG LogEnd)
+{
+    LARGE_INTEGER FileSize;
+    ULONG HighWater, Offset, FileOffset, Length;
+    BOOLEAN FromFileSize = FALSE;
+    BOOLEAN Success = TRUE;
+    PVOID Zeros;
+
+    HighWater = RegistryHive->LogSize;
+    if (HighWater == 0)
+    {
+        /* Only the kernel knows the file size; without it nothing is done */
+        if (!HvpQueryFileSize(RegistryHive, HFILE_TYPE_LOG, &FileSize))
+            return;
+
+        /* Whole sectors: the log is written without intermediate buffering */
+        if ((ULONGLONG)FileSize.QuadPart > MAXULONG - HSECTOR_SIZE)
+            HighWater = ROUND_DOWN(MAXULONG, HSECTOR_SIZE);
+        else
+            HighWater = ROUND_UP(FileSize.u.LowPart, HSECTOR_SIZE);
+        FromFileSize = TRUE;
+    }
+
+    if (HighWater > LogEnd)
+    {
+        Zeros = RegistryHive->Allocate(HV_LOG_SCRUB_CHUNK, TRUE, TAG_CM);
+        if (!Zeros)
+        {
+            RegistryHive->LogSize = HighWater;
+            return;
+        }
+        RtlZeroMemory(Zeros, HV_LOG_SCRUB_CHUNK);
+
+        for (Offset = LogEnd; Offset < HighWater; Offset += Length)
+        {
+            Length = min(HighWater - Offset, HV_LOG_SCRUB_CHUNK);
+            FileOffset = Offset;
+            if (!RegistryHive->FileWrite(RegistryHive, HFILE_TYPE_LOG,
+                                         &FileOffset, Zeros, Length))
+            {
+                Success = FALSE;
+                break;
+            }
+        }
+        RegistryHive->Free(Zeros, 0);
+
+        if (Success)
+            Success = RegistryHive->FileFlush(RegistryHive, HFILE_TYPE_LOG, NULL, 0);
+
+        if (!Success)
+        {
+            DPRINT1("Failed to overwrite the stale part of the log (0x%x - 0x%x)\n", LogEnd, HighWater);
+            RegistryHive->LogSize = HighWater;
+            return;
+        }
+
+        /* The zeros are on the medium: the rest of the file can go. A failure leaves zeros. */
+        if (FromFileSize &&
+            !RegistryHive->FileSetSize(RegistryHive, HFILE_TYPE_LOG, LogEnd, HighWater))
+        {
+            DPRINT1("Failed to cut the log to 0x%x bytes\n", LogEnd);
+        }
+    }
+
+    RegistryHive->LogSize = LogEnd;
 }
 
 /**
@@ -515,6 +645,9 @@ HvSyncHive(
 #if !defined(CMLIB_HOST) && !defined(_BLDR_)
     BOOLEAN HardErrors;
 #endif
+#if (NTDDI_VERSION < NTDDI_VISTA)
+    ULONG LogEnd = 0;
+#endif
 
     ASSERT(!RegistryHive->ReadOnly);
     ASSERT(RegistryHive->Signature == HV_HHIVE_SIGNATURE);
@@ -552,7 +685,7 @@ HvSyncHive(
     /* Update the hive log file if present */
     if (RegistryHive->Log)
     {
-        if (!HvpWriteLog(RegistryHive))
+        if (!HvpWriteLog(RegistryHive, &LogEnd))
         {
             DPRINT1("Failed to write a log whilst syncing the hive\n");
 #if !defined(CMLIB_HOST) && !defined(_BLDR_)
@@ -573,6 +706,10 @@ HvSyncHive(
     }
 
 #if (NTDDI_VERSION < NTDDI_VISTA)
+    /* The hive file is clean: nothing older than this write may stay in the log */
+    if (RegistryHive->Log)
+        HvpScrubLog(RegistryHive, LogEnd);
+
     /* Update the alternate hive file if present */
     if (RegistryHive->Alternate)
     {
