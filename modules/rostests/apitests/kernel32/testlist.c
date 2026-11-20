@@ -188,6 +188,7 @@ extern void func_FileCutAfterClose(void);
 extern void func_FileDeleteMapped(void);
 extern void func_FileFlushAllocCut(void);
 extern void func_FileFlushRace(void);
+extern void func_FileFlushSelfWrite(void);
 extern void func_FileLockCloseOther(void);
 extern void func_FileLockSpan(void);
 extern void func_FileLockZeroLength(void);
@@ -473,6 +474,7 @@ const struct test winetest_testlist[] =
     { "FileDeleteMapped",            func_FileDeleteMapped },
     { "FileFlushAllocCut",           func_FileFlushAllocCut },
     { "FileFlushRace",               func_FileFlushRace },
+    { "FileFlushSelfWrite",          func_FileFlushSelfWrite },
     { "FileLockCloseOther",          func_FileLockCloseOther },
     { "FileLockSpan",                func_FileLockSpan },
     { "FileLockZeroLength",          func_FileLockZeroLength },
