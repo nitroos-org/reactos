@@ -284,6 +284,21 @@ PortAllocateRequestReserve(
 {
     ULONG SrbExtensionSize = FdoExtension->Miniport.PortConfig.SrbExtensionSize;
 
+    /* A start after a stop: the reserve of the previous start goes back first (nothing is in flight) */
+    if (FdoExtension->ReservedSrbExtension != NULL)
+    {
+        PortFreeSrbExtension(FdoExtension, FdoExtension->ReservedSrbExtension);
+        FdoExtension->ReservedSrbExtension = NULL;
+    }
+    if (FdoExtension->ReservedRequestReference != NULL)
+    {
+        ExFreePoolWithTag(FdoExtension->ReservedRequestReference, TAG_QUEUED_REQUEST);
+        FdoExtension->ReservedRequestReference = NULL;
+    }
+
+    /* Size the SRB extensions before anything can fail: requests allocate them without a reserve too */
+    PortInitializeSrbExtensions(FdoExtension);
+
     FdoExtension->ReservedRequestReference =
         ExAllocatePoolWithTag(NonPagedPool,
                               sizeof(*FdoExtension->ReservedRequestReference),
@@ -298,8 +313,6 @@ PortAllocateRequestReserve(
     {
         return;
     }
-
-    PortInitializeSrbExtensions(FdoExtension);
 
     FdoExtension->ReservedSrbExtension = PortAllocateSrbExtension(FdoExtension);
     if (FdoExtension->ReservedSrbExtension == NULL)
