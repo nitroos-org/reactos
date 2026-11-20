@@ -39,6 +39,10 @@ typedef struct _LSA_SAM_PWD_DATA
     BOOL IsConsole;
 } LSA_SAM_PWD_DATA, *PLSA_SAM_PWD_DATA;
 
+/* Lsa\LimitBlankPasswordUse (missing = on), read at each call */
+BOOL
+MsvpLimitBlankPasswordUse(VOID);
+
 /**
  * @brief Validates a user by checking if it exists in the sam database.
  *        Some other checks are done further.

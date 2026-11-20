@@ -72,8 +72,7 @@ done:
  * (substatus the same), measured on Windows Server 2022 (evidence samlock-20261120). Documented: "Accounts: Limit
  * local account use of blank passwords to console logon only".
  */
-static
-bool
+BOOL
 MsvpLimitBlankPasswordUse(VOID)
 {
     UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Lsa");

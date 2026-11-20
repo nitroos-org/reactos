@@ -167,6 +167,78 @@ MsvpIsConsoleLogonClient(
 }
 
 
+/*
+ * Could the client of the request reset the password of the user (USER_FORCE_PASSWORD_CHANGE granted to its token by
+ * the user object's security descriptor, as an administrator)? The password change below runs on a trusted SAM
+ * handle, so this is the access check SAM would have made on an untrusted one.
+ */
+static
+BOOL
+MsvpClientMayResetPassword(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _In_ SAMPR_HANDLE UserHandle)
+{
+    static GENERIC_MAPPING UserMapping = { USER_READ, USER_WRITE, USER_EXECUTE, USER_ALL_ACCESS };
+    SECURITY_QUALITY_OF_SERVICE Qos = { sizeof(Qos), SecurityIdentification, SECURITY_STATIC_TRACKING, FALSE };
+    PSAMPR_SR_SECURITY_DESCRIPTOR Sd = NULL;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Token = NULL, Identification = NULL;
+    /* NtAccessCheck probes the privilege set for ULONG alignment: not a byte array */
+    union
+    {
+        PRIVILEGE_SET Set;
+        UCHAR Buffer[sizeof(PRIVILEGE_SET) + 4 * sizeof(LUID_AND_ATTRIBUTES)];
+    } Privileges;
+    ULONG PrivilegeLength = sizeof(Privileges);
+    ACCESS_MASK Granted = 0;
+    NTSTATUS AccessStatus = STATUS_ACCESS_DENIED;
+    NTSTATUS Status;
+    BOOL Result = FALSE;
+
+    if (DispatchTable.OpenClientToken == NULL)
+        return FALSE;
+
+    Status = SamrQuerySecurityObject(UserHandle,
+                                     OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                                     &Sd);
+    if (!NT_SUCCESS(Status) || Sd == NULL || Sd->SecurityDescriptor == NULL)
+        goto done;
+
+    Status = DispatchTable.OpenClientToken(ClientRequest, &Token);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    ObjectAttributes.SecurityQualityOfService = &Qos;
+    Status = NtDuplicateToken(Token, TOKEN_QUERY, &ObjectAttributes, FALSE, TokenImpersonation, &Identification);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    Status = NtAccessCheck(Sd->SecurityDescriptor,
+                           Identification,
+                           USER_FORCE_PASSWORD_CHANGE,
+                           &UserMapping,
+                           &Privileges.Set,
+                           &PrivilegeLength,
+                           &Granted,
+                           &AccessStatus);
+    Result = NT_SUCCESS(Status) && NT_SUCCESS(AccessStatus) && (Granted & USER_FORCE_PASSWORD_CHANGE);
+
+done:
+    if (Identification != NULL)
+        NtClose(Identification);
+    if (Token != NULL)
+        NtClose(Token);
+    if (Sd != NULL)
+    {
+        if (Sd->SecurityDescriptor != NULL)
+            SamIFreeVoid(Sd->SecurityDescriptor);
+        SamIFreeVoid(Sd);
+    }
+    return Result;
+}
+
+
 static
 NTSTATUS
 BuildInteractiveProfileBuffer(IN PLSA_CLIENT_REQUEST ClientRequest,
@@ -841,13 +913,46 @@ MsvpChangePassword(IN PLSA_CLIENT_REQUEST ClientRequest,
 
     /* Open the user object */
     Status = SamrOpenUser(DomainHandle,
-                          USER_CHANGE_PASSWORD,
+                          USER_CHANGE_PASSWORD | USER_READ_GENERAL | READ_CONTROL,
                           RelativeIds.Element[0],
                           &UserHandle);
     if (!NT_SUCCESS(Status))
     {
         TRACE("SamrOpenUser failed (Status %08lx)\n", Status);
         goto done;
+    }
+
+    /*
+     * The password of an account with a blank password is a use of that blank password: while
+     * Lsa\LimitBlankPasswordUse is on, only the console (winlogon's change dialog) and a caller that could reset the
+     * password anyway (an administrator) may change it. Measured on Windows Server 2022: a standard user's
+     * NetUserChangePassword of a blank account is 5 with the empty and with a wrong old password (not counted as a
+     * bad password), 0 with LimitBlankPasswordUse 0; the Administrator's is 0. Without this, any local user could
+     * give the blank built-in Administrator a password of his choice and log on with it.
+     */
+    {
+        PSAMPR_USER_INFO_BUFFER UserInfo = NULL;
+        BOOLEAN Blank = FALSE;
+
+        /* SAM reports a stored hash of the empty password as "not present", like no hash at all */
+        Status = SamrQueryInformationUser(UserHandle, UserAllInformation, &UserInfo);
+        if (!NT_SUCCESS(Status))
+        {
+            TRACE("SamrQueryInformationUser failed (Status %08lx)\n", Status);
+            goto done;
+        }
+        Blank = !UserInfo->All.NtPasswordPresent && !UserInfo->All.LmPasswordPresent;
+        SamIFree_SAMPR_USER_INFO_BUFFER(UserInfo, UserAllInformation);
+
+        if (Blank &&
+            MsvpLimitBlankPasswordUse() &&
+            !MsvpIsConsoleLogonClient(ClientRequest, Interactive) &&
+            !MsvpClientMayResetPassword(ClientRequest, UserHandle))
+        {
+            TRACE("Change of a blank password refused for a caller that is not the console\n");
+            Status = STATUS_ACCESS_DENIED;
+            goto done;
+        }
     }
 
 

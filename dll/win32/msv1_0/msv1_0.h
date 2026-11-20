@@ -222,6 +222,12 @@ SamrQueryInformationUser(IN SAMPR_HANDLE UserHandle,
 
 NTSTATUS
 NTAPI
+SamrQuerySecurityObject(IN SAMPR_HANDLE ObjectHandle,
+                        IN SECURITY_INFORMATION SecurityInformation,
+                        OUT PSAMPR_SR_SECURITY_DESCRIPTOR *SecurityDescriptor);
+
+NTSTATUS
+NTAPI
 SamrSetInformationUser(IN SAMPR_HANDLE UserHandle,
                        IN USER_INFORMATION_CLASS UserInformationClass,
                        IN PSAMPR_USER_INFO_BUFFER Buffer);
