@@ -1360,11 +1360,12 @@ DispatchSAS(
 
         case WLX_SAS_TYPE_SCRNSVR_TIMEOUT:
             /*
-             * The screen saver is the logged-on user's: it does not start when nobody is logged on, when
-             * the workstation is locked or while a SAS dialog is shown (it would run on the application
-             * desktop, out of sight, and hold up this thread until it ends).
+             * The screen saver is the logged-on user's: it does not start when nobody is logged on or while a SAS
+             * dialog is shown. It does start on a locked workstation (it runs on its own desktop, over the
+             * lock screen, as on Windows) and returns to the lock screen.
              */
-            if (Session->LogonState != STATE_LOGGED_ON)
+            if (Session->LogonState != STATE_LOGGED_ON &&
+                Session->LogonState != STATE_LOCKED)
             {
                 SetEvent(Session->hEndOfScreenSaver);
                 return;

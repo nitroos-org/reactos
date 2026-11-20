@@ -416,7 +416,7 @@ RunEmptyScreenSaver(
 
         if (GetLastInputInfo(&InputInfo) && InputInfo.dwTime != LastInput)
         {
-            SwitchDesktop(Session->ApplicationDesktop);
+            SwitchDesktop(Session->LogonState == STATE_LOCKED ? Session->WinlogonDesktop : Session->ApplicationDesktop);
             return FALSE;
         }
     }
@@ -590,10 +590,17 @@ StartScreenSaver(
     if (bSecure && (GetTickCount() - StartTick) >= GracePeriod)
         bLock = TRUE;
 
-    /* A locked workstation goes from the screen saver desktop to the Winlogon desktop without showing the
-     * application desktop in between: the caller locks */
-    if (!bLock)
+    /* A workstation that is locked (or is to be locked by the caller) goes from the screen saver desktop to the
+     * Winlogon desktop without showing the application desktop in between */
+    if (Session->LogonState == STATE_LOCKED)
+    {
+        SwitchDesktop(Session->WinlogonDesktop);
+        bLock = FALSE;
+    }
+    else if (!bLock)
+    {
         SwitchDesktop(Session->ApplicationDesktop);
+    }
 
     CallNotificationDlls(Session, StopScreenSaverHandler);
 
@@ -610,7 +617,9 @@ cleanup:
     {
         /* Windows locks a workstation with a password protected screen saver setting when there is no
          * screen saver to show (after the grace period) or when the saver cannot be started (at once) */
-        if (bSecure && bNoSaver)
+        if (Session->LogonState == STATE_LOCKED)
+            bLock = FALSE; /* locked already, nothing to show */
+        else if (bSecure && bNoSaver)
             bLock = RunEmptyScreenSaver(Session, GracePeriod);
         else if (bSecure && bStartFailed)
             bLock = TRUE;
