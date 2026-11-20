@@ -851,8 +851,6 @@ MsvpChangePassword(IN PLSA_CLIENT_REQUEST ClientRequest,
 
     TRACE("Domain: %S\n", RequestBuffer->DomainName.Buffer);
     TRACE("Account: %S\n", RequestBuffer->AccountName.Buffer);
-    TRACE("Old Password: %S\n", RequestBuffer->OldPassword.Buffer);
-    TRACE("New Password: %S\n", RequestBuffer->NewPassword.Buffer);
 
     /* Connect to the SAM server */
     Status = SamIConnect(NULL,
@@ -2429,7 +2427,6 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
 
         TRACE("Domain: %wZ\n", &LogonInfo->LogonDomainName);
         TRACE("User: %wZ\n", &LogonInfo->UserName);
-        TRACE("Password: %wZ\n", &LogonInfo->Password);
 
         // TODO: If LogonType == Service, do some extra work using LogonInfo->Password.
     }

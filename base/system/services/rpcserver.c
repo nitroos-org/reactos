@@ -2766,7 +2766,6 @@ RChangeServiceConfigW(
                     DPRINT1("ScmDecryptPassword failed (Error %lu)\n", dwError);
                     goto done;
                 }
-                DPRINT("Clear text password: %S\n", lpClearTextPassword);
 
                 /* Write the password */
                 dwError = ScmSetServicePassword(lpService->szServiceName,
