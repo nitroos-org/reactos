@@ -104,6 +104,10 @@ START_TEST(PhysicallyInstalledMemory)
     {
         DWORD TableError = GetLastError();
 
+        /* Without SMBIOS Windows (x64 and WoW64) fails the query with ERROR_INVALID_FUNCTION;
+         * ERROR_NOT_SUPPORTED is what a WoW64 layer that does not forward the class gives */
+        ok(TableError != ERROR_NOT_SUPPORTED, "RSMB table query not supported in this process\n");
+
         /* No SMBIOS: the function fails with the table query's error */
         Value = 0xdeadbeefdeadbeefULL;
         SetLastError(0xdeadbeef);
