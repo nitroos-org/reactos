@@ -6,8 +6,61 @@
  */
 
 #include "precomp.h"
+#include <userenv.h>
 
 #include "svchlp.h"
+
+/*
+ * A LocalSystem service runs with LocalSystem's own profile in its environment.
+ * Measured on Windows Server 2022: USERPROFILE C:\Windows\system32\config\systemprofile,
+ * APPDATA and LOCALAPPDATA its AppData\Roaming and AppData\Local, TEMP and TMP %SystemRoot%\TEMP.
+ */
+static void
+check_service_variable(PCWSTR Name, PCWSTR Expected)
+{
+    WCHAR Value[MAX_PATH], LongValue[MAX_PATH], LongExpected[MAX_PATH];
+    DWORD dwSize = GetEnvironmentVariableW(Name, Value, ARRAYSIZE(Value));
+
+    service_ok(dwSize != 0 && dwSize < ARRAYSIZE(Value), "%S not set (%lu)\n", Name, GetLastError());
+    if (dwSize == 0 || dwSize >= ARRAYSIZE(Value))
+        return;
+    /* TEMP is kept in its short form */
+    if (!GetLongPathNameW(Value, LongValue, ARRAYSIZE(LongValue)))
+        StringCchCopyW(LongValue, ARRAYSIZE(LongValue), Value);
+    if (!GetLongPathNameW(Expected, LongExpected, ARRAYSIZE(LongExpected)))
+        StringCchCopyW(LongExpected, ARRAYSIZE(LongExpected), Expected);
+    service_ok(_wcsicmp(LongValue, LongExpected) == 0, "%S is '%S', expected '%S'\n", Name, Value, Expected);
+}
+
+static void
+check_localsystem_profile_variables(void)
+{
+    WCHAR Profile[MAX_PATH], Expected[MAX_PATH];
+    DWORD dwSize = ARRAYSIZE(Profile);
+    HANDLE hToken;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
+    {
+        service_ok(FALSE, "OpenProcessToken failed: %lu\n", GetLastError());
+        return;
+    }
+    if (!GetUserProfileDirectoryW(hToken, Profile, &dwSize))
+    {
+        service_ok(FALSE, "GetUserProfileDirectoryW failed: %lu\n", GetLastError());
+        CloseHandle(hToken);
+        return;
+    }
+    CloseHandle(hToken);
+
+    check_service_variable(L"USERPROFILE", Profile);
+    StringCchPrintfW(Expected, ARRAYSIZE(Expected), L"%s\\AppData\\Roaming", Profile);
+    check_service_variable(L"APPDATA", Expected);
+    StringCchPrintfW(Expected, ARRAYSIZE(Expected), L"%s\\AppData\\Local", Profile);
+    check_service_variable(L"LOCALAPPDATA", Expected);
+    ExpandEnvironmentStringsW(L"%SystemRoot%\\TEMP", Expected, ARRAYSIZE(Expected));
+    check_service_variable(L"TEMP", Expected);
+    check_service_variable(L"TMP", Expected);
+}
 
 
 /*** Service part of the test ***/
@@ -103,6 +156,7 @@ service_main(DWORD dwArgc, LPWSTR* lpszArgv)
     dwSize = GetEnvironmentVariableW(L"USERNAME", NULL, 0);
     service_ok(dwSize != 0, "USERNAME envvar not found, or GetEnvironmentVariableW failed: %lu\n", GetLastError());
 #endif
+    check_localsystem_profile_variables();
 
     Teb = NtCurrentTeb();
     service_ok(Teb->SubProcessTag != 0, "SubProcessTag is not defined!\n");
