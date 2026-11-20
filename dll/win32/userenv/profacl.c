@@ -789,11 +789,14 @@ ReadPathValue(
 
 /*
  * The files setup puts in the root of the system partition (base/setup/lib/bootsup.c): the loader, its
- * configuration (boot options, the kernel and HAL to load), the boot sector and MBR copies it chains to.
+ * configuration (boot options, the kernel and HAL to load), the boot sector and MBR copies it chains to,
+ * and the boot sector of another system it found there (a dual boot: freeldr.ini gets an entry that loads
+ * and runs BOOTSECT.DOS, BOOTSECT.OS2 or BOOTSECT.OLD before any system starts).
  */
 static const PCWSTR BootFiles[] =
 {
-    L"freeldr.sys", L"freeldr.ini", L"rosload.exe", L"bootsect.ros", L"mbr.old"
+    L"freeldr.sys", L"freeldr.ini", L"rosload.exe", L"bootsect.ros", L"mbr.old",
+    L"bootsect.dos", L"bootsect.os2", L"bootsect.old"
 };
 
 static BOOL
