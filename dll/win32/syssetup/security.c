@@ -104,9 +104,7 @@ SetAccountsDomainSid(
         DPRINT("LsaSetInformationPolicy failed (Status: 0x%08lx)\n", Status);
     }
 
-    if (OrigInfo != NULL)
-        LsaFreeMemory(OrigInfo);
-
+    /* OrigInfo stays allocated until the end: Info.DomainSid may point into it (SamOpenDomain below) */
     LsaClose(PolicyHandle);
 
     DomainNameInfo.DomainName.Length = DomainNameLength * sizeof(WCHAR);
@@ -142,6 +140,9 @@ SetAccountsDomainSid(
 
         SamCloseHandle(ServerHandle);
     }
+
+    if (OrigInfo != NULL)
+        LsaFreeMemory(OrigInfo);
 
     return Status;
 }
