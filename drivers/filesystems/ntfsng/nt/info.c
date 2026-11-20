@@ -88,6 +88,122 @@ static NTSTATUS NgName(PNG_VCB Vcb, PNG_CCB Ccb, PFILE_NAME_INFORMATION N, ULONG
     return Copy < Len ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
 }
 
+/*
+ * FileNormalizedNameInformation: the path of the open file from the volume root with the long names as
+ * stored on disk (no 8.3 names, the case of the disk), built from the names of the directories up to the
+ * root. The stream suffix of the open name stays. The whole name is cut to what fits (STATUS_BUFFER_OVERFLOW).
+ */
+static NTSTATUS NgNormalizedName(PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb, PFILE_NAME_INFORMATION N, ULONG Room, PULONG Used)
+{
+    ULONG Fixed = FIELD_OFFSET(FILE_NAME_INFORMATION, FileName);
+    ULONG Cap = 32768, Pos, Total, Copy, StreamChars = 0, Depth;
+    PWCHAR Buf, Names;
+    ULONGLONG Dir;
+    NTSTATUS Status = STATUS_SUCCESS;
+    ngc_node *Cur = NULL;
+    BOOLEAN CurIsFcb = TRUE;
+
+    if (Room < Fixed)
+        return STATUS_BUFFER_TOO_SMALL;
+    if (Fcb->IsRoot || !Ccb->NameLength)
+    {
+        N->FileNameLength = sizeof(WCHAR);
+        if (Room >= Fixed + sizeof(WCHAR))
+            N->FileName[0] = L'\\';
+        *Used = Fixed + min(Room - Fixed, (ULONG)sizeof(WCHAR));
+        return Room >= Fixed + sizeof(WCHAR) ? STATUS_SUCCESS : STATUS_BUFFER_OVERFLOW;
+    }
+    Buf = ExAllocatePoolWithTag(PagedPool, Cap * sizeof(WCHAR) + 256 * sizeof(WCHAR), TAG_NTFSNG);
+    if (!Buf)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    Names = Buf + Cap;                  /* one component */
+    Pos = Cap;                          /* the path is built backwards from the end of Buf */
+
+    /* the stream suffix of the name this handle was opened by (":stream" or ":stream:$DATA") */
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
+    Dir = Ccb->ParentMftNo;
+    if (Ccb->Path.Length)
+    {
+        ULONG Chars = Ccb->Path.Length / sizeof(WCHAR), i, LastSlash = 0;
+        for (i = 0; i < Chars; i++)
+            if (Ccb->Path.Buffer[i] == L'\\')
+                LastSlash = i;
+        for (i = LastSlash; i < Chars; i++)
+            if (Ccb->Path.Buffer[i] == L':')
+            {
+                StreamChars = Chars - i;
+                if (StreamChars < 256)
+                {
+                    Pos -= StreamChars;
+                    RtlCopyMemory(Buf + Pos, Ccb->Path.Buffer + i, StreamChars * sizeof(WCHAR));
+                }
+                else
+                    StreamChars = 0;
+                break;
+            }
+    }
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
+
+    NgAcquireCore(Vcb);
+    if (NgEnsureNode(Fcb))
+    {
+        NgReleaseCore(Vcb);
+        ExFreePoolWithTag(Buf, TAG_NTFSNG);
+        return STATUS_FILE_INVALID;
+    }
+    Cur = Fcb->Node;
+    for (Depth = 0; Depth < 1024 && Status == STATUS_SUCCESS; Depth++)
+    {
+        unsigned int Len = 0;
+        ULONGLONG Parent = Dir;
+        int Err;
+
+        if (Depth == 0)
+            Err = ngc_long_name_in(Cur, Dir, Ccb->Name, Ccb->NameLength, Names, &Len);
+        else
+            Err = ngc_parent_name(Cur, &Parent, Names, &Len);
+        if (Err || !Len || Len >= 256 || Pos < Len + 1)
+        {
+            Status = Err ? NgErrnoToStatus(Err) : STATUS_OBJECT_PATH_NOT_FOUND;
+            break;
+        }
+        Pos -= Len;
+        RtlCopyMemory(Buf + Pos, Names, Len * sizeof(WCHAR));
+        Buf[--Pos] = L'\\';
+        if (Depth > 0)
+            Dir = Parent;
+        if (Dir == 5)
+            break;
+        if (!CurIsFcb)
+            ngc_put(Cur);
+        CurIsFcb = FALSE;
+        if (ngc_iget(Vcb->Core, Dir, &Cur))
+        {
+            Cur = NULL;
+            Status = STATUS_OBJECT_PATH_NOT_FOUND;
+            break;
+        }
+        /* the parent's own name comes from its first long name */
+    }
+    if (Cur && !CurIsFcb)
+        ngc_put(Cur);
+    NgReleaseCore(Vcb);
+    if (Status == STATUS_SUCCESS && Depth >= 1024)
+        Status = STATUS_OBJECT_PATH_NOT_FOUND;
+    if (Status != STATUS_SUCCESS)
+    {
+        ExFreePoolWithTag(Buf, TAG_NTFSNG);
+        return Status;
+    }
+    Total = (Cap - Pos) * sizeof(WCHAR);
+    N->FileNameLength = Total;
+    Copy = min(Total, (Room - Fixed) & ~(ULONG)(sizeof(WCHAR) - 1));
+    RtlCopyMemory(N->FileName, Buf + Pos, Copy);
+    ExFreePoolWithTag(Buf, TAG_NTFSNG);
+    *Used = Fixed + Copy;
+    return Copy < Total ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+}
+
 typedef struct _NG_STREAMS
 {
     BOOLEAN NamedOnly;          /* a directory has no unnamed data stream */
@@ -131,6 +247,9 @@ static int NgStreamFill(void *Context, const unsigned short *Name, unsigned int 
     S->Count++;
     return 0;
 }
+
+/* FileNormalizedNameInformation (48, Vista+) is past the end of this DDK's FILE_INFORMATION_CLASS */
+#define NG_FILE_NORMALIZED_NAME_INFORMATION_CLASS 48
 
 /* FileIdInformation (59, Windows 8+) is past the end of this DDK's FILE_INFORMATION_CLASS */
 #define NG_FILE_ID_INFORMATION_CLASS 59
@@ -216,6 +335,9 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             break;
         case FileNameInformation:
             Status = NgName(Vcb, Ccb, Buffer, Length, &Used);
+            break;
+        case NG_FILE_NORMALIZED_NAME_INFORMATION_CLASS:
+            Status = NgNormalizedName(Vcb, Fcb, Ccb, Buffer, Length, &Used);
             break;
         case FileAlternateNameInformation:
         {

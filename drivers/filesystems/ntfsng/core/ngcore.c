@@ -4365,6 +4365,55 @@ int ngc_parent_name(ngc_node *n, unsigned long long *parent, unsigned short *out
 	return err;
 }
 
+/*
+ * The long (not DOS-only) name of @n in directory @parent_mref (any directory when @parent_mref is 0).
+ * -ENOENT when it has none there.
+ */
+int ngc_long_name_in(ngc_node *n, unsigned long long parent_mref, const unsigned short *hint, unsigned int hintlen,
+		     unsigned short *out, unsigned int *len)
+{
+	struct ntfs_inode *ni = NTFS_I((struct inode *)n);
+	struct ntfs_volume *vol;
+	struct ntfs_attr_search_ctx *ctx;
+	int err = -ENOENT;
+	int pass;
+	if (NInoAttr(ni))
+		ni = ni->ext.base_ntfs_ino;
+	vol = ni->vol;
+	mutex_lock(&ni->mrec_lock);
+	/*
+	 * Pass 0 takes the name the handle was opened by (hard links in one directory have several long names
+	 * there), pass 1 any long name in the directory (the handle was opened by its 8.3 name).
+	 */
+	for (pass = 0; pass < 2 && err; pass++) {
+		if (pass == 0 && !hintlen)
+			continue;
+		ctx = ntfs_attr_get_search_ctx(ni, NULL);
+		if (!ctx) {
+			mutex_unlock(&ni->mrec_lock);
+			return -ENOMEM;
+		}
+		while (!ntfs_attr_lookup(AT_FILE_NAME, AT_UNNAMED, 0, CASE_SENSITIVE, 0, NULL, 0, ctx)) {
+			struct file_name_attr *fn = ngc_fn(ctx);
+			if (ctx->attr->non_resident || fn->file_name_type == FILE_NAME_DOS)
+				continue;
+			if (parent_mref && MREF_LE(fn->parent_directory) != MREF(parent_mref))
+				continue;
+			if (pass == 0 && (fn->file_name_length != hintlen ||
+			    !ntfs_are_names_equal(fn->file_name, hintlen, (__le16 *)hint, hintlen,
+						  IGNORE_CASE, vol->upcase, vol->upcase_len)))
+				continue;
+			memcpy(out, fn->file_name, fn->file_name_length * sizeof(__le16));
+			*len = fn->file_name_length;
+			err = 0;
+			break;
+		}
+		ntfs_attr_put_search_ctx(ctx);
+	}
+	mutex_unlock(&ni->mrec_lock);
+	return err;
+}
+
 /* The DOS-only name of @n in directory @parent_mref, or *len = 0 when it has none. */
 static int ngc_short_name_impl(ngc_node *n, unsigned long long parent_mref, unsigned short *out, unsigned int *len)
 {

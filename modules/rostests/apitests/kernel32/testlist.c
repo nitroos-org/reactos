@@ -2,6 +2,7 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_GetFileInformationByHandleEx(void);
 extern void func_VirtualAlloc2(void);
 extern void func_VirtualAllocLarge(void);
 extern void func_Wow64Process(void);
@@ -283,6 +284,7 @@ extern void func_WriteFile(void);
 
 const struct test winetest_testlist[] =
 {
+    { "GetFileInformationByHandleEx", func_GetFileInformationByHandleEx },
     { "VirtualAlloc2",               func_VirtualAlloc2 },
     { "VirtualAllocLarge",           func_VirtualAllocLarge },
     { "Wow64Environment", func_Wow64Environment },

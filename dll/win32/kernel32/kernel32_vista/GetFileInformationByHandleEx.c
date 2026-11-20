@@ -23,15 +23,19 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetFileInformationByHandleEx(HANDLE handle, FILE_I
 
     switch (class)
     {
-    case FileRemoteProtocolInfo:
     case FileStorageInfo:
-    case FileDispositionInfoEx:
-    case FileRenameInfoEx:
     case FileCaseSensitiveInfo:
-    case FileNormalizedNameInfo:
         FIXME("%p, %u, %p, %lu\n", handle, class, info, size);
         SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
         return FALSE;
+
+    case FileRemoteProtocolInfo:
+        status = NtQueryInformationFile(handle, &io, info, size, FileRemoteProtocolInformation);
+        break;
+
+    case FileNormalizedNameInfo:
+        status = NtQueryInformationFile(handle, &io, info, size, FileNormalizedNameInformation);
+        break;
 
     case FileStreamInfo:
         status = NtQueryInformationFile(handle, &io, info, size, FileStreamInformation);
@@ -86,8 +90,11 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetFileInformationByHandleEx(HANDLE handle, FILE_I
             (class == FileIdExtdDirectoryRestartInfo));
         break;
 
+    /* the set-only classes, including the extended disposition and rename ones, cannot be queried */
     case FileRenameInfo:
+    case FileRenameInfoEx:
     case FileDispositionInfo:
+    case FileDispositionInfoEx:
     case FileAllocationInfo:
     case FileIoPriorityHintInfo:
     case FileEndOfFileInfo:
