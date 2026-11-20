@@ -1709,6 +1709,19 @@ DoUnlock(
             }
             MessageBoxW(hwndDlg, Buffer2, Buffer1, MB_OK | MB_ICONERROR);
         }
+        else if (Status == STATUS_ACCOUNT_RESTRICTION &&
+                 (SubStatus == STATUS_PASSWORD_EXPIRED || SubStatus == STATUS_PASSWORD_MUST_CHANGE) &&
+                 _wcsicmp(UserName, pgContext->UserName) == 0)
+        {
+            /* The password of the session's user is right but has expired meanwhile: say so and offer the
+               change (the logon dialog does the same); the new password is then typed here */
+            ResourceMessageBox(pgContext,
+                               hwndDlg,
+                               MB_OK | MB_ICONSTOP,
+                               IDS_COMPUTERLOCKED,
+                               (SubStatus == STATUS_PASSWORD_MUST_CHANGE) ? IDS_PASSWORDMUSTCHANGE : IDS_PASSWORDEXPIRED);
+            OnChangePassword(hwndDlg, pgContext);
+        }
         else if (!NT_SUCCESS(Status) && _wcsicmp(UserName, pgContext->UserName) == 0)
         {
             /* Wrong Password */
