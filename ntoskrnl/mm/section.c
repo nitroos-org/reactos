@@ -6769,9 +6769,12 @@ restart:
             Entry = MmGetPageEntrySectionSegment(Segment, &PageOff);
 
             /*
-             * A page that this thread itself is writing (a paging write further up the stack, see MI_SEGMENT_WRITER)
-             * would be waited for for ever.  Zero it now and leave it dirty: the write in flight may take the old
-             * or the new bytes (past the new end of file either way), and the zeros are written after it.
+             * A page that this thread itself is writing (a paging write further up the stack, see MI_SEGMENT_WRITER).
+             * This loop never waits for a page being written (only for a read in flight, below), so this is not
+             * about a wait: zero it as any other page, and also leave it dirty, because the write in flight may
+             * take the old or the new bytes (past the new end of file either way): the zeros are written after it
+             * (the writer's completion keeps a page dirtied meanwhile dirty).  A page another thread is writing is
+             * zeroed below without the dirty mark, as before.
              */
             if ((Entry != 0) && !IS_SWAP_FROM_SSE(Entry) && IS_WRITE_SSE(Entry) &&
                 MiIsOwnPagingWrite(Segment, PageOffset))
