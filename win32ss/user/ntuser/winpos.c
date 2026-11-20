@@ -3941,6 +3941,7 @@ NtUserMinMaximize(
     BOOL Hide)
 {
   PWND pWnd;
+  USER_REFERENCE_ENTRY Ref;
 
   TRACE("Enter NtUserMinMaximize\n");
   UserEnterExclusive();
@@ -3959,7 +3960,10 @@ NtUserMinMaximize(
 
   cmd |= Hide ? SW_HIDE : 0;
 
+  /* ShowWindow sends messages to the window's thread, which may destroy it meanwhile */
+  UserRefObjectCo(pWnd, &Ref);
   co_WinPosShowWindow(pWnd, cmd);
+  UserDerefObjectCo(pWnd);
 
 Exit:
   TRACE("Leave NtUserMinMaximize\n");
