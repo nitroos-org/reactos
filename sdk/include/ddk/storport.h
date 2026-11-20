@@ -8218,6 +8218,7 @@ StorPortLogSystemEvent(
                                     MaximumSize);
 }
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
 FORCEINLINE
 ULONG
 StorPortStateChangeDetected(
@@ -8240,6 +8241,7 @@ StorPortStateChangeDetected(
                          &Status);
     return Status;
 }
+#endif /* (NTDDI_VERSION >= NTDDI_WIN8) */
 
 
 #if (NTDDI_VERSION >= NTDDI_WIN7)
