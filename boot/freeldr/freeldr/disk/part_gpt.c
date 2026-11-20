@@ -298,9 +298,6 @@ DiskReadGptHeader(
     return FALSE;
 }
 
-/* Partitions are numbered over the used entries; the kernel reader refuses a table that has more of them than this */
-#define GPT_MAX_USED_PARTITIONS 128
-
 /* The entry that was found by the last call: the next number continues from there */
 static struct
 {
@@ -395,10 +392,6 @@ DiskGetGptPartitionEntry(
     GptLast.Index = EntryIndex;
     GptLast.HeaderCrc32 = GptHeader.HeaderCrc32;
     GptLast.ArrayCrc32 = GptHeader.PartitionEntryArrayCrc32;
-
-    /* The entry must lie in the usable range (this also keeps the size and the byte offsets below from wrapping) */
-    if (!GptCheckEntry(&GptHeader, &GptEntry))
-        return FALSE;
 
     /* The entry must lie in the usable range (this also keeps the size and the byte offsets below from wrapping) */
     if (!GptCheckEntry(&GptHeader, &GptEntry))
