@@ -252,6 +252,9 @@ typedef VOID (*IP_PROTOCOL_HANDLER)(
 #define LOOPBACK_BCASTADDR_IPv4 ((IPv4_RAW_ADDRESS)DH2N(0x7FFFFFFF))
 #define LOOPBACK_ADDRMASK_IPv4  ((IPv4_RAW_ADDRESS)DH2N(0xFF000000))
 
+/* An IPv4 address (network order) in 224.0.0.0/4 */
+#define IPV4_IS_MULTICAST(A)    (((A) & DH2N(0xF0000000)) == DH2N(0xE0000000))
+
 /* Protocol definitions */
 #ifndef IPPROTO_RAW
 #define IPPROTO_RAW     0   /* Raw IP */

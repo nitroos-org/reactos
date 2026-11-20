@@ -178,8 +178,9 @@ typedef struct _ADDRESS_FILE {
     BOOLEAN TcpKeepAlive;
     ULONG TcpKeepAliveTime;               /* The values of SIO_KEEPALIVE_VALS, as lwIP takes them */
     ULONG TcpKeepAliveInterval;
-    /* An IPv6 UDP socket (ip/transport/udp/udp6.c): the multicast hop limit, loop and interface (IPV6_MULTICAST_*)
-       and the groups it joined (allocated with the first one, under the object lock); TTL is its unicast hop limit */
+    /* The multicast hop limit (TTL), loop and interface index of a datagram socket: IPV6_MULTICAST_* of an IPv6 UDP
+       socket (ip/transport/udp/udp6.c), IP_MULTICAST_* of an IPv4 UDP or raw one (udp.c, rawip.c); and the IPv6
+       groups it joined (allocated with the first one, under the object lock); TTL is its unicast hop limit */
     UCHAR McastHops;
     BOOLEAN McastLoop;
     ULONG McastIf;

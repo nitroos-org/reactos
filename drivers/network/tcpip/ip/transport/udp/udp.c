@@ -223,6 +223,7 @@ NTSTATUS UDPSendDatagram(
     PNEIGHBOR_CACHE_ENTRY NCE;
     IP_PACKET LoopPacket;
     PNEIGHBOR_CACHE_ENTRY LoopNCE = NULL;
+    BOOLEAN Multicast;
 
     LockObject(AddrFile);
 
@@ -287,8 +288,26 @@ NTSTATUS UDPSendDatagram(
 		return STATUS_UNSUCCESSFUL;
     }
 
+    Multicast = IPV4_IS_MULTICAST(RemoteAddress.Address.IPv4Address);
+
     LocalAddress = AddrFile->Address;
-    if (AddrIsUnspecified(&LocalAddress))
+    if (Multicast)
+    {
+        /* A group (RFC 1112 6): to the group's Ethernet address on the interface IP_MULTICAST_IF names (or the one
+           of the socket's address, or of the route to the group), with the multicast TTL; never to a router */
+        if (!(NCE = RouteGetMulticastNeighbor(&RemoteAddress, AddrFile->McastIf, &LocalAddress))) {
+            UnlockObject(AddrFile);
+            return AddrFile->McastIf ? STATUS_INVALID_ADDRESS : STATUS_NETWORK_UNREACHABLE;
+        }
+
+        if (AddrIsUnspecified(&LocalAddress))
+        {
+            LocalAddress = NCE->Interface->Unicast;
+            LocalAddress.Address.IPv4Address = IFSelectSourceAddress(NCE->Interface,
+                                                                     RemoteAddress.Address.IPv4Address);
+        }
+    }
+    else if (AddrIsUnspecified(&LocalAddress))
     {
         /* If the local address is unspecified (0),
          * then use the unicast address of the
@@ -338,10 +357,15 @@ NTSTATUS UDPSendDatagram(
         return Status;
     }
 
-    /* NDIS does not loop broadcasts back to the sender, so deliver a local copy */
+    /* A group's datagram has the multicast TTL (IP_MULTICAST_TTL, 1 by default); 0 keeps it on this computer */
+    if (Multicast)
+        ((PIPv4_HEADER)Packet.Header)->Ttl = AddrFile->McastHops;
+
+    /* NDIS does not loop broadcasts back to the sender, so deliver a local copy; a group's datagram as well while a
+       socket of this computer is in a group (IP_MULTICAST_LOOP is the receiving socket's on Windows: UDPReceive) */
     if (Loopback != NULL &&
         NCE->Interface != Loopback &&
-        UDPIsBroadcastAddress(&RemoteAddress))
+        (Multicast ? UDP4HasGroups() : UDPIsBroadcastAddress(&RemoteAddress)))
     {
         LoopNCE = NBLocateNeighbor(&Loopback->Unicast, Loopback);
         if (LoopNCE != NULL &&
@@ -364,7 +388,16 @@ NTSTATUS UDPSendDatagram(
 
     UnlockObject(AddrFile);
 
-    Status = IPSendDatagram(&Packet, NCE);
+    if (Multicast && ((PIPv4_HEADER)Packet.Header)->Ttl == 0)
+    {
+        /* TTL 0: the local copy only (RFC 1112 6.1) */
+        Packet.Free(&Packet);
+        Status = STATUS_SUCCESS;
+    }
+    else
+    {
+        Status = IPSendDatagram(&Packet, NCE);
+    }
     NBDereferenceNeighbor(NCE);
 
     if (LoopNCE != NULL)
@@ -893,7 +926,14 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
     }
 
     do {
-      if (ToAll && (DstAddress->Address.IPv4Address & 0xF0) == 0xE0 && SrcAddress->Type == IP_ADDRESS_V4 &&
+      if (ToAll && (DstAddress->Address.IPv4Address & 0xF0) == 0xE0 && Interface == Loopback &&
+          !AddrFile->McastLoop)
+      {
+        /* A group's datagram this computer sent (the local copy, UDPSendDatagram): as on Windows, a socket with
+           IP_MULTICAST_LOOP off does not receive it (the option is the receiver's) */
+        DereferenceObject(AddrFile);
+      }
+      else if (ToAll && (DstAddress->Address.IPv4Address & 0xF0) == 0xE0 && SrcAddress->Type == IP_ADDRESS_V4 &&
           !UDP4FilterAccepts(AddrFile, DstAddress->Address.IPv4Address, SrcAddress->Address.IPv4Address,
                              Interface ? Interface->Index : 0))
       {

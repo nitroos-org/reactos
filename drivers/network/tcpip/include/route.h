@@ -15,5 +15,6 @@
 #include <arp.h>
 
 PNEIGHBOR_CACHE_ENTRY RouteGetRouteToDestination(PIP_ADDRESS Destination);
+PNEIGHBOR_CACHE_ENTRY RouteGetMulticastNeighbor(PIP_ADDRESS Group, ULONG IfIndex, PIP_ADDRESS Bound);
 
 /* EOF */

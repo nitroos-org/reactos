@@ -601,7 +601,17 @@ PNEIGHBOR_CACHE_ENTRY NBFindOrCreateNeighbor(
   if (NCE == NULL)
     {
         TI_DbgPrint(MID_TRACE,("BCAST: %s\n", A2S(&Interface->Broadcast)));
-        if( AddrIsEqual(Address, &Interface->Broadcast) ||
+        if (Address->Type == IP_ADDRESS_V4 && IPV4_IS_MULTICAST(Address->Address.IPv4Address)) {
+            /* An IPv4 group: its Ethernet address (RFC 1112 6.4: 01:00:5e and the low 23 bits of the group), a
+               permanent entry, as Windows lists one ("static") for each group it sent to; no ARP */
+            const UCHAR *Group = (const UCHAR *)&Address->Address.IPv4Address;
+            UCHAR Mac[6];
+
+            Mac[0] = 0x01; Mac[1] = 0x00; Mac[2] = 0x5E;
+            Mac[3] = Group[1] & 0x7F; Mac[4] = Group[2]; Mac[5] = Group[3];
+            NCE = NBAddNeighbor(Interface, Address, (Interface->AddressLength == sizeof(Mac)) ? Mac : NULL,
+                                Interface->AddressLength, NUD_PERMANENT, 0);
+        } else if( AddrIsEqual(Address, &Interface->Broadcast) ||
             AddrIsUnspecified(Address) ) {
             TI_DbgPrint(MID_TRACE,("Packet targeted at broadcast addr\n"));
             NCE = NBAddNeighbor(Interface, Address, NULL,

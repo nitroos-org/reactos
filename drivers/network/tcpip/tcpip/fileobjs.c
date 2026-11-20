@@ -627,7 +627,8 @@ NTSTATUS FileOpenAddress(
   AddrFile->RefCount = 1;
   AddrFile->Free = AddrFileFree;
   AddrFile->Sharers = 1;
-  /* IPv6 multicast: hop limit 1, looped back (RFC 3493 5.2; VERIFY ON ORACLE) */
+  /* Multicast (IPv6 and IPv4): hop limit / TTL 1, looped back (RFC 3493 5.2, RFC 1112 6.1; Windows Server 2022
+     sends an IPv4 group's datagram with TTL 1 by default) */
   AddrFile->McastHops = 1;
   AddrFile->McastLoop = TRUE;
   if (ShareAccess & (FILE_SHARE_READ | FILE_SHARE_WRITE))

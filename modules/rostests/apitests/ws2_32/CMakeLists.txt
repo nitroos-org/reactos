@@ -53,6 +53,7 @@ list(APPEND SOURCE
     listen.c
     udpconnreset.c
     manysockets.c
+    mcast4send.c
     mcastfilter.c
     memleak.c
     nbconnect.c
