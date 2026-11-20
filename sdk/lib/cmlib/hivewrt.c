@@ -345,11 +345,16 @@ RetryLater:
  *
  * Hive->LogSize is the high-water mark: no byte of the log beyond it
  * holds data. Unknown (0) after the hive is loaded, when the file size
- * stands for it; then the file is also cut to LogEnd after the zeros
- * are written, so that the next load does not zero it again. Later
- * writes zero only between their end and the mark, so a sync costs at
- * most as many zeros as the previous log write was longer. On any
- * failure the mark stays where it is and the next sync tries again.
+ * stands for it. Later writes zero only between their end and the mark,
+ * so a sync costs at most as many zeros as the previous log write was
+ * longer. On any failure the mark stays where it is and the next sync
+ * tries again.
+ *
+ * The file is never made shorter. A log write that extends the file
+ * needs the new file size on the medium before the hive write that it
+ * protects, a file system metadata change; within the existing size a
+ * log write changes data only. Cutting the file at every load would
+ * make most log writes of a boot extend it again.
  */
 static
 VOID
@@ -360,7 +365,6 @@ HvpScrubLog(
 {
     LARGE_INTEGER FileSize;
     ULONG HighWater, Offset, FileOffset, Length;
-    BOOLEAN FromFileSize = FALSE;
     BOOLEAN Success = TRUE;
     PVOID Zeros;
 
@@ -376,7 +380,6 @@ HvpScrubLog(
             HighWater = ROUND_DOWN(MAXULONG, HSECTOR_SIZE);
         else
             HighWater = ROUND_UP(FileSize.u.LowPart, HSECTOR_SIZE);
-        FromFileSize = TRUE;
     }
 
     if (HighWater > LogEnd)
@@ -410,13 +413,6 @@ HvpScrubLog(
             DPRINT1("Failed to overwrite the stale part of the log (0x%x - 0x%x)\n", LogEnd, HighWater);
             RegistryHive->LogSize = HighWater;
             return;
-        }
-
-        /* The zeros are on the medium: the rest of the file can go. A failure leaves zeros. */
-        if (FromFileSize &&
-            !RegistryHive->FileSetSize(RegistryHive, HFILE_TYPE_LOG, LogEnd, HighWater))
-        {
-            DPRINT1("Failed to cut the log to 0x%x bytes\n", LogEnd);
         }
     }
 
