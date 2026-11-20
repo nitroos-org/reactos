@@ -941,7 +941,7 @@ done:
 /* ACCOUNT LOCKOUT **********************************************************
  *
  * [MS-SAMR] 3.1.5.13.7.1 (SamValidateAuthentication) gives the rules, the measurements on Windows Server 2022
- * (evidence samlock-20261120) the details:
+ * the details:
  * - a wrong password counts (LastBadPasswordTime, BadPasswordCount); the count starts again at 1 when the last bad
  *   password is older than the observation window, and reads as 0 once the window has passed;
  * - the attempt that reaches a nonzero threshold locks the account (LockoutTime = now); while it is locked, its

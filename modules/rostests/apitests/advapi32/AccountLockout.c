@@ -498,7 +498,7 @@ static void TestAdministrator(void)
     /* still only the wrong password, not the lock, refuses it */
     ok_dec(Logon(Name, WrongPassword, LOGON32_LOGON_NETWORK), ERROR_LOGON_FAILURE);
 
-    /* a right logon is not refused: with the harness Administrator (blank password) only with the policy off */
+    /* a right logon is not refused: with a blank-password Administrator only with the policy off */
     {
         HKEY Key;
         DWORD Old = 1, Size = sizeof(Old), Type, Zero = 0, Error;

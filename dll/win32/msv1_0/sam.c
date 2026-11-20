@@ -69,7 +69,7 @@ done:
  * on, an account with a blank password can be logged on only by the logon dialog on the console. Every other logon
  * that gives the blank password (LogonUser of every type that checks a password, also from a process in the console
  * session or from LocalSystem with SeTcbPrivilege, CreateProcessWithLogonW, NTLM) fails with STATUS_ACCOUNT_RESTRICTION
- * (substatus the same), measured on Windows Server 2022 (evidence samlock-20261120). Documented: "Accounts: Limit
+ * (substatus the same), measured on Windows Server 2022. Documented: "Accounts: Limit
  * local account use of blank passwords to console logon only".
  */
 BOOL

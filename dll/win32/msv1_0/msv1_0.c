@@ -97,7 +97,7 @@ IsTrustedClient(
 
 
 /*
- * Is this the logon of the logon dialog on the console? Measured on Windows Server 2022 (evidence samlock-20261120):
+ * Is this the logon of the logon dialog on the console? Measured on Windows Server 2022:
  * a blank-password account logs on through the logon dialog on the console, while every LogonUser type, also from a
  * process in the console session and from LocalSystem (LsaRegisterLogonProcess, SeTcbPrivilege, Interactive, any token
  * source or origin name), CreateProcessWithLogonW and NTLM are refused. Here: an interactive (or unlock) logon whose
