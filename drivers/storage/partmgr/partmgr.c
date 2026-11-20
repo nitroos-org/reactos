@@ -953,7 +953,7 @@ FdoIoctlDiskSetDriveLayoutEx(
 {
     PDRIVE_LAYOUT_INFORMATION_EX layoutEx, layoutUser = Irp->AssociatedIrp.SystemBuffer;
     NTSTATUS status;
-    BOOLEAN isGpt;
+    BOOLEAN isGpt, returnLayout = FALSE;
 
     PAGED_CODE();
 
@@ -990,6 +990,7 @@ FdoIoctlDiskSetDriveLayoutEx(
          (layoutEx->PartitionCount > 1)))
     {
         PartMgrReleaseLayoutLock(FdoExtension);
+        ExFreePool(layoutEx);
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
@@ -1045,6 +1046,15 @@ FdoIoctlDiskSetDriveLayoutEx(
         FdoExtension->LayoutValid = TRUE;
 
         FdoExtension->IsSuperFloppy = PartMgrIsDiskSuperFloppy(FdoExtension);
+
+        // return the layout with the updated partition numbers, in table order, to a caller that gave
+        // room for it. This is done here: once the lock is released the cache (which is now layoutEx)
+        // can be replaced and freed by another request.
+        if (isGpt && VerifyIrpOutBufferSize(Irp, layoutSize))
+        {
+            RtlCopyMemory(layoutUser, layoutEx, layoutSize);
+            returnLayout = TRUE;
+        }
     }
     else
     {
@@ -1073,17 +1083,8 @@ FdoIoctlDiskSetDriveLayoutEx(
 
     if (isGpt)
     {
-        // return the layout with the updated partition numbers, in table order, to a caller
-        // that gave room for it; a failed write is reported
-        if (NT_SUCCESS(status) && VerifyIrpOutBufferSize(Irp, layoutSize))
-        {
-            RtlCopyMemory(layoutUser, layoutEx, layoutSize);
-            Irp->IoStatus.Information = layoutSize;
-        }
-        else
-        {
-            Irp->IoStatus.Information = 0;
-        }
+        // a failed write is reported
+        Irp->IoStatus.Information = returnLayout ? layoutSize : 0;
         return status;
     }
 
