@@ -1220,6 +1220,33 @@ DoLogon(
                            IDS_LOGONWRONGUSERORPWD);
         goto done;
     }
+    else if (Status == STATUS_ACCOUNT_LOCKED_OUT)
+    {
+        /* The account lockout policy locked the account (the LSA returns this status itself, as on Windows):
+           the system message of ERROR_ACCOUNT_LOCKED_OUT */
+        WCHAR szCaption[256];
+        WCHAR szText[512];
+
+        TRACE("Account locked out\n");
+        LoadStringW(pgContext->hDllInstance, IDS_LOGONTITLE, szCaption, _countof(szCaption));
+        if (!FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                            NULL,
+                            ERROR_ACCOUNT_LOCKED_OUT,
+                            0,
+                            szText,
+                            _countof(szText),
+                            NULL))
+        {
+            LoadStringW(pgContext->hDllInstance, IDS_ACCOUNTLOCKED, szText, _countof(szText));
+        }
+
+        pgContext->pWlxFuncs->WlxMessageBox(pgContext->hWlx,
+                                            hwndDlg,
+                                            szText,
+                                            szCaption,
+                                            MB_OK | MB_ICONERROR);
+        goto done;
+    }
     else if (Status == STATUS_ACCOUNT_RESTRICTION)
     {
         TRACE("DoLoginTasks failed! Status 0x%08lx  SubStatus 0x%08lx\n", Status, SubStatus);
