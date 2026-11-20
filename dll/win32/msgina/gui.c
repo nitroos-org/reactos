@@ -380,25 +380,13 @@ StatusDialogProc(
 static DWORD WINAPI
 StartupWindowThread(LPVOID lpParam)
 {
-    HDESK hDesk;
     PDISPLAYSTATUSMSG msg = (PDISPLAYSTATUSMSG)lpParam;
 
-    /* When SetThreadDesktop is called the system closes the desktop handle when needed
-       so we have to create a new handle because this handle may still be in use by winlogon  */
-    if (!DuplicateHandle (  GetCurrentProcess(),
-                            msg->hDesktop,
-                            GetCurrentProcess(),
-                            (HANDLE*)&hDesk,
-                            0,
-                            FALSE,
-                            DUPLICATE_SAME_ACCESS))
-    {
-        ERR("Duplicating handle failed!\n");
-        HeapFree(GetProcessHeap(), 0, lpParam);
-        return FALSE;
-    }
-
-    if(!SetThreadDesktop(hDesk))
+    /* SetThreadDesktop neither closes the handle it is given nor takes ownership of it, and
+       the desktop handles of Winlogon live as long as Winlogon runs, so the thread uses the
+       handle it is passed. (A duplicate of it was never closed: three handles leaked for
+       every logon and logoff, one for each status window thread.) */
+    if(!SetThreadDesktop(msg->hDesktop))
     {
         ERR("Setting thread desktop failed!\n");
         HeapFree(GetProcessHeap(), 0, lpParam);
