@@ -17,6 +17,78 @@
 /* PRIVATE FUNCTIONS *********************************************************/
 
 /*
+ * The wait list of a queue holds two kinds of waiter: threads inside KeRemoveQueue(Ex), which ask for an entry and are
+ * handed one, and threads (or wait packets) waiting on the queue as a dispatcher object, which only ask for it to hold
+ * an entry (a completion port handle can be waited on). A thread of the first kind is recognised by its wait reason.
+ * Dispatcher lock held for all of these.
+ */
+FORCEINLINE
+BOOLEAN
+KiIsQueueWaitBlock(IN PKWAIT_BLOCK WaitBlock)
+{
+    return ((WaitBlock->WaitType != KI_WAIT_PACKET) &&
+            (WaitBlock->Thread->WaitReason == WrQueue));
+}
+
+/* The newest thread waiting to be handed an entry, or NULL */
+static
+PKWAIT_BLOCK
+KiFindQueueWaiter(IN PKQUEUE Queue)
+{
+    PLIST_ENTRY WaitEntry;
+    PKWAIT_BLOCK WaitBlock;
+
+    for (WaitEntry = Queue->Header.WaitListHead.Blink;
+         WaitEntry != &Queue->Header.WaitListHead;
+         WaitEntry = WaitEntry->Blink)
+    {
+        WaitBlock = CONTAINING_RECORD(WaitEntry, KWAIT_BLOCK, WaitListEntry);
+        if (KiIsQueueWaitBlock(WaitBlock))
+            return WaitBlock;
+    }
+    return NULL;
+}
+
+/*
+ * The queue went from empty to holding an entry: everyone who waits on it as an object is satisfied. The entry is not
+ * taken (as for a notification event), and a thread inside KeRemoveQueue(Ex) is left alone.
+ */
+static
+VOID
+KiSignalQueueWaiters(IN PKQUEUE Queue)
+{
+    PLIST_ENTRY WaitEntry, WaitList = &Queue->Header.WaitListHead;
+    PKWAIT_BLOCK WaitBlock;
+
+    /* Every wake removes at least the block it found, so starting over from the head terminates */
+    for (;;)
+    {
+        for (WaitEntry = WaitList->Flink; WaitEntry != WaitList; WaitEntry = WaitEntry->Flink)
+        {
+            WaitBlock = CONTAINING_RECORD(WaitEntry, KWAIT_BLOCK, WaitListEntry);
+            if (!KiIsQueueWaitBlock(WaitBlock))
+                break;
+        }
+        if (WaitEntry == WaitList)
+            return;
+
+        if (WaitBlock->WaitType == KI_WAIT_PACKET)
+        {
+            KiSignalWaitPacket(WaitBlock);
+        }
+        else if (WaitBlock->WaitType == WaitAny)
+        {
+            KiUnwaitThread(WaitBlock->Thread, WaitBlock->WaitKey, IO_NO_INCREMENT);
+        }
+        else
+        {
+            /* A wait for all objects tests them again */
+            KiUnwaitThread(WaitBlock->Thread, STATUS_KERNEL_APC, IO_NO_INCREMENT);
+        }
+    }
+}
+
+/*
  * Called when a thread which has a queue entry is entering a wait state
  */
 VOID
@@ -24,7 +96,6 @@ FASTCALL
 KiActivateWaiterQueue(IN PKQUEUE Queue)
 {
     PLIST_ENTRY QueueEntry;
-    PLIST_ENTRY WaitEntry;
     PKWAIT_BLOCK WaitBlock;
     PKTHREAD Thread;
     ASSERT_QUEUE(Queue);
@@ -38,11 +109,11 @@ KiActivateWaiterQueue(IN PKQUEUE Queue)
         /* Get the Queue Entry */
         QueueEntry = Queue->EntryListHead.Flink;
 
-        /* Get the Wait Entry */
-        WaitEntry = Queue->Header.WaitListHead.Blink;
+        /* Get the thread that waits for an entry */
+        WaitBlock = KiFindQueueWaiter(Queue);
 
         /* Make sure that the Queue entries are not part of empty lists */
-        if ((WaitEntry != &Queue->Header.WaitListHead) &&
+        if ((WaitBlock) &&
             (QueueEntry != &Queue->EntryListHead))
         {
             /* Remove this entry */
@@ -53,9 +124,6 @@ KiActivateWaiterQueue(IN PKQUEUE Queue)
             Queue->Header.SignalState--;
 
             /* Unwait the Thread */
-            WaitBlock = CONTAINING_RECORD(WaitEntry,
-                                          KWAIT_BLOCK,
-                                          WaitListEntry);
             Thread = WaitBlock->Thread;
             KiUnwaitThread(Thread, (LONG_PTR)QueueEntry, IO_NO_INCREMENT);
         }
@@ -74,15 +142,14 @@ KiInsertQueue(IN PKQUEUE Queue,
     ULONG InitialState;
     PKTHREAD Thread = KeGetCurrentThread();
     PKWAIT_BLOCK WaitBlock;
-    PLIST_ENTRY WaitEntry;
     PKTIMER Timer;
     ASSERT_QUEUE(Queue);
 
     /* Save the old state */
     InitialState = Queue->Header.SignalState;
 
-    /* Get the Entry */
-    WaitEntry = Queue->Header.WaitListHead.Blink;
+    /* Get the thread that waits for an entry (waiters on the queue as an object are not handed one) */
+    WaitBlock = KiFindQueueWaiter(Queue);
 
     /*
      * Why the KeGetCurrentThread()->Queue != Queue?
@@ -90,15 +157,14 @@ KiInsertQueue(IN PKQUEUE Queue,
      * -Gunnar
      */
     if ((Queue->CurrentCount < Queue->MaximumCount) &&
-        (WaitEntry != &Queue->Header.WaitListHead) &&
+        (WaitBlock != NULL) &&
         ((Thread->Queue != Queue) ||
          (Thread->WaitReason != WrQueue)))
     {
         /* Remove the wait entry */
-        RemoveEntryList(WaitEntry);
+        RemoveEntryList(&WaitBlock->WaitListEntry);
 
-        /* Get the Wait Block and Thread */
-        WaitBlock = CONTAINING_RECORD(WaitEntry, KWAIT_BLOCK, WaitListEntry);
+        /* Get the Thread */
         Thread = WaitBlock->Thread;
 
         /* Remove the queue from the thread's wait list */
@@ -132,6 +198,9 @@ KiInsertQueue(IN PKQUEUE Queue,
             /* Insert at the end */
             InsertTailList(&Queue->EntryListHead, Entry);
         }
+
+        /* The queue holds an entry now: whoever waits on it as an object is satisfied */
+        if (InitialState == 0) KiSignalQueueWaiters(Queue);
     }
 
     /* Return the previous state */

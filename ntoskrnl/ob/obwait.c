@@ -227,6 +227,16 @@ NtWaitForMultipleObjects(IN ULONG ObjectCount,
     /* For a Waitall, we can't have the same object more then once */
     if (WaitType == WaitAll)
     {
+        /* A completion port is not an object a wait for all can include */
+        for (i = 0; i < ObjectCount; i++)
+        {
+            if (Objects[i] && (OBJECT_TO_OBJECT_HEADER(Objects[i])->Type == IoCompletionType))
+            {
+                Status = STATUS_INVALID_HANDLE;
+                goto Quickie;
+            }
+        }
+
         /* Clear the main loop variable */
         i = 0;
 

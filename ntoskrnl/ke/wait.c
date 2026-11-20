@@ -513,10 +513,7 @@ KeWaitForSingleObject(IN PVOID Object,
         }
         else
         {
-            /* Sanity check */
-            ASSERT(CurrentObject->Header.Type != QueueObject);
-
-            /* Check if it's a mutant */
+            /* Check if it's a mutant (a queue, as an object, is signalled while it holds an entry and not changed by a wait) */
             if (CurrentObject->Header.Type == MutantObject)
             {
                 /* Check its signal state or if we own it */
@@ -734,7 +731,6 @@ KeWaitForMultipleObjects(IN ULONG Count,
                 {
                     /* Get the Current Object */
                     CurrentObject = (PKMUTANT)Object[Index];
-                    ASSERT(CurrentObject->Header.Type != QueueObject);
 
                     /* Check if the Object is a mutant */
                     if (CurrentObject->Header.Type == MutantObject)
@@ -779,7 +775,6 @@ KeWaitForMultipleObjects(IN ULONG Count,
                 {
                     /* Get the Current Object */
                     CurrentObject = (PKMUTANT)Object[Index];
-                    ASSERT(CurrentObject->Header.Type != QueueObject);
 
                     /* Check if we're dealing with a mutant again */
                     if (CurrentObject->Header.Type == MutantObject)
