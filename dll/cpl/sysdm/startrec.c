@@ -28,6 +28,8 @@ typedef struct _STARTINFO
     DWORD dwCrashDumpEnabled;
     BOOL bCrashDumpChanged;
     INT iFreeLdrIni;
+    BOOL bEspIni; /* freeldr.ini is on the EFI system partition (UEFI) */
+    DWORD dwEspIniAttributes;
 } STARTINFO, *PSTARTINFO;
 
 /* The debugging information choices, in the order of the combo box: the index is the registry value */
@@ -471,6 +473,42 @@ LoadOSList(HWND hwndDlg, PSTARTINFO pStartInfo)
     WCHAR *szSystemDrive;
     HINF hInf;
 
+    /* UEFI: freeldr.ini is on the EFI system partition, which has no drive letter */
+    if (EspIniIsUefiBoot())
+    {
+        DWORD dwError = EspIniFindFreeldrIni(pStartInfo->szFreeldrIni,
+                                             ARRAYSIZE(pStartInfo->szFreeldrIni));
+        if (dwError == ERROR_SUCCESS)
+        {
+            hInf = SetupOpenInfFileW(pStartInfo->szFreeldrIni, NULL, INF_STYLE_OLDNT, NULL);
+            if (hInf != INVALID_HANDLE_VALUE)
+            {
+                LoadFreeldrSettings(hInf, hwndDlg);
+                SetupCloseInfFile(hInf);
+                pStartInfo->iFreeLdrIni = 1;
+                pStartInfo->bEspIni = TRUE;
+                return TRUE;
+            }
+            dwError = GetLastError();
+        }
+
+        /* Nothing is read and nothing will be written: say why */
+        pStartInfo->szFreeldrIni[0] = UNICODE_NULL;
+        EnableWindow(GetDlgItem(hwndDlg, IDC_STRECOSCOMBO), FALSE);
+        EnableWindow(GetDlgItem(hwndDlg, IDC_STRECLIST), FALSE);
+        EnableWindow(GetDlgItem(hwndDlg, IDC_STRRECLISTUPDWN), FALSE);
+        EnableWindow(GetDlgItem(hwndDlg, IDC_STRRECEDIT), FALSE);
+        {
+            WCHAR szMsg[256], szTitle[64];
+            LoadStringW(hApplet, (dwError == ERROR_ACCESS_DENIED) ? IDS_STARTREC_ESP_DENIED :
+                                   (dwError == ERROR_TOO_MANY_NAMES) ? IDS_STARTREC_ESP_AMBIGUOUS : IDS_STARTREC_ESP_MISSING,
+                        szMsg, ARRAYSIZE(szMsg));
+            LoadStringW(hApplet, IDS_CPLSYSTEMNAME, szTitle, ARRAYSIZE(szTitle));
+            MessageBoxW(hwndDlg, szMsg, szTitle, MB_OK | MB_ICONINFORMATION);
+        }
+        return FALSE;
+    }
+
     dwBufSize = GetSystemDrive(&szSystemDrive);
     if (dwBufSize == 0)
         return FALSE;
@@ -703,6 +741,68 @@ LoadRecoveryOptions(HWND hwndDlg, PSTARTINFO pStartInfo)
 }
 
 
+/*
+ * The loader's freeldr.ini on the EFI system partition is not written in place: the profile functions
+ * truncate the file and write it again, and a power cut in between leaves the loader without its
+ * configuration. A copy is changed instead, written to the disk, and then put in the place of the
+ * file in one rename. The file is hidden and a system file (A SH): the attributes are off while the
+ * rename is done and are set again on the new file whatever the result.
+ */
+static BOOL
+EspIniBeginWrite(PSTARTINFO pStartInfo, PWCHAR szNew, SIZE_T cchNew)
+{
+    if (FAILED(StringCchPrintfW(szNew, cchNew, L"%s.new", pStartInfo->szFreeldrIni)))
+        return FALSE;
+
+    pStartInfo->dwEspIniAttributes = GetFileAttributesW(pStartInfo->szFreeldrIni);
+    if (pStartInfo->dwEspIniAttributes == INVALID_FILE_ATTRIBUTES)
+        return FALSE;
+
+    /* A copy left by an earlier attempt that did not finish */
+    SetFileAttributesW(szNew, FILE_ATTRIBUTE_NORMAL);
+    DeleteFileW(szNew);
+
+    if (!CopyFileW(pStartInfo->szFreeldrIni, szNew, TRUE))
+        return FALSE;
+    SetFileAttributesW(szNew, FILE_ATTRIBUTE_NORMAL);
+    return TRUE;
+}
+
+static BOOL
+EspIniEndWrite(PSTARTINFO pStartInfo, PCWSTR szNew, BOOL bWritten)
+{
+    BOOL bDone = FALSE;
+
+    if (bWritten)
+    {
+        HANDLE hNew = CreateFileW(szNew, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hNew != INVALID_HANDLE_VALUE)
+        {
+            /* The new content is on the disk before it replaces the old file */
+            bWritten = FlushFileBuffers(hNew);
+            CloseHandle(hNew);
+        }
+        else
+        {
+            bWritten = FALSE;
+        }
+    }
+
+    if (bWritten)
+    {
+        SetFileAttributesW(pStartInfo->szFreeldrIni, FILE_ATTRIBUTE_NORMAL);
+        bDone = MoveFileExW(szNew, pStartInfo->szFreeldrIni, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    }
+
+    if (!bDone)
+        DeleteFileW(szNew);
+
+    /* The attributes of the file in its place (the old file when nothing was replaced) */
+    if (pStartInfo->dwEspIniAttributes != INVALID_FILE_ATTRIBUTES && pStartInfo->dwEspIniAttributes != 0)
+        SetFileAttributesW(pStartInfo->szFreeldrIni, pStartInfo->dwEspIniAttributes);
+    return bDone;
+}
+
 /* Property page dialog callback */
 INT_PTR CALLBACK
 StartRecDlgProc(HWND hwndDlg,
@@ -765,33 +865,63 @@ StartRecDlgProc(HWND hwndDlg,
 
                     if ((INT_PTR)pRecord != CB_ERR)
                     {
-                        if (pStartInfo->iFreeLdrIni == 1) // FreeLdrIni style
+                        PCWSTR pszIni = pStartInfo->szFreeldrIni;
+                        WCHAR szEspNew[MAX_PATH + 20];
+                        BOOL bBegun = FALSE, bWritten = TRUE;
+
+                        /* On UEFI a copy of freeldr.ini on the EFI system partition is changed and then replaces the file */
+                        if (pStartInfo->bEspIni)
+                        {
+                            bBegun = EspIniBeginWrite(pStartInfo, szEspNew, ARRAYSIZE(szEspNew));
+                            bWritten = bBegun;
+                            if (bBegun)
+                                pszIni = szEspNew;
+                        }
+
+                        if (pStartInfo->bEspIni && !bBegun)
+                        {
+                            /* nothing is written */
+                        }
+                        else if (pStartInfo->iFreeLdrIni == 1) // FreeLdrIni style
                         {
                             /* Set default timeout */
-                            WritePrivateProfileStringW(L"FREELOADER",
-                                                      L"TimeOut",
-                                                      szTimeout,
-                                                      pStartInfo->szFreeldrIni);
+                            bWritten &= WritePrivateProfileStringW(L"FREELOADER",
+                                                                   L"TimeOut",
+                                                                   szTimeout,
+                                                                   pszIni);
                             /* Set default OS */
-                            WritePrivateProfileStringW(L"FREELOADER",
-                                                      L"DefaultOS",
-                                                      pRecord->szSectionName,
-                                                      pStartInfo->szFreeldrIni);
+                            bWritten &= WritePrivateProfileStringW(L"FREELOADER",
+                                                                   L"DefaultOS",
+                                                                   pRecord->szSectionName,
+                                                                   pszIni);
 
                         }
                         else if (pStartInfo->iFreeLdrIni == 2) // BootIni style
                         {
                             /* Set default timeout */
-                            WritePrivateProfileStringW(L"boot loader",
-                                                      L"timeout",
-                                                      szTimeout,
-                                                      pStartInfo->szFreeldrIni);
+                            bWritten &= WritePrivateProfileStringW(L"boot loader",
+                                                                   L"timeout",
+                                                                   szTimeout,
+                                                                   pszIni);
                             /* Set default OS */
-                            WritePrivateProfileStringW(L"boot loader",
-                                                      L"default",
-                                                      pRecord->szBootPath,
-                                                      pStartInfo->szFreeldrIni);
+                            bWritten &= WritePrivateProfileStringW(L"boot loader",
+                                                                   L"default",
+                                                                   pRecord->szBootPath,
+                                                                   pszIni);
 
+                        }
+
+                        if (pStartInfo->bEspIni)
+                        {
+                            if (bBegun)
+                                bWritten = EspIniEndWrite(pStartInfo, szEspNew, bWritten);
+                            if (!bWritten)
+                            {
+                                WCHAR szMsg[256], szTitle[64];
+                                LoadStringW(hApplet, IDS_STARTREC_ESP_NOTSAVED, szMsg, ARRAYSIZE(szMsg));
+                                LoadStringW(hApplet, IDS_CPLSYSTEMNAME, szTitle, ARRAYSIZE(szTitle));
+                                MessageBoxW(hwndDlg, szMsg, szTitle, MB_OK | MB_ICONWARNING);
+                            }
                         }
                     }
 

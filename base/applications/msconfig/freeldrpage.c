@@ -26,7 +26,7 @@ static FREELDR_SETTINGS Settings = { 0, { 0, }, 0, 0, FALSE };
 #define BUFFER_SIZE 512
 
 static BOOL
-LoadBootIni(WCHAR *szDrive, HWND hDlg)
+LoadBootIni(WCHAR *szDrive, PCWSTR szEspIni, HWND hDlg)
 {
     WCHAR szBuffer[BUFFER_SIZE];
     HWND hDlgCtrl;
@@ -35,28 +35,38 @@ LoadBootIni(WCHAR *szDrive, HWND hDlg)
     LRESULT pos;
     HRESULT hr;
 
-    hr = StringCbCopyW(szBuffer, sizeof(szBuffer), szDrive);
-    if (FAILED(hr))
-        return FALSE;
-
-    hr = StringCbCatW(szBuffer, sizeof(szBuffer), L"freeldr.ini");
-    if (FAILED(hr))
-        return FALSE;
-
-    file = _wfopen(szBuffer, L"rt");
-    if (!file)
+    if (szEspIni)
+    {
+        /* UEFI: the file on the EFI system partition, reached through its volume GUID path */
+        file = _wfopen(szEspIni, L"rt");
+        if (!file)
+            return FALSE;
+    }
+    else
     {
         hr = StringCbCopyW(szBuffer, sizeof(szBuffer), szDrive);
         if (FAILED(hr))
             return FALSE;
 
-        hr = StringCbCatW(szBuffer, sizeof(szBuffer), L"boot.ini");
+        hr = StringCbCatW(szBuffer, sizeof(szBuffer), L"freeldr.ini");
         if (FAILED(hr))
             return FALSE;
 
         file = _wfopen(szBuffer, L"rt");
         if (!file)
-            return FALSE;
+        {
+            hr = StringCbCopyW(szBuffer, sizeof(szBuffer), szDrive);
+            if (FAILED(hr))
+                return FALSE;
+
+            hr = StringCbCatW(szBuffer, sizeof(szBuffer), L"boot.ini");
+            if (FAILED(hr))
+                return FALSE;
+
+            file = _wfopen(szBuffer, L"rt");
+            if (!file)
+                return FALSE;
+        }
     }
 
     hDlgCtrl = GetDlgItem(hDlg, IDC_LIST_BOX);
@@ -120,6 +130,25 @@ InitializeFreeLDRDialog(HWND hDlg)
     WCHAR winDir[PATH_MAX];
     WCHAR* ptr = NULL;
 
+    if (EspIniIsUefiBoot())
+    {
+        WCHAR szEspIni[MAX_PATH + 16];
+        DWORD dwError = EspIniFindFreeldrIni(szEspIni, ARRAYSIZE(szEspIni));
+
+        if (dwError == ERROR_SUCCESS && LoadBootIni(NULL, szEspIni, hDlg))
+            return TRUE;
+
+        /* Nothing was read: show why in the list instead of an empty page */
+        {
+            WCHAR szMsg[256];
+            LoadStringW(hInst, (dwError == ERROR_ACCESS_DENIED) ? IDS_FREELDR_ESP_DENIED :
+                                  (dwError == ERROR_TOO_MANY_NAMES) ? IDS_FREELDR_ESP_AMBIGUOUS : IDS_FREELDR_ESP_MISSING,
+                        szMsg, ARRAYSIZE(szMsg));
+            SendDlgItemMessageW(hDlg, IDC_LIST_BOX, LB_ADDSTRING, 0, (LPARAM)szMsg);
+        }
+        return FALSE;
+    }
+
     GetWindowsDirectoryW(winDir, PATH_MAX);
     ptr = wcschr(winDir, L'\\');
     if (ptr == NULL)
@@ -127,7 +156,7 @@ InitializeFreeLDRDialog(HWND hDlg)
         return FALSE;
     }
     ptr[1] = L'\0';
-    return LoadBootIni(winDir, hDlg);
+    return LoadBootIni(winDir, NULL, hDlg);
 }
 
 INT_PTR CALLBACK

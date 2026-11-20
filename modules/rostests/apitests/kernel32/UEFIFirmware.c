@@ -169,6 +169,12 @@ START_TEST(UEFIFirmware)
                                               _A2W(EFI_TEST_GUID_STRING),
                                               &EfiVariableValue,
                                               sizeof(EfiVariableValue));
+    if (!bResult && GetLastError() == ERROR_INVALID_FUNCTION)
+    {
+        /* The system does not provide UEFI variable access yet */
+        skip("Firmware variable access is not implemented, aborting.\n");
+        goto _exit;
+    }
     ok(bResult,
        "SetFirmwareEnvironmentVariableW failed with error: 0x%08lX\n",
        GetLastError());

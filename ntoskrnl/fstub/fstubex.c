@@ -158,7 +158,8 @@ FstubWritePartitionTableEFI(IN PDISK_INFORMATION Disk,
                             IN ULONGLONG LastUsableLBA,
                             IN BOOLEAN WriteBackupTable,
                             IN ULONG PartitionCount,
-                            IN PPARTITION_INFORMATION_EX PartitionEntries OPTIONAL
+                            IN PPARTITION_INFORMATION_EX PartitionEntries OPTIONAL,
+                            IN PULONG SlotOf OPTIONAL
 );
 
 NTSTATUS
@@ -435,6 +436,7 @@ FstubCreateDiskEFI(IN PDEVICE_OBJECT DeviceObject,
                                          LastUsableLBA,
                                          FALSE,
                                          0,
+                                         NULL,
                                          NULL);
     /* Then, write backup table */
     if (NT_SUCCESS(Status))
@@ -446,6 +448,7 @@ FstubCreateDiskEFI(IN PDEVICE_OBJECT DeviceObject,
                                              LastUsableLBA,
                                              TRUE,
                                              0,
+                                             NULL,
                                              NULL);
     }
 
@@ -1691,11 +1694,12 @@ FstubWritePartitionTableEFI(IN PDISK_INFORMATION Disk,
                             IN ULONGLONG LastUsableLBA,
                             IN BOOLEAN WriteBackupTable,
                             IN ULONG PartitionCount,
-                            IN PPARTITION_INFORMATION_EX PartitionEntries OPTIONAL)
+                            IN PPARTITION_INFORMATION_EX PartitionEntries OPTIONAL,
+                            IN PULONG SlotOf OPTIONAL)
 {
     NTSTATUS Status;
     EFI_PARTITION_ENTRY Entry;
-    ULONG i, WrittenPartitions, SectoredPartitionEntriesSize, PartitionEntryCRC32;
+    ULONG i, Slot, WrittenPartitions, SectoredPartitionEntriesSize, PartitionEntryCRC32;
 
     PAGED_CODE();
 
@@ -1706,6 +1710,51 @@ FstubWritePartitionTableEFI(IN PDISK_INFORMATION Disk,
     PartitionEntryCRC32 = 0;
     /* Count how much sectors we'll have to read to read the whole partition table */
     SectoredPartitionEntriesSize = (MaxPartitionCount * PARTITION_ENTRY_SIZE) / Disk->SectorSize;
+
+    if (SlotOf)
+    {
+        /*
+         * Every partition goes into the slot of the entry array that SlotOf gives it, the other
+         * slots are written as unused entries: the entries of other systems keep their numbers.
+         * The checksum of the array is computed over the slots in order.
+         */
+        RtlZeroMemory(&Entry, sizeof(EFI_PARTITION_ENTRY));
+        for (Slot = 0; Slot < MaxPartitionCount; Slot++)
+        {
+            for (i = 0; i < PartitionCount; i++)
+            {
+                if (SlotOf[i] == Slot)
+                    break;
+            }
+
+            if (i < PartitionCount)
+                FstubCopyEntryEFI(&Entry, &PartitionEntries[i], Disk->SectorSize);
+            else
+                RtlZeroMemory(&Entry, sizeof(EFI_PARTITION_ENTRY));
+
+            Status = FstubWriteEntryEFI(Disk,
+                                        SectoredPartitionEntriesSize,
+                                        Slot,
+                                        &Entry,
+                                        WriteBackupTable,
+                                        FALSE,
+                                        &PartitionEntryCRC32);
+            if (!NT_SUCCESS(Status))
+            {
+                return Status;
+            }
+        }
+
+        /* Once we're done, write the GPT header */
+        return FstubWriteHeaderEFI(Disk,
+                                   SectoredPartitionEntriesSize,
+                                   DiskGUID,
+                                   MaxPartitionCount,
+                                   FirstUsableLBA,
+                                   LastUsableLBA,
+                                   PartitionEntryCRC32,
+                                   WriteBackupTable);
+    }
 
     for (i = 0, WrittenPartitions = 0; i < PartitionCount; i++)
     {
@@ -1876,6 +1925,189 @@ FstubGptLayoutFits(IN PDRIVE_LAYOUT_INFORMATION_EX DriveLayout,
             return FALSE;
     }
     return TRUE;
+}
+
+/*
+ * What the entry array of the disk holds now, slot by slot (only what is needed to
+ * recognise a partition again).
+ */
+typedef struct _FSTUB_GPT_SLOT
+{
+    GUID Id;
+    ULONGLONG Start;
+    BOOLEAN Used;
+    BOOLEAN Taken;
+} FSTUB_GPT_SLOT, *PFSTUB_GPT_SLOT;
+
+static
+NTSTATUS
+FstubReadGptSlots(IN PDISK_INFORMATION Disk,
+                  IN ULONGLONG EntryLBA,
+                  IN ULONG NumberOfEntries,
+                  OUT PFSTUB_GPT_SLOT* OutSlots)
+{
+    NTSTATUS Status;
+    PFSTUB_GPT_SLOT Slots;
+    ULONG i, EntriesPerSector = Disk->SectorSize / PARTITION_ENTRY_SIZE;
+
+    PAGED_CODE();
+
+    *OutSlots = NULL;
+    Slots = ExAllocatePoolWithTag(PagedPool, NumberOfEntries * sizeof(*Slots), TAG_FSTUB);
+    if (!Slots)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(Slots, NumberOfEntries * sizeof(*Slots));
+
+    for (i = 0; i < NumberOfEntries; i++)
+    {
+        PEFI_PARTITION_ENTRY Entry;
+
+        if (i % EntriesPerSector == 0)
+        {
+            Status = FstubReadSector(Disk->DeviceObject,
+                                     Disk->SectorSize,
+                                     EntryLBA + (i / EntriesPerSector),
+                                     Disk->Buffer);
+            if (!NT_SUCCESS(Status))
+            {
+                ExFreePoolWithTag(Slots, TAG_FSTUB);
+                return Status;
+            }
+        }
+
+        Entry = &((PEFI_PARTITION_ENTRY)Disk->Buffer)[i % EntriesPerSector];
+        if (!IsEqualGUID(&Entry->PartitionType, &PARTITION_ENTRY_UNUSED_GUID))
+        {
+            Slots[i].Used = TRUE;
+            Slots[i].Id = Entry->UniquePartition;
+            Slots[i].Start = Entry->StartingLBA;
+        }
+    }
+
+    *OutSlots = Slots;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * Gives every used partition of the layout the slot it has in the entry array now (matched by
+ * its unique GUID and starting sector, then by the GUID, then by the starting sector); a new
+ * partition takes the first free slot. SlotOf[i] is the slot of layout entry i, MAXULONG for
+ * an unused one. A foreign table with gaps keeps the slot of every entry (UEFI boot entries
+ * of other systems and fstab lines name a partition by its slot).
+ */
+static
+NTSTATUS
+FstubAssignGptSlots(IN PDISK_INFORMATION Disk,
+                    IN ULONGLONG EntryLBA,
+                    IN ULONG NumberOfEntries,
+                    IN PDRIVE_LAYOUT_INFORMATION_EX DriveLayout,
+                    OUT PULONG* OutSlotOf)
+{
+    NTSTATUS Status;
+    PFSTUB_GPT_SLOT Slots;
+    PULONG SlotOf;
+    ULONG i, s, Pass;
+    ULONGLONG Start;
+
+    PAGED_CODE();
+
+    *OutSlotOf = NULL;
+    Status = FstubReadGptSlots(Disk, EntryLBA, NumberOfEntries, &Slots);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    SlotOf = ExAllocatePoolWithTag(PagedPool, (DriveLayout->PartitionCount + 1) * sizeof(ULONG), TAG_FSTUB);
+    if (!SlotOf)
+    {
+        ExFreePoolWithTag(Slots, TAG_FSTUB);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    for (i = 0; i < DriveLayout->PartitionCount; i++)
+        SlotOf[i] = MAXULONG;
+
+    for (Pass = 0; Pass < 3; Pass++)
+    {
+        for (i = 0; i < DriveLayout->PartitionCount; i++)
+        {
+            PPARTITION_INFORMATION_EX Info = &DriveLayout->PartitionEntry[i];
+
+            if (SlotOf[i] != MAXULONG ||
+                IsEqualGUID(&Info->Gpt.PartitionType, &PARTITION_ENTRY_UNUSED_GUID))
+                continue;
+
+            Start = (ULONGLONG)Info->StartingOffset.QuadPart / Disk->SectorSize;
+            for (s = 0; s < NumberOfEntries; s++)
+            {
+                BOOLEAN SameId, SameStart;
+
+                if (!Slots[s].Used || Slots[s].Taken)
+                    continue;
+
+                SameId = IsEqualGUID(&Slots[s].Id, &Info->Gpt.PartitionId) &&
+                         !IsEqualGUID(&Info->Gpt.PartitionId, &PARTITION_ENTRY_UNUSED_GUID);
+                SameStart = (Slots[s].Start == Start);
+                if ((Pass == 0 && SameId && SameStart) ||
+                    (Pass == 1 && SameId) ||
+                    (Pass == 2 && SameStart))
+                {
+                    SlotOf[i] = s;
+                    Slots[s].Taken = TRUE;
+                    break;
+                }
+            }
+        }
+    }
+
+    /* New partitions: first free slot (a slot of a partition that is gone is free) */
+    s = 0;
+    for (i = 0; i < DriveLayout->PartitionCount; i++)
+    {
+        if (SlotOf[i] != MAXULONG ||
+            IsEqualGUID(&DriveLayout->PartitionEntry[i].Gpt.PartitionType, &PARTITION_ENTRY_UNUSED_GUID))
+            continue;
+
+        while (s < NumberOfEntries && Slots[s].Taken)
+            s++;
+        if (s >= NumberOfEntries)
+        {
+            ExFreePoolWithTag(SlotOf, TAG_FSTUB);
+            ExFreePoolWithTag(Slots, TAG_FSTUB);
+            return STATUS_INVALID_PARAMETER;
+        }
+        SlotOf[i] = s;
+        Slots[s].Taken = TRUE;
+    }
+
+    ExFreePoolWithTag(Slots, TAG_FSTUB);
+    *OutSlotOf = SlotOf;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * Puts the layout in slot order, unused entries last: the partition manager numbers the
+ * partitions by their place in the layout and the reader numbers them in table order.
+ */
+static
+VOID
+FstubSortLayoutBySlot(IN OUT PDRIVE_LAYOUT_INFORMATION_EX DriveLayout,
+                      IN PULONG SlotOf)
+{
+    ULONG i, j;
+
+    for (i = 1; i < DriveLayout->PartitionCount; i++)
+    {
+        PARTITION_INFORMATION_EX Info = DriveLayout->PartitionEntry[i];
+        ULONG Slot = SlotOf[i];
+
+        for (j = i; j > 0 && SlotOf[j - 1] > Slot; j--)
+        {
+            DriveLayout->PartitionEntry[j] = DriveLayout->PartitionEntry[j - 1];
+            SlotOf[j] = SlotOf[j - 1];
+        }
+        DriveLayout->PartitionEntry[j] = Info;
+        SlotOf[j] = Slot;
+    }
 }
 
 /* PUBLIC FUNCTIONS **********************************************************/
@@ -2552,7 +2784,8 @@ IoWritePartitionTableEx(IN PDEVICE_OBJECT DeviceObject,
     ULONG NumberOfEntries;
     PDISK_INFORMATION Disk;
     PEFI_PARTITION_HEADER EfiHeader;
-    ULONGLONG SectorsForPartitions, FirstUsableLBA, LastUsableLBA;
+    ULONGLONG SectorsForPartitions, FirstUsableLBA, LastUsableLBA, EntryLBA;
+    PULONG SlotOf = NULL;
 
     PAGED_CODE();
 
@@ -2597,6 +2830,7 @@ IoWritePartitionTableEx(IN PDEVICE_OBJECT DeviceObject,
                 {
                     /* Backup data */
                     NumberOfEntries = EfiHeader->NumberOfEntries;
+                    EntryLBA = EfiHeader->PartitionEntryLBA;
                     RtlCopyMemory(&DiskGuid, &EfiHeader->DiskGUID, sizeof(GUID));
                     /* Count number of sectors needed to store partitions */
                     SectorsForPartitions = ((ULONGLONG)NumberOfEntries * PARTITION_ENTRY_SIZE) / Disk->SectorSize;
@@ -2613,6 +2847,16 @@ IoWritePartitionTableEx(IN PDEVICE_OBJECT DeviceObject,
                     }
                     else
                     {
+                        /* Every partition that is on the disk keeps its slot, new ones take free slots */
+                        Status = FstubAssignGptSlots(Disk,
+                                                     EntryLBA,
+                                                     NumberOfEntries,
+                                                     DriveLayout,
+                                                     &SlotOf);
+                    }
+
+                    if (NT_SUCCESS(Status))
+                    {
                         /* Write primary table */
                         Status = FstubWritePartitionTableEFI(Disk,
                                                              DiskGuid,
@@ -2621,7 +2865,8 @@ IoWritePartitionTableEx(IN PDEVICE_OBJECT DeviceObject,
                                                              LastUsableLBA,
                                                              FALSE,
                                                              DriveLayout->PartitionCount,
-                                                             DriveLayout->PartitionEntry);
+                                                             DriveLayout->PartitionEntry,
+                                                             SlotOf);
                         /* If it succeeded, also update backup table */
                         if (NT_SUCCESS(Status))
                         {
@@ -2632,8 +2877,18 @@ IoWritePartitionTableEx(IN PDEVICE_OBJECT DeviceObject,
                                                                  LastUsableLBA,
                                                                  TRUE,
                                                                  DriveLayout->PartitionCount,
-                                                                 DriveLayout->PartitionEntry);
+                                                                 DriveLayout->PartitionEntry,
+                                                                 SlotOf);
                         }
+
+                        /* The caller numbers the partitions in table order */
+                        if (NT_SUCCESS(Status))
+                            FstubSortLayoutBySlot(DriveLayout, SlotOf);
+                    }
+                    if (SlotOf)
+                    {
+                        ExFreePoolWithTag(SlotOf, TAG_FSTUB);
+                        SlotOf = NULL;
                     }
                 }
                 else

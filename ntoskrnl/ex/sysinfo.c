@@ -558,6 +558,8 @@ NtSetSystemEnvironmentValue(IN PUNICODE_STRING VariableName,
     return Status;
 }
 
+extern BOOLEAN ExpBootedViaEfi;
+
 NTSTATUS
 NTAPI
 NtEnumerateSystemEnvironmentValuesEx(IN ULONG InformationClass,
@@ -577,8 +579,21 @@ NtQuerySystemEnvironmentValueEx(
     _Inout_ PULONG ReturnLength,
     _Out_opt_ PULONG Attributes)
 {
+    /*
+     * Firmware variables do not exist on a legacy BIOS computer: the call fails with
+     * ERROR_INVALID_FUNCTION there. On a UEFI computer it needs SeSystemEnvironmentPrivilege
+     * and fails with an error that is specific to the firmware: GetFirmwareEnvironmentVariable
+     * documents this as the way to tell the two apart (a dummy name and GUID: ERROR_INVALID_FUNCTION on
+     * BIOS, another error on UEFI). The UEFI variable services are not used yet: no variable is found.
+     */
+    if (!ExpBootedViaEfi)
+        return STATUS_NOT_IMPLEMENTED;
+
+    if (!SeSinglePrivilegeCheck(SeSystemEnvironmentPrivilege, ExGetPreviousMode()))
+        return STATUS_PRIVILEGE_NOT_HELD;
+
     UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    return STATUS_VARIABLE_NOT_FOUND;
 }
 
 NTSTATUS
@@ -590,6 +605,11 @@ NtSetSystemEnvironmentValueEx(
     _In_ ULONG ValueLength,
     _In_ ULONG Attributes)
 {
+    /* Same order of checks as NtQuerySystemEnvironmentValueEx; writing is not implemented */
+    if (ExpBootedViaEfi &&
+        !SeSinglePrivilegeCheck(SeSystemEnvironmentPrivilege, ExGetPreviousMode()))
+        return STATUS_PRIVILEGE_NOT_HELD;
+
     UNIMPLEMENTED;
     return STATUS_NOT_IMPLEMENTED;
 }
@@ -3591,8 +3611,6 @@ typedef struct _SYSTEM_BOOT_ENVIRONMENT_INFORMATION
     ULONGLONG BootFlags;
 } SYSTEM_BOOT_ENVIRONMENT_INFORMATION, *PSYSTEM_BOOT_ENVIRONMENT_INFORMATION;
 #endif
-
-extern BOOLEAN ExpBootedViaEfi;
 
 /* Class 90 - Boot Environment Information */
 QSI_DEF(SystemBootEnvironmentInformation)

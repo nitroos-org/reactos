@@ -62,3 +62,15 @@ typedef struct _GPT_PARTITION_ENTRY
 C_ASSERT(sizeof(GPT_PARTITION_ENTRY) == 128);
 
 #include <poppack.h>
+
+BOOLEAN
+GptCheckHeader(
+    _In_reads_bytes_(SectorSize) const UCHAR* Sector,
+    _In_ ULONG SectorSize,
+    _In_ ULONGLONG DiskSectors,
+    _In_ ULONGLONG HeaderLba);
+
+BOOLEAN
+GptCheckEntry(
+    _In_ const GPT_TABLE_HEADER* Header,
+    _In_ const GPT_PARTITION_ENTRY* Entry);

@@ -239,6 +239,7 @@ UefiGetBootPartitionEntry(
         GPT_PARTITION_ENTRY GptEntry;
         EFI_BLOCK_IO* RootBlockIo;
         ULONG EntriesPerBlock;
+        ULONG UsedIndex = 0;
         EFI_STATUS Status;
         EFI_GUID UnusedGuid = EFI_PART_TYPE_UNUSED_GUID;
         EFI_GUID SystemGuid = EFI_PART_TYPE_EFI_SYSTEM_PART_GUID;
@@ -252,6 +253,10 @@ UefiGetBootPartitionEntry(
             return FALSE;
 
         BlockSize = RootBlockIo->Media->BlockSize;
+        /* DiskReadGptHeader accepted the header: the entry size is 128 and the count is bounded.
+         * The block must hold at least one entry and fit the read buffer. */
+        if (BlockSize < GptHeader.SizeOfPartitionEntry || BlockSize > DiskReadBufferSize)
+            return FALSE;
         EntriesPerBlock = BlockSize / GptHeader.SizeOfPartitionEntry;
 
         /* Iterate through GPT partition entries */
@@ -260,29 +265,39 @@ UefiGetBootPartitionEntry(
             ULONGLONG EntryLba = GptHeader.PartitionEntryLba + (i / EntriesPerBlock);
             ULONG EntryOffset = (i % EntriesPerBlock) * GptHeader.SizeOfPartitionEntry;
 
-            /* Read the block containing the partition entry */
-            Status = RootBlockIo->ReadBlocks(
-                RootBlockIo,
-                RootBlockIo->Media->MediaId,
-                EntryLba,
-                BlockSize,
-                DiskReadBuffer);
+            /* Read the block containing the partition entry (one read for each block, not for each entry) */
+            if (EntryOffset == 0)
+            {
+                Status = RootBlockIo->ReadBlocks(
+                    RootBlockIo,
+                    RootBlockIo->Media->MediaId,
+                    EntryLba,
+                    BlockSize,
+                    DiskReadBuffer);
 
-            if (EFI_ERROR(Status))
-                continue;
+                /* A block that cannot be read: the numbers of the used entries behind it would be wrong */
+                if (EFI_ERROR(Status))
+                    return FALSE;
+            }
 
             /* Extract partition entry */
             RtlCopyMemory(&GptEntry, (PUCHAR)DiskReadBuffer + EntryOffset, sizeof(GptEntry));
 
-            /* Skip unused partitions */
+            /* Skip unused partitions: they have no number (partitions are numbered over the used
+             * entries in table order, as the kernel does, see DiskGetGptPartitionEntry) */
             if (RtlEqualMemory(&GptEntry.PartitionTypeGuid, &UnusedGuid, sizeof(UnusedGuid)))
+                continue;
+            UsedIndex++;
+
+            /* Skip entries outside of the usable range: their size would wrap around */
+            if (!GptCheckEntry(&GptHeader, &GptEntry))
                 continue;
 
             /* Calculate partition size in blocks */
             ULONGLONG PartitionSizeBlocks = GptEntry.EndingLba - GptEntry.StartingLba + 1;
 
             TRACE("GPT Partition %lu: StartLba=%llu, EndLba=%llu, SizeBlocks=%llu\n",
-                  i + 1, GptEntry.StartingLba, GptEntry.EndingLba, PartitionSizeBlocks);
+                  UsedIndex, GptEntry.StartingLba, GptEntry.EndingLba, PartitionSizeBlocks);
 
             /* Match partition by size (within 1 block tolerance for rounding) */
             if (PartitionSizeBlocks == BootPartitionSize ||
@@ -291,9 +306,9 @@ UefiGetBootPartitionEntry(
                   BootPartitionSize <= PartitionSizeBlocks + 1)))
             {
                 TRACE("Found matching GPT partition %lu: Size matches (%llu blocks)\n",
-                      i + 1, BootPartitionSize);
+                      UsedIndex, BootPartitionSize);
 
-                *BootPartition = i + 1; /* GPT partitions are 1-indexed */
+                *BootPartition = UsedIndex; /* GPT partitions are 1-indexed, counted over the used entries */
 
                 /* Convert GPT entry to standard-style entry */
                 if (PartitionEntry)

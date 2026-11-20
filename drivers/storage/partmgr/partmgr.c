@@ -353,6 +353,28 @@ PartMgrReleaseInstanceId(
         PartMgrReleaseLayoutLock(FdoExtension);
 }
 
+// An entry of the layout that is not a partition: an unused or container MBR entry,
+// an unused GPT entry (a slot of the entry array that holds nothing)
+static
+BOOLEAN
+PartMgrIsUnusedLayoutEntry(
+    _In_ PDRIVE_LAYOUT_INFORMATION_EX Layout,
+    _In_ PPARTITION_INFORMATION_EX Entry)
+{
+    static const GUID unusedGuid = {0};
+
+    if (Layout->PartitionStyle == PARTITION_STYLE_MBR)
+    {
+        return (Entry->Mbr.PartitionType == PARTITION_ENTRY_UNUSED ||
+                IsContainerPartition(Entry->Mbr.PartitionType));
+    }
+    if (Layout->PartitionStyle == PARTITION_STYLE_GPT)
+    {
+        return RtlCompareMemory(&Entry->Gpt.PartitionType, &unusedGuid, sizeof(GUID)) == sizeof(GUID);
+    }
+    return FALSE;
+}
+
 static
 CODE_SEG("PAGE")
 VOID
@@ -386,9 +408,7 @@ PartMgrUpdatePartitionDevices(
             partEntry = &NewLayout->PartitionEntry[i];
 
             // skip unused and container partitions
-            if (NewLayout->PartitionStyle == PARTITION_STYLE_MBR &&
-                (partEntry->Mbr.PartitionType == PARTITION_ENTRY_UNUSED ||
-                    IsContainerPartition(partEntry->Mbr.PartitionType)))
+            if (PartMgrIsUnusedLayoutEntry(NewLayout, partEntry))
             {
                 continue;
             }
@@ -462,9 +482,7 @@ PartMgrUpdatePartitionDevices(
         PPARTITION_INFORMATION_EX partEntry = &NewLayout->PartitionEntry[i];
 
         // again, skip unused and container partitions
-        if (NewLayout->PartitionStyle == PARTITION_STYLE_MBR &&
-            (partEntry->Mbr.PartitionType == PARTITION_ENTRY_UNUSED ||
-                IsContainerPartition(partEntry->Mbr.PartitionType)))
+        if (PartMgrIsUnusedLayoutEntry(NewLayout, partEntry))
         {
             continue;
         }
@@ -564,6 +582,28 @@ PartMgrUpdatePartitionDevices(
     FdoExtension->EnumeratedPartitionsTotal = totalPartitions;
 }
 
+// The partition style and the identifier of the disk that the partition manager keeps are those
+// of the layout it holds: a new layout (a new table written, or the table read) changes them.
+static
+CODE_SEG("PAGE")
+VOID
+PartMgrUpdateDiskData(
+    _In_ PFDO_EXTENSION FdoExtension,
+    _In_ PDRIVE_LAYOUT_INFORMATION_EX Layout)
+{
+    PAGED_CODE();
+
+    FdoExtension->DiskData.PartitionStyle = Layout->PartitionStyle;
+    if (Layout->PartitionStyle == PARTITION_STYLE_MBR)
+    {
+        FdoExtension->DiskData.Mbr.Signature = Layout->Mbr.Signature;
+    }
+    else
+    {
+        FdoExtension->DiskData.Gpt.DiskId = Layout->Gpt.DiskId;
+    }
+}
+
 /**
  * @brief
  * Retrieves the disk partition layout from the given disk FDO.
@@ -599,16 +639,7 @@ PartMgrGetDriveLayout(
     FdoExtension->LayoutCache = layoutEx;
     FdoExtension->LayoutValid = TRUE;
 
-    FdoExtension->DiskData.PartitionStyle = layoutEx->PartitionStyle;
-    if (FdoExtension->DiskData.PartitionStyle == PARTITION_STYLE_MBR)
-    {
-        FdoExtension->DiskData.Mbr.Signature = layoutEx->Mbr.Signature;
-        // FdoExtension->DiskData.Mbr.Checksum = geometryEx.Partition.Mbr.CheckSum;
-    }
-    else
-    {
-        FdoExtension->DiskData.Gpt.DiskId = layoutEx->Gpt.DiskId;
-    }
+    PartMgrUpdateDiskData(FdoExtension, layoutEx);
 
     FdoExtension->IsSuperFloppy = PartMgrIsDiskSuperFloppy(FdoExtension);
 
@@ -888,6 +919,7 @@ FdoIoctlDiskSetDriveLayout(
         }
         FdoExtension->LayoutCache = layoutEx;
         FdoExtension->LayoutValid = TRUE;
+        PartMgrUpdateDiskData(FdoExtension, layoutEx);
 
         // set updated partition numbers
         for (UINT32 i = 0; i < layoutInfo->PartitionCount; i++)
@@ -935,6 +967,7 @@ FdoIoctlDiskSetDriveLayoutEx(
 {
     PDRIVE_LAYOUT_INFORMATION_EX layoutEx, layoutUser = Irp->AssociatedIrp.SystemBuffer;
     NTSTATUS status;
+    BOOLEAN isGpt, returnLayout = FALSE;
 
     PAGED_CODE();
 
@@ -960,6 +993,7 @@ FdoIoctlDiskSetDriveLayoutEx(
     }
 
     RtlCopyMemory(layoutEx, layoutUser, layoutSize);
+    isGpt = (layoutEx->PartitionStyle == PARTITION_STYLE_GPT);
 
     PartMgrAcquireLayoutLock(FdoExtension);
 
@@ -970,6 +1004,7 @@ FdoIoctlDiskSetDriveLayoutEx(
          (layoutEx->PartitionCount > 1)))
     {
         PartMgrReleaseLayoutLock(FdoExtension);
+        ExFreePool(layoutEx);
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
@@ -991,21 +1026,27 @@ FdoIoctlDiskSetDriveLayoutEx(
     }
     else
     {
-        // this in fact updates the bus relations
-        PartMgrUpdatePartitionDevices(FdoExtension, layoutEx);
-
-        // write the partition table to the disk
-        status = IoWritePartitionTableEx(FdoExtension->LowerDevice, layoutEx);
-        if (NT_SUCCESS(status))
+        if (layoutEx->PartitionStyle == PARTITION_STYLE_GPT)
         {
-            // set updated partition numbers
-            for (UINT32 i = 0; i < layoutEx->PartitionCount; i++)
+            // the writer puts every partition into its slot of the entry array and returns
+            // the layout in table order: the partitions are numbered in that order
+            status = IoWritePartitionTableEx(FdoExtension->LowerDevice, layoutEx);
+            if (NT_SUCCESS(status))
             {
-                PPARTITION_INFORMATION_EX part = &layoutEx->PartitionEntry[i];
-
-                part->PartitionNumber = layoutEx->PartitionEntry[i].PartitionNumber;
+                // this in fact updates the bus relations
+                PartMgrUpdatePartitionDevices(FdoExtension, layoutEx);
             }
         }
+        else
+        {
+            // this in fact updates the bus relations
+            PartMgrUpdatePartitionDevices(FdoExtension, layoutEx);
+
+            // write the partition table to the disk
+            status = IoWritePartitionTableEx(FdoExtension->LowerDevice, layoutEx);
+        }
+
+
     }
 
     // update the layout cache
@@ -1017,12 +1058,24 @@ FdoIoctlDiskSetDriveLayoutEx(
         }
         FdoExtension->LayoutCache = layoutEx;
         FdoExtension->LayoutValid = TRUE;
+        PartMgrUpdateDiskData(FdoExtension, layoutEx);
 
         FdoExtension->IsSuperFloppy = PartMgrIsDiskSuperFloppy(FdoExtension);
+
+        // return the layout with the updated partition numbers, in table order, to a caller that gave
+        // room for it. This is done here: once the lock is released the cache (which is now layoutEx)
+        // can be replaced and freed by another request.
+        if (isGpt && VerifyIrpOutBufferSize(Irp, layoutSize))
+        {
+            RtlCopyMemory(layoutUser, layoutEx, layoutSize);
+            returnLayout = TRUE;
+        }
     }
     else
     {
         FdoExtension->LayoutValid = FALSE;
+        ExFreePool(layoutEx);
+        layoutEx = NULL;
     }
 
     PartMgrReleaseLayoutLock(FdoExtension);
@@ -1042,6 +1095,13 @@ FdoIoctlDiskSetDriveLayoutEx(
                                            &notification,
                                            NULL,
                                            NULL);
+
+    if (isGpt)
+    {
+        // a failed write is reported
+        Irp->IoStatus.Information = returnLayout ? layoutSize : 0;
+        return status;
+    }
 
     Irp->IoStatus.Information = layoutSize;
     return STATUS_SUCCESS;
