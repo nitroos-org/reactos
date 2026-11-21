@@ -181,6 +181,7 @@ KMT_TESTFUNC Test_RtlSplayTree;
 KMT_TESTFUNC Test_RtlStack;
 KMT_TESTFUNC Test_RtlUnicodePrefix;
 KMT_TESTFUNC Test_RtlStrSafe;
+KMT_TESTFUNC Test_RtlUnicodePrefixEmptyName;
 KMT_TESTFUNC Test_RtlUnicodeString;
 KMT_TESTFUNC Test_ZwAllocateVirtualMemory;
 KMT_TESTFUNC Test_ZwCreateSection;
@@ -350,6 +351,7 @@ const KMT_TEST TestList[] =
     { "RtlStackKM",                         Test_RtlStack },
     { "RtlUnicodePrefix",                   Test_RtlUnicodePrefix },
     { "RtlStrSafeKM",                       Test_RtlStrSafe },
+    { "RtlUnicodePrefixEmptyName",          Test_RtlUnicodePrefixEmptyName },
     { "RtlUnicodeStringKM",                 Test_RtlUnicodeString },
     { "SeAccessCheckAuditAlarm",            Test_SeAccessCheckAuditAlarm },
     { "SeAccessCheckDifferential",          Test_SeAccessCheckDifferential },
