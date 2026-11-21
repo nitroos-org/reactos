@@ -2006,7 +2006,8 @@ StTestInterfaceParams(PIP_INTERFACE Eth, const ip6_addr_t *R1, const UCHAR *Mac1
     n = TCP6InterfaceMetric(En);
     UNLOCK_TCPIP_CORE();
     _snprintf(Detail, sizeof(Detail), "automatic metric %u", n);
-    StResult(St == STATUS_SUCCESS && Eth->Ip6Metric == 0 && n >= 15 && n <= 40, "interface parameters: metric 0 is automatic again", Detail);
+    StResult(St == STATUS_SUCCESS && Eth->Ip6Metric == 0 && n == RouterAutomaticMetric((ULONGLONG)Eth->Speed * 100),
+             "interface parameters: metric 0 is automatic again", Detail);
 
     /* what the stack cannot do */
     Req.Fields = TCP_IPIF_SET_FORWARDING;

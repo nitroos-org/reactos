@@ -265,18 +265,31 @@ static NETIO_IF *find_row_interface(NETIO_IF *List, ULONG Count, ULONG64 Luid, D
 
 /* ---- MIB_IF_ROW2 ---- */
 
-/* The automatic interface metric of Windows for a link speed in bits per second. */
+/* The automatic interface metric of Windows for a link speed in bits per second: the table Microsoft documents for
+ * Windows 10 and later, for interfaces that are not wireless (Wi-Fi interfaces have a table of their own, not implemented):
+ * https://learn.microsoft.com/troubleshoot/windows-server/networking/automatic-metric-for-ipv4-routes
+ * The stack (tcpip router.c) has the same table. */
 static ULONG automatic_metric(ULONG64 Speed)
 {
-  if (Speed > 200000000ULL)
+  if (Speed >= 100000000000ULL)
+    return 5;
+  if (Speed >= 40000000000ULL)
+    return 10;
+  if (Speed >= 10000000000ULL)
     return 15;
-  if (Speed > 80000000ULL)
+  if (Speed >= 2000000000ULL)
     return 20;
-  if (Speed > 20000000ULL)
+  if (Speed >= 200000000ULL)
     return 25;
-  if (Speed > 4000000ULL)
-    return 30;
-  return 40;
+  if (Speed >= 80000000ULL)
+    return 35;
+  if (Speed >= 20000000ULL)
+    return 45;
+  if (Speed >= 4000000ULL)
+    return 55;
+  if (Speed >= 500000ULL)
+    return 65;
+  return 75;
 }
 
 static void fill_if_row2(const NETIO_IF *If, PMIB_IF_ROW2 Out, BOOL Statistics)
