@@ -483,6 +483,21 @@ Return Value:
                 SetFlag(Vcb->Vpb->RealDevice->Flags, DO_VERIFY_VOLUME);
             }
 
+#ifdef __REACTOS__
+            //
+            //  chkdsk may have cleared the dirty bit of a volume that is
+            //  mounted dirty (it cannot lock the boot volume).  Its handle
+            //  has FO_FILE_MODIFIED but not WriteAccess (that is what the
+            //  test above misses): see FatCheckDirtyBitOnDisk.
+            //
+
+            if (!FlagOn( Ccb->Flags, CCB_FLAG_COMPLETE_DISMOUNT ) &&
+                FlagOn(FileObject->Flags, FO_FILE_MODIFIED)) {
+
+                FatCheckDirtyBitOnDisk( IrpContext, Vcb );
+            }
+#endif
+
             //
             //  If the volume is locked by this file object then release
             //  the volume and send notification.
