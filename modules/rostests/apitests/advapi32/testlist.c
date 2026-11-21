@@ -2,6 +2,9 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_AccessCheckAuditAlarm(void);
+extern void func_AccessCheckAuditAlarmArgs(void);
+extern void func_AccessCheckAuditAlarmStress(void);
 extern void func_AccessCheckDifferential(void);
 extern void func_AccessCheckObjectTypeList(void);
 extern void func_AddMandatoryAce(void);
@@ -170,6 +173,9 @@ extern void func_LsaLookupSids2(void);
 
 const struct test winetest_testlist[] =
 {
+    { "AccessCheckAuditAlarm", func_AccessCheckAuditAlarm },
+    { "AccessCheckAuditAlarmArgs", func_AccessCheckAuditAlarmArgs },
+    { "AccessCheckAuditAlarmStress", func_AccessCheckAuditAlarmStress },
     { "AccessCheckDifferential", func_AccessCheckDifferential },
     { "AccessCheckObjectTypeList", func_AccessCheckObjectTypeList },
     { "AddMandatoryAce", func_AddMandatoryAce },

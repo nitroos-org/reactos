@@ -177,6 +177,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ps/PsQuota.c
     ntos_ps/PsQuotaLimited.c
     ntos_ps/PsQuotaSwitchRace.c
+    ntos_se/SeAccessCheckAuditAlarm.c
     ntos_se/SeAccessCheckDifferential.c
     ntos_se/SeAutoInherit.c
     ntos_se/SeHelpers.c

@@ -1410,6 +1410,159 @@ SepGetPrivilegeSetLength(
 
 /**
  * @brief
+ * Gives one result to the object, or to every entry of the object
+ * type list when the caller asked for a result list.
+ *
+ * @param[out] GrantedAccessList
+ * Kernel buffer of one entry, or of ObjectTypeListLength entries
+ * with UseResultList.
+ *
+ * @param[out] AccessStatusList
+ * Kernel buffer of one entry, or of ObjectTypeListLength entries
+ * with UseResultList.
+ */
+VOID
+SepSetAccessCheckResults(
+    _Out_writes_(UseResultList ? ObjectTypeListLength : 1) PACCESS_MASK GrantedAccessList,
+    _Out_writes_(UseResultList ? ObjectTypeListLength : 1) PNTSTATUS AccessStatusList,
+    _In_ BOOLEAN UseResultList,
+    _In_ ULONG ObjectTypeListLength,
+    _In_ ACCESS_MASK GrantedAccess,
+    _In_ NTSTATUS AccessStatus)
+{
+    ULONG ResultListIndex;
+    ULONG ResultListLength = UseResultList ? ObjectTypeListLength : 1;
+
+    for (ResultListIndex = 0; ResultListIndex < ResultListLength; ResultListIndex++)
+    {
+        GrantedAccessList[ResultListIndex] = GrantedAccess;
+        AccessStatusList[ResultListIndex] = AccessStatus;
+    }
+}
+
+/**
+ * @brief
+ * The access check of the NtAccessCheck* and the NtAccessCheck*AndAuditAlarm
+ * system services, on input that the caller has already captured and
+ * validated. Both families call this, so for the same descriptor, token,
+ * request, object type list and mapping they give the same results.
+ *
+ * @param[in] CapturedSecurityDescriptor
+ * The captured descriptor of the object; it has an owner and a group.
+ *
+ * @param[in] Token
+ * The referenced token of the client. The function takes its lock.
+ *
+ * @param[in] PrimaryToken
+ * The primary token of the caller (only a fallback of the worker).
+ *
+ * @param[in] CapturedPrincipalSelfSid
+ * The captured principal self SID, or NULL.
+ *
+ * @param[in] DesiredAccess
+ * The rights asked for, with no generic rights and without the rights
+ * that SePrivilegePolicyCheck has granted already.
+ *
+ * @param[in] PreviouslyGrantedAccess
+ * The rights that SePrivilegePolicyCheck has granted.
+ *
+ * @param[in] CapturedObjectTypeList
+ * The captured object type list, or NULL.
+ *
+ * @param[in] ObjectTypeListLength
+ * The number of entries of the list (not 0 with UseResultList).
+ *
+ * @param[in] CapturedGenericMapping
+ * The captured generic mapping.
+ *
+ * @param[in] UseResultList
+ * TRUE for a result per entry of the list.
+ *
+ * @param[out] GrantedAccessList
+ * Kernel buffer for the granted rights (one entry, or one per list entry).
+ *
+ * @param[out] AccessStatusList
+ * Kernel buffer for the access status (one entry, or one per list entry).
+ */
+VOID
+SepAccessCheckCaptured(
+    _In_ PSECURITY_DESCRIPTOR CapturedSecurityDescriptor,
+    _In_ PTOKEN Token,
+    _In_ PACCESS_TOKEN PrimaryToken,
+    _In_opt_ PSID CapturedPrincipalSelfSid,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ ACCESS_MASK PreviouslyGrantedAccess,
+    _In_reads_opt_(ObjectTypeListLength) POBJECT_TYPE_LIST_INTERNAL CapturedObjectTypeList,
+    _In_ ULONG ObjectTypeListLength,
+    _In_ PGENERIC_MAPPING CapturedGenericMapping,
+    _In_ BOOLEAN UseResultList,
+    _Out_writes_(UseResultList ? ObjectTypeListLength : 1) PACCESS_MASK GrantedAccessList,
+    _Out_writes_(UseResultList ? ObjectTypeListLength : 1) PNTSTATUS AccessStatusList)
+{
+    PAGED_CODE();
+
+    ASSERT(CapturedSecurityDescriptor != NULL);
+    ASSERT(Token != NULL);
+    ASSERT(!UseResultList || (CapturedObjectTypeList != NULL && ObjectTypeListLength != 0));
+
+    /* Lock the token */
+    SepAcquireTokenLockShared(Token);
+
+    /*
+     * Check if the token is the owner and grant WRITE_DAC and READ_CONTROL rights,
+     * unless the DACL has an OWNER RIGHTS ACE for the object
+     */
+    if (DesiredAccess & (WRITE_DAC | READ_CONTROL | MAXIMUM_ALLOWED))
+    {
+        if (SepTokenGetsImplicitOwnerRights(Token, CapturedSecurityDescriptor))
+        {
+            if (DesiredAccess & MAXIMUM_ALLOWED)
+                PreviouslyGrantedAccess |= (WRITE_DAC | READ_CONTROL);
+            else
+                PreviouslyGrantedAccess |= (DesiredAccess & (WRITE_DAC | READ_CONTROL));
+
+            DesiredAccess &= ~(WRITE_DAC | READ_CONTROL);
+        }
+    }
+
+    if (DesiredAccess == 0)
+    {
+        /*
+         * Propagate the access and status for the whole hierarchy
+         * of the list or just to single target object.
+         */
+        SepSetAccessCheckResults(GrantedAccessList,
+                                 AccessStatusList,
+                                 UseResultList,
+                                 ObjectTypeListLength,
+                                 PreviouslyGrantedAccess,
+                                 STATUS_SUCCESS);
+    }
+    else
+    {
+        /* Now perform the access check */
+        SepAccessCheckWorker(CapturedSecurityDescriptor,
+                             Token,
+                             PrimaryToken,
+                             CapturedPrincipalSelfSid,
+                             DesiredAccess,
+                             CapturedObjectTypeList,
+                             ObjectTypeListLength,
+                             PreviouslyGrantedAccess,
+                             CapturedGenericMapping,
+                             UserMode,
+                             UseResultList,
+                             NULL,
+                             GrantedAccessList,
+                             AccessStatusList);
+    }
+
+    /* Unlock the token */
+    SepReleaseTokenLock(Token);
+}
+
+/**
+ * @brief
  * Internal function that performs a security check against the
  * client who requests access on a resource object. This function
  * is used by access check NT system calls.
@@ -1527,7 +1680,6 @@ SepAccessCheck(
     ACCESS_MASK PreviouslyGrantedAccess = 0;
     PPRIVILEGE_SET Privileges = NULL;
     ULONG CapturedPrivilegeSetLength, RequiredPrivilegeSetLength;
-    ULONG ResultListIndex;
     PTOKEN Token = NULL;
     NTSTATUS Status;
     GENERIC_MAPPING CapturedGenericMapping = {0};
@@ -1535,7 +1687,7 @@ SepAccessCheck(
     PNTSTATUS ResultAccessStatus;
     ACCESS_MASK SingleGrantedAccess = 0;
     NTSTATUS SingleAccessStatus = STATUS_ACCESS_DENIED;
-    BOOLEAN TokenLocked = FALSE;
+    BOOLEAN SubjectContextCaptured = FALSE;
     BOOLEAN IsPseudoHandle = FALSE;
     BOOLEAN OutputAccessResults = FALSE;
     BOOLEAN WriteRequiredLength = FALSE;
@@ -1699,19 +1851,12 @@ SepAccessCheck(
          * Propagate the access and status for the whole hierarchy of the list
          * or just to single target object.
          */
-        if (UseResultList)
-        {
-            for (ResultListIndex = 0; ResultListIndex < ObjectTypeListLength; ResultListIndex++)
-            {
-                ResultAccessStatus[ResultListIndex] = Status;
-                ResultGrantedAccess[ResultListIndex] = 0;
-            }
-        }
-        else
-        {
-            *ResultAccessStatus = Status;
-            *ResultGrantedAccess = 0;
-        }
+        SepSetAccessCheckResults(ResultGrantedAccess,
+                                 ResultAccessStatus,
+                                 UseResultList,
+                                 ObjectTypeListLength,
+                                 0,
+                                 Status);
 
         OutputAccessResults = TRUE;
         FunctionStatus = STATUS_SUCCESS;
@@ -1825,79 +1970,31 @@ SepAccessCheck(
         }
     }
 
-    /* Set up the subject context, and lock it */
+    /* The primary token is only a fallback of the worker; the client token is always given */
     SeCaptureSubjectContext(&SubjectSecurityContext);
+    SubjectContextCaptured = TRUE;
 
-    /* Lock the token */
-    SepAcquireTokenLockShared(Token);
-    TokenLocked = TRUE;
-
-    /*
-     * Check if the token is the owner and grant WRITE_DAC and READ_CONTROL rights,
-     * unless the DACL has an OWNER RIGHTS ACE for the object
-     */
-    if (DesiredAccess & (WRITE_DAC | READ_CONTROL | MAXIMUM_ALLOWED))
-    {
-        if (SepTokenGetsImplicitOwnerRights(Token, CapturedSecurityDescriptor))
-        {
-            if (DesiredAccess & MAXIMUM_ALLOWED)
-                PreviouslyGrantedAccess |= (WRITE_DAC | READ_CONTROL);
-            else
-                PreviouslyGrantedAccess |= (DesiredAccess & (WRITE_DAC | READ_CONTROL));
-
-            DesiredAccess &= ~(WRITE_DAC | READ_CONTROL);
-        }
-    }
-
-    if (DesiredAccess == 0)
-    {
-        /*
-         * Propagate the access and status for the whole hierarchy
-         * of the list or just to single target object.
-         */
-        if (UseResultList)
-        {
-            for (ResultListIndex = 0; ResultListIndex < ObjectTypeListLength; ResultListIndex++)
-            {
-                ResultAccessStatus[ResultListIndex] = STATUS_SUCCESS;
-                ResultGrantedAccess[ResultListIndex] = PreviouslyGrantedAccess;
-            }
-        }
-        else
-        {
-            *ResultGrantedAccess = PreviouslyGrantedAccess;
-            *ResultAccessStatus = STATUS_SUCCESS;
-        }
-    }
-    else
-    {
-        /* Now perform the access check */
-        SepAccessCheckWorker(CapturedSecurityDescriptor,
-                             Token,
-                             &SubjectSecurityContext.PrimaryToken,
-                             CapturedPrincipalSelfSid,
-                             DesiredAccess,
-                             CapturedObjectTypeList,
-                             ObjectTypeListLength,
-                             PreviouslyGrantedAccess,
-                             &CapturedGenericMapping,
-                             PreviousMode,
-                             UseResultList,
-                             NULL,
-                             ResultGrantedAccess,
-                             ResultAccessStatus);
-    }
+    /* Now perform the access check (the access check and audit alarm services share this) */
+    SepAccessCheckCaptured(CapturedSecurityDescriptor,
+                           Token,
+                           SubjectSecurityContext.PrimaryToken,
+                           CapturedPrincipalSelfSid,
+                           DesiredAccess,
+                           PreviouslyGrantedAccess,
+                           CapturedObjectTypeList,
+                           ObjectTypeListLength,
+                           &CapturedGenericMapping,
+                           UseResultList,
+                           ResultGrantedAccess,
+                           ResultAccessStatus);
 
     OutputAccessResults = TRUE;
     FunctionStatus = STATUS_SUCCESS;
 
 Cleanup:
-    /* Release subject context and unlock the token */
-    if (TokenLocked)
-    {
+    /* Release the subject context */
+    if (SubjectContextCaptured)
         SeReleaseSubjectContext(&SubjectSecurityContext);
-        SepReleaseTokenLock(Token);
-    }
 
     /* Release the caputed principal self SID */
     SepReleaseSid(CapturedPrincipalSelfSid,

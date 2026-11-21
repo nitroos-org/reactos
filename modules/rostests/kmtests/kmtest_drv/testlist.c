@@ -157,6 +157,7 @@ KMT_TESTFUNC Test_PsQuotaLimitedTrim;
 KMT_TESTFUNC Test_PsQuotaLimitedSetLimits;
 KMT_TESTFUNC Test_PsQuotaLimitedThreshold;
 KMT_TESTFUNC Test_PsQuotaSwitchRace;
+KMT_TESTFUNC Test_SeAccessCheckAuditAlarm;
 KMT_TESTFUNC Test_SeAccessCheckDifferential;
 KMT_TESTFUNC Test_SeAccessCheckDifferentialFull;
 KMT_TESTFUNC Test_SeAccessCheckDifferentialPerf;
@@ -350,6 +351,7 @@ const KMT_TEST TestList[] =
     { "RtlUnicodePrefix",                   Test_RtlUnicodePrefix },
     { "RtlStrSafeKM",                       Test_RtlStrSafe },
     { "RtlUnicodeStringKM",                 Test_RtlUnicodeString },
+    { "SeAccessCheckAuditAlarm",            Test_SeAccessCheckAuditAlarm },
     { "SeAccessCheckDifferential",          Test_SeAccessCheckDifferential },
     { "-SeAccessCheckDifferentialFull",     Test_SeAccessCheckDifferentialFull },
     { "-SeAccessCheckDifferentialPerf",     Test_SeAccessCheckDifferentialPerf },

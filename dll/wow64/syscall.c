@@ -3387,6 +3387,45 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         return NtAccessCheckByTypeResultList(Security32(&Descriptor, P(0)), P(1), H(2), a[3], List, a[5], P(6), P(7),
                                              P(8), P(9), P(10));
     }
+    /* The access check and audit alarm services: the three names are 32-bit UNICODE_STRINGs, the descriptor and
+     * the object type list are converted as for NtAccessCheck*, the outputs are ULONG arrays and a BOOLEAN, the
+     * same in both ABIs. The kernel captures and checks everything else. */
+    case W64_NtAccessCheckAndAuditAlarm:
+    {
+        UNICODE_STRING Names[3];
+        return NtAccessCheckAndAuditAlarm(String32(&Names[0], P(0)), P(1), String32(&Names[1], P(2)),
+                                          String32(&Names[2], P(3)), Security32(&Descriptor, P(4)), a[5], P(6),
+                                          (BOOLEAN)a[7], P(8), P(9), P(10));
+    }
+    case W64_NtAccessCheckByTypeAndAuditAlarm:
+    case W64_NtAccessCheckByTypeResultListAndAuditAlarm:
+    {
+        UNICODE_STRING Names[3];
+        POBJECT_TYPE_LIST List;
+        Status = ObjectTypeList32(a[9], a[10], &List, Cleanup);
+        if (!NT_SUCCESS(Status)) return Status;
+        if (Number == W64_NtAccessCheckByTypeAndAuditAlarm)
+            return NtAccessCheckByTypeAndAuditAlarm(String32(&Names[0], P(0)), P(1), String32(&Names[1], P(2)),
+                                                    String32(&Names[2], P(3)), Security32(&Descriptor, P(4)), P(5),
+                                                    a[6], a[7], a[8], List, a[10], P(11), (BOOLEAN)a[12], P(13),
+                                                    P(14), P(15));
+        return NtAccessCheckByTypeResultListAndAuditAlarm(String32(&Names[0], P(0)), P(1), String32(&Names[1], P(2)),
+                                                          String32(&Names[2], P(3)), Security32(&Descriptor, P(4)),
+                                                          P(5), a[6], a[7], a[8], List, a[10], P(11), (BOOLEAN)a[12],
+                                                          P(13), P(14), P(15));
+    }
+    case W64_NtAccessCheckByTypeResultListAndAuditAlarmByHandle:
+    {
+        UNICODE_STRING Names[3];
+        POBJECT_TYPE_LIST List;
+        Status = ObjectTypeList32(a[10], a[11], &List, Cleanup);
+        if (!NT_SUCCESS(Status)) return Status;
+        return NtAccessCheckByTypeResultListAndAuditAlarmByHandle(String32(&Names[0], P(0)), P(1), H(2),
+                                                                  String32(&Names[1], P(3)), String32(&Names[2], P(4)),
+                                                                  Security32(&Descriptor, P(5)), P(6), a[7], a[8],
+                                                                  a[9], List, a[11], P(12), (BOOLEAN)a[13], P(14),
+                                                                  P(15), P(16));
+    }
     case W64_NtSetSecurityObject:
         return NtSetSecurityObject(H(0), a[1], Security32(&Descriptor, P(2)));
     case W64_NtQuerySecurityObject:

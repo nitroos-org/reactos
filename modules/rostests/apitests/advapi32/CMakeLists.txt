@@ -1,5 +1,8 @@
 
 list(APPEND SOURCE
+    AccessCheckAuditAlarm.c
+    AccessCheckAuditAlarmArgs.c
+    AccessCheckAuditAlarmStress.c
     AccessCheckDifferential.c
     AccessCheckObjectTypeList.c
     AddMandatoryAce.c
