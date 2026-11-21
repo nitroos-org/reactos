@@ -852,13 +852,24 @@ get_best_icon_file_offset(
 
 /************* IMPLEMENTATION CORE ****************/
 
+/* Bytes of cLines rows of cx pixels at cBitCount, DWORD aligned, in 64 bits (no wrap) */
+static ULONGLONG get_dib_image_size64( LONG cx, LONG cLines, WORD cBitCount )
+{
+    ULONGLONG cxAbs = (ULONGLONG)(cx < 0 ? -(LONGLONG)cx : cx);
+    ULONGLONG cyAbs = (ULONGLONG)(cLines < 0 ? -(LONGLONG)cLines : cLines);
+    return (((cxAbs * cBitCount + 31) >> 3) & ~3ULL) * cyAbs;
+}
+
+/* cbBmi is the number of bytes at pbmi: the header, its colour table and the image bits must be
+   inside it, whatever the header claims */
 static BOOL CURSORICON_GetCursorDataFromBMI(
     _Inout_ CURSORDATA* pdata,
-    _In_    const BITMAPINFO *pbmi
+    _In_    const BITMAPINFO *pbmi,
+    _In_    SIZE_T cbBmi
 )
 {
-    UINT ubmiSize = bitmap_info_size(pbmi, DIB_RGB_COLORS);
-    BOOL monochrome = is_dib_monochrome(pbmi);
+    UINT ubmiSize;
+    BOOL monochrome;
     LONG width, height;
     WORD bpp;
     DWORD compr;
@@ -868,6 +879,12 @@ static BOOL CURSORICON_GetCursorDataFromBMI(
     HBITMAP hbmpOld = NULL;
     BOOL bResult = FALSE;
     const VOID *pvColor, *pvMask;
+    PVOID pvMaskCopy = NULL;
+    ULONGLONG cjColor, cjMask;
+
+    /* DIB_GetBitmapInfo reads the header (and the 8 bytes of a PNG signature) */
+    if ((cbBmi < 8) || (pbmi->bmiHeader.biSize > cbBmi))
+        return FALSE;
 
     ibmpType = DIB_GetBitmapInfo(&pbmi->bmiHeader, &width, &height, &bpp, &compr);
     /* Invalid data */
@@ -877,6 +894,26 @@ static BOOL CURSORICON_GetCursorDataFromBMI(
     /* No compression for icons */
     if(compr != BI_RGB)
         return FALSE;
+
+    /* An image without pixels has nothing to draw, and the hotspot is scaled by width and height */
+    if ((width <= 0) || (height == 0))
+        return FALSE;
+
+    /* The colour table, then the XOR bits, must be there */
+    ubmiSize = bitmap_info_size(pbmi, DIB_RGB_COLORS);
+    cjColor = get_dib_image_size64(width, height / 2, bpp);
+    cjMask = get_dib_image_size64(width, height / 2, 1);
+    if ((ubmiSize > cbBmi) || (cjColor > cbBmi - ubmiSize))
+    {
+        WARN("Icon image needs %u + %I64u bytes, has %Iu\n", ubmiSize, cjColor, cbBmi);
+        return FALSE;
+    }
+
+    /* is_dib_monochrome looks at two colour table entries */
+    monochrome = (bpp == 1) &&
+                 ((ULONGLONG)pbmi->bmiHeader.biSize +
+                  2 * ((pbmi->bmiHeader.biSize == sizeof(BITMAPCOREHEADER)) ? sizeof(RGBTRIPLE) : sizeof(RGBQUAD)) <= cbBmi) &&
+                 is_dib_monochrome(pbmi);
 
     /* If no dimensions were set, use the one from the icon */
     if(!pdata->cx) pdata->cx = width;
@@ -919,8 +956,21 @@ static BOOL CURSORICON_GetCursorDataFromBMI(
     height /= 2;
 
     pvColor = (const char*)pbmi + ubmiSize;
-    pvMask = (const char*)pvColor +
-        get_dib_image_size(width, height, bpp );
+    pvMask = (const char*)pvColor + (SIZE_T)cjColor;
+
+    /* Some icons end before their AND mask (or in the middle of it): read what is there into a
+       zero filled mask instead of reading behind the data */
+    if (cjMask > cbBmi - ubmiSize - cjColor)
+    {
+        SIZE_T cjHave = (SIZE_T)(cbBmi - ubmiSize - cjColor);
+        if (cjMask > MAXLONG)
+            goto done;
+        pvMaskCopy = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)cjMask);
+        if (!pvMaskCopy)
+            goto done;
+        RtlCopyMemory(pvMaskCopy, pvMask, cjHave);
+        pvMask = pvMaskCopy;
+    }
 
     /* Set XOR bits */
     if(monochrome)
@@ -992,6 +1042,7 @@ done:
     if(hbmpOld) SelectObject(hdc, hbmpOld);
     DeleteDC(hdc);
     if(pbmiCopy) HeapFree(GetProcessHeap(), 0, pbmiCopy);
+    if(pvMaskCopy) HeapFree(GetProcessHeap(), 0, pvMaskCopy);
     /* Clean up in case of failure */
     if(!bResult)
     {
@@ -1244,8 +1295,20 @@ static BOOL CURSORICON_GetCursorDataFromANI(
     for(i=0; i < pHeader->num_frames; i++)
     {
         CURSORDATA* pFrameData;
-        const DWORD chunk_size = *(const DWORD *)(icon_chunk + sizeof(DWORD));
+        DWORD chunk_size;
         const BITMAPINFO* pbmi;
+        const BYTE *pEnd = pData + dwDataSize;
+        SIZE_T cbFrame, cbAvail;
+
+        /* The frame chunk header and its data are read from the caller's buffer: stay inside it
+           whatever the chunk sizes say */
+        if ((icon_chunk < pData) || (icon_chunk > pEnd) || ((SIZE_T)(pEnd - icon_chunk) < 2 * sizeof(DWORD)))
+        {
+            ERR("Frame %d is outside of the data.\n", i);
+            goto error;
+        }
+        chunk_size = *(const DWORD *)(icon_chunk + sizeof(DWORD));
+        cbFrame = min((SIZE_T)chunk_size, (SIZE_T)(pEnd - icon_data));
 
         if(pHeader->num_frames > 1)
             pFrameData = &pCurData->aspcur[i];
@@ -1259,7 +1322,7 @@ static BOOL CURSORICON_GetCursorDataFromANI(
             /* The chunks describe an icon file */
             const CURSORICONFILEDIRENTRY* pDirEntry = get_best_icon_file_entry(
                 (const CURSORICONFILEDIR *) icon_data,
-                chunk_size,
+                (DWORD)cbFrame,
                 pCurData->cx,
                 pCurData->cy,
                 TRUE,
@@ -1281,17 +1344,20 @@ static BOOL CURSORICON_GetCursorDataFromANI(
                 pFrameData->cx = pHeader->width;
                 pFrameData->cy = pHeader->height;
             }
+            /* get_best_icon_file_entry checked the entry against cbFrame */
             pbmi = (const BITMAPINFO *) (icon_data + pDirEntry->dwDIBOffset);
+            cbAvail = cbFrame - pDirEntry->dwDIBOffset;
         }
         else
         {
             /* The chunks just describe bitmaps */
             pbmi = (const BITMAPINFO *)icon_data;
+            cbAvail = cbFrame;
             pFrameData->xHotspot = pFrameData->yHotspot = 0;
         }
 
         /* Do the real work */
-        CURSORICON_GetCursorDataFromBMI(pFrameData, pbmi);
+        CURSORICON_GetCursorDataFromBMI(pFrameData, pbmi, cbAvail);
 
         if(pHeader->num_frames > 1)
             pFrameData->CURSORF_flags |= CURSORF_ACONFRAME;
@@ -1671,11 +1737,13 @@ CURSORICON_LoadFromFileW(
     cursorData.rt = LOWORD(bIcon ? RT_ICON : RT_CURSOR);
 
     /* Try to load BMP icon */
-    if (!CURSORICON_GetCursorDataFromBMI(&cursorData, (PBITMAPINFO)(&bits[entry->dwDIBOffset])))
+    /* get_best_icon_file_entry checked dwDIBOffset against the file size */
+    if (!CURSORICON_GetCursorDataFromBMI(&cursorData, (PBITMAPINFO)(&bits[entry->dwDIBOffset]),
+                                         filesize - entry->dwDIBOffset))
     {
         /* Convert PNG raw data to BMP icon if the icon was PNG icon */
         PBYTE pngBits = &bits[entry->dwDIBOffset];
-        pbBmpIcon = CURSORICON_ConvertPngToBmpIcon(pngBits, filesize, &BmpIconSize);
+        pbBmpIcon = CURSORICON_ConvertPngToBmpIcon(pngBits, filesize - entry->dwDIBOffset, &BmpIconSize);
         if (!pbBmpIcon)
             goto end; /* Not PNG icon or failed */
 
@@ -1688,7 +1756,8 @@ CURSORICON_LoadFromFileW(
         cursorData.rt = LOWORD(bIcon ? RT_ICON : RT_CURSOR);
 
         /* Can we load this BMP icon? */
-        if (!CURSORICON_GetCursorDataFromBMI(&cursorData, (PBITMAPINFO)(&pbBmpIcon[entry->dwDIBOffset])))
+        if (!CURSORICON_GetCursorDataFromBMI(&cursorData, (PBITMAPINFO)(&pbBmpIcon[entry->dwDIBOffset]),
+                                             BmpIconSize - entry->dwDIBOffset))
         {
             ERR("Failing file: '%S'.\n", lpszName);
             goto end;
@@ -1929,9 +1998,17 @@ CURSORICON_LoadImageW(
     {
         /* idType == 2 for cursor resources */
         SHORT* ptr = (SHORT*)bits;
-        cursorData.xHotspot = ptr[0];
-        cursorData.yHotspot = ptr[1];
-        bits += 2*sizeof(SHORT);
+        if (cbBits >= 2*sizeof(SHORT))
+        {
+            cursorData.xHotspot = ptr[0];
+            cursorData.yHotspot = ptr[1];
+            bits += 2*sizeof(SHORT);
+            cbBits -= 2*sizeof(SHORT);
+        }
+        else
+        {
+            cbBits = 0;
+        }
     }
     cursorData.cx = cxDesired;
     cursorData.cy = cyDesired;
@@ -1940,7 +2017,8 @@ CURSORICON_LoadImageW(
     /* Get the bitmaps */
     bStatus = CURSORICON_GetCursorDataFromBMI(
         &cursorData,
-        (BITMAPINFO*)bits);
+        (BITMAPINFO*)bits,
+        cbBits);
 
     if(!bStatus && bIcon)
     {
@@ -1958,7 +2036,8 @@ CURSORICON_LoadImageW(
             cursorData.rt = (USHORT)((ULONG_PTR)RT_ICON);
             bStatus = CURSORICON_GetCursorDataFromBMI(
                 &cursorData,
-                (PBITMAPINFO)&pbBmpIcon[bmpDir->idEntries[0].dwDIBOffset]);
+                (PBITMAPINFO)&pbBmpIcon[bmpDir->idEntries[0].dwDIBOffset],
+                cbBmpIcon - bmpDir->idEntries[0].dwDIBOffset);
             HeapFree(GetProcessHeap(), 0, pbBmpIcon);
         }
     }
@@ -3170,19 +3249,27 @@ HICON WINAPI CreateIconFromResourceEx(
                 FreeResource(ResHandle);
                 return NULL;
             }
+            /* From here on the bits are the resource's, and so is their size */
+            cbIconBits = SizeofResource(hinst, hrsrc);
         }
         if(!fIcon)
         {
             WORD* pt = (WORD*)pbIconBits;
+            if (cbIconBits < 2 * sizeof(WORD))
+            {
+                if (ResHandle) FreeResource(ResHandle);
+                return NULL;
+            }
             cursorData.xHotspot = *pt++;
             cursorData.yHotspot = *pt++;
             pbIconBits = (PBYTE)pt;
+            cbIconBits -= 2 * sizeof(WORD);
         }
 
         isAnimated = FALSE;
 
         /* Try to load BMP icon */
-        if (!CURSORICON_GetCursorDataFromBMI(&cursorData, (PBITMAPINFO)pbIconBits))
+        if (!CURSORICON_GetCursorDataFromBMI(&cursorData, (PBITMAPINFO)pbIconBits, cbIconBits))
         {
             /* Convert PNG raw data to BMP icon if the icon was PNG icon */
             pbBmpIcon = CURSORICON_ConvertPngToBmpIcon(pbIconBits, cbIconBits, &BmpIconSize);
@@ -3198,7 +3285,8 @@ HICON WINAPI CreateIconFromResourceEx(
             cursorData.rt = LOWORD(fIcon ? RT_ICON : RT_CURSOR);
 
             /* Can we load this BMP icon? */
-            if (!CURSORICON_GetCursorDataFromBMI(&cursorData, (PBITMAPINFO)&pbBmpIcon[entry->dwDIBOffset]))
+            if (!CURSORICON_GetCursorDataFromBMI(&cursorData, (PBITMAPINFO)&pbBmpIcon[entry->dwDIBOffset],
+                                                 BmpIconSize - entry->dwDIBOffset))
             {
                 ERR("Couldn't get cursor/icon data\n");
                 goto end_error;
