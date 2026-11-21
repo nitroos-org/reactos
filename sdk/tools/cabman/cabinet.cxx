@@ -351,16 +351,23 @@ bool CCabinet::SetCabinetReservedFile(const char* FileName)
         return false;
     }
 
-    /* The size of the per-cabinet reserved area is a 16-bit field of the cabinet header: a larger file would be
-     * written whole after a truncated size and corrupt the cabinet */
-    if (CabinetReservedFileSize > 0xffff)
+    /* The per-cabinet reserved area (cbCFHeader, a 16-bit field of the cabinet header) holds 0 to 60000 bytes
+     * (Microsoft cabinet file format, CFHEADER): a larger file would be written whole after a truncated size and
+     * corrupt the cabinet, and one over 60000 bytes is outside what the format allows even when the field can
+     * store it. Say how much room is left every time, so that growth shows up in the build and not at boot. */
+    if (CabinetReservedFileSize > CAB_RESERVED_AREA_MAX)
     {
-        printf("ERROR: the cabinet reserved file '%s' is %lu bytes, more than the 65535 a cabinet header can hold.\n",
-               FileName, (unsigned long)CabinetReservedFileSize);
+        printf("ERROR: the cabinet reserved file '%s' is %lu bytes, more than the %u a cabinet header can hold.\n",
+               FileName, (unsigned long)CabinetReservedFileSize, CAB_RESERVED_AREA_MAX);
         CabinetReservedFileSize = 0;
         fclose(FileHandle);
         return false;
     }
+    printf("cabman: reserved file '%s': %lu of %u bytes, %lu left%s\n",
+           FileName, (unsigned long)CabinetReservedFileSize, CAB_RESERVED_AREA_MAX,
+           (unsigned long)(CAB_RESERVED_AREA_MAX - CabinetReservedFileSize),
+           (CAB_RESERVED_AREA_MAX - CabinetReservedFileSize < CAB_RESERVED_AREA_MAX / 10) ?
+               " (WARNING: less than 10% left, the next growth of this file breaks the build)" : "");
 
     CabinetReservedFileBuffer = malloc(CabinetReservedFileSize);
     if (!CabinetReservedFileBuffer)
