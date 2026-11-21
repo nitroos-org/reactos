@@ -33,6 +33,7 @@ list(APPEND SOURCE
     EncryptFile.c
     eventlog.c
     eventlog_full.c
+    EventLogSecurityAccess.c
     EventRegister.c
     EventProvider.c
     EventSetInformation.c
