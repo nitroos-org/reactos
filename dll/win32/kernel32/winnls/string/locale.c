@@ -4192,7 +4192,7 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
 #if (WINVER >= 0x0600)
     /* A name that is no well-formed tag is refused (measured on Windows Server 2022: ERROR_INVALID_PARAMETER for
        "xx-invalid", "x" and "en-US-"). NULL, "" (invariant) and LOCALE_NAME_SYSTEM_DEFAULT are taken. */
-    if (!BasepIsLocaleNameAccepted(locale))
+    if (locale && locale[0] && !BasepIsLocaleNameAccepted(locale))
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
