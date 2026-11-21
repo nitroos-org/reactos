@@ -40,10 +40,7 @@ remove_main(
         if (_wcsicmp(argv[i], L"noerr") == 0)
         {
             /* noerr */
-            ConPuts(StdOut, L"The NOERR option is not supported yet!\n");
-#if 0
-            bNoErr = TRUE;
-#endif
+            return RefuseUnsupportedOption(L"NOERR");
         }
     }
 
@@ -65,17 +62,15 @@ remove_main(
         else if (HasPrefix(argv[i], L"mount=", &pszSuffix))
         {
             DPRINT("Mount\n", pszSuffix);
-            ConPuts(StdOut, L"The MOUNT option is not supported yet!\n");
-            nExclusive++;
+            return RefuseUnsupportedOption(L"MOUNT");
         }
         else if (_wcsicmp(argv[i], L"all") == 0)
         {
-            ConPuts(StdOut, L"The ALL option is not supported yet!\n");
-            nExclusive++;
+            return RefuseUnsupportedOption(L"ALL");
         }
         else if (_wcsicmp(argv[i], L"dismount") == 0)
         {
-            ConPuts(StdOut, L"The DISMOUNT option is not supported yet!\n");
+            return RefuseUnsupportedOption(L"DISMOUNT");
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {

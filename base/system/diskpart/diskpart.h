@@ -579,6 +579,10 @@ merge_main(
     _In_ PWSTR *argv);
 
 /* misc.c */
+EXIT_CODE
+RefuseUnsupportedOption(
+    _In_ PCWSTR pszOption);
+
 BOOL
 IsDecString(
     _In_ PWSTR pszDecString);

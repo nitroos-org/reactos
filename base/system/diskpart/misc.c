@@ -331,3 +331,16 @@ PrintBusType(
                     pszBuffer,
                     cchBufferMax);
 }
+
+
+/*
+ * An option that diskpart does not implement: the command does nothing, says so and
+ * sets the error level (the script run stops, as with any command that fails).
+ */
+EXIT_CODE
+RefuseUnsupportedOption(
+    _In_ PCWSTR pszOption)
+{
+    ConPrintf(StdOut, L"The %s option is not supported yet!\nThe command was not run.\n", pszOption);
+    return EXIT_CMD_ARG;
+}

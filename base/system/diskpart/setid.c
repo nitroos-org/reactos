@@ -41,7 +41,7 @@ setid_main(
         {
             /* noerr */
             DPRINT("NOERR\n");
-            ConPuts(StdOut, L"The NOERR option is not supported yet!\n");
+            return RefuseUnsupportedOption(L"NOERR");
         }
     }
 
@@ -61,7 +61,7 @@ setid_main(
         {
             /* override */
             DPRINT("OVERRIDE\n");
-            ConPuts(StdOut, L"The OVERRIDE option is not supported yet!\n");
+            return RefuseUnsupportedOption(L"OVERRIDE");
         }
         else
         {

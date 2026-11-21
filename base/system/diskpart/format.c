@@ -121,10 +121,7 @@ format_main(
         {
             /* noerr */
             DPRINT("NoErr\n", pszSuffix);
-            ConPuts(StdOut, L"The NOERR option is not supported yet!\n");
-#if 0
-            bNoErr = TRUE;
-#endif
+            return RefuseUnsupportedOption(L"NOERR");
         }
     }
 
@@ -138,7 +135,7 @@ format_main(
         else if (HasPrefix(argv[i], L"revision=", &pszSuffix))
         {
             /* revision=<X.XX> */
-            ConPuts(StdOut, L"The REVISION option is not supported yet!\n");
+            return RefuseUnsupportedOption(L"REVISION");
         }
         else if (HasPrefix(argv[i], L"label=", &pszSuffix))
         {
@@ -158,7 +155,7 @@ format_main(
         else if (_wcsicmp(argv[i], L"recommended") == 0)
         {
             /* recommended */
-            ConPuts(StdOut, L"The RECOMMENDED option is not supported yet!\n");
+            return RefuseUnsupportedOption(L"RECOMMENDED");
         }
         else if (_wcsicmp(argv[i], L"quick") == 0)
         {
@@ -168,22 +165,22 @@ format_main(
         else if (_wcsicmp(argv[i], L"compress") == 0)
         {
             /* compress */
-            ConPuts(StdOut, L"The COMPRESS option is not supported yet!\n");
+            return RefuseUnsupportedOption(L"COMPRESS");
         }
         else if (_wcsicmp(argv[i], L"override") == 0)
         {
             /* override */
-            ConPuts(StdOut, L"The OVERRIDE option is not supported yet!\n");
+            return RefuseUnsupportedOption(L"OVERRIDE");
         }
         else if (_wcsicmp(argv[i], L"duplicate") == 0)
         {
             /* duplicate */
-            ConPuts(StdOut, L"The DUPLICATE option is not supported yet!\n");
+            return RefuseUnsupportedOption(L"DUPLICATE");
         }
         else if (_wcsicmp(argv[i], L"nowait") == 0)
         {
             /* nowait */
-            ConPuts(StdOut, L"The NOWAIT option is not supported yet!\n");
+            return RefuseUnsupportedOption(L"NOWAIT");
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {

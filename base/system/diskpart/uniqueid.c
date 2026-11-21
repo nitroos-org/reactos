@@ -55,7 +55,7 @@ UniqueIdDisk(
         {
             /* noerr */
             DPRINT("NOERR\n");
-            ConPuts(StdOut, L"The NOERR option is not supported yet!\n");
+            return RefuseUnsupportedOption(L"NOERR");
         }
     }
 

@@ -299,10 +299,7 @@ DeletePartition(
         {
             /* noerr */
             DPRINT("NOERR\n");
-            ConPuts(StdOut, L"The NOERR option is not supported yet!\n");
-#if 0
-            bNoErr = TRUE;
-#endif
+            return RefuseUnsupportedOption(L"NOERR");
         }
     }
 

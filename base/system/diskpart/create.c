@@ -28,20 +28,180 @@ MegabytesToSectors(
     return (ullMegabytes * 1024 * 1024) / ulBytesPerSector;
 }
 
+/* An option that is not implemented: nothing is done, the error level says so (see RefuseUnsupportedOption) */
+
+/* offset=<N> is in KB: a whole number of sectors, strictly decimal, that does not overflow */
+static
+BOOLEAN
+ParseOffsetKilobytes(
+    _In_ PWSTR pszOffset,
+    _In_ ULONG ulBytesPerSector,
+    _Out_ PULONGLONG pullSectors)
+{
+    PWSTR pszEnd;
+    ULONGLONG ullKilobytes;
+
+    if (!iswdigit(*pszOffset))
+        return FALSE;
+
+    errno = 0;
+    ullKilobytes = _wcstoui64(pszOffset, &pszEnd, 10);
+    if (*pszEnd != UNICODE_NULL || errno == ERANGE || ullKilobytes > _UI64_MAX / 1024)
+        return FALSE;
+
+    if (((ullKilobytes * 1024) % ulBytesPerSector) != 0)
+        return FALSE;
+
+    *pullSectors = (ullKilobytes * 1024) / ulBytesPerSector;
+    return TRUE;
+}
+
+/*
+ * The unpartitioned entry of the list that holds the range [ullOffset, ullOffset + length) (length = ullSectors,
+ * or all of the entry from the offset if ullSectors is 0). ullReserve sectors at the start of an entry are not
+ * usable (the sector of the EBR of a logical drive). NULL if no entry holds the range: the range would overlap
+ * a partition or leave the usable area.
+ */
+static
+PPARTENTRY
+FindFreeEntryFor(
+    _In_ PLIST_ENTRY ListHead,
+    _In_ ULONGLONG ullOffset,
+    _In_ ULONGLONG ullSectors,
+    _In_ BOOLEAN bReserveEbr,
+    _Out_ PULONGLONG pullLength)
+{
+    PLIST_ENTRY ListEntry;
+    PPARTENTRY PartEntry;
+    ULONGLONG ullStart, ullEnd, ullLength;
+
+    for (ListEntry = ListHead->Flink; ListEntry != ListHead; ListEntry = ListEntry->Flink)
+    {
+        PartEntry = CONTAINING_RECORD(ListEntry, PARTENTRY, ListEntry);
+        if (PartEntry->IsPartitioned)
+            continue;
+
+        ullStart = PartEntry->StartSector.QuadPart;
+        ullEnd = ullStart + PartEntry->SectorCount.QuadPart;
+        if (bReserveEbr && ListEntry->Blink != ListHead)
+            ullStart += PartEntry->DiskEntry->SectorAlignment;
+
+        if (ullOffset < ullStart || ullOffset >= ullEnd)
+            continue;
+
+        ullLength = (ullSectors != 0) ? ullSectors : (ullEnd - ullOffset);
+        if (ullLength == 0 || ullLength > ullEnd - ullOffset)
+            return NULL;
+
+        *pullLength = ullLength;
+        return PartEntry;
+    }
+
+    return NULL;
+}
+
+/*
+ * Makes the new (partitioned) entry [ullOffset, ullOffset + ullLength) out of the unpartitioned entry that holds it;
+ * what is left in front of it and behind it stays unpartitioned entries (a rest smaller than the alignment is not
+ * an entry, as the scan makes none).
+ */
+static
+PPARTENTRY
+SplitFreeEntry(
+    _In_ PPARTENTRY FreeEntry,
+    _In_ ULONGLONG ullOffset,
+    _In_ ULONGLONG ullLength)
+{
+    PDISKENTRY DiskEntry = FreeEntry->DiskEntry;
+    ULONGLONG ullStart = FreeEntry->StartSector.QuadPart;
+    ULONGLONG ullEnd = ullStart + FreeEntry->SectorCount.QuadPart;
+    ULONGLONG ullBefore = ullOffset - ullStart;
+    ULONGLONG ullAfter = ullEnd - (ullOffset + ullLength);
+    PPARTENTRY NewEntry, AfterEntry = NULL;
+
+    NewEntry = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PARTENTRY));
+    if (NewEntry == NULL)
+        return NULL;
+
+    if (ullAfter >= DiskEntry->SectorAlignment)
+    {
+        AfterEntry = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PARTENTRY));
+        if (AfterEntry == NULL)
+        {
+            RtlFreeHeap(RtlGetProcessHeap(), 0, NewEntry);
+            return NULL;
+        }
+    }
+
+    NewEntry->DiskEntry = DiskEntry;
+    NewEntry->StartSector.QuadPart = ullOffset;
+    NewEntry->SectorCount.QuadPart = ullLength;
+    NewEntry->LogicalPartition = FreeEntry->LogicalPartition;
+    NewEntry->IsPartitioned = TRUE;
+    NewEntry->New = TRUE;
+    NewEntry->FormatState = Unformatted;
+    NewEntry->FileSystemName[0] = L'\0';
+    InsertHeadList(&FreeEntry->ListEntry, &NewEntry->ListEntry);
+
+    if (AfterEntry != NULL)
+    {
+        AfterEntry->DiskEntry = DiskEntry;
+        AfterEntry->StartSector.QuadPart = ullOffset + ullLength;
+        AfterEntry->SectorCount.QuadPart = ullAfter;
+        AfterEntry->LogicalPartition = FreeEntry->LogicalPartition;
+        AfterEntry->FormatState = Unformatted;
+        InsertHeadList(&NewEntry->ListEntry, &AfterEntry->ListEntry);
+    }
+
+    /* what is left in front: not the alignment area that is the EBR of a logical drive (nothing fits there) */
+    if (ullBefore >= DiskEntry->SectorAlignment &&
+        !(FreeEntry->LogicalPartition && ullBefore == DiskEntry->SectorAlignment))
+    {
+        FreeEntry->SectorCount.QuadPart = ullBefore;
+    }
+    else
+    {
+        RemoveEntryList(&FreeEntry->ListEntry);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, FreeEntry);
+    }
+
+    return NewEntry;
+}
+
 static
 PPARTENTRY
 InsertGptPartition(
     _In_ PDISKENTRY pDisk,
     _In_ ULONGLONG ullSectorSize,
-    _In_ const GUID *pPartitionType)
+    _In_ const GUID *pPartitionType,
+    _In_opt_ PULONGLONG pullOffset)
 {
     PPARTENTRY PartEntry, NewPartEntry;
     PLIST_ENTRY ListEntry;
+    ULONGLONG ullLength;
     GUID PartitionId;
 
     /* The identifier comes first: with no random data no partition is claimed */
     if (!CreateGUID(&PartitionId))
         return NULL;
+
+    if (pullOffset != NULL)
+    {
+        /* offset=: exactly there, or nothing (the range must lie in unpartitioned space) */
+        PartEntry = FindFreeEntryFor(&pDisk->PrimaryPartListHead, *pullOffset, ullSectorSize, FALSE, &ullLength);
+        if (PartEntry == NULL)
+            return NULL;
+
+        NewPartEntry = SplitFreeEntry(PartEntry, *pullOffset, ullLength);
+        if (NewPartEntry == NULL)
+            return NULL;
+
+        CopyMemory(&NewPartEntry->Gpt.PartitionType, pPartitionType, sizeof(GUID));
+        NewPartEntry->Gpt.PartitionId = PartitionId;
+        NewPartEntry->Gpt.Attributes = 0ULL;
+        NewPartEntry->PartitionNumber = 0;
+        return NewPartEntry;
+    }
 
     for (ListEntry = pDisk->PrimaryPartListHead.Flink;
          ListEntry != &CurrentDisk->PrimaryPartListHead;
@@ -128,6 +288,8 @@ CreateEfiPartition(
     PPARTENTRY PartEntry;
     ULONGLONG ullSize = 0ULL;
     ULONGLONG ullSectorCount;
+    ULONGLONG ullOffset = 0ULL;
+    BOOLEAN bOffset = FALSE;
 #if 0
     BOOL bNoErr = FALSE;
 #endif
@@ -164,10 +326,7 @@ CreateEfiPartition(
         {
             /* noerr */
             DPRINT("NoErr\n", pszSuffix);
-            ConPuts(StdOut, L"The NOERR option is not supported yet!\n");
-#if 0
-            bNoErr = TRUE;
-#endif
+            return RefuseUnsupportedOption(L"NOERR");
         }
     }
 
@@ -189,15 +348,12 @@ CreateEfiPartition(
         {
             /* offset=<N> (KB) */
             DPRINT("Offset : %s\n", pszSuffix);
-            ConPuts(StdOut, L"The OFFSET option is not supported yet!\n");
-#if 0
-            ullOffset = _wcstoui64(pszSuffix, NULL, 10);
-            if ((ullOffset == 0) && (errno == ERANGE))
+            if (!ParseOffsetKilobytes(pszSuffix, CurrentDisk->BytesPerSector, &ullOffset))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
                 return EXIT_SUCCESS;
             }
-#endif
+            bOffset = TRUE;
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
@@ -229,7 +385,8 @@ CreateEfiPartition(
 
     PartEntry = InsertGptPartition(CurrentDisk,
                                    ullSectorCount,
-                                   &PARTITION_SYSTEM_GUID);
+                                   &PARTITION_SYSTEM_GUID,
+                                   bOffset ? &ullOffset : NULL);
     if (PartEntry == FALSE)
     {
         ConResPuts(StdOut, IDS_CREATE_PARTITION_FAIL);
@@ -294,10 +451,7 @@ CreateExtendedPartition(
         {
             /* noerr */
             DPRINT("NoErr\n", pszSuffix);
-            ConPuts(StdOut, L"The NOERR option is not supported yet!\n");
-#if 0
-            bNoErr = TRUE;
-#endif
+            return RefuseUnsupportedOption(L"NOERR");
         }
     }
 
@@ -319,24 +473,13 @@ CreateExtendedPartition(
         {
             /* offset=<N> (KB) */
             DPRINT("Offset : %s\n", pszSuffix);
-            ConPuts(StdOut, L"The OFFSET option is not supported yet!\n");
-#if 0
-            ullOffset = _wcstoui64(pszSuffix, NULL, 10);
-            if ((ullOffset == 0) && (errno == ERANGE))
-            {
-                ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                return EXIT_SUCCESS;
-            }
-#endif
+            return RefuseUnsupportedOption(L"OFFSET");
         }
         else if (HasPrefix(argv[i], L"align=", &pszSuffix))
         {
             /* align=<N> */
             DPRINT("Align : %s\n", pszSuffix);
-            ConPuts(StdOut, L"The ALIGN option is not supported yet!\n");
-#if 0
-            bAlign = TRUE;
-#endif
+            return RefuseUnsupportedOption(L"ALIGN");
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
@@ -473,8 +616,9 @@ CreateLogicalPartition(
     PLIST_ENTRY ListEntry;
     ULONGLONG ullSize = 0ULL;
     ULONGLONG ullSectorCount;
-#if 0
     ULONGLONG ullOffset = 0ULL;
+    BOOLEAN bOffset = FALSE;
+#if 0
     BOOL bNoErr = FALSE;
 #endif
     UCHAR PartitionType = PARTITION_HUGE;
@@ -503,10 +647,7 @@ CreateLogicalPartition(
         {
             /* noerr */
             DPRINT("NoErr\n", pszSuffix);
-            ConPuts(StdOut, L"The NOERR option is not supported yet!\n");
-#if 0
-            bNoErr = TRUE;
-#endif
+            return RefuseUnsupportedOption(L"NOERR");
         }
     }
 
@@ -528,15 +669,12 @@ CreateLogicalPartition(
         {
             /* offset=<N> (KB) */
             DPRINT("Offset : %s\n", pszSuffix);
-            ConPuts(StdOut, L"The OFFSET option is not supported yet!\n");
-#if 0
-            ullOffset = _wcstoui64(pszSuffix, NULL, 10);
-            if ((ullOffset == 0) && (errno == ERANGE))
+            if (!ParseOffsetKilobytes(pszSuffix, CurrentDisk->BytesPerSector, &ullOffset))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
                 return EXIT_SUCCESS;
             }
-#endif
+            bOffset = TRUE;
         }
         else if (HasPrefix(argv[i], L"id=", &pszSuffix))
         {
@@ -564,10 +702,7 @@ CreateLogicalPartition(
         {
             /* align=<N> */
             DPRINT("Align : %s\n", pszSuffix);
-            ConPuts(StdOut, L"The ALIGN option is not supported yet!\n");
-#if 0
-            bAlign = TRUE;
-#endif
+            return RefuseUnsupportedOption(L"ALIGN");
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
@@ -597,71 +732,57 @@ CreateLogicalPartition(
     CurrentPartition = NULL;
     CurrentVolume = NULL;
 
-    for (ListEntry = CurrentDisk->LogicalPartListHead.Flink;
+    if (bOffset)
+    {
+        /* offset=: exactly there, or nothing (the range must lie in unpartitioned space of the extended partition) */
+        ULONGLONG ullLength;
+
+        PartEntry = FindFreeEntryFor(&CurrentDisk->LogicalPartListHead, ullOffset, ullSectorCount, TRUE, &ullLength);
+        NewPartEntry = (PartEntry != NULL) ? SplitFreeEntry(PartEntry, ullOffset, ullLength) : NULL;
+        if (NewPartEntry != NULL)
+        {
+            NewPartEntry->Mbr.PartitionType = PartitionType;
+            CurrentPartition = NewPartEntry;
+            CurrentDisk->Dirty = TRUE;
+        }
+    }
+
+    /*
+     * First fit: every drive of the chain has its EBR in the alignment area in front of it. The
+     * unpartitioned entry at the start of the extended partition begins behind the first EBR; any
+     * other entry begins where the drive in front of it ends, so the new drive starts one alignment
+     * later (else its EBR lands in the end of that drive: it was written over its data).
+     */
+    for (ListEntry = bOffset ? &CurrentDisk->LogicalPartListHead : CurrentDisk->LogicalPartListHead.Flink;
          ListEntry != &CurrentDisk->LogicalPartListHead;
          ListEntry = ListEntry->Flink)
     {
+        ULONGLONG ullReserve, ullAvailable, ullLength;
+
         PartEntry = CONTAINING_RECORD(ListEntry, PARTENTRY, ListEntry);
         if (PartEntry->IsPartitioned)
             continue;
 
-        if (ullSectorCount == 0)
+        ullReserve = (ListEntry->Blink != &CurrentDisk->LogicalPartListHead) ? CurrentDisk->SectorAlignment : 0;
+        if (PartEntry->SectorCount.QuadPart <= ullReserve)
+            continue;
+
+        ullAvailable = PartEntry->SectorCount.QuadPart - ullReserve;
+        ullLength = (ullSectorCount != 0) ? ullSectorCount : ullAvailable;
+        if (ullLength > ullAvailable)
+            continue;
+
+        NewPartEntry = SplitFreeEntry(PartEntry, PartEntry->StartSector.QuadPart + ullReserve, ullLength);
+        if (NewPartEntry == NULL)
         {
-            PartEntry->IsPartitioned = TRUE;
-            PartEntry->New = TRUE;
-            PartEntry->Mbr.PartitionType = PartitionType;
-            PartEntry->FormatState = Unformatted;
-            PartEntry->FileSystemName[0] = L'\0';
-
-            CurrentPartition = PartEntry;
-            CurrentDisk->Dirty = TRUE;
-            break;
+            ConPuts(StdOut, L"Memory allocation failed!\n");
+            return EXIT_SUCCESS;
         }
-        else
-        {
-            if (PartEntry->SectorCount.QuadPart == ullSectorCount)
-            {
-                PartEntry->IsPartitioned = TRUE;
-                PartEntry->New = TRUE;
-                PartEntry->Mbr.PartitionType = PartitionType;
-                PartEntry->FormatState = Unformatted;
-                PartEntry->FileSystemName[0] = L'\0';
 
-                CurrentPartition = PartEntry;
-                CurrentDisk->Dirty = TRUE;
-                break;
-            }
-            else if (PartEntry->SectorCount.QuadPart > ullSectorCount)
-            {
-                NewPartEntry = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PARTENTRY));
-                if (NewPartEntry == NULL)
-                {
-                    ConPuts(StdOut, L"Memory allocation failed!\n");
-                    return TRUE;
-                }
-
-                NewPartEntry->DiskEntry = PartEntry->DiskEntry;
-
-                NewPartEntry->StartSector.QuadPart = PartEntry->StartSector.QuadPart;
-                NewPartEntry->SectorCount.QuadPart = ullSectorCount;
-
-                NewPartEntry->LogicalPartition = TRUE;
-                NewPartEntry->IsPartitioned = TRUE;
-                NewPartEntry->New = TRUE;
-                NewPartEntry->Mbr.PartitionType = PartitionType;
-                NewPartEntry->FormatState = Unformatted;
-                NewPartEntry->FileSystemName[0] = L'\0';
-
-                PartEntry->StartSector.QuadPart += ullSectorCount;
-                PartEntry->SectorCount.QuadPart -= ullSectorCount;
-
-                InsertTailList(ListEntry, &NewPartEntry->ListEntry);
-
-                CurrentPartition = NewPartEntry;
-                CurrentDisk->Dirty = TRUE;
-                break;
-            }
-        }
+        NewPartEntry->Mbr.PartitionType = PartitionType;
+        CurrentPartition = NewPartEntry;
+        CurrentDisk->Dirty = TRUE;
+        break;
     }
 
     if (CurrentPartition == NULL)
@@ -696,6 +817,8 @@ CreateMsrPartition(
     PPARTENTRY PartEntry;
     ULONGLONG ullSize = 0ULL;
     ULONGLONG ullSectorSize;
+    ULONGLONG ullOffset = 0ULL;
+    BOOLEAN bOffset = FALSE;
 #if 0
     BOOL bNoErr = FALSE;
 #endif
@@ -732,10 +855,7 @@ CreateMsrPartition(
         {
             /* noerr */
             DPRINT("NoErr\n", pszSuffix);
-            ConPuts(StdOut, L"The NOERR option is not supported yet!\n");
-#if 0
-            bNoErr = TRUE;
-#endif
+            return RefuseUnsupportedOption(L"NOERR");
         }
     }
 
@@ -757,15 +877,12 @@ CreateMsrPartition(
         {
             /* offset=<N> (KB) */
             DPRINT("Offset : %s\n", pszSuffix);
-            ConPuts(StdOut, L"The OFFSET option is not supported yet!\n");
-#if 0
-            ullOffset = _wcstoui64(pszSuffix, NULL, 10);
-            if ((ullOffset == 0) && (errno == ERANGE))
+            if (!ParseOffsetKilobytes(pszSuffix, CurrentDisk->BytesPerSector, &ullOffset))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
                 return EXIT_SUCCESS;
             }
-#endif
+            bOffset = TRUE;
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
@@ -797,7 +914,8 @@ CreateMsrPartition(
 
     PartEntry = InsertGptPartition(CurrentDisk,
                                    ullSectorSize,
-                                   &PARTITION_MSFT_RESERVED_GUID);
+                                   &PARTITION_MSFT_RESERVED_GUID,
+                                   bOffset ? &ullOffset : NULL);
     if (PartEntry == FALSE)
     {
         ConResPuts(StdOut, IDS_CREATE_PARTITION_FAIL);
@@ -831,7 +949,9 @@ static
 VOID
 CreatePrimaryMbrPartition(
     _In_ ULONGLONG ullSize,
-    _In_ PWSTR pszPartitionType)
+    _In_ PWSTR pszPartitionType,
+    _In_ BOOLEAN bOffset,
+    _In_ ULONGLONG ullOffset)
 {
     PPARTENTRY PartEntry, NewPartEntry;
     PLIST_ENTRY ListEntry;
@@ -881,7 +1001,22 @@ CreatePrimaryMbrPartition(
 
     DPRINT1("SectorCount: %I64u\n", ullSectorCount);
 
-    for (ListEntry = CurrentDisk->PrimaryPartListHead.Flink;
+    if (bOffset)
+    {
+        /* offset=: exactly there, or nothing (the range must lie in unpartitioned space) */
+        ULONGLONG ullLength;
+
+        PartEntry = FindFreeEntryFor(&CurrentDisk->PrimaryPartListHead, ullOffset, ullSectorCount, FALSE, &ullLength);
+        NewPartEntry = (PartEntry != NULL) ? SplitFreeEntry(PartEntry, ullOffset, ullLength) : NULL;
+        if (NewPartEntry != NULL)
+        {
+            NewPartEntry->Mbr.PartitionType = PartitionType;
+            CurrentPartition = NewPartEntry;
+            CurrentDisk->Dirty = TRUE;
+        }
+    }
+
+    for (ListEntry = bOffset ? &CurrentDisk->PrimaryPartListHead : CurrentDisk->PrimaryPartListHead.Flink;
          ListEntry != &CurrentDisk->PrimaryPartListHead;
          ListEntry = ListEntry->Flink)
     {
@@ -974,7 +1109,9 @@ static
 VOID
 CreatePrimaryGptPartition(
     _In_ ULONGLONG ullSize,
-    _In_ PWSTR pszPartitionType)
+    _In_ PWSTR pszPartitionType,
+    _In_ BOOLEAN bOffset,
+    _In_ ULONGLONG ullOffset)
 {
     PPARTENTRY PartEntry;
     ULONGLONG ullSectorCount;
@@ -1021,7 +1158,8 @@ CreatePrimaryGptPartition(
 
     PartEntry = InsertGptPartition(CurrentDisk,
                                    ullSectorCount,
-                                   &guidPartitionType);
+                                   &guidPartitionType,
+                                   bOffset ? &ullOffset : NULL);
     if (PartEntry == FALSE)
     {
         ConResPuts(StdOut, IDS_CREATE_PARTITION_FAIL);
@@ -1057,8 +1195,9 @@ CreatePrimaryPartition(
     _In_ PWSTR *argv)
 {
     ULONGLONG ullSize = 0ULL;
-#if 0
     ULONGLONG ullOffset = 0ULL;
+    BOOLEAN bOffset = FALSE;
+#if 0
     BOOL bNoErr = FALSE;
 #endif
     INT i;
@@ -1077,10 +1216,7 @@ CreatePrimaryPartition(
         {
             /* noerr */
             DPRINT("NoErr\n", pszSuffix);
-            ConPuts(StdOut, L"The NOERR option is not supported yet!\n");
-#if 0
-            bNoErr = TRUE;
-#endif
+            return RefuseUnsupportedOption(L"NOERR");
         }
     }
 
@@ -1102,15 +1238,12 @@ CreatePrimaryPartition(
         {
             /* offset=<N> (KB) */
             DPRINT("Offset : %s\n", pszSuffix);
-            ConPuts(StdOut, L"The OFFSET option is not supported yet!\n");
-#if 0
-            ullOffset = _wcstoui64(pszSuffix, NULL, 10);
-            if ((ullOffset == 0) && (errno == ERANGE))
+            if (!ParseOffsetKilobytes(pszSuffix, CurrentDisk->BytesPerSector, &ullOffset))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
                 return EXIT_SUCCESS;
             }
-#endif
+            bOffset = TRUE;
         }
         else if (HasPrefix(argv[i], L"id=", &pszSuffix))
         {
@@ -1122,10 +1255,7 @@ CreatePrimaryPartition(
         {
             /* align=<N> */
             DPRINT("Align : %s\n", pszSuffix);
-            ConPuts(StdOut, L"The ALIGN option is not supported yet!\n");
-#if 0
-            bAlign = TRUE;
-#endif
+            return RefuseUnsupportedOption(L"ALIGN");
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
@@ -1146,11 +1276,11 @@ CreatePrimaryPartition(
     if (CurrentDisk->PartitionStyle == PARTITION_STYLE_MBR)
     {
         DPRINT("Partition Type: %s\n", pszPartitionType);
-        CreatePrimaryMbrPartition(ullSize, pszPartitionType);
+        CreatePrimaryMbrPartition(ullSize, pszPartitionType, bOffset, ullOffset);
     }
     else if (CurrentDisk->PartitionStyle == PARTITION_STYLE_GPT)
     {
-        CreatePrimaryGptPartition(ullSize, pszPartitionType);
+        CreatePrimaryGptPartition(ullSize, pszPartitionType, bOffset, ullOffset);
     }
     else
     {
