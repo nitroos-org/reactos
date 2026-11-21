@@ -179,6 +179,7 @@ list(APPEND SOURCE
     winnls/string/casemap.c
     winnls/string/collation.c
     winnls/string/digitmap.c
+    winnls/string/findnls.c
     winnls/string/fold.c
     winnls/string/format_msg.c
     winnls/string/japanese.c
