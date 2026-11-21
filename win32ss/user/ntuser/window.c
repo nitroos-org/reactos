@@ -223,11 +223,16 @@ IntEnableWindow( HWND hWnd, BOOL bEnable )
    BOOL Update;
    PWND pWnd;
    UINT bIsDisabled;
+   USER_REFERENCE_ENTRY Ref;
 
    if(!(pWnd = UserGetWindowObject(hWnd)))
    {
       return FALSE;
    }
+
+   /* WM_CANCELMODE and the loss of the focus call the window's thread, which may
+      destroy the window meanwhile */
+   UserRefObjectCo(pWnd, &Ref);
 
    /* check if updating is needed */
    bIsDisabled = !!(pWnd->style & WS_DISABLED);
@@ -249,14 +254,16 @@ IntEnableWindow( HWND hWnd, BOOL bEnable )
           TRACE("IntEnableWindow SF NULL\n");
           co_UserSetFocus(NULL);
        }
-       IntSetStyle( pWnd, WS_DISABLED, 0 );
+       if (!(pWnd->state & WNDS_DESTROYED))
+          IntSetStyle( pWnd, WS_DISABLED, 0 );
     }
 
-    if (Update)
+    if (Update && !(pWnd->state & WNDS_DESTROYED))
     {
         IntNotifyWinEvent(EVENT_OBJECT_STATECHANGE, pWnd, OBJID_WINDOW, CHILDID_SELF, 0);
         co_IntSendMessage(hWnd, WM_ENABLE, (LPARAM)bEnable, 0);
     }
+    UserDerefObjectCo(pWnd);
     // Return nonzero if it was disabled, or zero if it wasn't:
     return bIsDisabled;
 }
@@ -5061,6 +5068,7 @@ IntShowOwnedPopups(PWND OwnerWnd, BOOL fShow )
    int count = 0;
    PWND pWnd;
    HWND *win_array;
+   USER_REFERENCE_ENTRY Ref;
 
 //   ASSERT(OwnerWnd);
 
@@ -5078,8 +5086,11 @@ IntShowOwnedPopups(PWND OwnerWnd, BOOL fShow )
    {
       if (!(pWnd = ValidateHwndNoErr( win_array[count] )))
          continue;
-      ASSERT(pWnd->spwndOwner == OwnerWnd);
+      /* The list was taken before the popups were called: one may have another owner by now */
+      if (pWnd->spwndOwner != OwnerWnd)
+         continue;
 
+      /* Each popup is called and may destroy itself (or be destroyed) meanwhile */
       if (fShow)
       {
          if (pWnd->state & WNDS_HIDDENPOPUP)
@@ -5088,8 +5099,11 @@ IntShowOwnedPopups(PWND OwnerWnd, BOOL fShow )
              * WM_SHOWWINDOW messages with SW_PARENTOPENING,
              * regardless of the state of the owner
              */
+            UserRefObjectCo(pWnd, &Ref);
             co_IntSendMessage(win_array[count], WM_SHOWWINDOW, SW_SHOWNORMAL, SW_PARENTOPENING);
-            pWnd->state &= ~WNDS_HIDDENPOPUP;
+            if (!(pWnd->state & WNDS_DESTROYED))
+               pWnd->state &= ~WNDS_HIDDENPOPUP;
+            UserDerefObjectCo(pWnd);
             continue;
          }
       }
@@ -5101,8 +5115,11 @@ IntShowOwnedPopups(PWND OwnerWnd, BOOL fShow )
              * WM_SHOWWINDOW messages with SW_PARENTCLOSING,
              * regardless of the state of the owner
              */
+            UserRefObjectCo(pWnd, &Ref);
             co_IntSendMessage(win_array[count], WM_SHOWWINDOW, SW_HIDE, SW_PARENTCLOSING);
-            pWnd->state |= WNDS_HIDDENPOPUP;
+            if (!(pWnd->state & WNDS_DESTROYED))
+               pWnd->state |= WNDS_HIDDENPOPUP;
+            UserDerefObjectCo(pWnd);
             continue;
          }
       }
