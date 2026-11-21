@@ -1245,6 +1245,35 @@ int BIDI_ReorderL2vLevel(int level, int *pIndices, const BYTE* plevel, int cch, 
     return ich;
 }
 
+#ifdef __REACTOS__
+/*************************************************************
+ *    BIDI_LevelsAllBase
+ *
+ * TRUE when BIDI_DetermineLevels would give every character of the string paragraph level 0 for a left-to-right
+ * paragraph without an override (base level 0): no character is a strong right-to-left letter (R, AL), an Arabic
+ * number (AN), an explicit embedding/override/isolate control or a boundary neutral (BN). The remaining classes
+ * (L, EN, ES, ET, CS, NSM, ON, S, WS, B) stay at level 0 there: European numbers and the separators/terminators
+ * around them resolve to L after sos L (W1-W7), neutrals to the embedding direction L (N1/N2), segment and
+ * paragraph separators to the paragraph level (L1). fLegacyBidiClass only turns ES into ON, both on this list.
+ */
+BOOL BIDI_LevelsAllBase(const WCHAR *string, unsigned int count)
+{
+    unsigned int i;
+
+    for (i = 0; i < count; i++)
+    {
+        switch (get_table_entry_32(bidi_direction_table, string[i]))
+        {
+            case L: case EN: case ES: case ET: case CS: case NSM: case ON: case S: case WS: case B:
+                break;
+            default:
+                return FALSE;
+        }
+    }
+    return TRUE;
+}
+#endif
+
 BOOL BIDI_GetStrengths(const WCHAR *string, unsigned int count, const SCRIPT_CONTROL *c, WORD *strength)
 {
     unsigned int i;

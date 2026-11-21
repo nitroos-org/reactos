@@ -1436,6 +1436,19 @@ static HRESULT _ItemizeInternal(const WCHAR *pwcInChars, int cInChars,
         }
     }
 
+#ifdef __REACTOS__
+    /* A left-to-right paragraph (base level 0, no override) whose characters can only resolve to level 0 and has no
+       bidi control (forceLevels): the pass below would give every character level 0 and then drop the levels again
+       (see the check after it), so the result is known without running it. Text of the Latin and other left-to-right
+       scripts (an edit control analyses every line with this state) does not pay for the bidi algorithm. */
+    if (psState && psControl && !psState->fOverrideDirection && !psState->uBidiLevel && !forceLevels &&
+        BIDI_LevelsAllBase(pwcInChars, cInChars))
+    {
+        baselevel = 0;
+        baselayout = 0;
+    }
+    else
+#endif
     if (psState && psControl)
     {
         if (!(levels = calloc(cInChars, sizeof(*levels))))
