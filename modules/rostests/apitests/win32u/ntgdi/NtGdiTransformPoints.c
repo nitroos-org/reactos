@@ -359,6 +359,50 @@ START_TEST(NtGdiTransformPoints)
     ok_long(apt2[0].x, 128);
     ok_long(apt2[0].x, 128);
 
+    /* Mode 2: LPtoDP in 28.4 fixed point (Windows Server 2022: identity (10,20) -> (160,320),
+       viewport origin (7,9): (10,20) -> (272,464)) */
+
+    SetMapMode(hDC, MM_TEXT);
+    SetViewportOrgEx(hDC, 0, 0, NULL);
+    SetWindowOrgEx(hDC, 0, 0, NULL);
+    SetLastError(0xDEADBEEF);
+    apt1[0].x = 10;
+    apt1[0].y = 20;
+    apt2[0].x = apt2[0].y = 0xBEEFDEAD;
+    ret = NtGdiTransformPoints(hDC, apt1, apt2, 1, 2);
+    ok_int(ret, TRUE);
+    ok_err(0xDEADBEEF);
+    ok_long(apt2[0].x, 160);
+    ok_long(apt2[0].y, 320);
+
+    SetViewportOrgEx(hDC, 7, 9, NULL);
+    SetLastError(0xDEADBEEF);
+    apt2[0].x = apt2[0].y = 0xBEEFDEAD;
+    ret = NtGdiTransformPoints(hDC, apt1, apt2, 1, 2);
+    ok_int(ret, TRUE);
+    ok_err(0xDEADBEEF);
+    ok_long(apt2[0].x, 272);
+    ok_long(apt2[0].y, 464);
+    SetViewportOrgEx(hDC, 0, 0, NULL);
+
+    /* a scale of 2/3: 10 -> 6.667 -> 106.67 -> 107, 20 -> 13.33 -> 213.33 -> 213 */
+    SetMapMode(hDC, MM_ANISOTROPIC);
+    SetWindowExtEx(hDC, 3, 3, NULL);
+    SetViewportExtEx(hDC, 2, 2, NULL);
+    SetLastError(0xDEADBEEF);
+    apt2[0].x = apt2[0].y = 0xBEEFDEAD;
+    ret = NtGdiTransformPoints(hDC, apt1, apt2, 1, 2);
+    ok_int(ret, TRUE);
+    ok_err(0xDEADBEEF);
+    ok_long(apt2[0].x, 107);
+    ok_long(apt2[0].y, 213);
+
+    /* a mode that is not known still fails */
+    SetLastError(0xDEADBEEF);
+    ret = NtGdiTransformPoints(hDC, apt1, apt2, 1, 3);
+    ok_int(ret, FALSE);
+    ok_err(ERROR_INVALID_PARAMETER);
+
     ret = DeleteDC(hDC);
     ok_int(ret, TRUE);
 }

@@ -231,6 +231,7 @@ TCPQueryIpInterfaces(PVOID Out, ULONG OutSize)
             Row->IfIndex = CurrentIF->Index;
             Row->Ip4Mtu = CurrentIF->MTU;
             Row->Ip4Metric = CurrentIF->Ip4MetricConfig;
+            Row->LinkSpeed = CurrentIF->Speed;
             if (IsLoopback)
                 Row->Flags |= TCP_IPIF_ROW_LOOPBACK;
             /* DisabledComponents (TCPIpv6Links FALSE): IPv6 is on the loopback interface only */

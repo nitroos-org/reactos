@@ -443,7 +443,24 @@ NtGdiTransformPoints(
             ret = TRUE;
             break;
 
-        case 2: // Not supported yet. Need testing.
+        /* Mode 2: LPtoDP in 28.4 fixed point, rounded to nearest (Windows Server 2022, identity DC: (10,20) -> (160,320);
+           viewport origin (7,9): (10,20) -> (272,464); MM_LOMETRIC: (10,20) -> (60,-121)) */
+        case 2:
+        {
+            MATRIX mx = *DC_pmxWorldToDevice(pdc);
+
+            FLOATOBJ_MulLong(&mx.efM11, 16);
+            FLOATOBJ_MulLong(&mx.efM12, 16);
+            FLOATOBJ_MulLong(&mx.efM21, 16);
+            FLOATOBJ_MulLong(&mx.efM22, 16);
+            FLOATOBJ_MulLong(&mx.efDx, 16);
+            FLOATOBJ_MulLong(&mx.efDy, 16);
+            mx.flAccel = 0; /* the shortcuts of INTERNAL_APPLY_MATRIX are for the unscaled matrix */
+            INTERNAL_APPLY_MATRIX(&mx, Points, Count);
+            ret = TRUE;
+            break;
+        }
+
         default:
         {
             EngSetLastError(ERROR_INVALID_PARAMETER);

@@ -495,7 +495,8 @@ static void fill_ip_interface(const NETIO_IF *If, ADDRESS_FAMILY Family, const T
       Out->Metric = Manual;
     }
     else
-      Out->Metric = automatic_metric(If->Row.dwSpeed);
+      /* the stack's speed (100 bit/s units) does not saturate, MIB_IFROW::dwSpeed does at 4294967295 bit/s */
+      Out->Metric = automatic_metric(Cfg && Cfg->LinkSpeed ? (ULONG64)Cfg->LinkSpeed * 100 : If->Row.dwSpeed);
     Out->UseNeighborUnreachabilityDetection = TRUE;
     Out->SupportsNeighborDiscovery = TRUE;
     Out->SupportsRouterDiscovery = TRUE;
