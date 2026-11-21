@@ -2664,24 +2664,39 @@ AreAnyAccessesGranted(DWORD GrantedAccess,
 /******************************************************************************
  * ParseAclStringFlags
  */
-static DWORD ParseAclStringFlags(LPCWSTR* StringAcl)
+static DWORD ParseAclStringFlags(LPCWSTR* StringAcl, BOOL sacl, BOOL *isNull, BOOL *bad)
 {
+    static const WCHAR noAccessControl[] = L"NO_ACCESS_CONTROL";
+    const DWORD prot = sacl ? SE_SACL_PROTECTED : SE_DACL_PROTECTED;
+    const DWORD req = sacl ? SE_SACL_AUTO_INHERIT_REQ : SE_DACL_AUTO_INHERIT_REQ;
+    const DWORD inh = sacl ? SE_SACL_AUTO_INHERITED : SE_DACL_AUTO_INHERITED;
     DWORD flags = 0;
     LPCWSTR szAcl = *StringAcl;
 
+    *isNull = FALSE;
+    *bad = FALSE;
     while (*szAcl && *szAcl != '(')
     {
+        if (!_wcsnicmp(szAcl, noAccessControl, ARRAYSIZE(noAccessControl) - 1))
+        {
+            /* a NULL ACL: nothing may follow it in this part of the string (Windows: invalid parameter) */
+            szAcl += ARRAYSIZE(noAccessControl) - 1;
+            *isNull = TRUE;
+            if (*szAcl)
+                *bad = TRUE;
+            break;
+        }
         if (*szAcl == 'P')
         {
-            flags |= SE_DACL_PROTECTED;
+            flags |= prot;
         }
         else if (*szAcl == 'A')
         {
             szAcl++;
             if (*szAcl == 'R')
-                flags |= SE_DACL_AUTO_INHERIT_REQ;
+                flags |= req;
             else if (*szAcl == 'I')
-                flags |= SE_DACL_AUTO_INHERITED;
+                flags |= inh;
         }
         szAcl++;
     }
@@ -2990,9 +3005,10 @@ static BOOL AliasFieldEndsCleanly(LPCWSTR p)
  *
  * dacl_flags(string_ace1)(string_ace2)... (string_acen)
  */
-static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, LPDWORD lpdwFlags,
-    PACL pAcl, LPDWORD cBytes)
+static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, BOOL sacl, LPDWORD lpdwFlags,
+    PACL pAcl, LPDWORD cBytes, BOOL *pIsNull)
 {
+    BOOL nullAcl, badFlags;
     DWORD val;
     DWORD sidlen;
     DWORD length = sizeof(ACL);
@@ -3012,7 +3028,18 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, LPDWORD lpdwFlags,
         pAce = (PACCESS_ALLOWED_ACE) (pAcl + 1);
 
     /* Parse ACL flags */
-    *lpdwFlags = ParseAclStringFlags(&StringAcl);
+    *lpdwFlags = ParseAclStringFlags(&StringAcl, sacl, &nullAcl, &badFlags);
+    *pIsNull = nullAcl;
+    if (badFlags)
+    {
+        error = ERROR_INVALID_PARAMETER;
+        goto lerr;
+    }
+    if (nullAcl)
+    {
+        *cBytes = 0;
+        return TRUE;
+    }
 
     /* Parse ACE */
     while (*StringAcl == '(')
@@ -3254,15 +3281,21 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
 	    {
                 DWORD flags;
                 DWORD bytes;
+                BOOL isNull;
 
-                if (!ParseStringAclToAcl(tok, &flags, (PACL)lpNext, &bytes))
+                if (!ParseStringAclToAcl(tok, FALSE, &flags, (PACL)lpNext, &bytes, &isNull))
                     goto lend;
 
                 if (SecurityDescriptor)
                 {
                     SecurityDescriptor->Control |= SE_DACL_PRESENT | flags;
-                    SecurityDescriptor->Dacl = lpNext - (LPBYTE)SecurityDescriptor;
-                    lpNext += bytes; /* Advance to next token */
+                    if (isNull)
+                        SecurityDescriptor->Dacl = 0;
+                    else
+                    {
+                        SecurityDescriptor->Dacl = lpNext - (LPBYTE)SecurityDescriptor;
+                        lpNext += bytes; /* Advance to next token */
+                    }
 		}
 
 		*cBytes += bytes;
@@ -3274,15 +3307,21 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
             {
                 DWORD flags;
                 DWORD bytes;
+                BOOL isNull;
 
-                if (!ParseStringAclToAcl(tok, &flags, (PACL)lpNext, &bytes))
+                if (!ParseStringAclToAcl(tok, TRUE, &flags, (PACL)lpNext, &bytes, &isNull))
                     goto lend;
 
                 if (SecurityDescriptor)
                 {
                     SecurityDescriptor->Control |= SE_SACL_PRESENT | flags;
-                    SecurityDescriptor->Sacl = lpNext - (LPBYTE)SecurityDescriptor;
-                    lpNext += bytes; /* Advance to next token */
+                    if (isNull)
+                        SecurityDescriptor->Sacl = 0;
+                    else
+                    {
+                        SecurityDescriptor->Sacl = lpNext - (LPBYTE)SecurityDescriptor;
+                        lpNext += bytes; /* Advance to next token */
+                    }
 		}
 
 		*cBytes += bytes;
@@ -3721,7 +3760,11 @@ static BOOL DumpAcl(PACL pacl, WCHAR **pwptr, ULONG *plen, BOOL protected, BOOL 
         DumpString(SDDL_AUTO_INHERITED, -1, pwptr, plen);
 
     if (pacl == NULL)
+    {
+        /* a present NULL ACL: everybody has access (Windows prints NO_ACCESS_CONTROL) */
+        DumpString(L"NO_ACCESS_CONTROL", -1, pwptr, plen);
         return TRUE;
+    }
 
     if (!IsValidAcl(pacl))
         return FALSE;
