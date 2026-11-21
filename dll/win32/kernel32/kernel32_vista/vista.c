@@ -1362,9 +1362,12 @@ FindNLSStringEx(
         return -1;
     }
 
-    SetLastError(ERROR_SUCCESS);
     cchSource -= cchValue;
-    if (cchSource < 0) return -1;
+    if (cchSource < 0)
+    {
+        SetLastError(ERROR_SUCCESS);
+        return -1;
+    }
 
     count = dwFindNLSStringFlags & (FIND_FROMSTART | FIND_FROMEND) ? cchSource + 1 : 1;
     offset = dwFindNLSStringFlags & (FIND_FROMSTART | FIND_STARTSWITH) ? 0 : cchSource;
@@ -1382,6 +1385,9 @@ FindNLSStringEx(
         if (!ret) return -1;
         offset += inc;
     }
+
+    /* No match is no error; a match leaves the last error alone (measured on Windows Server 2022) */
+    SetLastError(ERROR_SUCCESS);
     return -1;
 }
 

@@ -63,8 +63,7 @@ static void CheckEx(LPCWSTR Locale, DWORD Flags, INT Expected, DWORD ExpectedErr
     Result = pFindNLSStringEx(Locale, Flags, Source, -1, Value, -1, &Found, NULL, NULL, 0);
     ok(Result == Expected, "line %d: locale '%ls' flags 0x%lx: got %d, expected %d\n", Line, Locale ? Locale : L"(null)",
        Flags, Result, Expected);
-    if (Expected == -1 && ExpectedError != NOERR)
-        ok(GetLastError() == ExpectedError, "line %d: locale '%ls' flags 0x%lx: error %lu, expected %lu\n", Line,
+    ok(GetLastError() == ExpectedError, "line %d: locale '%ls' flags 0x%lx: error %lu, expected %lu\n", Line,
            Locale ? Locale : L"(null)", Flags, GetLastError(), ExpectedError);
     if (Expected == -1)
         ok(Found == PENDING_FOUND, "line %d: found was written (%d)\n", Line, Found);
