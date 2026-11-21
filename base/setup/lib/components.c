@@ -950,6 +950,8 @@ ComponentsLoadRecorded(
 
     if (!Any && Profile == COMPONENT_PROFILE_STANDARD)
     {
+        /* nothing left out, or a record that names nothing this medium knows: the same as no record */
+        SetupLogFormat("update: the recorded component selection leaves nothing out, or has no entry this medium knows: installing everything");
         FreeRecordedState(State);
         return NULL;
     }
