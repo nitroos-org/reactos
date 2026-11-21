@@ -144,6 +144,119 @@ AddReg=Classes
 11,,shellbtrfs.dll,1
 11,,zipfldr.dll,1
 
+; The 32-bit COM servers of SysWOW64 (amd64 builds with the 32-bit side). The 32-bit regsvr32 runs over each file, in the order
+; of the list, so that the registrations land in the 32-bit registry view. ONE list for both users: Setup's second stage
+; (RegisterWow64Dlls) and "featmgr /enable wow64" (the 32-bit side added after the installation) read these two sections through
+; the same code (dll\win32\syssetup\wow64reg.c). Names are relative to SysWOW64. Keep in sync with packages/syswow64.lst.
+; A failure of a DLL of the core section fails the setup; the extras are best-effort (logged, never fatal).
+[Wow64RegisterCore]
+ole32.dll
+oleaut32.dll
+rsaenh.dll
+wintrust.dll
+softpub.dll
+mscat32.dll
+msisip.dll
+pwrshsip.dll
+cryptnet.dll
+winhttp.dll
+shell32.dll
+msxml3.dll
+; The rest of the shipped SysWOW64 COM set that setup registers for the native view (OleControlDlls above). Without these a
+; 32-bit client gets REGDB_E_CLASSNOTREG: browseui (CLSID_ACLMulti, used by installer UIs) and windowscodecs (PNG/JPEG
+; decoders, so GDI+ image load) are the ones that bit real installers.
+browseui.dll
+windowscodecs.dll
+avifil32.dll
+comdlg32.dll
+iertutil.dll
+ieframe.dll
+shdocvw.dll
+mlang.dll
+msctf.dll
+msi.dll
+msimtf.dll
+oleacc.dll
+olepro32.dll
+propsys.dll
+rpcrt4.dll
+urlmon.dll
+; IServiceProvider proxy/stub: CoRegisterClassObject(CLSCTX_LOCAL_SERVER) marshals it, so 32-bit COM servers (Google Updater) need it
+actxprxy.dll
+; CLSID_TaskScheduler: 32-bit updaters register their wake tasks
+taskschd.dll
+; CLSID_WbemLocator, SWbemLocator and the WMI path parser: 32-bit WMI clients (installers, VBScript from SysWOW64) create them by CLSID
+wbem\wbemprox.dll
+wbem\wbemdisp.dll
+wbem\wmiutils.dll
+; Script engines and WScript.Shell/FileSystemObject for 32-bit scripts
+vbscript.dll
+jscript.dll
+scrrun.dll
+wshom.ocx
+
+[Wow64RegisterExtra]
+; The COM servers among the other SysWOW64 files (DirectShow, DirectMusic, DirectPlay, ATL, the shell and Internet helpers):
+; the same set that setup registers for the native view (OleControlDlls above)
+atl.dll
+acppage.dll
+amstream.dll
+cabview.dll
+comcat.dll
+; quartz and devenum register through each other: whichever goes first fails once, so a DLL that failed is tried again after the others
+d3dxof.dll
+quartz.dll
+devenum.dll
+qcap.dll
+qedit.dll
+dmband.dll
+dmcompos.dll
+dmime.dll
+dmloader.dll
+dmscript.dll
+dmstyle.dll
+dmusic.dll
+dplayx.dll
+dpnet.dll
+dpnhupnp.dll
+dxdiagn.dll
+fontext.dll
+hlink.dll
+hnetcfg.dll
+ieproxy.dll
+inetcomm.dll
+inseng.dll
+itss.dll
+mmcshext.dll
+mstask.dll
+msxml6.dll
+objsel.dll
+pstorec.dll
+sendmail.dll
+sti.dll
+stobject.dll
+; CLSID_ExplorerBrowser and the namespace tree control: the Vista-style Open/Save dialog (IFileDialog) creates the ExplorerBrowser
+; for its folder tree and file list, and without the registration a 32-bit dialog is blank (REGDB_E_CLASSNOTREG). Registers after
+; the core set (shell32, ole32), which it loads
+explorerframe.dll
+; BITS proxy/stub: the interface and proxy CLSID registrations of the 32-bit view, so a 32-bit BITS client can marshal to the
+; 64-bit service (CLSID itself: hivesft_amd64.inf)
+qmgrprxy.dll
+; The remaining SysWOW64 COM servers that setup registers for the native view. Without them a 32-bit game or client gets
+; REGDB_E_CLASSNOTREG for DirectDraw/DirectSound/DirectInput/UI Automation/MSHTML/HTML Help/ADSI. mshtml registers after the
+; core set (urlmon, shdocvw, ieframe); its typelib step fails under WoW64 (TYPE_E_CANTLOADLIBRARY, class keys are written
+; first), hence a logged non-fatal failure. cryptdlg (DllRegisterServer fails natively too) and wininet (no DllRegisterServer)
+; register no CLSID and are left out
+activeds.dll
+ddraw.dll
+dinput.dll
+dinput8.dll
+dsound.dll
+hhctrl.ocx
+mshtml.dll
+uiautomationcore.dll
+wuapi.dll
+
 [TypeLibraries]
 activeds.tlb
 riched20.dll
