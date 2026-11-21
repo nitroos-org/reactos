@@ -574,6 +574,137 @@ static BOOL PrintTypedAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswers
     return TRUE;
 }
 
+/* The query packet for pResolve (type Type, class as set) in Buffer, which is 12 + strlen(pResolve) + 2 + 4 bytes long */
+static void BuildQuery( PCHAR Buffer, PCHAR pResolve, USHORT Type )
+{
+    int i = 0, j, k;
+
+    /* Insert the ID field. */
+    ((PSHORT)&Buffer[i])[0] = htons( RequestID );
+    i += 2;
+
+    /* Bits 0-7 of the second 16 are all 0, except for when recursion is
+    desired. */
+    Buffer[i] = 0x00;
+    if( State.recurse) Buffer[i] |= 0x01;
+    i += 1;
+
+    /* Bits 8-15 of the second 16 are 0 for a query. */
+    Buffer[i] = 0x00;
+    i += 1;
+
+    /* Only 1 question. */
+    ((PSHORT)&Buffer[i])[0] = htons( 1 );
+    i += 2;
+
+    /* We aren't sending a response, so 0 out the rest of the header. */
+    Buffer[i] = 0x00;
+    Buffer[i + 1] = 0x00;
+    Buffer[i + 2] = 0x00;
+    Buffer[i + 3] = 0x00;
+    Buffer[i + 4] = 0x00;
+    Buffer[i + 5] = 0x00;
+    i += 6;
+
+    /* Walk through the query address. Split each section delimited by '.'.
+       Format of the QNAME section is length|data, etc. Last one is null */
+    j = i;
+    i += 1;
+
+    for( k = 0; k < strlen( pResolve ); k += 1 )
+    {
+        if( pResolve[k] != '.' )
+        {
+            Buffer[i] = pResolve[k];
+            i += 1;
+        }
+        else
+        {
+            Buffer[j] = (i - j) - 1;
+            j = i;
+            i += 1;
+        }
+    }
+
+    Buffer[j] = (i - j) - 1;
+    Buffer[i] = 0x00;
+    i += 1;
+
+    /* QTYPE */
+    ((PSHORT)&Buffer[i])[0] = htons( Type );
+    i += 2;
+
+    /* QCLASS */
+    ((PSHORT)&Buffer[i])[0] = htons( ClassNametoClassID( State.Class ) );
+}
+
+#define MAX_ADDRESSES   64
+typedef CHAR ADDRESS_TEXT[48];
+
+/* Appends the A (WantType TYPE_A) or AAAA (TYPE_AAAA) records of the answer section to List (Count of Max used);
+   returns the new count (k is the offset of the first record) */
+static int CollectAddressAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswers, USHORT WantType,
+                                  ADDRESS_TEXT *List, int Count )
+{
+    int a;
+    USHORT Type, DataLength;
+
+    for( a = 0; a < NumAnswers && Count < MAX_ADDRESSES; a += 1 )
+    {
+        if( (ULONG)k >= RecLen ) break;
+        k = SkipName( Rec, RecLen, k );
+        if( k < 0 || (ULONG)k + 10 > RecLen ) break;
+        Type = ntohs( ((PUSHORT)&Rec[k])[0] );
+        k += 8;
+        DataLength = ntohs( ((PUSHORT)&Rec[k])[0] );
+        k += 2;
+        if( (ULONG)k + DataLength > RecLen ) break;
+        if( WantType == Type && DataLength == (TYPE_AAAA == Type ? 16 : 4) )
+        {
+            if( TYPE_AAAA == Type )
+                FormatIpv6( (const UCHAR *)&Rec[k], List[Count] );
+            else
+                sprintf( List[Count], "%u.%u.%u.%u", (UCHAR)Rec[k], (UCHAR)Rec[k + 1], (UCHAR)Rec[k + 2], (UCHAR)Rec[k + 3] );
+            Count += 1;
+        }
+        k += DataLength;
+    }
+
+    return Count;
+}
+
+/*
+ * Asks the server for the AAAA records of pName and appends them to List. A reply that is not usable (no answer,
+ * an error code, too short) adds nothing: the lookup is of both address types and the A answer decides what is said.
+ */
+static int QueryAddressesAAAA( PCHAR pName, ADDRESS_TEXT *List, int Count )
+{
+    PCHAR Buffer, RecBuffer;
+    ULONG BufferLength = 12 + (ULONG)(strlen( pName ) + 2) + 4, RecBufferLength = 512;
+    int k = 12;
+
+    Buffer = HeapAlloc( ProcessHeap, 0, BufferLength );
+    RecBuffer = HeapAlloc( ProcessHeap, 0, RecBufferLength );
+    if( Buffer && RecBuffer )
+    {
+        BuildQuery( Buffer, pName, TYPE_AAAA );
+        if( SendRequest( Buffer, BufferLength, RecBuffer, &RecBufferLength ) &&
+            RecBufferLength >= DNS_HEADER_LENGTH &&
+            RCODE_NOERROR == (RecBuffer[3] & 0x0F) &&
+            SkipQuestions( RecBuffer, RecBufferLength, ntohs( ((PSHORT)&RecBuffer[4])[0] ), &k ) )
+        {
+            Count = CollectAddressAnswers( RecBuffer, RecBufferLength, k, ntohs( ((PUSHORT)&RecBuffer[6])[0] ),
+                                           TYPE_AAAA, List, Count );
+        }
+    }
+    if( Buffer ) HeapFree( ProcessHeap, 0, Buffer );
+    if( RecBuffer ) HeapFree( ProcessHeap, 0, RecBuffer );
+
+    RequestID += 1;
+
+    return Count;
+}
+
 void PerformLookup( PCHAR pAddr )
 {
     /* Needed to issue DNS packets and parse them. */
@@ -581,7 +712,7 @@ void PerformLookup( PCHAR pAddr )
     CHAR pResolve[256];
     CHAR pResult[256];
     ULONG BufferLength = 0, RecBufferLength = 512;
-    int i = 0, j = 0, k = 0, d = 0;
+    int k = 0, d = 0;
     BOOL bOk = FALSE;
 
     /* Makes things easier when parsing the response packet. */
@@ -649,63 +780,7 @@ void PerformLookup( PCHAR pAddr )
         goto cleanup;
     }
 
-    /* Insert the ID field. */
-    ((PSHORT)&Buffer[i])[0] = htons( RequestID );
-    i += 2;
-
-    /* Bits 0-7 of the second 16 are all 0, except for when recursion is
-    desired. */
-    Buffer[i] = 0x00;
-    if( State.recurse) Buffer[i] |= 0x01;
-    i += 1;
-
-    /* Bits 8-15 of the second 16 are 0 for a query. */
-    Buffer[i] = 0x00;
-    i += 1;
-
-    /* Only 1 question. */
-    ((PSHORT)&Buffer[i])[0] = htons( 1 );
-    i += 2;
-
-    /* We aren't sending a response, so 0 out the rest of the header. */
-    Buffer[i] = 0x00;
-    Buffer[i + 1] = 0x00;
-    Buffer[i + 2] = 0x00;
-    Buffer[i + 3] = 0x00;
-    Buffer[i + 4] = 0x00;
-    Buffer[i + 5] = 0x00;
-    i += 6;
-
-    /* Walk through the query address. Split each section delimited by '.'.
-       Format of the QNAME section is length|data, etc. Last one is null */
-    j = i;
-    i += 1;
-
-    for( k = 0; k < strlen( pResolve ); k += 1 )
-    {
-        if( pResolve[k] != '.' )
-        {
-            Buffer[i] = pResolve[k];
-            i += 1;
-        }
-        else
-        {
-            Buffer[j] = (i - j) - 1;
-            j = i;
-            i += 1;
-        }
-    }
-
-    Buffer[j] = (i - j) - 1;
-    Buffer[i] = 0x00;
-    i += 1;
-
-    /* QTYPE */
-    ((PSHORT)&Buffer[i])[0] = htons( Type );
-    i += 2;
-
-    /* QCLASS */
-    ((PSHORT)&Buffer[i])[0] = htons( ClassNametoClassID( State.Class ) );
+    BuildQuery( Buffer, pResolve, Type );
 
     /* Ship off the request to the DNS server. */
     bOk = SendRequest( Buffer,
@@ -778,9 +853,33 @@ void PerformLookup( PCHAR pAddr )
         goto cleanup;
     }
 
+    /* The plain lookup of a name asks for A and AAAA and prints all addresses, the IPv6 ones first */
+    if( TYPE_A == QueryType && !IsValidIP( pAddr ) && !strcmp( State.type, TypeBoth ) )
+    {
+        ADDRESS_TEXT List[MAX_ADDRESSES];
+        int Count = QueryAddressesAAAA( pAddr, List, 0 ), n;
+
+        Count = CollectAddressAnswers( RecBuffer, RecBufferLength, k, NumAnswers, TYPE_A, List, Count );
+        if( Count > 0 )
+        {
+            if( 0 == NumAuthority )
+                _tprintf( _T("Non-authoritative answer:\n") );
+
+            _tprintf( _T("Name:    %s\n"), pAddr );
+            for( n = 0; n < Count; n += 1 )
+            {
+                if( 0 == n )
+                    _tprintf( Count == 1 ? _T("Address:  %s\n") : _T("Addresses:  %s\n"), List[n] );
+                else
+                    _tprintf( _T("          %s\n"), List[n] );
+            }
+            _tprintf( _T("\n") );
+        }
+        goto cleanup;
+    }
+
     /* A (not a reverse lookup): every address of the answer that is in the packet */
-    if( TYPE_A == QueryType && !IsValidIP( pAddr ) &&
-        ( !strcmp( State.type, TypeA ) || !strcmp( State.type, TypeBoth ) ) )
+    if( TYPE_A == QueryType && !IsValidIP( pAddr ) && !strcmp( State.type, TypeA ) )
     {
         PrintAddressAnswers( RecBuffer, RecBufferLength, k, NumAnswers, NumAuthority, pAddr, TYPE_A );
         goto cleanup;
