@@ -47,6 +47,7 @@ CDFParser::CDFParser()
     InfModeEnabled = false;
     InfFileHandle = NULL;
     SizeFileHandle = NULL;
+    SizedLineCount = 0;
 }
 
 CDFParser::~CDFParser()
@@ -86,7 +87,11 @@ CDFParser::~CDFParser()
     if (InfFileHandle != NULL)
         fclose(InfFileHandle);
     if (SizeFileHandle != NULL)
+    {
+        /* the count that tells a complete file from one cut short (see WriteInfLine) */
+        fprintf(SizeFileHandle, "\r\n[SizeCheck]\r\nFiles=%lu\r\n", (unsigned long)SizedLineCount);
         fclose(SizeFileHandle);
+    }
 }
 
 /*
@@ -95,6 +100,10 @@ CDFParser::~CDFParser()
  * Setup (the page that asks which components to install) adds the sizes up per component from the second
  * one. It is a separate file so that the first keeps the format every reader of the inf expects.
  * Neither is stored in the cabinet header: the per-cabinet reserved area (-RC) holds 60000 bytes at most.
+ *
+ * -I writes the inf only, -N (the cabinet itself, which is built again whenever one of its files changes)
+ * the sizes only, and without either option both. The sizes file ends with a [SizeCheck] section, the
+ * number of lines of the file list, so that a reader can tell a file that was cut short.
  */
 void CDFParser::WriteInfLine(char* InfLine, const char* SizedLine)
 {
@@ -102,10 +111,7 @@ void CDFParser::WriteInfLine(char* InfLine, const char* SizedLine)
     char eolbuf[2];
     const char* destpath;
 
-    if (DontGenerateInf)
-        return;
-
-    if (SizeFileHandle == NULL && InfFileNameSet)
+    if (!InfFileOnly && SizeFileHandle == NULL && InfFileNameSet)
     {
         char* dot;
 
@@ -128,7 +134,15 @@ void CDFParser::WriteInfLine(char* InfLine, const char* SizedLine)
         {
             DPRINT(MIN_TRACE, ("Error writing the sizes file.\n"));
         }
+        else if (SizedLine != NULL)
+        {
+            /* a line of the file list (the lines of the header go without a size) */
+            SizedLineCount++;
+        }
     }
+
+    if (DontGenerateInf)
+        return;
 
     if (InfFileHandle == NULL)
     {

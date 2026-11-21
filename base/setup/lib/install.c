@@ -741,8 +741,11 @@ ComponentsMeasure(
     HINF InfHandle;
     UINT ErrorLine;
     WCHAR PathBuffer[MAX_PATH];
+    BOOLEAN FromSizes;
+    ULONG FileLines;
     ULONG Files = 0, Sized = 0;
     ULONGLONG Total = 0;
+    BOOLEAN Damaged = FALSE;
 
     if (!Components)
         return FALSE;
@@ -764,6 +767,7 @@ ComponentsMeasure(
         if (!ptr) ptr = PathBuffer + wcslen(PathBuffer);
         wcscpy(ptr, L".sizes");
         InfHandle = SpInfOpenInfFile(PathBuffer, NULL, INF_STYLE_WIN4, pSetupData->LanguageId, &ErrorLine);
+        FromSizes = (InfHandle != INVALID_HANDLE_VALUE);
         if (InfHandle == INVALID_HANDLE_VALUE)
         {
             /* no sizes: the plain inf lists the same files, without a size */
@@ -773,6 +777,7 @@ ComponentsMeasure(
         if (InfHandle == INVALID_HANDLE_VALUE)
             continue;
 
+        FileLines = 0;
         if (SpInfFindFirstLine(InfHandle, L"SourceFiles", NULL, &FilesContext))
         {
             do
@@ -803,6 +808,7 @@ ComponentsMeasure(
                     RtlStringCchCopyW(RelPath, ARRAYSIZE(RelPath), TargetFileName ? TargetFileName : SourceFileName);
 
                 ++Files;
+                ++FileLines;
                 if (INF_GetDataField(&FilesContext, 3, &SizeText))
                 {
                     PCWSTR p;
@@ -827,11 +833,36 @@ NextLine:
                 if (SourceFileName) INF_FreeData(SourceFileName);
             } while (SpInfFindNextLine(&FilesContext, &FilesContext));
         }
+
+        /*
+         * The sizes file ends with [SizeCheck], Files=<number of lines of the list>: a file that was cut short
+         * parses as a shorter list and would give wrong totals, so it gives none (no section: the same).
+         */
+        if (FromSizes)
+        {
+            INFCONTEXT CheckContext;
+            PCWSTR CountText = NULL;
+            ULONG Expected = 0;
+            BOOLEAN Found = FALSE;
+
+            if (SpInfFindFirstLine(InfHandle, L"SizeCheck", L"Files", &CheckContext) &&
+                INF_GetDataField(&CheckContext, 1, &CountText))
+            {
+                PCWSTR p;
+
+                for (p = CountText; *p >= L'0' && *p <= L'9' && Expected <= 0xFFFFFFFUL; ++p)
+                    Expected = Expected * 10 + (*p - L'0');
+                Found = (p != CountText && !*p);
+                INF_FreeData(CountText);
+            }
+            if (!Found || Expected != FileLines)
+                Damaged = TRUE;
+        }
         SpInfCloseInfFile(InfHandle);
     } while (SpInfFindNextLine(&CabinetsContext, &CabinetsContext));
 
     /* every file has a size, or the medium does not carry sizes at all (all sizes 0: the same) */
-    Components->SizesKnown = (Files && Sized == Files && Total);
+    Components->SizesKnown = (Files && Sized == Files && Total && !Damaged);
     /* nothing is logged here: an installation that leaves everything in must not differ from one without the page,
      * not even by a log file (ComponentsSetChoice logs the selection when something is left out) */
     return Components->SizesKnown;
