@@ -579,12 +579,25 @@ ResourceMessageBox(
 }
 
 
+/* What the password change dialog works on: the account it offers (the logged-on user's when the names are NULL)
+   and, optionally, where it leaves the new password after a change */
+typedef struct _CHANGEPWD_PARAMS
+{
+    PGINA_CONTEXT pgContext;
+    PCWSTR UserName;
+    PCWSTR DomainName;
+    PWSTR NewPassword;
+    DWORD NewPasswordLength;
+} CHANGEPWD_PARAMS, *PCHANGEPWD_PARAMS;
+
+
 static
 BOOL
 DoChangePassword(
-    IN PGINA_CONTEXT pgContext,
+    IN PCHANGEPWD_PARAMS pParams,
     IN HWND hwndDlg)
 {
+    PGINA_CONTEXT pgContext = pParams->pgContext;
     WCHAR UserName[256];
     WCHAR Domain[256];
     WCHAR OldPassword[256];
@@ -716,16 +729,10 @@ DoChangePassword(
                        IDS_CHANGEPWDTITLE,
                        IDS_PASSWORDCHANGED);
 
-    /* The password change of a logon in progress (the password has expired): the logon is retried with the new one.
-       No password is kept for a logged-on session */
-    if (pgContext->bLogonInProgress &&
-        (wcscmp(UserName, pgContext->UserName) == 0) &&
-        (wcscmp(Domain, pgContext->DomainName) == 0) &&
-        (wcscmp(OldPassword, pgContext->Password) == 0))
-    {
-        SecureZeroMemory(pgContext->Password, sizeof(pgContext->Password));
-        StringCchCopyW(pgContext->Password, _countof(pgContext->Password), NewPassword1);
-    }
+    /* The password change of a logon in progress (the password has expired): the caller retries the logon with the
+       new one. No password is kept for a logged-on session */
+    if (pParams->NewPassword != NULL)
+        StringCchCopyW(pParams->NewPassword, pParams->NewPasswordLength, NewPassword1);
 
 done:
     /* Zero out the password buffers */
@@ -759,19 +766,21 @@ ChangePasswordDialogProc(
     IN WPARAM wParam,
     IN LPARAM lParam)
 {
-    PGINA_CONTEXT pgContext;
+    PCHANGEPWD_PARAMS pParams;
 
-    pgContext = (PGINA_CONTEXT)GetWindowLongPtrW(hwndDlg, GWLP_USERDATA);
+    pParams = (PCHANGEPWD_PARAMS)GetWindowLongPtrW(hwndDlg, GWLP_USERDATA);
 
     switch (uMsg)
     {
         case WM_INITDIALOG:
         {
-            pgContext = (PGINA_CONTEXT)lParam;
-            SetWindowLongPtrW(hwndDlg, GWLP_USERDATA, (LONG_PTR)pgContext);
+            pParams = (PCHANGEPWD_PARAMS)lParam;
+            SetWindowLongPtrW(hwndDlg, GWLP_USERDATA, (LONG_PTR)pParams);
 
-            SetDlgItemTextW(hwndDlg, IDC_CHANGEPWD_USERNAME, pgContext->UserName);
-            SendDlgItemMessageW(hwndDlg, IDC_CHANGEPWD_DOMAIN, CB_ADDSTRING, 0, (LPARAM)pgContext->DomainName);
+            SetDlgItemTextW(hwndDlg, IDC_CHANGEPWD_USERNAME,
+                            pParams->UserName ? pParams->UserName : pParams->pgContext->UserName);
+            SendDlgItemMessageW(hwndDlg, IDC_CHANGEPWD_DOMAIN, CB_ADDSTRING, 0,
+                                (LPARAM)(pParams->DomainName ? pParams->DomainName : pParams->pgContext->DomainName));
             SendDlgItemMessageW(hwndDlg, IDC_CHANGEPWD_DOMAIN, CB_SETCURSEL, 0, 0);
             SetFocus(GetDlgItem(hwndDlg, IDC_CHANGEPWD_OLDPWD));
             return FALSE; // Default focus is changed.
@@ -790,7 +799,7 @@ ChangePasswordDialogProc(
             switch (LOWORD(wParam))
             {
                 case IDOK:
-                    if (DoChangePassword(pgContext, hwndDlg))
+                    if (DoChangePassword(pParams, hwndDlg))
                     {
                         EndDialog(hwndDlg, TRUE);
                     }
@@ -921,14 +930,30 @@ OnInitSecurityDlg(
 }
 
 
+/* Shows the password change dialog; TRUE when the password was changed. UserName and Domain (both or none) name the
+   account offered instead of the logged-on user's; NewPassword (when not NULL, NewPasswordLength characters) receives
+   the new password of a change. */
 static BOOL
 OnChangePassword(
     IN HWND hwnd,
-    IN PGINA_CONTEXT pgContext)
+    IN PGINA_CONTEXT pgContext,
+    IN PCWSTR UserName OPTIONAL,
+    IN PCWSTR Domain OPTIONAL,
+    OUT PWSTR NewPassword OPTIONAL,
+    IN DWORD NewPasswordLength)
 {
+    CHANGEPWD_PARAMS Params;
     INT res;
 
     TRACE("OnChangePassword()\n");
+
+    Params.pgContext = pgContext;
+    Params.UserName = UserName;
+    Params.DomainName = Domain;
+    Params.NewPassword = NewPassword;
+    Params.NewPasswordLength = NewPasswordLength;
+    if (NewPassword != NULL && NewPasswordLength != 0)
+        NewPassword[0] = UNICODE_NULL;
 
     res = pgContext->pWlxFuncs->WlxDialogBoxParam(
         pgContext->hWlx,
@@ -936,11 +961,11 @@ OnChangePassword(
         MAKEINTRESOURCEW(IDD_CHANGEPWD),
         hwnd,
         ChangePasswordDialogProc,
-        (LPARAM)pgContext);
+        (LPARAM)&Params);
 
     TRACE("Result: %x\n", res);
 
-    return FALSE;
+    return (res == TRUE);
 }
 
 
@@ -1118,8 +1143,8 @@ SecurityDialogProc(
                     }
                     return TRUE;
                 case IDC_SECURITY_CHANGEPWD:
-                    if (OnChangePassword(hwndDlg, pgContext))
-                        EndDialog(hwndDlg, WLX_SAS_ACTION_PWD_CHANGED);
+                    /* The dialog stays: Winlogon has no handler for WLX_SAS_ACTION_PWD_CHANGED */
+                    OnChangePassword(hwndDlg, pgContext, NULL, NULL, NULL, 0);
                     return TRUE;
                 case IDC_SECURITY_TASKMGR:
                     EndDialog(hwndDlg, WLX_SAS_ACTION_TASKLIST);
@@ -1181,10 +1206,11 @@ DoLogon(
     LPWSTR UserName = NULL;
     LPWSTR Password = NULL;
     LPWSTR Domain = NULL;
+    WCHAR NewPassword[256];
     BOOL result = FALSE;
     NTSTATUS Status, SubStatus = STATUS_SUCCESS;
 
-    pgContext->bLogonInProgress = TRUE;
+    NewPassword[0] = UNICODE_NULL;
 
     if (GetTextboxText(hwndDlg, IDC_LOGON_USERNAME, &UserName) && *UserName == '\0')
         goto done;
@@ -1283,14 +1309,11 @@ DoLogon(
                                    IDS_PASSWORDEXPIRED);
             }
 
-            if (!OnChangePassword(hwndDlg, pgContext))
+            /* The dialog offers the account that was typed; the logon is retried with the new password */
+            if (!OnChangePassword(hwndDlg, pgContext, UserName, Domain, NewPassword, _countof(NewPassword)))
                 goto done;
 
-            Status = DoLoginTasks(pgContext,
-                                  pgContext->UserName,
-                                  pgContext->DomainName,
-                                  pgContext->Password,
-                                  &SubStatus);
+            Status = DoLoginTasks(pgContext, UserName, Domain, NewPassword, &SubStatus);
             if (!NT_SUCCESS(Status))
             {
                 TRACE("Login after password change failed! (Status 0x%08lx)\n", Status);
@@ -1377,9 +1400,9 @@ done:
     pgContext->bAutoAdminLogon = FALSE;
 
     /* The logon attempt is over: no password stays in the context (a stored automatic logon password that was read
-       into it, or the one a password change put there) */
+       into it) nor in this function (the one a password change gave) */
     SecureZeroMemory(pgContext->Password, sizeof(pgContext->Password));
-    pgContext->bLogonInProgress = FALSE;
+    SecureZeroMemory(NewPassword, sizeof(NewPassword));
 
     if (UserName != NULL)
         HeapFree(GetProcessHeap(), 0, UserName);
@@ -1741,7 +1764,7 @@ DoUnlock(
                                    MB_OK | MB_ICONSTOP,
                                    IDS_COMPUTERLOCKED,
                                    (SubStatus == STATUS_PASSWORD_MUST_CHANGE) ? IDS_PASSWORDMUSTCHANGE : IDS_PASSWORDEXPIRED);
-                OnChangePassword(hwndDlg, pgContext);
+                OnChangePassword(hwndDlg, pgContext, NULL, NULL, NULL, 0);
             }
             else
             {

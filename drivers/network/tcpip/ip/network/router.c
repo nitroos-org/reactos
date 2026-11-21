@@ -17,6 +17,36 @@
 LIST_ENTRY FIBListHead;
 KSPIN_LOCK FIBLock;
 
+/*
+ * The automatic metric of an interface by its link speed. The table is the one Microsoft documents for Windows 10 and
+ * later, for interfaces that are not wireless (Wi-Fi interfaces have a table of their own that is not implemented):
+ * https://learn.microsoft.com/troubleshoot/windows-server/networking/automatic-metric-for-ipv4-routes
+ */
+ULONG
+RouterAutomaticMetric(
+    _In_ ULONGLONG BitsPerSecond)
+{
+    if (BitsPerSecond >= 100000000000ULL)
+        return 5;
+    if (BitsPerSecond >= 40000000000ULL)
+        return 10;
+    if (BitsPerSecond >= 10000000000ULL)
+        return 15;
+    if (BitsPerSecond >= 2000000000ULL)
+        return 20;
+    if (BitsPerSecond >= 200000000ULL)
+        return 25;
+    if (BitsPerSecond >= 80000000ULL)
+        return 35;
+    if (BitsPerSecond >= 20000000ULL)
+        return 45;
+    if (BitsPerSecond >= 4000000ULL)
+        return 55;
+    if (BitsPerSecond >= 500000ULL)
+        return 65;
+    return 75;
+}
+
 UINT
 ProcessAutoMetric(
     _In_ PIP_INTERFACE Interface)
@@ -27,21 +57,8 @@ ProcessAutoMetric(
     if (Interface->Metric != 0)
         return Interface->Metric;
 
-    /* Auto metric */
-    if (Interface->Speed > 2000000000)
-        return 5;
-    else if (Interface->Speed > 200000000)
-        return 10;
-    else if (Interface->Speed > 80000000)
-        return 20;
-    else if (Interface->Speed > 20000000)
-        return 25;
-    else if (Interface->Speed > 4000000)
-        return 30;
-    else if (Interface->Speed > 500000)
-        return 40;
-    else
-        return 50;
+    /* Auto metric: the speed of the interface is in units of 100 bit/s (OID_GEN_LINK_SPEED) */
+    return RouterAutomaticMetric((ULONGLONG)Interface->Speed * 100);
 }
 
 
