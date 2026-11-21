@@ -420,7 +420,8 @@ MI_IS_MAPPED_PTE(PMMPTE PointerPte)
     return ((PointerPte->u.Hard.Valid != 0) ||
             (PointerPte->u.Proto.Prototype != 0) ||
             (PointerPte->u.Trans.Transition != 0) ||
-            (PointerPte->u.Hard.PageFrameNumber != 0));
+            (PointerPte->u.Hard.PageFrameNumber != 0) ||
+            (PointerPte->u.Soft.PageFileHigh != 0));
 }
 
 FORCEINLINE
