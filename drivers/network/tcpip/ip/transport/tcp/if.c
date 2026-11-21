@@ -170,10 +170,12 @@ TCPUpdateInterfaceStateLocked(PIP_INTERFACE IF, BOOLEAN HasIPv4Address)
         netif_set_up(netif);
         netif_set_default(netif);
     }
-    else if (TCPIpv6Links && netif_is_link_up(netif))
+    else if (TCPIpv6Links && (netif_is_link_up(netif) || netif_is_up(netif)))
     {
         /* IPv6 needs no IPv4 address: its link-local address is formed, checked (DAD) and used with the
-         * link alone, and lwIP does all of that only on an interface that is up */
+         * link alone, and lwIP does all of that only on an interface that is up. An interface that is up stays up
+         * when its link drops: bringing it down would clear its IPv6 prefixes, routers and routes, which Windows
+         * keeps over a media disconnect (the addresses are checked again when the link comes back) */
         netif_set_up(netif);
     }
     else

@@ -1144,36 +1144,33 @@ BOOLEAN ReconfigureAdapter(PRECONFIGURE_CONTEXT Context)
     PLAN_ADAPTER Adapter = Context->Adapter;
     PIP_INTERFACE Interface = Adapter->Context;
     NDIS_STATUS NdisStatus;
-    IP_ADDRESS DefaultMask;
 
-    /* Initialize the default unspecified address (0.0.0.0) */
-    AddrInitIPv4(&DefaultMask, 0);
+    /*
+     * A media disconnect (cable out, switch port bounce, Wi-Fi roam) keeps the addresses and routes of both
+     * families, as Windows does: Windows Server 2022 keeps its DHCP and static IPv4 addresses, its IPv6 addresses
+     * and every route over link drops of 1 to 120 s and reports the interface as disconnected meanwhile, so that
+     * TCP connections survive a short drop. The IPv4 configuration is read when the adapter starts the first time;
+     * a link that comes back keeps what it had (the DHCP client checks its lease again). The neighbour entries stay
+     * too (Windows keeps the router's: IPv4 in Probe, IPv6 Stale), so that a datagram sent meanwhile is lost without
+     * an error instead of failing its address resolution; they are checked again as they age.
+     */
     if (Context->State == LAN_STATE_STARTED &&
         !Context->Adapter->CompletingReset)
     {
-        /* Read the IP configuration */
-        ReadIpConfiguration(Interface);
-        /* and the persistent IPv6 addresses, routes and interface parameters of the adapter (persist6.c) */
+        if (!Adapter->IpConfigured)
+        {
+            /* Read the IP configuration */
+            ReadIpConfiguration(Interface);
+
+            /* Compute the broadcast address */
+            Interface->Broadcast.Type = IP_ADDRESS_V4;
+            Interface->Broadcast.Address.IPv4Address = Interface->Unicast.Address.IPv4Address |
+                                                      ~Interface->Netmask.Address.IPv4Address;
+            Adapter->IpConfigured = TRUE;
+        }
+        /* the persistent IPv6 addresses, routes and interface parameters of the adapter that are not there
+           (persist6.c: what is there already stays as it is) */
         TCP6ApplyPersistent(Interface);
-
-        /* Compute the broadcast address */
-        Interface->Broadcast.Type = IP_ADDRESS_V4;
-        Interface->Broadcast.Address.IPv4Address = Interface->Unicast.Address.IPv4Address |
-                                                  ~Interface->Netmask.Address.IPv4Address;
-    }
-    else if (!Context->Adapter->CompletingReset)
-    {
-        /* Clear IP configuration */
-        Interface->Unicast = DefaultMask;
-        Interface->Netmask = DefaultMask;
-        Interface->Broadcast = DefaultMask;
-
-        /* Remove all interface routes, and forget the additional addresses (their neighbors go with the others) */
-        IFClearNtes(Interface);
-        RouterRemoveRoutesForInterface(Interface);
-
-        /* Destroy all cached neighbors */
-        NBDestroyNeighborsForInterface(Interface);
     }
 
     Context->Adapter->CompletingReset = FALSE;
