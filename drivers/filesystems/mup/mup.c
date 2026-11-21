@@ -2330,7 +2330,7 @@ CreateRedirectedFile(PIRP Irp,
 
         /* If so, check whether the prefix is still valid */
         KeQuerySystemTime(&CurrentTime);
-        if (Prefix->ValidityTimeout.QuadPart < CurrentTime.QuadPart)
+        if (CurrentTime.QuadPart <= Prefix->ValidityTimeout.QuadPart)
         {
             /* It is: so, update its validity period and reroute file opening */
             MupCalculateTimeout(&Prefix->ValidityTimeout);
