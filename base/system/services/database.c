@@ -3802,6 +3802,298 @@ ScmLoadService(PSERVICE Service,
 }
 
 
+/*
+ * The services a service depends on (DependOnService, DependOnGroup) are started before it, as on Windows
+ * (CreateService, lpDependencies: "names of services or load ordering groups that the system must start before this
+ * service"; "Dependency on a group means that this service can run if at least one member of the group is running after
+ * an attempt to start all members of the group"; ERROR_SERVICE_DEPENDENCY_FAIL 1068 and ERROR_SERVICE_DEPENDENCY_DELETED
+ * 1075 are the codes of the system error list).
+ */
+#define SCM_MAX_DEPENDENCY_DEPTH    16
+#define SCM_DEPENDENCY_MIN_WAIT     30000   /* ms a dependency may take, as long as it makes progress */
+
+typedef struct _SCM_START_CHAIN
+{
+    ULONG Depth;
+    PSERVICE Services[SCM_MAX_DEPENDENCY_DEPTH];
+} SCM_START_CHAIN, *PSCM_START_CHAIN;
+
+static DWORD
+ScmStartServiceWithDependencies(PSERVICE Service,
+                                DWORD argc,
+                                const PCWSTR* argv,
+                                PSCM_START_CHAIN Chain);
+
+/* Waits until the service has reached the running states (bStopped FALSE) or has stopped (bStopped TRUE). A wait
+   that sees no progress (the checkpoint) for the service's wait hint, at least SCM_DEPENDENCY_MIN_WAIT, gives up. */
+static BOOL
+ScmWaitForServiceState(PSERVICE Service,
+                       BOOL bStopped)
+{
+    DWORD dwState, dwCheckPoint, dwWaitHint;
+    DWORD dwLastCheckPoint = (DWORD)-1;
+    DWORD dwProgressTime = GetTickCount();
+    DWORD dwAllowed = SCM_DEPENDENCY_MIN_WAIT;
+
+    for (;;)
+    {
+        ScmLockDatabaseShared();
+        dwState = Service->Status.dwCurrentState;
+        dwCheckPoint = Service->Status.dwCheckPoint;
+        dwWaitHint = Service->Status.dwWaitHint;
+        ScmUnlockDatabase();
+
+        if (bStopped)
+        {
+            if (dwState == SERVICE_STOPPED)
+                return TRUE;
+        }
+        else
+        {
+            if (dwState == SERVICE_STOPPED)
+                return FALSE;
+            if (dwState != SERVICE_START_PENDING && dwState != SERVICE_STOP_PENDING)
+                return TRUE;
+        }
+
+        if (dwCheckPoint != dwLastCheckPoint)
+        {
+            dwProgressTime = GetTickCount();
+            dwAllowed = max(dwWaitHint, SCM_DEPENDENCY_MIN_WAIT);
+            dwLastCheckPoint = dwCheckPoint;
+        }
+
+        if (GetTickCount() - dwProgressTime >= dwAllowed)
+            return FALSE;
+
+        Sleep(50);
+    }
+}
+
+/* Brings the named service to the running states, starting it (and what it depends on) when it is stopped */
+static DWORD
+ScmStartDependencyByName(PCWSTR pszName,
+                         PSCM_START_CHAIN Chain)
+{
+    PSERVICE Dependency;
+    DWORD dwError = ERROR_SUCCESS;
+    DWORD dwState;
+    DWORD dwStartType;
+    BOOL bDeleted;
+    int nTry;
+
+    ScmLockDatabaseShared();
+    Dependency = ScmGetServiceEntryByName(pszName);
+    if (Dependency != NULL)
+        ScmReferenceService(Dependency);
+    ScmUnlockDatabase();
+
+    if (Dependency == NULL)
+        return ERROR_SERVICE_DEPENDENCY_DELETED;
+
+    for (nTry = 0; nTry < 2; nTry++)
+    {
+        ScmLockDatabaseShared();
+        dwState = Dependency->Status.dwCurrentState;
+        dwStartType = Dependency->dwStartType;
+        bDeleted = Dependency->bDeleted;
+        ScmUnlockDatabase();
+
+        if (dwState == SERVICE_START_PENDING)
+        {
+            dwError = ScmWaitForServiceState(Dependency, FALSE) ? ERROR_SUCCESS : ERROR_SERVICE_DEPENDENCY_FAIL;
+            break;
+        }
+        else if (dwState == SERVICE_STOP_PENDING)
+        {
+            /* Let the stop finish, then start it again */
+            if (!ScmWaitForServiceState(Dependency, TRUE))
+            {
+                dwError = ERROR_SERVICE_DEPENDENCY_FAIL;
+                break;
+            }
+        }
+        else if (dwState != SERVICE_STOPPED)
+        {
+            /* Running (or paused): nothing to do */
+            dwError = ERROR_SUCCESS;
+            break;
+        }
+        else
+        {
+            if (bDeleted)
+            {
+                dwError = ERROR_SERVICE_DEPENDENCY_DELETED;
+                break;
+            }
+            if (dwStartType == SERVICE_DISABLED)
+            {
+                dwError = ERROR_SERVICE_DEPENDENCY_FAIL;
+                break;
+            }
+
+            dwError = ScmStartServiceWithDependencies(Dependency, 0, NULL, Chain);
+            if (dwError == ERROR_SERVICE_ALREADY_RUNNING)
+                dwError = ERROR_SUCCESS;
+            else if (dwError != ERROR_SUCCESS)
+                dwError = ERROR_SERVICE_DEPENDENCY_FAIL;
+
+            /* A user-mode service must have reported its running state before the next one is started */
+            if (dwError == ERROR_SUCCESS && !ScmWaitForServiceState(Dependency, FALSE))
+                dwError = ERROR_SERVICE_DEPENDENCY_FAIL;
+            break;
+        }
+    }
+
+    if (nTry == 2)
+        dwError = ERROR_SERVICE_DEPENDENCY_FAIL;
+
+    ScmLockDatabaseExclusive();
+    ScmDereferenceService(Dependency);
+    ScmUnlockDatabase();
+
+    return dwError;
+}
+
+/* Tries to start every member of a load ordering group (the disabled ones are left alone); the dependency is met when
+   one member is running afterwards. A group without a member does not stop the service (as before). */
+static DWORD
+ScmStartDependencyGroup(PSERVICE Service,
+                        PCWSTR pszGroup,
+                        PSCM_START_CHAIN Chain)
+{
+    PLIST_ENTRY ServiceEntry;
+    PSERVICE Member;
+    PWSTR pszNames = NULL, pszName, pszEnd = NULL;
+    SIZE_T cchNames = 0, cchName;
+    BOOL bAnyMember = FALSE, bRunning = FALSE;
+    ULONG nPass;
+
+    /* The names of the members are copied: the database lock cannot be held while they are started */
+    ScmLockDatabaseShared();
+    for (nPass = 0; nPass < 2; nPass++)
+    {
+        if (nPass == 1)
+        {
+            pszNames = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (cchNames + 1) * sizeof(WCHAR));
+            if (pszNames == NULL)
+            {
+                ScmUnlockDatabase();
+                return ERROR_NOT_ENOUGH_MEMORY;
+            }
+            pszEnd = pszNames;
+        }
+
+        for (ServiceEntry = ServiceListHead.Flink; ServiceEntry != &ServiceListHead; ServiceEntry = ServiceEntry->Flink)
+        {
+            Member = CONTAINING_RECORD(ServiceEntry, SERVICE, ServiceListEntry);
+            if (Member == Service || Member->lpGroup == NULL || Member->bDeleted ||
+                Member->dwStartType == SERVICE_DISABLED ||
+                _wcsicmp(Member->lpGroup->lpGroupName, pszGroup) != 0)
+            {
+                continue;
+            }
+
+            cchName = wcslen(Member->lpServiceName) + 1;
+            if (nPass == 0)
+            {
+                cchNames += cchName;
+            }
+            else
+            {
+                wcscpy(pszEnd, Member->lpServiceName);
+                pszEnd += cchName;
+            }
+        }
+    }
+    ScmUnlockDatabase();
+
+    for (pszName = pszNames; *pszName != UNICODE_NULL; pszName += wcslen(pszName) + 1)
+    {
+        bAnyMember = TRUE;
+        if (ScmStartDependencyByName(pszName, Chain) == ERROR_SUCCESS)
+            bRunning = TRUE;
+    }
+
+    HeapFree(GetProcessHeap(), 0, pszNames);
+
+    return (bAnyMember && !bRunning) ? ERROR_SERVICE_DEPENDENCY_FAIL : ERROR_SUCCESS;
+}
+
+
+/* Starts what the service depends on; ERROR_SERVICE_DEPENDENCY_FAIL when a dependency does not come up */
+static DWORD
+ScmStartDependencies(PSERVICE Service,
+                     PSCM_START_CHAIN Chain)
+{
+    HKEY hServiceKey;
+    PWSTR pszDependencies = NULL, pszDependency;
+    DWORD dwLength;
+    DWORD dwError;
+
+    dwError = ScmOpenServiceKey(Service->lpServiceName, KEY_READ, &hServiceKey);
+    if (dwError != ERROR_SUCCESS)
+        return ERROR_SUCCESS;   /* no key, no dependencies: ScmLoadService reports what is wrong */
+
+    dwError = ScmReadDependencies(hServiceKey, &pszDependencies, &dwLength);
+    RegCloseKey(hServiceKey);
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
+    if (pszDependencies == NULL)
+        return ERROR_SUCCESS;
+
+    for (pszDependency = pszDependencies; *pszDependency != UNICODE_NULL; pszDependency += wcslen(pszDependency) + 1)
+    {
+        if (*pszDependency == SC_GROUP_IDENTIFIERW)
+            dwError = ScmStartDependencyGroup(Service, pszDependency + 1, Chain);
+        else
+            dwError = ScmStartDependencyByName(pszDependency, Chain);
+
+        if (dwError != ERROR_SUCCESS)
+        {
+            DPRINT1("Dependency '%S' of '%S' failed (Error %lu)\n", pszDependency, Service->lpServiceName, dwError);
+            break;
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, pszDependencies);
+    return dwError;
+}
+
+
+static DWORD
+ScmStartServiceWithDependencies(PSERVICE Service,
+                                DWORD argc,
+                                const PCWSTR* argv,
+                                PSCM_START_CHAIN Chain)
+{
+    DWORD dwError = ERROR_SUCCESS;
+    ULONG i;
+
+    /* A service that depends on itself, through others, or a chain that is too deep, cannot start */
+    for (i = 0; i < Chain->Depth; i++)
+    {
+        if (Chain->Services[i] == Service)
+            return ERROR_SERVICE_DEPENDENCY_FAIL;
+    }
+    if (Chain->Depth >= SCM_MAX_DEPENDENCY_DEPTH)
+        return ERROR_SERVICE_DEPENDENCY_FAIL;
+    Chain->Services[Chain->Depth++] = Service;
+
+    /* A service that is running or on its way needs nothing started (ScmLoadService says so) */
+    if (Service->Status.dwCurrentState == SERVICE_STOPPED)
+    {
+        dwError = ScmStartDependencies(Service, Chain);
+    }
+
+    if (dwError == ERROR_SUCCESS)
+        dwError = ScmLoadService(Service, argc, argv);
+
+    Chain->Depth--;
+    return dwError;
+}
+
+
 DWORD
 ScmStartService(PSERVICE Service,
                 DWORD argc,
@@ -3828,8 +4120,13 @@ ScmStartService(PSERVICE Service,
             goto done;
     }
 
-    /* Really start the service */
-    dwError = ScmLoadService(Service, argc, argv);
+    /* Really start the service, after the services it depends on */
+    {
+        SCM_START_CHAIN Chain;
+
+        Chain.Depth = 0;
+        dwError = ScmStartServiceWithDependencies(Service, argc, argv, &Chain);
+    }
 
     /* A start that the required privileges stop (1297 for a privilege the account lacks, 87 or 13 for an invalid
      * list) leaves the win32 exit code 0, not ERROR_SERVICE_NEVER_STARTED (measured on Windows Server 2022) */
