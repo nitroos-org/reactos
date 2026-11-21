@@ -2964,8 +2964,11 @@ IsSamePrimaryLayoutEntry(
     IN PDISKENTRY DiskEntry,
     IN PPARTENTRY PartEntry)
 {
+    /* The type and the boot flag are part of the entry: a change of either has to reach the table too */
     if ((PartitionInfo->StartingOffset.QuadPart == PartEntry->StartSector.QuadPart * DiskEntry->BytesPerSector) &&
-        (PartitionInfo->PartitionLength.QuadPart == PartEntry->SectorCount.QuadPart * DiskEntry->BytesPerSector))
+        (PartitionInfo->PartitionLength.QuadPart == PartEntry->SectorCount.QuadPart * DiskEntry->BytesPerSector) &&
+        (PartitionInfo->Mbr.PartitionType == PartEntry->Mbr.PartitionType) &&
+        (!!PartitionInfo->Mbr.BootIndicator == !!PartEntry->Mbr.BootIndicator))
     {
         return TRUE;
     }
@@ -3423,6 +3426,9 @@ UpdateGptDiskLayout(
         ZeroMemory(PartitionInfo, sizeof(PARTITION_INFORMATION_EX));
         PartitionInfo->RewritePartition = TRUE;
     }
+
+    /* As for an MBR disk: the table is to be written (WriteGptPartitions does nothing for a disk that is not dirty) */
+    DiskEntry->Dirty = TRUE;
 }
 
 
