@@ -808,11 +808,21 @@ int kshim_jnl_holds(struct block_device *b, u64 off, u64 len)
  * so a reader of the slot that finds it at or below its @since knows that no write to the page was sent since.  The in-place
  * passes of the journal run under the volume lock or as the I/O of a sealed transaction (kshim_jnl_busy), so a caller that
  * holds the lock and finds no I/O in flight sees all of theirs; file data written outside the lock is marked before and after.
+ * A slot is only ever raised (kshim_home_raise): file data is marked without the volume lock, so a writer that took its count
+ * earlier can store it after a later writer stored a higher one into the same slot (two pages that hash alike), and a plain
+ * store would then hide the later write from every reader whose @since lies between the two.
  */
+static void kshim_home_raise(unsigned long long *slot, u64 g)
+{
+	u64 o = __atomic_load_n(slot, __ATOMIC_SEQ_CST);
+	while (o < g && !__atomic_compare_exchange_n(slot, &o, g, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+		;
+}
+
 void kshim_home_all(struct block_device *b)
 {
 	u64 g = __atomic_add_fetch(&b->kshim_home_gen, 1, __ATOMIC_SEQ_CST);
-	__atomic_store_n(&b->kshim_home_wide, g, __ATOMIC_SEQ_CST);
+	kshim_home_raise(&b->kshim_home_wide, g);
 }
 
 void kshim_home_mark(struct block_device *b, u64 off, u64 len)
@@ -828,11 +838,11 @@ void kshim_home_mark(struct block_device *b, u64 off, u64 len)
 	g = __atomic_add_fetch(&b->kshim_home_gen, 1, __ATOMIC_SEQ_CST);
 	e = (off + len - 1) / KJ_PAGE;
 	if (e - off / KJ_PAGE >= KSHIM_HOME_N) {
-		__atomic_store_n(&b->kshim_home_wide, g, __ATOMIC_SEQ_CST);
+		kshim_home_raise(&b->kshim_home_wide, g);
 		return;
 	}
 	for (p = off / KJ_PAGE; p <= e; p++)
-		__atomic_store_n(&pg[p % KSHIM_HOME_N], g, __ATOMIC_SEQ_CST);
+		kshim_home_raise(&pg[p % KSHIM_HOME_N], g);
 }
 
 u64 kshim_home_now(struct block_device *b)
