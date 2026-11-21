@@ -473,8 +473,23 @@ Return Value:
             //  just to be safe (in case there is no dismount).
             //
 
+#ifdef __REACTOS__
+            //
+            //  autochk repairs the mounted boot volume through its own handle,
+            //  which has FO_FILE_MODIFIED but not WriteAccess, so the test of
+            //  the original code never fired for it and the verify that
+            //  rebuilds what the file system keeps in memory (the FAT cache,
+            //  the free cluster bitmap, the Mcbs, the dirty state) did not
+            //  run: a file whose chain autochk shortened was still extended
+            //  into the cluster it had freed.  A handle that modified the
+            //  volume is what counts, not the access it asked for.
+            //
+
+            } else if (FlagOn(FileObject->Flags, FO_FILE_MODIFIED)) {
+#else
             } else if (FileObject->WriteAccess &&
                        FlagOn(FileObject->Flags, FO_FILE_MODIFIED)) {
+#endif
 
                 (VOID)FatHijackIrpAndFlushDevice( IrpContext,
                                                   Irp,
