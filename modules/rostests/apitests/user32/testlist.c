@@ -128,6 +128,7 @@ extern void func_SetParent(void);
 extern void func_SetProp(void);
 extern void func_SetScrollInfo(void);
 extern void func_SetScrollRange(void);
+extern void func_SetSysColorsWinsta(void);
 extern void func_SetWindowPlacement(void);
 extern void func_SetWindowPosOwned(void);
 extern void func_SetWindowRgn(void);
@@ -296,6 +297,7 @@ const struct test winetest_testlist[] =
     { "SetProp", func_SetProp },
     { "SetScrollInfo", func_SetScrollInfo },
     { "SetScrollRange", func_SetScrollRange },
+    { "SetSysColorsWinsta", func_SetSysColorsWinsta },
     { "SetWindowPlacement", func_SetWindowPlacement },
     { "SetWindowPosOwned", func_SetWindowPosOwned },
     { "SetWindowRgn", func_SetWindowRgn },
