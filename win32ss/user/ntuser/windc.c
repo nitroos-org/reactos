@@ -502,8 +502,10 @@ DceReleaseDC(DCE* dce, BOOL EndPaint)
       DceDeleteClipRgn(dce);
    }
 
-   /* Restore previous visible region */
-   if (EndPaint)
+   /* Restore previous visible region. A cache DC whose window went while another
+      process held it (DceFreeWindowDCE) has no window left to take it from, and its
+      flags may still ask for the parent's (DCX_PARENTCLIP); the DC is released below. */
+   if (EndPaint && dce->pwndOrg)
    {
       DceUpdateVisRgn(dce, dce->pwndOrg, dce->DCXFlags);
    }
