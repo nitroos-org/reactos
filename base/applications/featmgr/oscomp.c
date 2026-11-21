@@ -38,6 +38,38 @@ void FmOsCompSetSource(LPCWSTR source)
         StringCchCopyW(g_source, ARRAYSIZE(g_source), source);
 }
 
+/* /force: add from a medium that is not the one the system was installed from (see CheckMedium) */
+static BOOL g_force;
+
+void FmOsCompSetForce(BOOL force)
+{
+    g_force = force;
+}
+
+/* A path from the medium (the cabinet inf of a disc or folder that anybody can have made) that stays inside the system
+ * folder: no ".." element, no drive or stream colon, not rooted, no empty element. */
+static BOOL RelPathOk(LPCWSTR rel)
+{
+    LPCWSTR p = rel;
+
+    if (!*p || *p == L'\\' || *p == L'/') return FALSE;
+    while (*p)
+    {
+        LPCWSTR e = p;
+        size_t n;
+
+        while (*e && *e != L'\\' && *e != L'/') e++;
+        n = (size_t)(e - p);
+        if (!n) return FALSE;
+        if (n == 2 && p[0] == L'.' && p[1] == L'.') return FALSE;
+        if (n == 1 && p[0] == L'.') return FALSE;
+        for (; p < e; p++)
+            if (*p == L':') return FALSE;
+        p = *e ? e + 1 : e;
+    }
+    return TRUE;
+}
+
 /* ---- the record ---------------------------------------------------------- */
 
 static BOOL IdOk(LPCWSTR id)
@@ -242,6 +274,56 @@ static BOOL FindMedium(LPWSTR dir, DWORD cch, FILE *log)
     return FALSE;
 }
 
+/* Identity of a medium: size, number of files and set id of its reactos.cab (CFHEADER), as setup recorded it (MediumId of the record) */
+static BOOL MediumIdOf(LPCWSTR medium, LPWSTR id, size_t cch)
+{
+    WCHAR p[MAX_PATH];
+    BYTE h[36];
+    DWORD got = 0;
+    HANDLE f;
+    BOOL ok;
+
+    StringCchPrintfW(p, ARRAYSIZE(p), L"%s\\reactos.cab", medium);
+    f = CreateFileW(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return FALSE;
+    ok = ReadFile(f, h, sizeof(h), &got, NULL) && got == sizeof(h) && h[0] == 'M' && h[1] == 'S' && h[2] == 'C' && h[3] == 'F';
+    CloseHandle(f);
+    if (!ok) return FALSE;
+    StringCchPrintfW(id, cch, L"%08lx-%04x-%04x", *(DWORD *)&h[8], (unsigned)*(WORD *)&h[28], (unsigned)*(WORD *)&h[32]);
+    return TRUE;
+}
+
+/* Is this the medium the system was installed from? A record without MediumId (an older setup) is not checked. */
+static BOOL CheckMedium(LPCWSTR medium, FILE *log)
+{
+    HKEY hk;
+    WCHAR rec[40], have[40] = L"";
+    DWORD cb = sizeof(rec) - sizeof(WCHAR), type;
+    BOOL has = FALSE;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, COMPONENTS_KEY, 0, KEY_QUERY_VALUE, &hk) == ERROR_SUCCESS)
+    {
+        has = RegQueryValueExW(hk, L"MediumId", NULL, &type, (LPBYTE)rec, &cb) == ERROR_SUCCESS && type == REG_SZ && cb >= sizeof(WCHAR);
+        RegCloseKey(hk);
+    }
+    if (!has)
+    {
+        LOGF(log, L"note: the record of this system does not say which medium it was installed from: the medium is not checked\n");
+        return TRUE;
+    }
+    rec[cb / sizeof(WCHAR)] = L'\0';
+    rec[ARRAYSIZE(rec) - 1] = L'\0';
+    if (MediumIdOf(medium, have, ARRAYSIZE(have)) && !_wcsicmp(have, rec)) return TRUE;
+    if (g_force)
+    {
+        LOGF(log, L"warn: this medium is not the one the system was installed from (%s, recorded %s): added anyway (/force)\n", have, rec);
+        return TRUE;
+    }
+    LOGF(log, L"error: this medium is not the one the system was installed from (its reactos.cab is not the recorded %s); use /force to add from it anyway\n", rec);
+    FmSetLastMessage(L"This is not the installation disc this system was installed from (another build). Put the matching disc in the drive. Files of two builds should not be mixed.");
+    return FALSE;
+}
+
 /* ---- file map ------------------------------------------------------------ */
 
 typedef struct _MAPENTRY
@@ -336,6 +418,11 @@ static BOOL BuildMap(LPCWSTR medium, const PATLIST *mine, const PATLIST *others,
                 else StringCchCopyW(rel, ARRAYSIZE(rel), tgt[0] ? tgt : src);
 
                 if (!PatAny(mine, rel) || PatAny(others, rel)) continue;
+                if (!RelPathOk(rel))
+                {
+                    LOGF(log, L"warn: ignored, its destination leaves the system folder: %s\n", rel);
+                    continue;
+                }
                 MapAdd(m, src, rel);
                 if (SetupGetStringFieldW(&fc, 3, sizeText, ARRAYSIZE(sizeText), NULL))
                     m->bytes += _wcstoui64(sizeText, NULL, 10);
@@ -753,17 +840,19 @@ static void RewriteRecord(LPCWSTR added, FILE *log)
         p += l;
     }
     GetSystemTime(&st);
-    len += (size_t)_snprintf(out + len, cap - len, "\r\n; added later (featmgr): %ws at %04u-%02u-%02uT%02u:%02uZ\r\n", added, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
+    /* _snprintf returns -1 when the text does not fit: never add that to the length */
+#define APPEND(...) do { int w_ = _snprintf(out + len, cap - len, __VA_ARGS__); if (w_ > 0) len += (size_t)w_; } while (0)
+    APPEND("\r\n; added later (featmgr): %ws at %04u-%02u-%02uT%02u:%02uZ\r\n", added, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
     for (v = 0; v < 2; v++)
     {
-        len += (size_t)_snprintf(out + len, cap - len, "\r\n[%s]\r\n", v == 0 ? "Installed" : "Omitted");
+        APPEND("\r\n[%s]\r\n", v == 0 ? "Installed" : "Omitted");
         for (k = 0; k < n; k++)
         {
             DWORD inst = 1;
             WCHAR nm[FM_MAX_NAME];
             RecordGet(list[k].Id, &inst, nm, ARRAYSIZE(nm));
             if ((v == 0) != (inst != 0)) continue;
-            len += (size_t)_snprintf(out + len, cap - len, "%ws=%ws\r\n", list[k].Id, nm[0] ? nm : list[k].Id);
+            APPEND("%ws=%ws\r\n", list[k].Id, nm[0] ? nm : list[k].Id);
         }
     }
     h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -843,6 +932,8 @@ HRESULT FmOsCompEnable(LPCWSTR id, FILE *log)
     }
     if (!FindMedium(medium, ARRAYSIZE(medium), log))
         return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
+    if (!CheckMedium(medium, log))
+        return HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH);
     LOGF(log, L"adding component '%s' from %s\n", id, medium);
     FmOpPhase(FM_PHASE_APPLY);
     FmOpStep(L"Reading the component list of the installation medium");

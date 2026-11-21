@@ -116,6 +116,7 @@ int     FmGetDependents(LPCWSTR id, LPWSTR buf, DWORD cch);
  * is turned on by copying it from the installation medium: a CD/DVD drive, or the folder / drive given with /source:
  * (FmOsCompSetSource). Removing a component after setup is not supported. */
 void   FmOsCompSetSource(LPCWSTR source);
+void   FmOsCompSetForce(BOOL force);   /* /force: add from a medium that is not the one the system came from */
 BOOL   FmOsCompIsComponent(LPCWSTR id);
 BOOL   FmOsCompFind(LPCWSTR id, FM_FEATURE *out);
 int    FmOsCompList(FM_FEATURE *out, int max);
