@@ -7431,6 +7431,23 @@ static HRESULT start_schedsvc(void)
     scm = OpenSCManagerW(NULL, NULL, 0);
     if (!scm) return SCHED_E_SERVICE_NOT_INSTALLED;
 
+    /* The service normally runs already, and a standard user may query it but not start it: ask first with the
+     * right a standard user has, and start it only when it is not running */
+    service = OpenServiceW(scm, L"Schedule", SERVICE_QUERY_STATUS);
+    if (service)
+    {
+        DWORD dummy;
+        BOOL running = QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, (BYTE *)&status, sizeof(status), &dummy) &&
+                       status.dwCurrentState == SERVICE_RUNNING;
+
+        CloseServiceHandle(service);
+        if (running)
+        {
+            CloseServiceHandle(scm);
+            return S_OK;
+        }
+    }
+
     service = OpenServiceW(scm, L"Schedule", SERVICE_START | SERVICE_QUERY_STATUS);
     if (service)
     {
