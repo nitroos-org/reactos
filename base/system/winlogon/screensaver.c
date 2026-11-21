@@ -464,6 +464,44 @@ RunEmptyScreenSaver(
 
 
 /*
+ * The time of the last input, as the idle timer of the screen saver sees it. A screen saver that ends by itself
+ * (it crashes at once, or exits for a missing file or device) with no input in between must not be started again
+ * and again while the user is away: the desktop would flash every few seconds and a password protected setting
+ * would never lock, as the saver always ends within the grace period.
+ */
+static
+DWORD
+GetLastInputTime(VOID)
+{
+    LASTINPUTINFO InputInfo;
+
+    InputInfo.cbSize = sizeof(InputInfo);
+    return GetLastInputInfo(&InputInfo) ? InputInfo.dwTime : 0;
+}
+
+static
+VOID
+ScreenSaverEnded(
+    IN PWLSESSION Session,
+    IN DWORD InputAtStart)
+{
+    Session->LastScreenSaverEnd = GetTickCount();
+    Session->bScreenSaverRan = TRUE;
+    Session->InputAtScreenSaverEnd = GetLastInputTime();
+    Session->bScreenSaverNeedsInput = (Session->InputAtScreenSaverEnd == InputAtStart);
+}
+
+/* Tells whether the last screen saver ended (or could not run) with no input since it was asked for, and there is
+ * still no input: a new one has to wait for an input. */
+BOOL
+NoInputSinceScreenSaver(
+    IN PWLSESSION Session)
+{
+    return Session->bScreenSaverNeedsInput && GetLastInputTime() == Session->InputAtScreenSaverEnd;
+}
+
+
+/*
  * Runs the screen saver of the logged-on user and waits for its end.
  *
  * Returns TRUE if the saver was started and ended, it was a password protected one (bSecure)
@@ -491,6 +529,7 @@ StartScreenSaver(
     BOOL bStartFailed = FALSE;
     BOOL bSwitched = FALSE;
     DWORD StartTick = 0;
+    DWORD InputAtStart = GetLastInputTime();
     /* A machine setting: read as winlogon, not as the user */
     DWORD GracePeriod = bSecure ? GetScreenSaverGracePeriod() : 0;
 
@@ -647,8 +686,7 @@ StartScreenSaver(
 
     CloseHandle(ProcessInformation.hProcess);
 
-    Session->LastScreenSaverEnd = GetTickCount();
-    Session->bScreenSaverRan = TRUE;
+    ScreenSaverEnded(Session, InputAtStart);
 
     /* The end of the saver locks the workstation, unless it ended within the grace period */
     if (bSecure && (GetTickCount() - StartTick) >= GracePeriod)
@@ -690,8 +728,7 @@ cleanup:
 
         if (bNoSaver || bStartFailed)
         {
-            Session->LastScreenSaverEnd = GetTickCount();
-            Session->bScreenSaverRan = TRUE;
+            ScreenSaverEnded(Session, InputAtStart);
         }
 
         PostMessageW(Session->SASWindow, WLX_WM_SAS, WLX_SAS_TYPE_SCRNSVR_ACTIVITY, 0);

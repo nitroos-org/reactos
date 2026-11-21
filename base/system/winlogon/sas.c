@@ -1374,9 +1374,12 @@ DispatchSAS(
             /*
              * Requests for a start that were queued while a screen saver was running (the idle timeout is
              * detected in two places) reach us right after it ended: the user has just woken it, do not
-             * start it again.
+             * start it again. The same when the last saver ended by itself, or could not run, and there has
+             * been no input since: the idle time is still over, but a saver that fails would be started
+             * again every few seconds.
              */
-            if (Session->bScreenSaverRan && (GetTickCount() - Session->LastScreenSaverEnd) < 2000)
+            if (Session->bScreenSaverRan &&
+                ((GetTickCount() - Session->LastScreenSaverEnd) < 2000 || NoInputSinceScreenSaver(Session)))
             {
                 SetEvent(Session->hEndOfScreenSaver);
                 return;
