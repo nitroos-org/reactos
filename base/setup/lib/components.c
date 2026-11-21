@@ -289,6 +289,44 @@ ReadIdMask(
     return Mask;
 }
 
+/*
+ * A short identity of the installation medium: size, number of files and set id from the header of its first
+ * cabinet (reactos.cab). Two builds of the system do not have the same one. It is recorded with the selection
+ * so that a component added later is taken from the medium it belongs to (an empty string: not readable).
+ */
+static VOID
+ReadMediumId(
+    _In_ PCWSTR SourcePath,
+    _Out_writes_(Size) PWSTR Id,
+    _In_ ULONG Size)
+{
+    WCHAR Path[MAX_PATH];
+    UNICODE_STRING FileName;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    HANDLE FileHandle;
+    UCHAR Header[36];
+    NTSTATUS Status;
+
+    Id[0] = UNICODE_NULL;
+    if (!NT_SUCCESS(CombinePaths(Path, ARRAYSIZE(Path), 2, SourcePath, L"reactos.cab")))
+        return;
+    RtlInitUnicodeString(&FileName, Path);
+    InitializeObjectAttributes(&ObjectAttributes, &FileName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtCreateFile(&FileHandle, FILE_READ_DATA | SYNCHRONIZE, &ObjectAttributes, &IoStatusBlock,
+                          NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_OPEN,
+                          FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+    if (!NT_SUCCESS(Status))
+        return;
+    Status = NtReadFile(FileHandle, NULL, NULL, NULL, &IoStatusBlock, Header, sizeof(Header), NULL, NULL);
+    NtClose(FileHandle);
+    if (!NT_SUCCESS(Status) || IoStatusBlock.Information < sizeof(Header) || RtlCompareMemory(Header, "MSCF", 4) != 4)
+        return;
+    /* CFHEADER: cbCabinet at 8, cFiles at 28, setID at 32 (little endian) */
+    RtlStringCchPrintfW(Id, Size, L"%08lx-%04x-%04x",
+                        *(UNALIGNED ULONG *)&Header[8], *(UNALIGNED USHORT *)&Header[28], *(UNALIGNED USHORT *)&Header[32]);
+}
+
 PCOMPONENTS_STATE
 NTAPI
 ComponentsLoad(
@@ -319,6 +357,7 @@ ComponentsLoad(
         RtlFreeHeap(RtlGetProcessHeap(), 0, State);
         return NULL;
     }
+    ReadMediumId(SourcePath, State->MediumId, ARRAYSIZE(State->MediumId));
 
     /* The ids first: Depends and Conflicts refer to them */
     Ok = SpInfFindFirstLine(State->Inf, L"Components", NULL, &Context);
@@ -730,6 +769,8 @@ ComponentsApplyRegistry(
     GetSourceVersion(Version, ARRAYSIZE(Version));
     SetSz(COMPONENTS_REG_KEY, L"Profile", ComponentProfileName(State->Profile));
     SetSz(COMPONENTS_REG_KEY, L"SourceVersion", Version);
+    if (State->MediumId[0])
+        SetSz(COMPONENTS_REG_KEY, L"MediumId", State->MediumId);
     SetDword(COMPONENTS_REG_KEY, L"AnyOff", State->AnyOff ? 1 : 0);
     /* how many lines of the hive inf files were not added for the components that are left out (the setup log is
      * written before the hives are built, so it cannot say) */

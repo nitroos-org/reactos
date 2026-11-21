@@ -51,6 +51,7 @@ typedef struct _COMPONENTS_STATE
     BOOLEAN Record;                     /* write the record on the installed system (the answer file had a
                                            [Components] section, or something is left out) */
     BOOLEAN AnyOff;
+    WCHAR MediumId[24];                 /* identity of the installation medium (ReadMediumId), recorded for adding components later */
     ULONG RegSkipped;                   /* registry lines of the hive inf files that were not added (left-out components) */
     ULONG OmitRegCount;                 /* the registry patterns of the components that are left out */
     PCWSTR OmitReg[COMPONENT_REG_GLOB_MAX];
