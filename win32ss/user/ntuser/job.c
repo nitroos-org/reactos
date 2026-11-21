@@ -767,6 +767,55 @@ UserJobCanUseObject(
     return FALSE;
 }
 
+/*
+ * JOB_OBJECT_UILIMIT_HANDLES and SetWinEventHook(WINEVENT_INCONTEXT): an in-context
+ * event hook loads its DLL into every process it is called for. Under that limit hooks
+ * reach only threads of processes in the job (MSDN: JOBOBJECT_BASIC_UI_RESTRICTIONS),
+ * so the hook must name a process or thread of the job; a hook on every process does
+ * not. A process without the limit is not affected.
+ */
+BOOL
+FASTCALL
+UserJobAllowsInContextEventHook(
+    _In_ DWORD idProcess,
+    _In_ DWORD idThread)
+{
+    PEPROCESS Process = PsGetCurrentProcess();
+    PEPROCESS Target;
+    PETHREAD Thread;
+    PEJOB pEJob;
+    BOOL Ret = TRUE;
+
+    if (PsGetProcessJob(Process) == NULL)
+        return TRUE;
+
+    pEJob = IntGetRestrictingJob(Process, JOB_OBJECT_UILIMIT_HANDLES);
+    if (pEJob == NULL)
+        return TRUE;
+
+    if (idProcess == 0 && idThread == 0)
+        return FALSE;
+
+    if (idProcess != 0)
+    {
+        if (!NT_SUCCESS(PsLookupProcessByProcessId(UlongToHandle(idProcess), &Target)))
+            return FALSE;
+        Ret = (Target == Process) || IntIsProcessInJob(Target, pEJob);
+        ObDereferenceObject(Target);
+    }
+
+    if (Ret && idThread != 0)
+    {
+        if (!NT_SUCCESS(PsLookupThreadByThreadId(UlongToHandle(idThread), &Thread)))
+            return FALSE;
+        Target = PsGetThreadProcess(Thread);
+        Ret = (Target == Process) || IntIsProcessInJob(Target, pEJob);
+        ObDereferenceObject(Thread);
+    }
+
+    return Ret;
+}
+
 /* The private atom table of the job of the current process that has
    JOB_OBJECT_UILIMIT_GLOBALATOMS, for the kernel's global atom functions.
    NULL: the process uses the global table. */

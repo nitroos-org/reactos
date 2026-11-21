@@ -37,4 +37,5 @@ ULONG FASTCALL UserGetProcessUIRestrictions(_In_ PEPROCESS Process);
 BOOL FASTCALL UserJobDenies(_In_ ULONG Flag);
 BOOL FASTCALL UserJobDeniesThread(_In_ PETHREAD Thread, _In_ ULONG Flag);
 BOOL FASTCALL UserJobCanUseObject(_In_opt_ PPROCESSINFO ppiOwner, _In_ HANDLE hObject);
+BOOL FASTCALL UserJobAllowsInContextEventHook(_In_ DWORD idProcess, _In_ DWORD idThread);
 PVOID NTAPI UserGetJobAtomTable(VOID);
