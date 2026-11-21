@@ -4205,6 +4205,17 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
         return 0;
     }
 
+#ifdef __REACTOS__
+    /* The linguistic flag and the flag it stands for are not combined (measured on Windows Server 2022:
+       ERROR_INVALID_FLAGS for 0x11 and 0x22) */
+    if ((flags & (NORM_IGNORECASE | LINGUISTIC_IGNORECASE)) == (NORM_IGNORECASE | LINGUISTIC_IGNORECASE) ||
+        (flags & (NORM_IGNORENONSPACE | LINGUISTIC_IGNOREDIACRITIC)) == (NORM_IGNORENONSPACE | LINGUISTIC_IGNOREDIACRITIC))
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return 0;
+    }
+#endif
+
     if (flags & semistub_flags)
     {
         if (!once++)

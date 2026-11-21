@@ -1327,12 +1327,13 @@ FindNLSStringEx(
 
     /* The comparison flags the search takes (measured on Windows Server 2022): not SORT_STRINGSORT, not the
        undocumented 0x10000000 or 0x8 and nothing above NORM_LINGUISTIC_CASING; NORM_IGNORENONSPACE together with
-       LINGUISTIC_IGNOREDIACRITIC is refused too. CompareStringEx itself is more tolerant. */
+       LINGUISTIC_IGNOREDIACRITIC is refused too, and so is NORM_IGNORECASE together with LINGUISTIC_IGNORECASE. CompareStringEx itself is more tolerant. */
     if (dwFindNLSStringFlags & ~(FindFlags | NORM_IGNORECASE | NORM_IGNORENONSPACE | NORM_IGNORESYMBOLS |
                                  LINGUISTIC_IGNORECASE | LINGUISTIC_IGNOREDIACRITIC | NORM_IGNOREKANATYPE |
                                  NORM_IGNOREWIDTH | NORM_LINGUISTIC_CASING) ||
         (dwFindNLSStringFlags & (NORM_IGNORENONSPACE | LINGUISTIC_IGNOREDIACRITIC)) ==
-        (NORM_IGNORENONSPACE | LINGUISTIC_IGNOREDIACRITIC))
+        (NORM_IGNORENONSPACE | LINGUISTIC_IGNOREDIACRITIC) ||
+        (dwFindNLSStringFlags & (NORM_IGNORECASE | LINGUISTIC_IGNORECASE)) == (NORM_IGNORECASE | LINGUISTIC_IGNORECASE))
     {
         SetLastError(ERROR_INVALID_FLAGS);
         return -1;
