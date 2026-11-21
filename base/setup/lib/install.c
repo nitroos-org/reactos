@@ -691,6 +691,15 @@ PrepareCopyInfFile(
              * because it has been already created above.
              */
         }
+        else if (pSetupData->Components &&
+                 ComponentsIsDirectoryOmitted((PCOMPONENTS_STATE)pSetupData->Components, DirKeyValue))
+        {
+            /*
+             * Only files of components that are left out go into this directory:
+             * it would stay empty (SysWOW64\wbem on a system without the 32-bit
+             * side, for one). The copy queue creates a directory when a file needs it.
+             */
+        }
         else
         {
             /* Arbitrary path -- Create it */
@@ -710,6 +719,122 @@ PrepareCopyInfFile(
     } while (SpInfFindNextLine(&DirContext, &DirContext));
 
     return TRUE;
+}
+
+
+/*
+ * The sizes of the files of the optional components, for the page that asks which to install: every line of the
+ * cabinet inf files (the same lines that PrepareFileCopy queues) is given to the components code with its size.
+ * The sizes are the last field of the lines of "reactos.sizes", the copy of the inf that the cabinet tool writes
+ * next to it (the inf itself cannot carry them: it is also stored in the cabinet header, 64 KB at most). Nothing is
+ * copied or opened except these files. Without that file (a medium made by an older cabinet tool) the state says
+ * so and the page shows no sizes.
+ */
+BOOLEAN
+NTAPI
+ComponentsMeasure(
+    IN PUSETUP_DATA pSetupData)
+{
+    PCOMPONENTS_STATE Components = (PCOMPONENTS_STATE)pSetupData->Components;
+    INFCONTEXT CabinetsContext, FilesContext, DirContext;
+    PCWSTR CabinetName;
+    HINF InfHandle;
+    UINT ErrorLine;
+    WCHAR PathBuffer[MAX_PATH];
+    ULONG Files = 0, Sized = 0;
+    ULONGLONG Total = 0;
+
+    if (!Components)
+        return FALSE;
+    if (!SpInfFindFirstLine(pSetupData->SetupInf, L"Cabinets", NULL, &CabinetsContext))
+        return FALSE;
+
+    do
+    {
+        PWCHAR ptr;
+
+        if (!INF_GetData(&CabinetsContext, NULL, &CabinetName))
+            break;
+        CombinePaths(PathBuffer, ARRAYSIZE(PathBuffer), 2, pSetupData->SourcePath.Buffer, CabinetName);
+        INF_FreeData(CabinetName);
+
+        ptr = wcsrchr(PathBuffer, L'\\');
+        if (!ptr) ptr = PathBuffer;
+        ptr = wcsrchr(ptr, L'.');
+        if (!ptr) ptr = PathBuffer + wcslen(PathBuffer);
+        wcscpy(ptr, L".sizes");
+        InfHandle = SpInfOpenInfFile(PathBuffer, NULL, INF_STYLE_WIN4, pSetupData->LanguageId, &ErrorLine);
+        if (InfHandle == INVALID_HANDLE_VALUE)
+        {
+            /* no sizes: the plain inf lists the same files, without a size */
+            wcscpy(ptr, L".inf");
+            InfHandle = SpInfOpenInfFile(PathBuffer, NULL, INF_STYLE_WIN4, pSetupData->LanguageId, &ErrorLine);
+        }
+        if (InfHandle == INVALID_HANDLE_VALUE)
+            continue;
+
+        if (SpInfFindFirstLine(InfHandle, L"SourceFiles", NULL, &FilesContext))
+        {
+            do
+            {
+                PCWSTR SourceFileName = NULL, TargetDirId = NULL, TargetFileName = NULL, SizeText = NULL, TargetDir = NULL;
+                WCHAR RelPath[MAX_PATH];
+                PCWSTR Dir;
+                ULONGLONG Bytes = 0;
+
+                if (!INF_GetDataField(&FilesContext, 0, &SourceFileName) ||
+                    !INF_GetDataField(&FilesContext, 1, &TargetDirId))
+                    goto NextLine;
+
+                if (!INF_GetDataField(&FilesContext, 2, &TargetFileName) || !*TargetFileName)
+                {
+                    INF_FreeData(TargetFileName);
+                    TargetFileName = NULL;
+                }
+                if (!LookupDirectoryById(InfHandle, &DirContext, TargetDirId, &TargetDir))
+                    goto NextLine;
+
+                Dir = TargetDir;
+                while (*Dir == L'\\')
+                    ++Dir;
+                if (*Dir)
+                    RtlStringCchPrintfW(RelPath, ARRAYSIZE(RelPath), L"%s\\%s", Dir, TargetFileName ? TargetFileName : SourceFileName);
+                else
+                    RtlStringCchCopyW(RelPath, ARRAYSIZE(RelPath), TargetFileName ? TargetFileName : SourceFileName);
+
+                ++Files;
+                if (INF_GetDataField(&FilesContext, 3, &SizeText))
+                {
+                    PCWSTR p;
+
+                    /* a size over 4 GB (the cabinet inf writes the size of one file of the medium) is not a size:
+                     * it also keeps the sum below from wrapping. The page then shows no sizes at all. */
+                    for (p = SizeText; *p >= L'0' && *p <= L'9' && Bytes <= 0xFFFFFFFFULL; ++p)
+                        Bytes = Bytes * 10 + (*p - L'0');
+                    if (p != SizeText && !*p && Bytes <= 0xFFFFFFFFULL)
+                    {
+                        ++Sized;
+                        Total += Bytes;
+                        ComponentsAddFile(Components, RelPath, Bytes);
+                    }
+                    INF_FreeData(SizeText);
+                }
+
+NextLine:
+                if (TargetDir) INF_FreeData(TargetDir);
+                if (TargetFileName) INF_FreeData(TargetFileName);
+                if (TargetDirId) INF_FreeData(TargetDirId);
+                if (SourceFileName) INF_FreeData(SourceFileName);
+            } while (SpInfFindNextLine(&FilesContext, &FilesContext));
+        }
+        SpInfCloseInfFile(InfHandle);
+    } while (SpInfFindNextLine(&CabinetsContext, &CabinetsContext));
+
+    /* every file has a size, or the medium does not carry sizes at all (all sizes 0: the same) */
+    Components->SizesKnown = (Files && Sized == Files && Total);
+    /* nothing is logged here: an installation that leaves everything in must not differ from one without the page,
+     * not even by a log file (ComponentsSetChoice logs the selection when something is left out) */
+    return Components->SizesKnown;
 }
 
 

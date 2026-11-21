@@ -45,6 +45,7 @@ CDFParser::CDFParser()
 
     InfModeEnabled = false;
     InfFileHandle = NULL;
+    SizeFileHandle = NULL;
 }
 
 CDFParser::~CDFParser()
@@ -83,9 +84,18 @@ CDFParser::~CDFParser()
 
     if (InfFileHandle != NULL)
         fclose(InfFileHandle);
+    if (SizeFileHandle != NULL)
+        fclose(SizeFileHandle);
 }
 
-void CDFParser::WriteInfLine(char* InfLine)
+/*
+ * The inf is written twice: as named ("reactos.inf") and as "reactos.sizes", where the line of a file also
+ * carries the uncompressed size of the file as its last field ("name=7,,1234", "name=201,target.dll,1234").
+ * Setup (the page that asks which components to install) adds the sizes up per component from the second
+ * one. It is a separate file because the first is also stored in the cabinet header, whose per-cabinet
+ * reserved area holds 64 KB at most (reactos.inf is close to that).
+ */
+void CDFParser::WriteInfLine(char* InfLine, const char* SizedLine)
 {
     char buf[PATH_MAX];
     char eolbuf[2];
@@ -93,6 +103,31 @@ void CDFParser::WriteInfLine(char* InfLine)
 
     if (DontGenerateInf)
         return;
+
+    if (SizeFileHandle == NULL && InfFileNameSet)
+    {
+        char* dot;
+
+        destpath = GetDestinationPath();
+        buf[0] = '\0';
+        if (strlen(destpath) > 0)
+            strcpy(buf, destpath);
+        strncat(buf, InfFileName, sizeof(buf) - strlen(buf) - 8);
+        dot = strrchr(buf, '.');
+        if (dot && strchr(dot, '/') == NULL && strchr(dot, '\\') == NULL)
+            *dot = '\0';
+        strcat(buf, ".sizes");
+        SizeFileHandle = fopen(buf, "wb");
+    }
+    if (SizeFileHandle != NULL)
+    {
+        const char* Text = SizedLine ? SizedLine : InfLine;
+
+        if (fwrite(Text, strlen(Text), 1, SizeFileHandle) < 1 || fwrite("\r\n", 2, 1, SizeFileHandle) < 1)
+        {
+            DPRINT(MIN_TRACE, ("Error writing the sizes file.\n"));
+        }
+    }
 
     if (InfFileHandle == NULL)
     {
@@ -1133,10 +1168,34 @@ ULONG CDFParser::PerformFileCopy()
     switch (Status)
     {
         case CAB_STATUS_SUCCESS:
+        {
+            /* the same line with the size appended: "name=dir" becomes "name=dir,,size", "name=dir,target" "name=dir,target,size" */
+            char SizedLine[PATH_MAX*2+32];
+            const char* Comma = DstName;
+            int CommaCount = 0;
+            FILE* SizeSource;
+            LONG SizeOfSource = -1;
+
             snprintf(InfLine, _countof(InfLine) - 1,
                      "%s=%s", GetFileName(SrcName).c_str(), DstName);
-            WriteInfLine(InfLine);
+            while ((Comma = strchr(Comma, ',')) != NULL)
+            {
+                CommaCount++;
+                Comma++;
+            }
+            SizeSource = fopen(SrcName, "rb");
+            if (SizeSource)
+            {
+                SizeOfSource = GetSizeOfFile(SizeSource);
+                fclose(SizeSource);
+            }
+            if (SizeOfSource >= 0 && CommaCount < 2)
+                snprintf(SizedLine, _countof(SizedLine) - 1, "%s%s,%ld", InfLine, CommaCount ? "" : ",", (long)SizeOfSource);
+            else
+                snprintf(SizedLine, _countof(SizedLine) - 1, "%s", InfLine);
+            WriteInfLine(InfLine, SizedLine);
             break;
+        }
 
         case CAB_STATUS_CANNOT_OPEN:
             if (strstr(Options, "optional"))

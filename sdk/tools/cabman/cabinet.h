@@ -32,6 +32,9 @@
 #define PATH_MAX MAX_PATH
 #endif
 
+/* Largest per-cabinet reserved area the cabinet file format allows (cbCFHeader: 0 to 60000 bytes) */
+#define CAB_RESERVED_AREA_MAX 60000
+
 #if !defined(C_ASSERT)
 #define C_ASSERT(expr) extern char (*c_assert(void)) [(expr) ? 1 : -1]
 #endif

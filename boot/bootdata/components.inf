@@ -2,8 +2,11 @@
 ;
 ; One place decides what a component is: which cabinet files belong to it, what has to be
 ; changed in the registry when it is left out, what it needs, and what is on in each profile.
-; Text mode setup (base/setup/lib/components.c) uses it only when the answer file has a
-; [Components] section; a default installation never opens this file and installs everything.
+; Text mode setup (base/setup/lib/components.c) uses it when the answer file has a [Components]
+; section and on the page "Choose what to install" (an interactive installation); an unattended
+; installation without the section never opens this file and installs everything. The sizes
+; the page shows are not kept here: they are the sizes of the files of the cabinet, read from
+; reactos.sizes (written by the cabinet tool at build time next to reactos.inf), added up per component.
 ; The later add/remove of components (feature manager) reads the same ids.
 ;
 ; [Components]       id = display name (the id is what the answer file and the registry use)
@@ -54,6 +57,8 @@ Arch         = amd64
 Profiles     = standard
 FeaturesNeed = wine-gecko, dotnet-framework-4.8, firefox
 Files        = SysWOW64\*, Microsoft.NET\Framework\v4.0.30319\wminet_utils.dll, winsxs\x86_*, winsxs\manifests\x86_*
+; The 32-bit view of the WinRT activation classes names DLLs of SysWOW64: not added without them, added with the component.
+Registry     = "HKLM\SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\*"
 
 [powershell7]
 Description  = %powershell7.desc%
@@ -68,6 +73,7 @@ Description  = %gl.desc%
 Compat       = %gl.compat%
 Profiles     = standard, minimal, core
 Files        = system32\libgallium_wgl.dll, system32\mesa3d-licenses.txt, system32\llvm-licenses.txt
+Registry     = "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D*"
 
 [vulkan]
 Description  = %vulkan.desc%
@@ -84,6 +90,7 @@ Arch         = amd64
 Profiles     = standard
 Depends      = wow64
 Files        = SysWOW64\libgallium_wgl.dll, SysWOW64\mesa3d-licenses.txt
+Registry     = "HKLM\SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D*"
 
 [fonts-cjk]
 Description  = %fonts-cjk.desc%
@@ -108,6 +115,23 @@ Description  = %accessories.desc%
 Compat       = %accessories.compat%
 Profiles     = standard
 Files        = system32\calc.exe, system32\charmap.exe, system32\clipbrd.exe, system32\fontview.exe, system32\mplay32.exe, system32\mspaint.exe, system32\sndrec32.exe, system32\wordpad.exe, system32\write.exe, SysWOW64\calc.exe, SysWOW64\charmap.exe, SysWOW64\mspaint.exe, SysWOW64\write.exe
+; The lines of the hive inf files that name these programs are not added (Root\Key, or Root\Key|Value;
+; '*' as in Files). The file types themselves stay: a file with no handler asks which program to use.
+Registry     = HKCR\*\OpenWithList\mspaint.exe, HKCR\*\OpenWithList\wordpad.exe, \
+               HKCR\SystemFileAssociations\text\OpenWithList\wordpad.exe, \
+               HKCR\.rtf, HKCR\.rtf\*, HKCR\rtffile, HKCR\rtffile\*, HKCR\clpfile, HKCR\clpfile\*, \
+               HKCR\fonfile\shell\open, HKCR\fonfile\shell\open\*, HKCR\fntfile\shell\open, HKCR\fntfile\shell\open\*, \
+               HKCR\ttffile\shell\open, HKCR\ttffile\shell\open\*, HKCR\ttcfile\shell\open, HKCR\ttcfile\shell\open\*, \
+               HKCR\otffile\shell\open, HKCR\otffile\shell\open\*, HKCR\otcfile\shell\open, HKCR\otcfile\shell\open\*, \
+               HKCR\SoundRec\shell\open, HKCR\SoundRec\shell\open\*, HKCR\MIDFile\shell\open, HKCR\MIDFile\shell\open\*, \
+               HKCR\CDAFile\shell\open, HKCR\CDAFile\shell\open\*, HKCR\AVIFile\shell\open, HKCR\AVIFile\shell\open\*, \
+               HKCR\jpegfile\shell\edit, HKCR\jpegfile\shell\edit\*, HKCR\bmpfile\shell\edit, HKCR\bmpfile\shell\edit\*, \
+               HKCR\pngfile\shell\edit, HKCR\pngfile\shell\edit\*, HKCR\TIFImage.Document\shell\edit, HKCR\TIFImage.Document\shell\edit\*, \
+               HKLM\SOFTWARE\Classes\Applications\mspaint.exe\*, HKLM\SOFTWARE\Classes\Applications\wordpad.exe\*, \
+               HKLM\SOFTWARE\Classes\Applications\mplay32.exe\*, \
+               "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\pbrush.exe*", \
+               "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\wordpad.exe*", \
+               "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\write.exe*"
 
 [net-legacy]
 Description  = %net-legacy.desc%
@@ -126,17 +150,29 @@ Compat       = %tests.compat%
 Profiles     = standard
 Files        = bin\*, system32\rosautotest.exe
 
+; The profile choice of the interactive page: name and one line per profile (%tokens% are in [Strings]).
+[ProfileText]
+standard = %profile.standard.name%, %profile.standard.desc%
+minimal  = %profile.minimal.name%, %profile.minimal.desc%
+core     = %profile.core.name%, %profile.core.desc%
+
 ; "core": the logon shell is the command prompt (Winlogon\Shell, the same value that the Server Core
 ; installation type of the graphical stage sets). Files stay; only the shell value changes.
 [Profile.core]
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon","Shell",0x00000000,"cmd.exe"
 
 [Strings]
+profile.standard.name = "Standard"
+profile.standard.desc = "Everything, as in every earlier installation."
+profile.minimal.name = "Minimal"
+profile.minimal.desc = "The system, the desktop and the command line; the optional components are left out (Customise shows which)."
+profile.core.name = "Core"
+profile.core.desc = "Minimal, and the command prompt instead of the desktop shell."
 wow64.name = "32-bit program support"
 wow64.desc = "The 32-bit system folder (SysWOW64) and the 32-bit side-by-side assemblies, so that 32-bit programs can run."
 wow64.compat = "32-bit programs and most installers do not start (the loader reports that WoW64 could not start, status 0xC0000034); the Wine Gecko and .NET Framework features need it."
 powershell7.name = "PowerShell 7"
-powershell7.desc = "The PowerShell 7 installer package that setup installs on the 64-bit edition."
+powershell7.desc = "The PowerShell 7 installer package (the size shown); Setup installs it, which takes about 285 MB more on the disk."
 powershell7.compat = "Scripts that call pwsh do not run until it is added later; the first-start installer does not add it."
 gl.name = "OpenGL software renderer"
 gl.desc = "The software OpenGL driver (Mesa llvmpipe class) of the native edition and its license texts."
@@ -158,7 +194,7 @@ games.desc = "Solitaire, Spider Solitaire and Minesweeper with the card library.
 games.compat = "The games are gone from the Start menu and the disk; nothing else uses them."
 accessories.name = "Accessories"
 accessories.desc = "Calculator, Paint, WordPad, Write, Character Map, ClipBook, Font Viewer, Media Player, Sound Recorder."
-accessories.compat = "These programs are gone (file types such as .bmp and .rtf keep their associations to programs that no longer exist); Notepad stays."
+accessories.compat = "These programs are gone, with the file types and Open With entries only they used (.rtf, for one); such files ask which program to use. Notepad stays."
 net-legacy.name = "Legacy network tools"
 net-legacy.desc = "telnet, ftp, finger, whois, the TFTP and telnet servers and the simple TCP/IP services."
 net-legacy.compat = "Scripts that call ftp or telnet fail; the telnetd and tcpsvcs services cannot start."

@@ -74,6 +74,7 @@
 @ stdcall InitializeSetup(ptr ptr ptr ptr)
 @ stdcall InitSystemPartition(ptr ptr ptr ptr ptr)
 @ stdcall InstallSetupInfFile(ptr)
+@ stdcall ComponentsLoadRecorded(wstr long wstr)
 @ stdcall UpdateRegistry(ptr long ptr long wstr ptr ptr)
 
 ;; fsutil
@@ -83,6 +84,20 @@
 ;; install
 @ stdcall PrepareFileCopy(ptr ptr)
 @ stdcall DoFileCopy(ptr ptr ptr)
+@ stdcall ComponentsMeasure(ptr)
+
+;; components
+@ stdcall ComponentsLoad(wstr long)
+@ stdcall ComponentsFree(ptr)
+@ stdcall ComponentProfileName(long)
+@ stdcall ComponentsToggle(long ptr long long long ptr ptr ptr)
+@ stdcall ComponentsApplicableMask(long ptr)
+@ stdcall -ret64 ComponentsBytesLeftOut(ptr long)
+@ stdcall ComponentsSetChoice(ptr long long)
+@ stdcall ComponentsProfileSelection(ptr long)
+@ stdcall ComponentsGetText(ptr long wstr ptr long)
+@ stdcall ComponentsGetProfileText(ptr long long ptr long)
+@ stdcall ComponentsGetName(ptr long ptr long)
 
 ;; bootsup
 @ stdcall InstallBootManagerAndBootEntries(long ptr ptr ptr ptr ptr)

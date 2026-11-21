@@ -53,10 +53,10 @@ add_custom_command(
 add_custom_command(
     COMMAND native-cabman -C ${CMAKE_CURRENT_BINARY_DIR}/reactos.dff -L ${CMAKE_CURRENT_BINARY_DIR} -I -P ${REACTOS_SOURCE_DIR}
     DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/reactos.dff native-cabman
-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/reactos.inf)
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/reactos.inf ${CMAKE_CURRENT_BINARY_DIR}/reactos.sizes)
 
 add_custom_target(
-    reactos_cab_inf DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/reactos.inf)
+    reactos_cab_inf DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/reactos.inf ${CMAKE_CURRENT_BINARY_DIR}/reactos.sizes)
 if(SYSWOW64)
     add_dependencies(reactos_cab_inf syswow64_stage)
 endif()
@@ -64,5 +64,12 @@ endif()
 add_cd_file(
     TARGET reactos_cab_inf
     FILE ${CMAKE_CURRENT_BINARY_DIR}/reactos.inf
+    DESTINATION reactos
+    NO_CAB FOR bootcd regtest)
+
+# the sizes of the files of the cabinet (cabman writes them next to the inf), read by the page of Setup that asks which components to install
+add_cd_file(
+    TARGET reactos_cab_inf
+    FILE ${CMAKE_CURRENT_BINARY_DIR}/reactos.sizes
     DESTINATION reactos
     NO_CAB FOR bootcd regtest)

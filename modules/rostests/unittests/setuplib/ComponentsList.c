@@ -238,6 +238,37 @@ Test_GlobBoundaries(void)
     ok(!ComponentGlobMatch(LongPattern, LongPath), "many stars against a long path\n");
 }
 
+/* The registry lines of left-out components: whole keys, one value, wildcards, other keys untouched */
+static void
+Test_RegistryOmitted(void)
+{
+    static COMPONENTS_STATE s;
+
+    RtlZeroMemory(&s, sizeof(s));
+    ok(!ComponentsIsRegistryOmitted(&s, L"HKCR", L"rtffile\\shell\\open\\command", L""), "no patterns: nothing is omitted\n");
+
+    s.OmitReg[s.OmitRegCount++] = L"HKCR\\rtffile";
+    s.OmitReg[s.OmitRegCount++] = L"HKCR\\rtffile\\*";
+    s.OmitReg[s.OmitRegCount++] = L"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\wordpad.exe*";
+    s.OmitReg[s.OmitRegCount++] = L"HKLM\\SOFTWARE\\Classes\\Foo|Bar";
+    s.OmitReg[s.OmitRegCount++] = L"HKCR\\*\\OpenWithList\\wordpad.exe";
+
+    ok(ComponentsIsRegistryOmitted(&s, L"HKCR", L"rtffile", NULL), "the key itself\n");
+    ok(ComponentsIsRegistryOmitted(&s, L"HKCR", L"RTFFILE", L""), "any case\n");
+    ok(ComponentsIsRegistryOmitted(&s, L"HKCR", L"rtffile\\shell\\open\\command", L""), "a subkey\n");
+    ok(ComponentsIsRegistryOmitted(&s, L"HKCR", L"rtffile\\DefaultIcon", L"Value"), "a subkey with a value\n");
+    ok(!ComponentsIsRegistryOmitted(&s, L"HKCR", L"rtffile2", L""), "a key with the same start is not matched\n");
+    ok(!ComponentsIsRegistryOmitted(&s, L"HKLM", L"rtffile", L""), "another root\n");
+    ok(ComponentsIsRegistryOmitted(&s, L"HKLM", L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\wordpad.exe", L"Path"),
+       "a key with a space in its path, and a value of it\n");
+    ok(ComponentsIsRegistryOmitted(&s, L"HKLM", L"SOFTWARE\\Classes\\Foo", L"Bar"), "one value\n");
+    ok(!ComponentsIsRegistryOmitted(&s, L"HKLM", L"SOFTWARE\\Classes\\Foo", L"Baz"), "another value of the key\n");
+    ok(!ComponentsIsRegistryOmitted(&s, L"HKLM", L"SOFTWARE\\Classes\\Foo", NULL), "the key of a value pattern\n");
+    ok(ComponentsIsRegistryOmitted(&s, L"HKCR", L"*\\OpenWithList\\wordpad.exe", L""), "the key named *\n");
+    ok(ComponentsIsRegistryOmitted(&s, L"HKCR", L"SystemFileAssociations\\text\\OpenWithList\\wordpad.exe", L""), "* is any run\n");
+    ok(!ComponentsIsRegistryOmitted(&s, L"HKCR", L"*\\OpenWithList\\notepad.exe", L""), "another program\n");
+}
+
 /* The 32-component limit of the masks */
 static void
 Test_ResolveLimits(void)
@@ -270,8 +301,160 @@ Test_ResolveLimits(void)
     ok(sel == 0xFFFFFFFFUL, "longer than the limit: 0x%lx\n", sel);
 }
 
+/* The interactive page: turning one component on or off in a selection */
+static void
+Test_Toggle(void)
+{
+    COMPONENT_DESC d[6];
+    COMPONENT_CHOICE ex[6];
+    ULONG sel, on, off, res, i, again;
+    const ULONG std = BIT(COMPONENT_PROFILE_STANDARD);
+    const ULONG all = BIT(COMPONENT_PROFILE_STANDARD) | BIT(COMPONENT_PROFILE_MINIMAL) | BIT(COMPONENT_PROFILE_CORE);
+
+    /* 0 wow64 · 1 gl · 2 vulkan (needs gl) · 3 gl-wow64 (needs wow64 and gl) · 4 other (conflicts with 0)
+       5 x86only (not in this edition) */
+    InitDesc(d, 0, L"wow64", std, 0, 0, TRUE);
+    InitDesc(d, 1, L"gl", all, 0, 0, TRUE);
+    InitDesc(d, 2, L"vulkan", std, BIT(1), 0, TRUE);
+    InitDesc(d, 3, L"gl-wow64", std, BIT(0) | BIT(1), 0, TRUE);
+    InitDesc(d, 4, L"other", 0, 0, BIT(0), TRUE);
+    InitDesc(d, 5, L"x86only", all, 0, 0, FALSE);
+    ok(ComponentsApplicableMask(6, d) == 0x1F, "applicable mask 0x%lx\n", ComponentsApplicableMask(6, d));
+
+    /* everything off, turn on the one that needs the most: its needs come with it */
+    res = ComponentsToggle(6, d, 0, 3, TRUE, &sel, &on, &off);
+    ok(res == COMPONENT_TOGGLE_OK && sel == (BIT(0) | BIT(1) | BIT(3)) && on == (BIT(0) | BIT(1)) && off == 0,
+       "on gl-wow64: res %lu sel 0x%lx on 0x%lx off 0x%lx\n", res, sel, on, off);
+
+    /* turning off a dependency takes the dependents with it, and says so */
+    res = ComponentsToggle(6, d, sel, 1, FALSE, &sel, &on, &off);
+    ok(res == COMPONENT_TOGGLE_OK && sel == BIT(0) && on == 0 && off == BIT(3), "off gl: sel 0x%lx off 0x%lx\n", sel, off);
+
+    /* turning off something nobody needs changes only that */
+    res = ComponentsToggle(6, d, 0x0F, 2, FALSE, &sel, &on, &off);
+    ok(res == COMPONENT_TOGGLE_OK && sel == 0x0B && on == 0 && off == 0, "off vulkan: sel 0x%lx\n", sel);
+
+    /* turning off what was already off, or on what was on: no change */
+    res = ComponentsToggle(6, d, 0x0F, 2, TRUE, &sel, &on, &off);
+    ok(res == COMPONENT_TOGGLE_OK && sel == 0x0F && !on && !off, "on again\n");
+    res = ComponentsToggle(6, d, 0x03, 2, FALSE, &sel, &on, &off);
+    ok(res == COMPONENT_TOGGLE_OK && sel == 0x03 && !on && !off, "off again\n");
+
+    /* a chain: wow64 off takes gl-wow64, which takes nothing else */
+    res = ComponentsToggle(6, d, 0x0F, 0, FALSE, &sel, &on, &off);
+    ok(res == COMPONENT_TOGGLE_OK && sel == 0x06 && off == BIT(3), "off wow64: sel 0x%lx off 0x%lx\n", sel, off);
+
+    /* conflict: turning on 'other' removes wow64 and what needs wow64 */
+    res = ComponentsToggle(6, d, 0x0F, 4, TRUE, &sel, &on, &off);
+    ok(res == COMPONENT_TOGGLE_OK && sel == 0x16 && off == (BIT(0) | BIT(3)) && !on, "on other: sel 0x%lx on 0x%lx off 0x%lx\n", sel, on, off);
+
+    /* a component of another edition cannot be turned on or off; the selection is not touched */
+    res = ComponentsToggle(6, d, 0x0F, 5, TRUE, &sel, &on, &off);
+    ok(res == COMPONENT_TOGGLE_NOT_HERE && sel == 0x0F && !on && !off, "x86only\n");
+    res = ComponentsToggle(6, d, 0x0F, 9, TRUE, &sel, &on, &off);
+    ok(res == COMPONENT_TOGGLE_NOT_HERE, "index out of range\n");
+
+    /* a dependency that does not exist in this edition: refused */
+    d[2].Depends = BIT(5);
+    res = ComponentsToggle(6, d, 0x01, 2, TRUE, &sel, &on, &off);
+    ok(res == COMPONENT_TOGGLE_NEEDS_MISSING && sel == 0x01 && !on && !off, "needs a missing component: res %lu sel 0x%lx\n", res, sel);
+    d[2].Depends = BIT(1);
+
+    /* whatever a toggle returns is a selection that the resolution of the answer file leaves alone */
+    for (i = 0; i < 6; ++i)
+        ex[i] = COMPONENT_UNSET;
+    for (sel = 0; sel < 0x20; ++sel)
+    {
+        ULONG k, j0;
+
+        /* only from selections that are consistent themselves */
+        for (j0 = 0; j0 < 6; ++j0)
+            ex[j0] = !d[j0].Applicable ? COMPONENT_UNSET : ((sel & BIT(j0)) ? COMPONENT_YES : COMPONENT_NO);
+        if (ComponentsResolve(6, d, COMPONENT_PROFILE_STANDARD, ex) != sel)
+            continue;
+
+        for (k = 0; k < 5; ++k)
+        {
+            ULONG n, j;
+
+            res = ComponentsToggle(6, d, sel, k, (sel & BIT(k)) ? FALSE : TRUE, &n, &on, &off);
+            if (res != COMPONENT_TOGGLE_OK)
+                continue;
+            for (j = 0; j < 6; ++j)
+                ex[j] = !d[j].Applicable ? COMPONENT_UNSET : ((n & BIT(j)) ? COMPONENT_YES : COMPONENT_NO);
+            again = ComponentsResolve(6, d, COMPONENT_PROFILE_STANDARD, ex);
+            ok(again == n, "toggle %lu of 0x%lx gave 0x%lx but the resolution says 0x%lx\n", k, sel, n, again);
+        }
+    }
+}
+
+/* Sizes: which files belong to which component, and what is left out for a selection */
+static void
+Test_Sizes(void)
+{
+    static COMPONENTS_STATE s;
+    ULONG i;
+    const ULONG std = BIT(COMPONENT_PROFILE_STANDARD);
+
+    RtlZeroMemory(&s, sizeof(s));
+    s.Count = 3;
+    InitDesc(s.Desc, 0, L"wow64", std, 0, 0, TRUE);
+    InitDesc(s.Desc, 1, L"accessories", std, 0, 0, TRUE);
+    InitDesc(s.Desc, 2, L"vulkan", std, 0, 0, FALSE);       /* not in this edition */
+    s.GlobCount = 3;
+    s.Glob[0] = L"SysWOW64\\*";           s.GlobOwner[0] = 0;
+    s.Glob[1] = L"system32\\calc.exe";    s.GlobOwner[1] = 1;
+    s.Glob[2] = L"SysWOW64\\calc.exe";    s.GlobOwner[2] = 1;
+
+    ComponentsAddFile(&s, L"system32\\calc.exe", 1000);        /* accessories */
+    ComponentsAddFile(&s, L"SysWOW64\\cmd.exe", 5000);         /* wow64 */
+    ComponentsAddFile(&s, L"SysWOW64\\calc.exe", 700);         /* both */
+    ComponentsAddFile(&s, L"system32\\cmd.exe", 9999);         /* none: not kept */
+    ok(s.FileCount == 3, "three files are kept: %lu\n", s.FileCount);
+    ok(s.OwnBytes[0] == 5700 && s.OwnBytes[1] == 1700 && s.OwnBytes[2] == 0, "own bytes %I64u %I64u %I64u\n",
+       s.OwnBytes[0], s.OwnBytes[1], s.OwnBytes[2]);
+
+    ok(ComponentsBytesLeftOut(&s, 0x3) == 0, "everything on: nothing left out\n");
+    ok(ComponentsBytesLeftOut(&s, 0x1) == 1000 + 700, "accessories off: %I64u\n", ComponentsBytesLeftOut(&s, 0x1));
+    ok(ComponentsBytesLeftOut(&s, 0x2) == 5000 + 700, "wow64 off: %I64u\n", ComponentsBytesLeftOut(&s, 0x2));
+    /* the file that both own is counted once */
+    ok(ComponentsBytesLeftOut(&s, 0x0) == 6700, "both off, the shared file once: %I64u\n", ComponentsBytesLeftOut(&s, 0x0));
+    /* the component of another edition is never "left out" */
+    ok(ComponentsBytesLeftOut(&s, 0x7) == 0, "other edition\n");
+
+    /* more files than the first allocation */
+    for (i = 0; i < 2000; ++i)
+        ComponentsAddFile(&s, L"SysWOW64\\x.dll", 1);
+    ok(s.FileCount == 2003 && s.OwnBytes[0] == 5700 + 2000, "growth: %lu files, %I64u bytes\n", s.FileCount, s.OwnBytes[0]);
+    ComponentsFree(NULL);       /* no state: nothing happens */
+    RtlFreeHeap(RtlGetProcessHeap(), 0, s.FileMask);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, s.FileBytes);
+}
+
+/* The standard preset of the page is everything of the edition, whatever the Profiles lines say */
+static void
+Test_StandardIsEverything(void)
+{
+    static COMPONENTS_STATE s;
+
+    RtlZeroMemory(&s, sizeof(s));
+    s.Count = 3;
+    InitDesc(s.Desc, 0, L"a", 0, 0, 0, TRUE);                            /* no Profiles line at all */
+    InitDesc(s.Desc, 1, L"b", BIT(COMPONENT_PROFILE_MINIMAL), 0, 0, TRUE);
+    InitDesc(s.Desc, 2, L"c", 0, 0, 0, FALSE);                           /* not in this edition */
+    ok(ComponentsProfileSelection(&s, COMPONENT_PROFILE_STANDARD) == 0x3, "standard: 0x%lx\n",
+       ComponentsProfileSelection(&s, COMPONENT_PROFILE_STANDARD));
+    ok(ComponentsProfileSelection(&s, COMPONENT_PROFILE_MINIMAL) == 0x2, "minimal: 0x%lx\n",
+       ComponentsProfileSelection(&s, COMPONENT_PROFILE_MINIMAL));
+    ok(ComponentsProfileSelection(&s, COMPONENT_PROFILE_CORE) == 0x0, "core: 0x%lx\n",
+       ComponentsProfileSelection(&s, COMPONENT_PROFILE_CORE));
+}
+
 START_TEST(ComponentsList)
 {
+    Test_StandardIsEverything();
+    Test_Toggle();
+    Test_Sizes();
     Test_Glob();
     Test_GlobBoundaries();
     Test_Profiles();
@@ -279,4 +462,5 @@ START_TEST(ComponentsList)
     Test_Resolve();
     Test_ResolveLimits();
     Test_Find();
+    Test_RegistryOmitted();
 }

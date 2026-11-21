@@ -404,6 +404,15 @@ do_reg_operation(HANDLE KeyHandle,
   return TRUE;
 }
 
+static PREGISTRY_LINE_FILTER RegistryLineFilter = NULL;
+
+VOID
+RegistrySetLineFilter(
+    IN PREGISTRY_LINE_FILTER Filter OPTIONAL)
+{
+    RegistryLineFilter = Filter;
+}
+
 /***********************************************************************
  *            registry_callback
  *
@@ -440,6 +449,19 @@ registry_callback(HINF hInf, PCWSTR Section, BOOLEAN Delete)
         /* get key */
         if (!SpInfGetStringField(&Context, 2, Buffer, sizeof(Buffer)/sizeof(WCHAR), NULL))
             *Buffer = 0;
+
+        /* a line of a component that is left out: not added (the root name is the INF's own: HKLM, HKCR, ...) */
+        if (RegistryLineFilter && !Delete)
+        {
+            WCHAR RootName[16], ValueName[MAX_PATH];
+
+            if (!SpInfGetStringField(&Context, 1, RootName, ARRAYSIZE(RootName), NULL))
+                RootName[0] = UNICODE_NULL;
+            if (!SpInfGetStringField(&Context, 3, ValueName, ARRAYSIZE(ValueName), NULL))
+                ValueName[0] = UNICODE_NULL;
+            if (RegistryLineFilter(RootName, Buffer, ValueName))
+                continue;
+        }
 
         DPRINT("KeyName: <%S\\%S>\n", RootKeyName, Buffer);
 

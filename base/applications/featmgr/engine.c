@@ -917,6 +917,13 @@ int FmEnumFeatures(FM_FEATURE **outArr)
         e.usable = FmScoopUsable() ? 1 : 0;
         FmScoopIndexEnum(swDir, IdxEnumCb, &e);
     }
+    {
+        /* the operating system components that setup recorded (none on a system installed without a choice) */
+        FM_FEATURE comps[32];
+        int nc = FmOsCompList(comps, ARRAYSIZE(comps)), k;
+        for (k = 0; k < nc; k++)
+            if (!AppendFeature(&comps[k], &arr, &count, &cap)) break;
+    }
 
     *outArr = arr;
     return count;
@@ -951,7 +958,7 @@ static BOOL FindByName(LPCWSTR id, FM_FEATURE *out)
         FinishEntry(out, -1);
         return TRUE;
     }
-    return FALSE;
+    return FmOsCompFind(id, out);      /* an operating system component of the setup record */
 }
 
 /* Setup recorded the components it left out (answer file [Components]) under HKLM\SOFTWARE\ReactOS\Nitro\Components\<id>:
@@ -1001,6 +1008,59 @@ BOOL FmBlockedByLeftOutComponent(LPCWSTR featureId, BOOL includeOwn, LPWSTR comp
     }
     RegCloseKey(hKey);
     return found;
+}
+
+/* Is the 32-bit side of the system there (SysWOW64 and the 32-bit registry view)? Setup records a left-out "wow64"
+ * component (Installed=0); without a record it is there when the 64-bit edition has its 32-bit kernel32. A 32-bit
+ * build has no such side and no feature of it. */
+BOOL FmWow64SidePresent(void)
+{
+#ifdef _WIN64
+    HKEY hKey;
+    DWORD installed = 1, cb = sizeof(installed), type;
+    WCHAR path[MAX_PATH];
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ReactOS\\Nitro\\Components\\wow64", 0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS)
+    {
+        if (RegQueryValueExW(hKey, L"Installed", NULL, &type, (LPBYTE)&installed, &cb) != ERROR_SUCCESS || type != REG_DWORD) installed = 1;
+        RegCloseKey(hKey);
+        return installed != 0;
+    }
+    if (!ExpandEnvironmentStringsW(L"%SystemRoot%\\SysWOW64\\kernel32.dll", path, MAX_PATH)) return TRUE;
+    return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+#else
+    return TRUE;
+#endif
+}
+
+/* A payload destination in the 32-bit system folder */
+static BOOL DestIsWow64(LPCWSTR dest)
+{
+    return StrStrIW(dest, L"\\SysWOW64\\") != NULL;
+}
+
+/* A registry line (the part after "Reg<N>=") in the 32-bit view of HKLM\SOFTWARE */
+static BOOL RegLineIsWow64(LPCWSTR line)
+{
+    return StrStrIW(line, L"\\Wow6432Node") != NULL;
+}
+
+/* Is every use of the [Payload] source file `name` in the 32-bit system folder? (nothing to download without that side) */
+static BOOL SourceOnlyForWow64(LPCWSTR manifest, LPCWSTR name)
+{
+    WCHAR *pay = ReadSection(manifest, L"Payload"), *q;
+    BOOL used = FALSE, only = TRUE;
+
+    for (q = pay; q && *q; q += wcslen(q) + 1)
+    {
+        WCHAR *eq = wcschr(q, L'='), *bar;
+        if (!eq || q[0] == L';' || !(bar = wcschr(eq + 1, L'|'))) continue;
+        if (wcslen(name) != (size_t)(bar - eq - 1) || _wcsnicmp(eq + 1, name, bar - eq - 1)) continue;
+        used = TRUE;
+        if (!DestIsWow64(bar + 1)) only = FALSE;
+    }
+    if (pay) HeapFree(GetProcessHeap(), 0, pay);
+    return used && only;
 }
 
 BOOL FmFindFeature(LPCWSTR id, FM_FEATURE *out)
@@ -3029,6 +3089,7 @@ static HRESULT ApplyRegistrySection(const FM_FEATURE *f, HKEY state, FILE *log)
     {
         WCHAR *eq = wcschr(p, L'=');
         if (!eq) continue;
+        if (RegLineIsWow64(eq + 1) && !FmWow64SidePresent()) continue;   /* the 32-bit view: no 32-bit side */
         hr = ApplyRegAction(eq + 1, state, log);
         if (FAILED(hr)) break;
     }
@@ -3171,6 +3232,11 @@ static HRESULT StageHostedPayload(const FM_FEATURE *f, WCHAR **fetched, FILE *lo
         if (!eq || line[0] == L';') continue;
         StringCchCopyW(spec, ARRAYSIZE(spec), eq + 1);
         name = wcstok_s(spec, L"|", &ctx);
+        if (name && SourceOnlyForWow64(f->ManifestPath, name) && !FmWow64SidePresent())
+        {
+            LOGF(log, L"  not downloaded (only for the 32-bit system folder, which this system does not have): %s\n", name);
+            continue;
+        }
         sha = wcstok_s(NULL, L"|", &ctx);
         size = wcstok_s(NULL, L"|", &ctx);
         for (i = 0; sha && sha[i]; i++)
@@ -3306,13 +3372,53 @@ static HRESULT ResolveSupersededFeatures(const FM_FEATURE *f, FILE *log)
     return S_OK;
 }
 
+/* After an operating system component is added, the features that are its installed form (FeaturesOwn in the setup record:
+ * powershell7 -> powershell-7, whose installer package the component just copied into the Featmgr payload folder) are
+ * turned on too. A failure is logged and does not undo the component. */
+static void EnableOwnFeatures(LPCWSTR comp, FILE *log)
+{
+    WCHAR key[160], list[256], *p;
+    HKEY hk;
+    DWORD cb = sizeof(list) - sizeof(WCHAR), type;
+
+    StringCchPrintfW(key, ARRAYSIZE(key), L"SOFTWARE\\ReactOS\\Nitro\\Components\\%s", comp);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, key, 0, KEY_QUERY_VALUE, &hk) != ERROR_SUCCESS) return;
+    if (RegQueryValueExW(hk, L"FeaturesOwn", NULL, &type, (LPBYTE)list, &cb) != ERROR_SUCCESS || type != REG_SZ) { RegCloseKey(hk); return; }
+    RegCloseKey(hk);
+    list[cb / sizeof(WCHAR)] = L'\0';
+    for (p = list; *p; )
+    {
+        WCHAR *e = wcschr(p, L','), one[FM_MAX_ID];
+        size_t n = e ? (size_t)(e - p) : wcslen(p);
+        if (n && n < ARRAYSIZE(one))
+        {
+            HRESULT hr;
+            CopyMemory(one, p, n * sizeof(WCHAR));
+            one[n] = L'\0';
+            hr = FmEnableInner(one, log);
+            if (FAILED(hr)) LOGF(log, L"note: the feature '%s' of the component could not be turned on (0x%08lx); run: featmgr /enable %s\n", one, hr, one);
+        }
+        p += n;
+        if (*p == L',') p++;
+    }
+}
+
 HRESULT FmEnable(LPCWSTR id, FILE *log)
 {
     HRESULT result;
 
     if (g_OpDepth++ == 0) { g_LastMsg[0] = L'\0'; g_Tail[0] = L'\0'; }
     result = FmRequireAdministrator(log);
-    if (SUCCEEDED(result)) result = FmEnableInner(id, log);
+    if (SUCCEEDED(result))
+    {
+        if (FmOsCompIsComponent(id))
+        {
+            result = FmOsCompEnable(id, log);
+            if (SUCCEEDED(result)) EnableOwnFeatures(id, log);
+        }
+        else
+            result = FmEnableInner(id, log);
+    }
     g_OpDepth--;
     return result;
 }
@@ -3553,6 +3659,13 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
                 *sep = L'|';
                 hr = E_INVALIDARG;
                 goto done;
+            }
+            if (DestIsWow64(sep + 1) && !FmWow64SidePresent())
+            {
+                /* the 32-bit side was left out at setup: no 32-bit file (it would recreate SysWOW64) */
+                LOGF(log, L"  skipped (no 32-bit system folder): %s\n", sep + 1);
+                *sep = L'|';
+                continue;
             }
             hr = ApplyPayloadFile(payloadDir, eq + 1, sep + 1, hosted ? want : NULL, state, log);
             *sep = L'|';
