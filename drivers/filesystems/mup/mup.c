@@ -2735,6 +2735,19 @@ MupCreate(PDEVICE_OBJECT DeviceObject,
                                            FileObject,
                                            Stack->Parameters.Create.SecurityContext->DesiredAccess,
                                            Stack->Parameters.Create.ShareAccess);
+                if (NT_SUCCESS(Status))
+                {
+                    /* what the handle may do with data: FileFsDeviceInformation looks at it */
+                    PIO_SECURITY_CONTEXT Context = Stack->Parameters.Create.SecurityContext;
+                    ACCESS_MASK Desired = Context->DesiredAccess;
+
+                    /* (the access that was granted already, as for MAXIMUM_ALLOWED or a generic right) */
+                    if (Context->AccessState != NULL)
+                        Desired |= Context->AccessState->PreviouslyGrantedAccess;
+
+                    FileObject->ReadAccess = (Desired & (FILE_READ_DATA | FILE_EXECUTE)) != 0;
+                    FileObject->WriteAccess = (Desired & (FILE_WRITE_DATA | FILE_APPEND_DATA)) != 0;
+                }
 
                 Irp->IoStatus.Information = FILE_OPENED;
                 Irp->IoStatus.Status = Status;
@@ -3030,6 +3043,13 @@ MupQueryVolumeInformation(PDEVICE_OBJECT DeviceObject,
 
     if (Stack->Parameters.QueryVolume.FsInformationClass != FileFsDeviceInformation)
     {
+        Status = STATUS_INVALID_DEVICE_REQUEST;
+    }
+    else if (Stack->FileObject != NULL && (Stack->FileObject->ReadAccess || Stack->FileObject->WriteAccess))
+    {
+        /* A handle opened with data access (FILE_READ_DATA, FILE_WRITE_DATA, FILE_EXECUTE, so also GENERIC_* and
+           MAXIMUM_ALLOWED) gets no device information; one opened for attributes, read control or synchronize only does
+           (measured on Windows Server 2022) */
         Status = STATUS_INVALID_DEVICE_REQUEST;
     }
     else if (Stack->Parameters.QueryVolume.Length < sizeof(FILE_FS_DEVICE_INFORMATION))
