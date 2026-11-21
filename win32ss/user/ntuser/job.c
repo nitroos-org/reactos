@@ -82,9 +82,39 @@ IntCreateJobInfo(_In_ PEJOB pEJob)
 }
 
 /*
- * Marks a process and its threads as belonging to a restricted job, so that
- * enforcement is a flag test rather than a walk back to the job. user32 sees
- * the thread flag through the CLIENTINFO.
+ * Whether JOB_OBJECT_UILIMIT_HANDLES applies to a process: its job or a job
+ * above it has the flag. Read from the JOBINFOs, which carry a new limit
+ * already while the kernel is still asking us about it (every job with UI
+ * limits has one).
+ */
+_Requires_exclusive_lock_held_(UserLock)
+static
+BOOL
+IntProcessUnderHandleLimit(_In_ PPROCESSINFO ppi)
+{
+    PEJOB Walk;
+    PJOBINFO pJobInfo;
+
+    if (ppi->peProcess == NULL)
+        return FALSE;
+
+    for (Walk = PsGetProcessJob(ppi->peProcess); Walk != NULL; Walk = Walk->ParentJob)
+    {
+        pJobInfo = IntFindJobInfo(Walk);
+        if (pJobInfo != NULL && (pJobInfo->UIRestrictions & JOB_OBJECT_UILIMIT_HANDLES))
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+/*
+ * Marks a process and its threads as restricted to the USER handles of its job
+ * (JOB_OBJECT_UILIMIT_HANDLES), so that user32 knows when to ask win32k before
+ * it uses a handle (it sees the thread flag through the CLIENTINFO). Only that
+ * limit: with the others the handles user32 validates itself stay usable, and
+ * asking win32k for each of them makes IsWindow, GetWindowLong or SendMessage
+ * many times slower. bRestricted FALSE: the process has left the job.
  */
 _Requires_exclusive_lock_held_(UserLock)
 static
@@ -98,6 +128,9 @@ IntSetProcessRestricted(
     BOOL bAttached = FALSE;
 
     ASSERT(UserIsEnteredExclusive());
+
+    if (bRestricted)
+        bRestricted = IntProcessUnderHandleLimit(ppi);
 
     if (bRestricted)
         ppi->W32PF_flags |= W32PF_JOBRESTRICTED;
@@ -279,6 +312,27 @@ IntIsProcessInJob(
     return FALSE;
 }
 
+/* The limits of a job changed: refresh the handle-limit flag of the processes
+   in it that USER tracks for a job, also those of jobs nested in it */
+_Requires_exclusive_lock_held_(UserLock)
+static
+VOID
+IntUpdateJobProcesses(_In_ PEJOB pEJob)
+{
+    PPROCESSINFO ppi;
+
+    for (ppi = gppiList; ppi != NULL; ppi = ppi->ppiNext)
+    {
+        if (ppi->peProcess != NULL &&
+            ppi->pW32Job != NULL &&
+            !(ppi->W32PF_flags & W32PF_TERMINATED) &&
+            IntIsProcessInJob(ppi->peProcess, pEJob))
+        {
+            IntSetProcessRestricted(ppi, TRUE);
+        }
+    }
+}
+
 /* Handles PsW32JobCalloutSetInformation */
 static
 NTSTATUS
@@ -289,7 +343,7 @@ IntJobSetRestrictions(
     NTSTATUS Status = STATUS_SUCCESS;
     PJOBINFO pJobInfo;
     BOOL Created = FALSE;
-    ULONG i;
+    ULONG OldRestrictions = 0;
 
     UserEnterExclusive();
 
@@ -297,17 +351,14 @@ IntJobSetRestrictions(
 
     /* No restrictions left. The JOBINFO stays until the job is deleted: a
        thread of the job may be using its atom table right now, and the
-       kernel calls us for a job that ever had restrictions when it goes. */
+       kernel calls us for a job that ever had restrictions when it goes.
+       The handle limit of a job above may still apply to its processes. */
     if (UIRestrictions == 0)
     {
         if (pJobInfo != NULL)
         {
             pJobInfo->UIRestrictions = 0;
-            for (i = 0; i < pJobInfo->ProcessCount; i++)
-            {
-                if (pJobInfo->pProcesses[i] != NULL)
-                    IntSetProcessRestricted(pJobInfo->pProcesses[i], FALSE);
-            }
+            IntUpdateJobProcesses(pEJob);
         }
 
         goto Quit;
@@ -324,6 +375,10 @@ IntJobSetRestrictions(
 
         Created = TRUE;
     }
+
+    /* The new limits first: IntSetProcessRestricted reads them */
+    OldRestrictions = pJobInfo->UIRestrictions;
+    pJobInfo->UIRestrictions = UIRestrictions;
 
     /* The job may already hold processes that connected to USER before the
        restrictions were applied, directly or through a job nested in it, or
@@ -351,12 +406,21 @@ IntJobSetRestrictions(
         }
     }
 
-    pJobInfo->UIRestrictions = UIRestrictions;
-
 Quit:
-    /* Undo a job we did not manage to finish building */
-    if (!NT_SUCCESS(Status) && Created)
-        IntDestroyJobInfo(pJobInfo);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Undo a job we did not manage to finish building; the kernel keeps
+           the old limits of one we did */
+        if (Created)
+        {
+            IntDestroyJobInfo(pJobInfo);
+        }
+        else if (pJobInfo != NULL)
+        {
+            pJobInfo->UIRestrictions = OldRestrictions;
+            IntUpdateJobProcesses(pEJob);
+        }
+    }
 
     UserLeave();
     return Status;
