@@ -733,6 +733,7 @@ ComponentsMeasure(
     UINT ErrorLine;
     WCHAR PathBuffer[MAX_PATH];
     ULONG Files = 0, Sized = 0;
+    ULONGLONG Total = 0;
 
     if (!Components)
         return FALSE;
@@ -804,6 +805,7 @@ ComponentsMeasure(
                     if (p != SizeText && !*p && Bytes <= 0xFFFFFFFFULL)
                     {
                         ++Sized;
+                        Total += Bytes;
                         ComponentsAddFile(Components, RelPath, Bytes);
                     }
                     INF_FreeData(SizeText);
@@ -819,8 +821,8 @@ NextLine:
         SpInfCloseInfFile(InfHandle);
     } while (SpInfFindNextLine(&CabinetsContext, &CabinetsContext));
 
-    /* every file has a size, or the medium does not carry sizes at all */
-    Components->SizesKnown = (Files && Sized == Files);
+    /* every file has a size, or the medium does not carry sizes at all (all sizes 0: the same) */
+    Components->SizesKnown = (Files && Sized == Files && Total);
     /* nothing is logged here: an installation that leaves everything in must not differ from one without the page,
      * not even by a log file (ComponentsSetChoice logs the selection when something is left out) */
     return Components->SizesKnown;
