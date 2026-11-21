@@ -28,6 +28,7 @@
 DEBUG_CHANNEL(nls);
 
 #include "lcformat_private.h"
+#include "kernel32_vista/localenamecache.h"
 #ifdef __REACTOS__
     #include "japanese.h"
     #define strcasecmp _stricmp
@@ -4254,8 +4255,9 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
 
 #if (WINVER >= 0x0600)
     /* A name that is no well-formed tag is refused (measured on Windows Server 2022: ERROR_INVALID_PARAMETER for
-       "xx-invalid", "x" and "en-US-"). NULL, "" (invariant) and LOCALE_NAME_SYSTEM_DEFAULT are taken. */
-    if (locale && locale[0] && !BasepIsLocaleNameAccepted(locale))
+       "xx-invalid", "x" and "en-US-"). NULL, "" (invariant) and LOCALE_NAME_SYSTEM_DEFAULT are taken. A name taken
+       lately is found by the inline test, the rest by the function. */
+    if (locale && locale[0] && !BasepIsAcceptedNameCached(locale) && !BasepIsLocaleNameAccepted(locale))
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return 0;

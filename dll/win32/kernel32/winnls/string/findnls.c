@@ -13,6 +13,8 @@
 
 #if (DLL_EXPORT_VERSION >= 0x0600) /* FindNLSString and FindNLSStringEx are exported from 0x600 on only */
 
+#include "kernel32_vista/localenamecache.h"
+
 /* locale.c */
 extern BOOL BasepPrepareCompareFlags(DWORD flags, int *wine_flags);
 /* sortkey.c */
@@ -55,7 +57,8 @@ FindNLSStringEx(
 
     /* The locale name comes first: a name that is no well-formed tag is refused before anything else is looked at
        (measured on Windows Server 2022: ERROR_INVALID_PARAMETER for short, empty and NULL strings and for bad flags) */
-    if (lpLocaleName && lpLocaleName[0] && !BasepIsLocaleNameAccepted(lpLocaleName))
+    if (lpLocaleName && lpLocaleName[0] && !BasepIsAcceptedNameCached(lpLocaleName) &&
+        !BasepIsLocaleNameAccepted(lpLocaleName))
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return -1;
