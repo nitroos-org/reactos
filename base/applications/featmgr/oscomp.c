@@ -504,7 +504,61 @@ typedef struct _EXTRACT
     NAMECOUNTS seen;    /* members of the cabinet being read, by name */
     int cab;
     WCHAR last[MAX_PATH];   /* the file being written: named in the message when the cabinet read stops */
+    WCHAR final[MAX_PATH];  /* viaTemp: the file that the member is meant for (the extraction goes to final + ".fmnew") */
+    BOOL viaTemp;
 } EXTRACT;
+
+/* TRUE when both files hold the same bytes */
+static BOOL SameContent(LPCWSTR a, LPCWSTR b)
+{
+    HANDLE ha, hb;
+    LARGE_INTEGER sa, sb;
+    BYTE *buf;
+    BOOL same = FALSE;
+
+    ha = CreateFileW(a, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    hb = CreateFileW(b, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    buf = HeapAlloc(GetProcessHeap(), 0, 2 * 65536);
+    if (ha != INVALID_HANDLE_VALUE && hb != INVALID_HANDLE_VALUE && buf && GetFileSizeEx(ha, &sa) && GetFileSizeEx(hb, &sb) &&
+        sa.QuadPart == sb.QuadPart)
+    {
+        for (;;)
+        {
+            DWORD ga, gb;
+
+            if (!ReadFile(ha, buf, 65536, &ga, NULL) || !ReadFile(hb, buf + 65536, 65536, &gb, NULL) || ga != gb) break;
+            if (!ga) { same = TRUE; break; }
+            if (memcmp(buf, buf + 65536, ga)) break;
+        }
+    }
+    if (buf) HeapFree(GetProcessHeap(), 0, buf);
+    if (ha != INVALID_HANDLE_VALUE) CloseHandle(ha);
+    if (hb != INVALID_HANDLE_VALUE) CloseHandle(hb);
+    return same;
+}
+
+/* A member whose file is already there (a second run after the first was cut short, or an older copy) is extracted next to it and
+ * compared: the same bytes leave the file alone, which matters for files that the system holds open (the 32-bit ntdll.dll of
+ * SysWOW64 is mapped into processes and cannot be overwritten); other bytes replace it, and when that is refused the error names
+ * the file. */
+static BOOL FinishTemp(EXTRACT *x, LPCWSTR temp)
+{
+    if (SameContent(temp, x->final))
+    {
+        DeleteFileW(temp);
+        return TRUE;
+    }
+    if (!MoveFileExW(temp, x->final, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    {
+        DWORD e = GetLastError();
+
+        LOGF(x->log, L"  error %lu: cannot replace %s\n", e, x->final);
+        x->error = e;
+        DeleteFileW(temp);
+        return FALSE;
+    }
+    return TRUE;
+}
 
 static UINT CALLBACK CabCallback(PVOID ctx, UINT notif, UINT_PTR p1, UINT_PTR p2)
 {
@@ -530,6 +584,19 @@ static UINT CALLBACK CabCallback(PVOID ctx, UINT notif, UINT_PTR p1, UINT_PTR p2
                 PathRemoveFileSpecW(dir);
                 SHCreateDirectoryExW(NULL, dir, NULL);
                 SetFileAttributesW(fi->FullTargetName, FILE_ATTRIBUTE_NORMAL);   /* an old read-only copy */
+                x->viaTemp = FALSE;
+                if (GetFileAttributesW(fi->FullTargetName) != INVALID_FILE_ATTRIBUTES)
+                {
+                    WCHAR temp[MAX_PATH];
+
+                    if (SUCCEEDED(StringCchPrintfW(temp, ARRAYSIZE(temp), L"%s.fmnew", fi->FullTargetName)))
+                    {
+                        StringCchCopyW(x->final, ARRAYSIZE(x->final), fi->FullTargetName);
+                        DeleteFileW(temp);          /* left by a power cut */
+                        StringCchCopyW(fi->FullTargetName, MAX_PATH, temp);
+                        x->viaTemp = TRUE;
+                    }
+                }
                 return FILEOP_DOIT;
             }
             return FILEOP_SKIP;
@@ -540,13 +607,23 @@ static UINT CALLBACK CabCallback(PVOID ctx, UINT notif, UINT_PTR p1, UINT_PTR p2
             if (fp->Win32Error != NO_ERROR)
             {
                 x->error = fp->Win32Error;
-                LOGF(x->log, L"  error %lu: %s\n", fp->Win32Error, fp->Target);
+                LOGF(x->log, L"  error %lu: %s\n", fp->Win32Error, x->viaTemp ? x->final : fp->Target);
+                if (x->viaTemp) DeleteFileW(fp->Target);
+            }
+            else if (x->viaTemp)
+            {
+                if (FinishTemp(x, fp->Target))
+                {
+                    x->done++;
+                    PatAdd(&x->map->installed, x->final);
+                }
             }
             else
             {
                 x->done++;
                 PatAdd(&x->map->installed, fp->Target);
             }
+            x->viaTemp = FALSE;
             return NO_ERROR;
         }
         case SPFILENOTIFY_NEEDNEWCABINET:
