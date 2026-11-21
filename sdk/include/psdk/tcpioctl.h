@@ -299,6 +299,7 @@ typedef struct _TCP_IP_INTERFACE_ROW
     ULONG Ip6Metric;        /* set by hand, 0 = automatic */
     ULONG Ip6RouterDiscovery;   /* NL_ROUTER_DISCOVERY_BEHAVIOR */
     ULONG Ip6DadTransmits;
+    ULONG LinkSpeed;        /* the link speed as the stack has it, in units of 100 bit/s (a 32-bit bit/s value saturates at 4.29 Gbit/s) */
 } TCP_IP_INTERFACE_ROW, *PTCP_IP_INTERFACE_ROW;
 
 /* Non public TOIID: the IPv6 route table of the stack (route6.c), apart from the routes every address and interface
