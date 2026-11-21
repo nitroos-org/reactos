@@ -112,6 +112,7 @@ list(APPEND SOURCE
     FindFirstFileEx.c
     FindFirstStream.c
     FindNextBoundary.c
+    FindNLSString.c
     FindNLSStringEx.c
     FindStringOrdinal.c
     FlushProcessWriteBuffers.c

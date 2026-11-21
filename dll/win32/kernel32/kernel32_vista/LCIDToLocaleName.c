@@ -32,6 +32,13 @@ LCIDToLocaleName(
     if (Locale == LOCALE_CUSTOM_UNSPECIFIED)
         Locale = GetUserDefaultLCID();
 
+    /* LOCALE_NEUTRAL, and the LCIDs of the custom range (no primary language, sublanguage 8 to 0x13), resolve to the
+       user default locale as well (measured on Windows Server 2022: "en-US" on an en-US system, with or without
+       LOCALE_ALLOW_NEUTRAL_NAMES). The sublanguages 5, 6 and 7 (0x1400 to 0x1c00) name no locale. */
+    if (Locale == LOCALE_NEUTRAL ||
+        (!(Locale & 0xffff03ff) && SUBLANGID(LANGIDFROMLCID(Locale)) >= 8 && SUBLANGID(LANGIDFROMLCID(Locale)) <= 0x13))
+        Locale = GetUserDefaultLCID();
+
     if (dwFlags & LOCALE_ALLOW_NEUTRAL_NAMES)
     {
         RtlFlags |= RTL_LOCALE_ALLOW_NEUTRAL_NAMES;
@@ -66,7 +73,9 @@ LCIDToLocaleName(
     }
     if (!NT_SUCCESS(Status))
     {
-        SetLastError(RtlNtStatusToDosError(Status));
+        /* A buffer that is too small is reported as such; an LCID that names no locale is ERROR_INVALID_PARAMETER
+           (measured on Windows Server 2022: 87 for 0x1400 where the status here maps to 31) */
+        SetLastError(Status == STATUS_BUFFER_TOO_SMALL ? ERROR_INSUFFICIENT_BUFFER : ERROR_INVALID_PARAMETER);
         return 0;
     }
 

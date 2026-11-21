@@ -2630,7 +2630,49 @@ IsNLSDefinedString(IN NLS_FUNCTION Function,
                    IN LPCWSTR lpString,
                    IN INT cchStr)
 {
-    STUB;
+    INT i;
+
+    /* The checks come in this order (measured on Windows Server 2022): a version structure that is neither an
+       NLSVERSIONINFO (12 bytes) nor an NLSVERSIONINFOEX (32 bytes) is ERROR_INSUFFICIENT_BUFFER, no string or an empty
+       one is ERROR_INVALID_PARAMETER, and a function other than COMPARE_STRING or any flag is ERROR_INVALID_FLAGS.
+       A NULL version structure is taken (Windows raises an access violation for it). */
+    if (lpVersionInformation &&
+        lpVersionInformation->dwNLSVersionInfoSize != 12 /* NLSVERSIONINFO before Windows 8 */ &&
+        lpVersionInformation->dwNLSVersionInfoSize != 32 /* NLSVERSIONINFOEX */)
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    if (!lpString || !cchStr)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (Function != COMPARE_STRING || dwFlags)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return FALSE;
+    }
+
+    /* A string is defined when it holds no unpaired surrogate (measured: FALSE with the last error untouched) */
+    if (cchStr < 0)
+        cchStr = lstrlenW(lpString);
+    for (i = 0; i < cchStr; i++)
+    {
+        WCHAR c = lpString[i];
+
+        if (c >= 0xd800 && c <= 0xdbff)
+        {
+            if (i + 1 < cchStr && lpString[i + 1] >= 0xdc00 && lpString[i + 1] <= 0xdfff)
+                i++;
+            else
+                return FALSE;
+        }
+        else if (c >= 0xdc00 && c <= 0xdfff)
+        {
+            return FALSE;
+        }
+    }
     return TRUE;
 }
 

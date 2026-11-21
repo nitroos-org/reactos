@@ -114,6 +114,7 @@ extern void func_FindFiles(void);
 extern void func_FindFirstFileEx(void);
 extern void func_FindFirstStream(void);
 extern void func_FindNextBoundary(void);
+extern void func_FindNLSString(void);
 extern void func_FindNLSStringEx(void);
 extern void func_FindStringOrdinal(void);
 extern void func_RegCurrentVersion(void);
@@ -403,6 +404,7 @@ const struct test winetest_testlist[] =
     { "FindFirstFileEx",             func_FindFirstFileEx },
     { "FindFirstStream",             func_FindFirstStream },
     { "FindNextBoundary",            func_FindNextBoundary },
+    { "FindNLSString",               func_FindNLSString },
     { "FindNLSStringEx",             func_FindNLSStringEx },
     { "FindStringOrdinal",           func_FindStringOrdinal },
     { "RegCurrentVersion",           func_RegCurrentVersion },
