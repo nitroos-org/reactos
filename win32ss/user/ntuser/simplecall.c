@@ -483,6 +483,12 @@ NtUserCallTwoParam(
         case TWOPARAM_ROUTINE_REDRAWTITLE:
         {
             Window = UserGetWindowObject((HWND)Param1);
+            /* An invalid handle (the frame of an MDI client that went, for one) */
+            if (!Window)
+            {
+                Ret = 0;
+                break;
+            }
             Ret = (DWORD_PTR)UserPaintCaption(Window, (INT)Param2);
             break;
         }
