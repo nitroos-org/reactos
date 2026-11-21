@@ -211,6 +211,32 @@ static BOOLEAN Chain(PHHIVE Hive, HCELL_INDEX ValueCell, CHAIN *C)
     return TRUE;
 }
 
+/*
+ * The layout a Windows reader accepts (measured on a Windows Server 2022 peer): the list holds exactly the segments the
+ * data needs, every segment cell, the last too, holds SEG bytes (not smaller), and what the data does not use is zero.
+ */
+static void CheckLayout(PHHIVE Hive, const CHAIN *C, ULONG Length)
+{
+    ULONG s, Used;
+    PUCHAR P;
+
+    CHECK(C->Count == CMP_BIG_DATA_SEGMENTS(Length), "length %lu: exactly the segments needed (%lu)",
+          (unsigned long)Length, (unsigned long)C->Count);
+    for (s = 0; s < C->Count && s < 8; s++)
+    {
+        P = (PUCHAR)HvGetCell(Hive, C->Seg[s]);
+        Used = (s + 1 < C->Count) ? SEG : Length - s * SEG;
+        CHECK(HvGetCellSize(Hive, P) >= (LONG)SEG, "length %lu: segment %lu holds at least %lu bytes",
+              (unsigned long)Length, (unsigned long)s, (unsigned long)SEG);
+        CHECK(HvGetCellSize(Hive, P) < (LONG)SEG + 16, "length %lu: segment %lu is not oversized",
+              (unsigned long)Length, (unsigned long)s);
+        for (; Used < SEG; Used++)
+            if (P[Used] != 0)
+                break;
+        CHECK(Used == SEG, "length %lu: the tail of segment %lu is zero", (unsigned long)Length, (unsigned long)s);
+    }
+}
+
 /* Allocated bytes of the stable storage (cells tile the bins) */
 static ULONG AllocatedBytes(PHHIVE Hive)
 {
@@ -307,6 +333,8 @@ static void TestWriteRead(ULONG Minor)
                   (unsigned long)g_Lengths[i], (unsigned long)C.Count);
             CHECK(CmpValueToData(Hive, (PCM_KEY_VALUE)HvGetCell(Hive, V[i]), &After) == NULL,
                   "the boot-time reader refuses big data");
+
+            CheckLayout(Hive, &C, g_Lengths[i]);
         }
         else if (g_Lengths[i] > SEG)
         {
@@ -386,6 +414,8 @@ static void TestReplace(void)
         CHECK(DataIs(Hive, V, Steps[i], 100 + i), "%lu bytes read back", (unsigned long)Steps[i]);
         CHECK(Chain(Hive, V, &C) == (Steps[i] > SEG), "%lu bytes: big data %s", (unsigned long)Steps[i],
               Steps[i] > SEG ? "expected" : "not expected");
+        if (Steps[i] > SEG)
+            CheckLayout(Hive, &C, Steps[i]);
         CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, g_LiveFlags)), "live check after %lu bytes",
               (unsigned long)Steps[i]);
         free(Data);
@@ -537,12 +567,97 @@ static void TestHandMade(void)
     Unload(&Cm);
 }
 
+/* ---- 5b: the layout of builds that sized the last segment cell to the rest (still read; rewritten in full size) ---- */
+static void TestOldLayout(void)
+{
+    static CMHIVE Cm;
+    PHHIVE Hive = &Cm.Hive;
+    /* what the earlier writer made: every cell but the last SEG bytes, the last exactly the rest */
+    static const ULONG A[3] = { SEG, SEG, 40000 - 2 * SEG };            /* 40000 */
+    static const ULONG B[2] = { SEG, 8 };                                /* 16345 */
+    static const ULONG C6[7] = { SEG, SEG, SEG, SEG, SEG, SEG, 100000 - 6 * SEG };
+    static const ULONG Step[3] = { SEG, SEG, 40000 - 2 * SEG - 8 };     /* the last cell one allocation step short */
+    HCELL_INDEX K, V;
+    CHAIN Ch;
+    PUCHAR Data;
+    ULONG Temp;
+    BOOLEAN Changed;
+    NTSTATUS Status;
+
+    printf("-- the old layout (last segment cell sized to the rest): loads unchanged, reads back, rewritten in full size; one step short is dropped\n");
+    CHECK(NewHive(&Cm, 5), "new hive");
+    K = SubKey(Hive, g_Root, L"K");
+    AddValueCell(Hive, K, L"a", REG_BINARY_, HandChain(Hive, 40000, 81, 3, A), 40000, 0);
+    AddValueCell(Hive, K, L"b", REG_BINARY_, HandChain(Hive, SEG + 1, 82, 2, B), SEG + 1, 0);
+    AddValueCell(Hive, K, L"c", REG_BINARY_, HandChain(Hive, 100000, 83, 7, C6), 100000, 0);
+    AddValueCell(Hive, K, L"short", REG_BINARY_, HandChain(Hive, 40000, 84, 3, Step), 40000, 0);
+    CHECK(HvWriteHive(Hive), "write");
+    Unload(&Cm);
+
+    CHECK(CM_CHECK_REGISTRY_SUCCESS(Load(&Cm, &Changed)) && Changed, "loads; only the chain one step short is repaired");
+    K = Find(Hive, g_Root, L"K");
+    CHECK(DataIs(Hive, FindValue(Hive, K, L"a"), 40000, 81), "a (40000, old layout) reads back");
+    CHECK(DataIs(Hive, FindValue(Hive, K, L"b"), SEG + 1, 82), "b (16345, old layout) reads back");
+    CHECK(DataIs(Hive, FindValue(Hive, K, L"c"), 100000, 83), "c (100000, old layout) reads back");
+    CHECK(FindValue(Hive, K, L"short") == HCELL_NIL, "a last cell one allocation step short of the data is dropped");
+    CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, g_LiveFlags)), "live check");
+
+    /* an untouched old chain stays as it is: its last cell is smaller than SEG */
+    V = FindValue(Hive, K, L"a");
+    CHECK(Chain(Hive, V, &Ch) && Ch.Count == 3 && HvGetCellSize(Hive, HvGetCell(Hive, Ch.Seg[2])) < (LONG)SEG,
+          "an untouched old chain keeps its short last cell");
+
+    /* written again (same size): full-size layout */
+    Data = MakeData(40000, 91);
+    Temp = 0;
+    memcpy(&Temp, Data, sizeof(Temp));
+    HvMarkCellDirty(Hive, V, FALSE);
+    Status = CmpReplaceValueData(Hive, (PCM_KEY_VALUE)HvGetCell(Hive, V), REG_BINARY_, Data, 40000, Stable, Temp);
+    CHECK(NT_SUCCESS(Status), "rewrite a at the same size");
+    free(Data);
+    CHECK(DataIs(Hive, V, 40000, 91), "a reads back after the rewrite");
+    CHECK(Chain(Hive, V, &Ch), "a is still big data");
+    CheckLayout(Hive, &Ch, 40000);
+
+    /* grown across a boundary: full size */
+    V = FindValue(Hive, K, L"b");
+    Data = MakeData(2 * SEG + 5, 92);
+    Temp = 0;
+    memcpy(&Temp, Data, sizeof(Temp));
+    HvMarkCellDirty(Hive, V, FALSE);
+    Status = CmpReplaceValueData(Hive, (PCM_KEY_VALUE)HvGetCell(Hive, V), REG_BINARY_, Data, 2 * SEG + 5, Stable, Temp);
+    CHECK(NT_SUCCESS(Status), "grow b");
+    free(Data);
+    CHECK(DataIs(Hive, V, 2 * SEG + 5, 92) && Chain(Hive, V, &Ch), "b reads back and is big data");
+    CheckLayout(Hive, &Ch, 2 * SEG + 5);
+
+    /* shrunk to one cell: a plain cell */
+    V = FindValue(Hive, K, L"c");
+    Data = MakeData(SEG, 93);
+    Temp = 0;
+    memcpy(&Temp, Data, sizeof(Temp));
+    HvMarkCellDirty(Hive, V, FALSE);
+    Status = CmpReplaceValueData(Hive, (PCM_KEY_VALUE)HvGetCell(Hive, V), REG_BINARY_, Data, SEG, Stable, Temp);
+    CHECK(NT_SUCCESS(Status), "shrink c");
+    free(Data);
+    CHECK(DataIs(Hive, V, SEG, 93) && !Chain(Hive, V, &Ch), "c reads back as one cell");
+    CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, g_LiveFlags)), "live check after the rewrites");
+    CHECK(HvWriteHive(Hive), "write");
+    Unload(&Cm);
+    CHECK(CM_CHECK_REGISTRY_SUCCESS(Load(&Cm, &Changed)) && !Changed, "the rewritten hive loads unchanged");
+    K = Find(Hive, g_Root, L"K");
+    CHECK(DataIs(Hive, FindValue(Hive, K, L"a"), 40000, 91) && DataIs(Hive, FindValue(Hive, K, L"b"), 2 * SEG + 5, 92) &&
+          DataIs(Hive, FindValue(Hive, K, L"c"), SEG, 93), "all three read back after the reload");
+    Unload(&Cm);
+}
+
 /* ---- 6: every kind of unsound chain: that value is dropped, nothing else ---- */
 typedef struct
 {
     HCELL_INDEX Key, Big, Other, Small, Big2, Key2, Sk, Free, RootClass;
     CHAIN BigC, OtherC;
     HCELL_INDEX SmallData;
+    HCELL_INDEX Short;      /* an allocated cell of 64 bytes no value owns */
 } GOOD;
 static GOOD g_G;
 
@@ -577,7 +692,7 @@ static PUCHAR BuildGood(ULONG *Size)
     B = HvAllocateCell(Hive, 64, Stable, HCELL_NIL);
     HvFreeCell(Hive, A);
     g_G.Free = A;
-    (void)B;
+    g_G.Short = B;
     CHECK(HvWriteHive(Hive), "write");
     Unload(&Cm);
     return SaveFile(Size);
@@ -605,8 +720,9 @@ static void T_SegNil(PHHIVE H)          { BigList(H)[1] = HCELL_NIL; }
 static void T_SegMidCell(PHHIVE H)      { BigList(H)[0] = g_G.BigC.Seg[0] + 16; }
 static void T_SegPastEnd(PHHIVE H)      { BigList(H)[2] = H->Storage[Stable].Length * HBLOCK_SIZE; }
 static void T_SegFree(PHHIVE H)         { BigList(H)[0] = g_G.Free; }
-static void T_SegShortMiddle(PHHIVE H)  { BigList(H)[1] = g_G.BigC.Seg[2]; BigList(H)[2] = g_G.BigC.Seg[1]; }
-static void T_SegShortLast(PHHIVE H)    { BigV(H)->DataLength = 2 * SEG + 8000; }  /* the last holds 40000-32688 = 7312 */
+/* the writer makes every segment cell SEG bytes: a short segment is a cell of 64 bytes put into the list */
+static void T_SegShortMiddle(PHHIVE H)  { BigList(H)[1] = g_G.Short; }
+static void T_SegShortLast(PHHIVE H)    { BigList(H)[2] = g_G.Short; BigV(H)->DataLength = 2 * SEG + 8000; }
 /* The last segment then needs 10 bytes only: any cell is large enough, only its use makes the chain unsound */
 static void ShortLast(PHHIVE H)         { BigV(H)->DataLength = 2 * SEG + 10; }
 static void T_SegTwice(PHHIVE H)        { BigList(H)[2] = BigList(H)[0]; }
@@ -836,6 +952,7 @@ int main(int argc, char **argv)
     TestOldFormat();
     TestCopy();
     TestHandMade();
+    TestOldLayout();
     TestMalformed();
     TestFlat();
     TestNoData();
