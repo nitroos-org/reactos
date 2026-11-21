@@ -264,7 +264,9 @@ EmptyClipboard(VOID)
 
 /* The code page a clipboard text is in, from the CF_LOCALE the clipboard holds (Windows
    converts text with the code pages of that locale, ANSI or OEM; with no usable CF_LOCALE it
-   uses the system's). hLocale is the kernel's handle of the CF_LOCALE data, or NULL. */
+   uses the system's; a block of two or three bytes is read as the low bytes of the LCID, one byte
+   is no locale: measured on Windows Server 2022). hLocale is the kernel's handle of the CF_LOCALE
+   data, or NULL. */
 static UINT
 IntClipboardCodePage(HANDLE hLocale, BOOL bOem)
 {
@@ -273,7 +275,7 @@ IntClipboardCodePage(HANDLE hLocale, BOOL bOem)
 
     if (hLocale &&
         NT_SUCCESS(NtUserCreateLocalMemHandle(hLocale, &lcid, sizeof(lcid), &cbLocale)) &&
-        cbLocale >= sizeof(lcid) &&
+        cbLocale >= sizeof(WORD) &&
         GetLocaleInfoW(lcid, (bOem ? LOCALE_IDEFAULTCODEPAGE : LOCALE_IDEFAULTANSICODEPAGE) | LOCALE_RETURN_NUMBER,
                        (LPWSTR)&cp, sizeof(cp) / sizeof(WCHAR)) &&
         cp != 0 && IsValidCodePage(cp))
