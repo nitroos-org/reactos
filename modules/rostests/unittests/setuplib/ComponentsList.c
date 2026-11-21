@@ -400,8 +400,28 @@ Test_Sizes(void)
     RtlFreeHeap(RtlGetProcessHeap(), 0, s.FileBytes);
 }
 
+/* The standard preset of the page is everything of the edition, whatever the Profiles lines say */
+static void
+Test_StandardIsEverything(void)
+{
+    static COMPONENTS_STATE s;
+
+    RtlZeroMemory(&s, sizeof(s));
+    s.Count = 3;
+    InitDesc(s.Desc, 0, L"a", 0, 0, 0, TRUE);                            /* no Profiles line at all */
+    InitDesc(s.Desc, 1, L"b", BIT(COMPONENT_PROFILE_MINIMAL), 0, 0, TRUE);
+    InitDesc(s.Desc, 2, L"c", 0, 0, 0, FALSE);                           /* not in this edition */
+    ok(ComponentsProfileSelection(&s, COMPONENT_PROFILE_STANDARD) == 0x3, "standard: 0x%lx\n",
+       ComponentsProfileSelection(&s, COMPONENT_PROFILE_STANDARD));
+    ok(ComponentsProfileSelection(&s, COMPONENT_PROFILE_MINIMAL) == 0x2, "minimal: 0x%lx\n",
+       ComponentsProfileSelection(&s, COMPONENT_PROFILE_MINIMAL));
+    ok(ComponentsProfileSelection(&s, COMPONENT_PROFILE_CORE) == 0x0, "core: 0x%lx\n",
+       ComponentsProfileSelection(&s, COMPONENT_PROFILE_CORE));
+}
+
 START_TEST(ComponentsList)
 {
+    Test_StandardIsEverything();
     Test_Toggle();
     Test_Sizes();
     Test_Glob();
