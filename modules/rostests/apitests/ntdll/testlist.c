@@ -118,6 +118,7 @@ extern void func_VolumeControlCodes(void);
 extern void func_IoctlAllowlist(void);
 extern void func_ScsiPassThrough(void);
 extern void func_NtQueryInformationFile(void);
+extern void func_NtQueryInformationFileNormalizedName(void);
 extern void func_NtQueryInformationProcess(void);
 extern void func_NtQueryInformationThread(void);
 extern void func_NtQueryInformationToken(void);
@@ -418,6 +419,7 @@ const struct test winetest_testlist[] =
     { "IoctlAllowlist",                 func_IoctlAllowlist },
     { "ScsiPassThrough",                func_ScsiPassThrough },
     { "NtQueryInformationFile",         func_NtQueryInformationFile },
+    { "NtQueryInformationFileNormalizedName", func_NtQueryInformationFileNormalizedName },
     { "NtQueryInformationProcess",      func_NtQueryInformationProcess },
     { "NtQueryInformationThread",       func_NtQueryInformationThread },
     { "NtQueryInformationToken",        func_NtQueryInformationToken },

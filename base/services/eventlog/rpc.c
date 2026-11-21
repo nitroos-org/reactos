@@ -440,6 +440,65 @@ ElfrChangeNotify(
 }
 
 
+/*
+ * May the RPC client open the Security log? It needs SeSecurityPrivilege. The token of the client that the
+ * service impersonates over the pipe carries the enabled privileges only, so a caller passes when the privilege
+ * is enabled in it or when it is an administrator (as the privilege is theirs by default).
+ */
+static BOOL
+ElfCallerMayOpenSecurityLog(VOID)
+{
+    HANDLE hToken = NULL;
+    PTOKEN_PRIVILEGES pPrivs = NULL;
+    DWORD i, dwSize = 0, dwDummy;
+    LUID Luid;
+    BOOL bHeld = FALSE;
+
+    /* looked up as the service, not as the caller */
+    if (!LookupPrivilegeValueW(NULL, SE_SECURITY_NAME, &Luid))
+        return FALSE;
+
+    if (RpcImpersonateClient(NULL) != RPC_S_OK)
+        return FALSE;
+
+    if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &hToken))
+    {
+        BYTE Admins[SECURITY_MAX_SID_SIZE];
+        BOOL bMember = FALSE;
+
+        /* An administrator (the Administrators group, enabled in the token) may open the log. LocalSystem is one. */
+        dwDummy = sizeof(Admins);
+        if (CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL, Admins, &dwDummy) &&
+            CheckTokenMembership(hToken, Admins, &bMember) && bMember)
+            bHeld = TRUE;
+
+        GetTokenInformation(hToken, TokenPrivileges, NULL, 0, &dwSize);
+        if (dwSize)
+            pPrivs = HeapAlloc(GetProcessHeap(), 0, dwSize);
+        if (pPrivs && GetTokenInformation(hToken, TokenPrivileges, pPrivs, dwSize, &dwSize))
+        {
+            for (i = 0; i < pPrivs->PrivilegeCount; i++)
+            {
+                if (pPrivs->Privileges[i].Luid.LowPart == Luid.LowPart &&
+                    pPrivs->Privileges[i].Luid.HighPart == Luid.HighPart &&
+                    !(pPrivs->Privileges[i].Attributes & SE_PRIVILEGE_REMOVED))
+                {
+                    bHeld = TRUE;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (pPrivs)
+        HeapFree(GetProcessHeap(), 0, pPrivs);
+    if (hToken)
+        CloseHandle(hToken);
+    RpcRevertToSelf();
+    return bHeld;
+}
+
+
 /* Function 7 */
 NTSTATUS
 WINAPI
@@ -451,6 +510,8 @@ ElfrOpenELW(
     ULONG MinorVersion,
     PIELF_HANDLE LogHandle)
 {
+    NTSTATUS Status;
+
     if ((MajorVersion != 1) || (MinorVersion != 1))
         return STATUS_INVALID_PARAMETER;
 
@@ -462,9 +523,22 @@ ElfrOpenELW(
 
     /* FIXME: Must verify that caller has read access */
 
-    return ElfCreateEventLogHandle((PLOGHANDLE*)LogHandle,
-                                   (PUNICODE_STRING)ModuleName,
-                                   FALSE);
+    Status = ElfCreateEventLogHandle((PLOGHANDLE*)LogHandle,
+                                     (PUNICODE_STRING)ModuleName,
+                                     FALSE);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* The Security log is opened by callers that hold SeSecurityPrivilege only */
+    if (!_wcsicmp(((PLOGHANDLE)*LogHandle)->LogFile->LogName, L"Security") &&
+        !ElfCallerMayOpenSecurityLog())
+    {
+        ElfDeleteEventLogHandle(LogHandle);
+        *LogHandle = NULL;
+        return STATUS_PRIVILEGE_NOT_HELD;
+    }
+
+    return STATUS_SUCCESS;
 }
 
 

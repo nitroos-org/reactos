@@ -3529,7 +3529,7 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
         if (!_wcsicmp(f.Provider, L"scoop"))
         {
             LOGF(log, L"error: '%s' is not available: Scoop needs 64-bit PowerShell 7, which this system does not have\n", id);
-            SetLastMsg(L"Scoop apps need 64-bit PowerShell 7 and are not available on this system (x86 images have no PowerShell 7 yet).");
+            SetLastMsg(L"Scoop apps need 64-bit PowerShell 7 and are not available on this system (x86 images have only the 32-bit PowerShell 7).");
         }
         else if (f.Tier == FM_TIER_SOFTWARE && f.Provider[0])
             LOGF(log, L"error: installer for '%s' is not available on this system "

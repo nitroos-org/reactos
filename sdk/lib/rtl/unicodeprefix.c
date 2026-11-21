@@ -33,7 +33,7 @@ ComputeUnicodeNameLength(IN PUNICODE_STRING UnicodeName)
     ULONG i, NamesFound = 1;
 
     /* Loop the string */
-    for (i = 0; i < (Chars - 1); i++)
+    for (i = 0; i + 1 < Chars; i++)
     {
         /* Check if we found a backslash, meaning another name */
         if (UnicodeName->Buffer[i] == '\\') NamesFound++;

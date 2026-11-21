@@ -149,6 +149,7 @@ list(APPEND SOURCE
     IoctlAllowlist.c
     ScsiPassThrough.c
     NtQueryInformationFile.c
+    NtQueryInformationFileNormalizedName.c
     NtQueryInformationProcess.c
     NtQueryInformationThread.c
     NtQueryInformationToken.c

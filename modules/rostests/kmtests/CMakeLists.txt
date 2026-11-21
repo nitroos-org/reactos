@@ -189,6 +189,7 @@ list(APPEND KMTEST_DRV_SOURCE
     rtl/RtlIsValidOemCharacter.c
     rtl/RtlRangeList.c
     rtl/RtlUnicodePrefix.c
+    rtl/RtlUnicodePrefixEmptyName.c
     ${COMMON_SOURCE}
 
     kmtest_drv/kmtest_drv.rc)
