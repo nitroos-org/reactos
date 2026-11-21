@@ -143,6 +143,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeSystemCall32.c
     ntos_ke/KeTimer.c
     ntos_mm/MmMapViewAligned.c
+    ntos_mm/MmMapIoSpace.c
     ntos_mm/MmMdl.c
     ntos_mm/MmCommitKernelFail.c
     ntos_mm/MmContiguousAlign.c
