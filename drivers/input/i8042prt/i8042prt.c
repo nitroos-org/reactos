@@ -336,6 +336,18 @@ i8042StartPacket(
 	KIRQL Irql;
 	NTSTATUS Status;
 
+	/* The device was not started (no resources, or the interrupt could not be
+	 * connected): there is no interrupt object to synchronize with */
+	if (!DeviceExtension->HighestDIRQLInterrupt)
+	{
+		WARN_(I8042PRT, "No interrupt connected, failing the packet\n");
+		Irp->IoStatus.Status = STATUS_DEVICE_NOT_READY;
+		Irp->IoStatus.Information = 0;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		IoStartNextPacket(FdoDeviceExtension->Fdo, FALSE);
+		return STATUS_DEVICE_NOT_READY;
+	}
+
 	Irql = KeAcquireInterruptSpinLock(DeviceExtension->HighestDIRQLInterrupt);
 
 	if (DeviceExtension->Packet.State != Idle)
