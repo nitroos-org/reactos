@@ -155,9 +155,12 @@ SepInitDACLs(VOID)
                  AclLength,
                  ACL_REVISION);
 
+    /* Everyone gets read, write and execute but not DELETE, WRITE_DAC, WRITE_OWNER or FILE_DELETE_CHILD:
+       (A;;0x1201bf;;;WD) on \Device\NamedPipe, \Device\Null, \Device\Afd, \Device\Mailslot and \Device\KsecDD
+       of Windows Server 2022 */
     RtlAddAccessAllowedAce(SePublicOpenUnrestrictedDacl,
                            ACL_REVISION,
-                           GENERIC_ALL,
+                           GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE,
                            SeWorldSid);
 
     RtlAddAccessAllowedAce(SePublicOpenUnrestrictedDacl,
