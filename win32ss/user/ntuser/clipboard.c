@@ -1903,6 +1903,15 @@ NtUserCreateLocalMemHandle(
     if (!NT_SUCCESS(Status))
         goto cleanup;
 
+    /* MSDN (JOBOBJECT_BASIC_UI_RESTRICTIONS): JOB_OBJECT_UILIMIT_READCLIPBOARD prevents
+       reading data from the clipboard. This copies the data of a clipboard handle out; the
+       handles are global values, so the check of NtUserGetClipboardData alone is not enough. */
+    if (UserJobDenies(JOB_OBJECT_UILIMIT_READCLIPBOARD))
+    {
+        Status = STATUS_ACCESS_DENIED;
+        goto cleanup;
+    }
+
     /* Get Clipboard data object */
     pMemObj = (PCLIPBOARDDATA)UserGetObject(gHandleTable, hMem, TYPE_CLIPDATA);
     if (!pMemObj)
