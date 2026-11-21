@@ -272,6 +272,17 @@ IopCreateArcNamesCd(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                                               FILE_READ_ATTRIBUTES,
                                               &FileObject,
                                               &DeviceObject);
+            /* A Cd that went away since its interface arrived cannot be the boot device: try the next one.
+             * It is not a failure of the initialization (IopMarkBootPartition waits for the boot device and
+             * stops with INACCESSIBLE_BOOT_DEVICE if it does not appear) */
+            if (Status == STATUS_OBJECT_NAME_NOT_FOUND ||
+                Status == STATUS_OBJECT_PATH_NOT_FOUND ||
+                Status == STATUS_NO_SUCH_DEVICE)
+            {
+                Status = STATUS_SUCCESS;
+                continue;
+            }
+
             /* Failure? Good bye! */
             if (!NT_SUCCESS(Status))
             {
@@ -307,8 +318,10 @@ IopCreateArcNamesCd(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
             }
             if (!NT_SUCCESS(Status))
             {
+                /* A Cd that cannot say which one it is cannot be matched: try the next one */
                 ObDereferenceObject(FileObject);
-                goto Cleanup;
+                Status = STATUS_SUCCESS;
+                continue;
             }
 
             /* Finally, build proper device name */
