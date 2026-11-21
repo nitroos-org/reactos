@@ -107,6 +107,8 @@ KMT_TESTFUNC Test_KeTimer;
 KMT_TESTFUNC Test_KeClockTime;
 KMT_TESTFUNC Test_KeDelayExecution;
 KMT_TESTFUNC Test_KernelType;
+KMT_TESTFUNC Test_MmDbgCopyHigh;
+KMT_TESTFUNC Test_MmMapIoSpace;
 KMT_TESTFUNC Test_MmMdl;
 KMT_TESTFUNC Test_MmCommitKernelFail;
 KMT_TESTFUNC Test_MmContiguousAlign;
@@ -284,6 +286,8 @@ const KMT_TEST TestList[] =
     { "KeClockTime",                        Test_KeClockTime },
     { "KeDelayExecution",                   Test_KeDelayExecution },
     { "-KernelType",                        Test_KernelType },
+    { "MmDbgCopyHigh",                      Test_MmDbgCopyHigh },
+    { "MmMapIoSpace",                       Test_MmMapIoSpace },
     { "MmMdl",                              Test_MmMdl },
     { "-MmCommitKernelFail",                Test_MmCommitKernelFail },
     { "MmContiguousAlign",                  Test_MmContiguousAlign },

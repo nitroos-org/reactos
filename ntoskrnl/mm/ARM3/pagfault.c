@@ -2453,10 +2453,12 @@ MmArmAccessFault(IN ULONG FaultCode,
         /* Check if this was a write */
         if (MI_IS_WRITE_ACCESS(FaultCode))
         {
-            /* Was it to a read-only page? */
-            Pfn1 = MI_PFN_ELEMENT(PointerPte->u.Hard.PageFrameNumber);
+            /* Was it to a read-only page? (device memory has no PFN entry) */
+            Pfn1 = NULL;
+            if (!(PointerPte->u.Long & PTE_READWRITE))
+                Pfn1 = MiGetPfnEntry(PFN_FROM_PTE(PointerPte));
             if (!(PointerPte->u.Long & PTE_READWRITE) &&
-                !(Pfn1->OriginalPte.u.Soft.Protection & MM_READWRITE))
+                (!Pfn1 || !(Pfn1->OriginalPte.u.Soft.Protection & MM_READWRITE)))
             {
                 /* Crash with distinguished bugcheck code */
                 KeBugCheckEx(ATTEMPTED_WRITE_TO_READONLY_MEMORY,
@@ -2534,10 +2536,12 @@ MmArmAccessFault(IN ULONG FaultCode,
                     /* Check if this was a write */
                     if (MI_IS_WRITE_ACCESS(FaultCode))
                     {
-                        /* Was it to a read-only page? */
-                        Pfn1 = MI_PFN_ELEMENT(PointerPte->u.Hard.PageFrameNumber);
+                        /* Was it to a read-only page? (device memory has no PFN entry) */
+                        Pfn1 = NULL;
+                        if (!(PointerPte->u.Long & PTE_READWRITE))
+                            Pfn1 = MiGetPfnEntry(PFN_FROM_PTE(PointerPte));
                         if (!(PointerPte->u.Long & PTE_READWRITE) &&
-                            !(Pfn1->OriginalPte.u.Soft.Protection & MM_READWRITE))
+                            (!Pfn1 || !(Pfn1->OriginalPte.u.Soft.Protection & MM_READWRITE)))
                         {
                             /* Crash with distinguished bugcheck code */
                             KeBugCheckEx(ATTEMPTED_WRITE_TO_READONLY_MEMORY,
@@ -2645,10 +2649,12 @@ _WARN("Session space stuff is not implemented yet!")
             /* Check if this was a write */
             if (MI_IS_WRITE_ACCESS(FaultCode))
             {
-                /* Was it to a read-only page that is not copy on write? */
-                Pfn1 = MI_PFN_ELEMENT(PointerPte->u.Hard.PageFrameNumber);
+                /* Was it to a read-only page that is not copy on write? (device memory has no PFN entry) */
+                Pfn1 = NULL;
+                if (!(TempPte.u.Long & PTE_READWRITE))
+                    Pfn1 = MiGetPfnEntry(PFN_FROM_PTE(&TempPte));
                 if (!(TempPte.u.Long & PTE_READWRITE) &&
-                    !(Pfn1->OriginalPte.u.Soft.Protection & MM_READWRITE) &&
+                    (!Pfn1 || !(Pfn1->OriginalPte.u.Soft.Protection & MM_READWRITE)) &&
                     !MI_IS_PAGE_COPY_ON_WRITE(&TempPte))
                 {
                     /* Case not yet handled */

@@ -213,7 +213,7 @@ MmDbgCopyMemory(IN ULONG64 Address,
             Flags |= MMDBG_COPY_PHYSICAL;
 
             /* Calculate the physical address */
-            PhysicalAddress = PointerPte->u.Hard.PageFrameNumber << PAGE_SHIFT;
+            PhysicalAddress = (ULONG64)PFN_FROM_PTE(PointerPte) << PAGE_SHIFT;
             PhysicalAddress += BYTE_OFFSET(Address);
 
             /* Translate the physical address */

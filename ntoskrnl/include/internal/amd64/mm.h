@@ -97,11 +97,61 @@
 #define MM_EMPTY_LIST  ((ULONG_PTR)-1)
 
 
-/* Easy accessing PFN in PTE */
-#define PFN_FROM_PTE(v) ((v)->u.Hard.PageFrameNumber)
-#define PFN_FROM_PDE(v) ((v)->u.Hard.PageFrameNumber)
-#define PFN_FROM_PPE(v) ((v)->u.Hard.PageFrameNumber)
-#define PFN_FROM_PXE(v) ((v)->u.Hard.PageFrameNumber)
+/*
+ * Easy accessing PFN in PTE. The field is 40 bits wide (bits 12-51); GCC does
+ * arithmetic on a bit-field wider than int in the field's own width, so
+ * "Pte->u.Hard.PageFrameNumber << PAGE_SHIFT" would drop the top 12 bits of a
+ * high address: these return a full PFN_NUMBER.
+ */
+#define PFN_FROM_PTE(v) ((PFN_NUMBER)(v)->u.Hard.PageFrameNumber)
+#define PFN_FROM_PDE(v) ((PFN_NUMBER)(v)->u.Hard.PageFrameNumber)
+#define PFN_FROM_PPE(v) ((PFN_NUMBER)(v)->u.Hard.PageFrameNumber)
+#define PFN_FROM_PXE(v) ((PFN_NUMBER)(v)->u.Hard.PageFrameNumber)
+
+/* The page frame number bits of a present PTE (and of a transition PTE) */
+#define MI_PTE_PFN_BITS 40
+#define MI_PTE_PFN_MASK 0x000FFFFFFFFFF000ULL
+#define MI_PTE_MAX_PFN  ((1ULL << MI_PTE_PFN_BITS) - 1)
+
+/*
+ * Checks the PTE layouts against the processor manuals' bit positions (see
+ * sdk/include/ndk/amd64/mmtypes.h). Every operand is a constant, so this folds
+ * to TRUE at compile time when the layout is right.
+ */
+FORCEINLINE
+BOOLEAN
+MiIsPteLayoutValid(VOID)
+{
+    MMPTE Pte;
+    union
+    {
+        ULONG64 Long;
+        MMPTE_HARDWARE_LARGEPAGE Large;
+    } Pde;
+
+    Pte.u.Long = 0;
+    Pte.u.Hard.PageFrameNumber = MI_PTE_MAX_PFN;
+    if (Pte.u.Long != MI_PTE_PFN_MASK) return FALSE;
+    Pte.u.Long = 0;
+    Pte.u.Trans.PageFrameNumber = MI_PTE_MAX_PFN;
+    if (Pte.u.Long != MI_PTE_PFN_MASK) return FALSE;
+    Pte.u.Long = 0;
+    Pte.u.Hard.NoExecute = 1;
+    if (Pte.u.Long != 0x8000000000000000ULL) return FALSE;
+    Pte.u.Long = 0;
+    Pte.u.Hard.SoftwareWsIndex = 0x7FF;
+    if (Pte.u.Long != 0x7FF0000000000000ULL) return FALSE;
+    Pte.u.Long = 0;
+    Pte.u.Flush.PageFrameNumber = MI_PTE_MAX_PFN;
+    if (Pte.u.Long != MI_PTE_PFN_MASK) return FALSE;
+    Pde.Long = 0;
+    Pde.Large.PageFrameNumber = (1ULL << 31) - 1;
+    if (Pde.Long != 0x000FFFFFFFE00000ULL) return FALSE;
+    Pde.Long = 0;
+    Pde.Large.NoExecute = 1;
+    if (Pde.Long != 0x8000000000000000ULL) return FALSE;
+    return TRUE;
+}
 
 /* Macros for portable PTE modification */
 #define MI_MAKE_DIRTY_PAGE(x)      ((x)->u.Hard.Dirty = 1)
@@ -370,7 +420,8 @@ MI_IS_MAPPED_PTE(PMMPTE PointerPte)
     return ((PointerPte->u.Hard.Valid != 0) ||
             (PointerPte->u.Proto.Prototype != 0) ||
             (PointerPte->u.Trans.Transition != 0) ||
-            (PointerPte->u.Hard.PageFrameNumber != 0));
+            (PointerPte->u.Hard.PageFrameNumber != 0) ||
+            (PointerPte->u.Soft.PageFileHigh != 0));
 }
 
 FORCEINLINE
