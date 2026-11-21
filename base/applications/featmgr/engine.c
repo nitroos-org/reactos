@@ -917,6 +917,13 @@ int FmEnumFeatures(FM_FEATURE **outArr)
         e.usable = FmScoopUsable() ? 1 : 0;
         FmScoopIndexEnum(swDir, IdxEnumCb, &e);
     }
+    {
+        /* the operating system components that setup recorded (none on a system installed without a choice) */
+        FM_FEATURE comps[32];
+        int nc = FmOsCompList(comps, ARRAYSIZE(comps)), k;
+        for (k = 0; k < nc; k++)
+            if (!AppendFeature(&comps[k], &arr, &count, &cap)) break;
+    }
 
     *outArr = arr;
     return count;
@@ -951,7 +958,7 @@ static BOOL FindByName(LPCWSTR id, FM_FEATURE *out)
         FinishEntry(out, -1);
         return TRUE;
     }
-    return FALSE;
+    return FmOsCompFind(id, out);      /* an operating system component of the setup record */
 }
 
 /* Setup recorded the components it left out (answer file [Components]) under HKLM\SOFTWARE\ReactOS\Nitro\Components\<id>:
@@ -3365,13 +3372,53 @@ static HRESULT ResolveSupersededFeatures(const FM_FEATURE *f, FILE *log)
     return S_OK;
 }
 
+/* After an operating system component is added, the features that are its installed form (FeaturesOwn in the setup record:
+ * powershell7 -> powershell-7, whose installer package the component just copied into the Featmgr payload folder) are
+ * turned on too. A failure is logged and does not undo the component. */
+static void EnableOwnFeatures(LPCWSTR comp, FILE *log)
+{
+    WCHAR key[160], list[256], *p;
+    HKEY hk;
+    DWORD cb = sizeof(list) - sizeof(WCHAR), type;
+
+    StringCchPrintfW(key, ARRAYSIZE(key), L"SOFTWARE\\ReactOS\\Nitro\\Components\\%s", comp);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, key, 0, KEY_QUERY_VALUE, &hk) != ERROR_SUCCESS) return;
+    if (RegQueryValueExW(hk, L"FeaturesOwn", NULL, &type, (LPBYTE)list, &cb) != ERROR_SUCCESS || type != REG_SZ) { RegCloseKey(hk); return; }
+    RegCloseKey(hk);
+    list[cb / sizeof(WCHAR)] = L'\0';
+    for (p = list; *p; )
+    {
+        WCHAR *e = wcschr(p, L','), one[FM_MAX_ID];
+        size_t n = e ? (size_t)(e - p) : wcslen(p);
+        if (n && n < ARRAYSIZE(one))
+        {
+            HRESULT hr;
+            CopyMemory(one, p, n * sizeof(WCHAR));
+            one[n] = L'\0';
+            hr = FmEnableInner(one, log);
+            if (FAILED(hr)) LOGF(log, L"note: the feature '%s' of the component could not be turned on (0x%08lx); run: featmgr /enable %s\n", one, hr, one);
+        }
+        p += n;
+        if (*p == L',') p++;
+    }
+}
+
 HRESULT FmEnable(LPCWSTR id, FILE *log)
 {
     HRESULT result;
 
     if (g_OpDepth++ == 0) { g_LastMsg[0] = L'\0'; g_Tail[0] = L'\0'; }
     result = FmRequireAdministrator(log);
-    if (SUCCEEDED(result)) result = FmEnableInner(id, log);
+    if (SUCCEEDED(result))
+    {
+        if (FmOsCompIsComponent(id))
+        {
+            result = FmOsCompEnable(id, log);
+            if (SUCCEEDED(result)) EnableOwnFeatures(id, log);
+        }
+        else
+            result = FmEnableInner(id, log);
+    }
     g_OpDepth--;
     return result;
 }

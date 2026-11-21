@@ -4,10 +4,10 @@ project(featmgr)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 # --- CLI frontend (automation): featmgr /list /query /enable /disable ---
-add_executable(featmgr cli.c engine.c components.c shelldefaults.c rapps_import.c native.c natgen.c zipinst.c rappsdb.c scoop.c scoopdefaults.c featmgr.rc)
+add_executable(featmgr cli.c engine.c components.c oscomp.c shelldefaults.c rapps_import.c native.c natgen.c zipinst.c rappsdb.c scoop.c scoopdefaults.c featmgr.rc)
 set_module_type(featmgr win32cui UNICODE)
 target_link_libraries(featmgr uuid minizip zlib)
-add_importlibs(featmgr advapi32 shlwapi shell32 ole32 user32 wininet crypt32 msvcrt kernel32 ntdll)
+add_importlibs(featmgr advapi32 shlwapi shell32 ole32 user32 wininet crypt32 setupapi msvcrt kernel32 ntdll)
 add_cd_file(TARGET featmgr DESTINATION reactos/system32 FOR all)
 
 # --- refreshenv: re-read PATH into the cmd / PowerShell window that is open (a child like featmgr cannot) ---
@@ -15,10 +15,10 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/refreshenv.cmd DESTINATION reactos/
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/refreshenv.ps1 DESTINATION reactos/system32 FOR all)
 
 # --- GUI applet: "Optional Features" (Turn features on/off) ---
-add_executable(optfeatures gui.c featwin.c progwin.c firstboot.c engine.c components.c shelldefaults.c rapps_import.c native.c rappsdb.c scoop.c scoopdefaults.c optfeatures.rc)
+add_executable(optfeatures gui.c featwin.c progwin.c firstboot.c engine.c components.c oscomp.c shelldefaults.c rapps_import.c native.c rappsdb.c scoop.c scoopdefaults.c optfeatures.rc)
 set_module_type(optfeatures win32gui UNICODE)
 target_link_libraries(optfeatures uuid)
-add_importlibs(optfeatures advapi32 shlwapi shell32 ole32 comctl32 user32 gdi32 wininet crypt32 msvcrt kernel32 ntdll)
+add_importlibs(optfeatures advapi32 shlwapi shell32 ole32 comctl32 user32 gdi32 wininet crypt32 setupapi msvcrt kernel32 ntdll)
 add_cd_file(TARGET optfeatures DESTINATION reactos/system32 FOR all)
 
 # --- optionalfeatures.exe: the Windows name; launches optfeatures.exe (no Control Panel icon, appwiz.cpl hosts it) ---
