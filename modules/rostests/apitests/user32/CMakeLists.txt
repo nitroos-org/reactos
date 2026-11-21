@@ -129,6 +129,7 @@ list(APPEND SOURCE
     SetProp.c
     SetScrollInfo.c
     SetScrollRange.c
+    SetSysColorsWinsta.c
     SetWindowPlacement.c
     SetWindowPosOwned.c
     SetWindowRgn.c
