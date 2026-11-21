@@ -118,6 +118,7 @@ list(APPEND SOURCE
     NtExtendSection.c
     NtFilterToken.c
     MupDeviceDescriptor.c
+    DeviceOpenDescriptor.c
     NtFreeVirtualMemory.c
     NtGetCurrentProcessorNumberEx.c
     NtGetNextThread.c
