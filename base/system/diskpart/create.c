@@ -55,6 +55,34 @@ ScanNoErr(
 
 /* An option that is not implemented: nothing is done, the error level says so (see RefuseUnsupportedOption) */
 
+/*
+ * size=<N> (MB): decimal digits only, more than 0, no overflow, given once. Anything else is "The arguments specified for this
+ * command are not valid" on the Windows DiskPart (measured: size=abc, size=0, size=-5, size=16 size=32 all fail and nothing is
+ * written); it was read as "all of the free space" here.
+ */
+static
+BOOLEAN
+ParseSizeMegabytes(
+    _In_ PWSTR pszSize,
+    _Out_ PULONGLONG pullSize,
+    _Inout_ PBOOLEAN pbGiven)
+{
+    PWSTR pszEnd;
+    ULONGLONG ullValue;
+
+    if (*pbGiven || !iswdigit(*pszSize))
+        return FALSE;
+
+    errno = 0;
+    ullValue = _wcstoui64(pszSize, &pszEnd, 10);
+    if (*pszEnd != UNICODE_NULL || errno == ERANGE || ullValue == 0)
+        return FALSE;
+
+    *pbGiven = TRUE;
+    *pullSize = ullValue;
+    return TRUE;
+}
+
 /* offset=<N> is in KB: a whole number of sectors, strictly decimal, that does not overflow */
 static
 BOOLEAN
@@ -339,6 +367,7 @@ CreateEfiPartition(
 {
     PPARTENTRY PartEntry;
     ULONGLONG ullSize = 0ULL;
+    BOOLEAN bSizeGiven = FALSE;
     ULONGLONG ullSectorCount;
     ULONGLONG ullOffset = 0ULL;
     BOOLEAN bOffset = FALSE;
@@ -381,8 +410,7 @@ CreateEfiPartition(
             /* size=<N> (MB) */
             DPRINT("Size : %s\n", pszSuffix);
 
-            ullSize = _wcstoui64(pszSuffix, NULL, 10);
-            if ((ullSize == 0) && (errno == ERANGE))
+            if (!ParseSizeMegabytes(pszSuffix, &ullSize, &bSizeGiven))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
                 return CREATE_FAILED();
@@ -470,6 +498,7 @@ CreateExtendedPartition(
 {
     PPARTENTRY PartEntry, NewPartEntry;
     ULONGLONG ullSize = 0ULL;
+    BOOLEAN bSizeGiven = FALSE;
     ULONGLONG ullSectorCount;
 #if 0
     ULONGLONG ullOffset = 0ULL;
@@ -500,8 +529,7 @@ CreateExtendedPartition(
             /* size=<N> (MB) */
             DPRINT("Size : %s\n", pszSuffix);
 
-            ullSize = _wcstoui64(pszSuffix, NULL, 10);
-            if ((ullSize == 0) && (errno == ERANGE))
+            if (!ParseSizeMegabytes(pszSuffix, &ullSize, &bSizeGiven))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
                 return CREATE_FAILED();
@@ -631,6 +659,7 @@ CreateLogicalPartition(
 {
     PPARTENTRY PartEntry, NewPartEntry;
     ULONGLONG ullSize = 0ULL;
+    BOOLEAN bSizeGiven = FALSE;
     ULONGLONG ullSectorCount;
     ULONGLONG ullOffset = 0ULL;
     BOOLEAN bOffset = FALSE;
@@ -666,8 +695,7 @@ CreateLogicalPartition(
             /* size=<N> (MB) */
             DPRINT("Size : %s\n", pszSuffix);
 
-            ullSize = _wcstoui64(pszSuffix, NULL, 10);
-            if ((ullSize == 0) && (errno == ERANGE))
+            if (!ParseSizeMegabytes(pszSuffix, &ullSize, &bSizeGiven))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
                 return CREATE_FAILED();
@@ -819,6 +847,7 @@ CreateMsrPartition(
 {
     PPARTENTRY PartEntry;
     ULONGLONG ullSize = 0ULL;
+    BOOLEAN bSizeGiven = FALSE;
     ULONGLONG ullSectorSize;
     ULONGLONG ullOffset = 0ULL;
     BOOLEAN bOffset = FALSE;
@@ -861,8 +890,7 @@ CreateMsrPartition(
             /* size=<N> (MB) */
             DPRINT("Size : %s\n", pszSuffix);
 
-            ullSize = _wcstoui64(pszSuffix, NULL, 10);
-            if ((ullSize == 0) && (errno == ERANGE))
+            if (!ParseSizeMegabytes(pszSuffix, &ullSize, &bSizeGiven))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
                 return CREATE_FAILED();
@@ -1166,6 +1194,7 @@ CreatePrimaryPartition(
     _In_ PWSTR *argv)
 {
     ULONGLONG ullSize = 0ULL;
+    BOOLEAN bSizeGiven = FALSE;
     ULONGLONG ullOffset = 0ULL;
     BOOLEAN bOffset = FALSE;
 #if 0
@@ -1190,8 +1219,7 @@ CreatePrimaryPartition(
             /* size=<N> (MB) */
             DPRINT("Size : %s\n", pszSuffix);
 
-            ullSize = _wcstoui64(pszSuffix, NULL, 10);
-            if ((ullSize == 0) && (errno == ERANGE))
+            if (!ParseSizeMegabytes(pszSuffix, &ullSize, &bSizeGiven))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
                 return CREATE_FAILED();

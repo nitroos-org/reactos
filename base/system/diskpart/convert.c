@@ -103,13 +103,13 @@ ConvertGPT(
     if (CurrentDisk->PartitionStyle == PARTITION_STYLE_GPT)
     {
         ConResPuts(StdOut, IDS_CONVERT_GPT_ALREADY);
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
     }
 
     if (GetPrimaryPartitionCount(CurrentDisk) != 0)
     {
         ConResPuts(StdOut, IDS_CONVERT_GPT_NOT_EMPTY);
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
     }
 
 #if 0
@@ -180,7 +180,7 @@ ConvertMBR(
     if (GetPrimaryPartitionCount(CurrentDisk) != 0)
     {
         ConResPuts(StdOut, IDS_CONVERT_MBR_NOT_EMPTY);
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
     }
 
     DiskInfo.PartitionStyle = PARTITION_STYLE_MBR;
