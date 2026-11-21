@@ -2694,6 +2694,15 @@ BOOLEAN
 CheckPartitionLayoutForChange(
     _In_ PDISKENTRY DiskEntry)
 {
+    PCWSTR Reason;
+
+    /* What is on the disk first: a table that cannot be relied on is not changed, not repaired */
+    if (!IsPartitionTableUsable(DiskEntry, &Reason))
+    {
+        ConResPrintf(StdOut, IDS_PARTITION_TABLE_UNSAFE, Reason);
+        return FALSE;
+    }
+
     if (!IsPartitionLayoutConsistent(DiskEntry))
     {
         ConResPuts(StdOut, IDS_PARTITION_LAYOUT_INVALID);
@@ -2749,6 +2758,17 @@ WriteMbrPartitions(
     /* If the disk is not dirty, there is nothing to do */
     if (!DiskEntry->Dirty)
         return STATUS_SUCCESS;
+
+    /* Never write over a table that cannot be relied on (backstop of the checks of the commands) */
+    {
+        PCWSTR TableReason;
+
+        if (!IsPartitionTableUsable(DiskEntry, &TableReason))
+        {
+            DPRINT1("The partition table on the disk cannot be relied on, nothing is written\n");
+            return STATUS_DISK_CORRUPT_ERROR;
+        }
+    }
 
     /* Never write a table with overlapping partitions or partitions outside the usable area */
     if (!IsPartitionLayoutConsistent(DiskEntry))
@@ -2876,6 +2896,17 @@ WriteGptPartitions(
     /* If the disk is not dirty, there is nothing to do */
     if (!DiskEntry->Dirty)
         return STATUS_SUCCESS;
+
+    /* Never write over a table that cannot be relied on (backstop of the checks of the commands) */
+    {
+        PCWSTR TableReason;
+
+        if (!IsPartitionTableUsable(DiskEntry, &TableReason))
+        {
+            DPRINT1("The partition table on the disk cannot be relied on, nothing is written\n");
+            return STATUS_DISK_CORRUPT_ERROR;
+        }
+    }
 
     /* Never write a table with overlapping partitions or partitions outside the usable area */
     if (!IsPartitionLayoutConsistent(DiskEntry))

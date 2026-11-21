@@ -331,6 +331,9 @@ DeletePartition(
         return EXIT_SUCCESS;
     }
 
+    if (!CheckPartitionLayoutForChange(CurrentDisk))
+        return EXIT_SUCCESS;
+
     if (CurrentDisk->PartitionStyle == PARTITION_STYLE_MBR)
     {
         DeleteMbrPartition(bOverride);

@@ -78,6 +78,9 @@ UniqueIdDisk(
         }
     }
 
+    if (!CheckPartitionLayoutForChange(CurrentDisk))
+        return EXIT_SUCCESS;
+
     if (CurrentDisk->PartitionStyle == PARTITION_STYLE_GPT)
     {
         if (!StringToGUID(&CurrentDisk->LayoutBuffer->Gpt.DiskId, pszId))

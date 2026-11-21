@@ -61,6 +61,9 @@ gpt_main(
         }
     }
 
+    if (!CheckPartitionLayoutForChange(CurrentDisk))
+        return EXIT_SUCCESS;
+
     DPRINT("Attributes: 0x%I64x\n", ullAttributes);
     CurrentPartition->Gpt.Attributes = ullAttributes;
     CurrentDisk->Dirty = TRUE;

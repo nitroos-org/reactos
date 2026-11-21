@@ -287,26 +287,6 @@ CreateExtendedPartition(
         ConResPuts(StdOut, IDS_CREATE_PARTITION_INVALID_STYLE);
         return EXIT_SUCCESS;
     }
-    else if (CurrentDisk->PartitionStyle == PARTITION_STYLE_RAW)
-    {
-        CREATE_DISK DiskInfo;
-        NTSTATUS Status;
-
-        DiskInfo.PartitionStyle = PARTITION_STYLE_MBR;
-        CreateSignature(&DiskInfo.Mbr.Signature);
-
-        Status = CreateDisk(CurrentDisk->DiskNumber, &DiskInfo);
-        if (!NT_SUCCESS(Status))
-        {
-            DPRINT1("CreateDisk() failed!\n");
-            return EXIT_SUCCESS;
-        }
-
-        CurrentDisk->StartSector.QuadPart = (ULONGLONG)CurrentDisk->SectorAlignment;
-        CurrentDisk->EndSector.QuadPart = min(CurrentDisk->SectorCount.QuadPart, 0x100000000) - 1;
-
-        ScanForUnpartitionedMbrDiskSpace(CurrentDisk);
-    }
 
     for (i = 3; i < argc; i++)
     {
@@ -1091,29 +1071,6 @@ CreatePrimaryPartition(
         return EXIT_SUCCESS;
     }
 
-    if (CurrentDisk->PartitionStyle == PARTITION_STYLE_RAW)
-    {
-        CREATE_DISK DiskInfo;
-        NTSTATUS Status;
-
-        DiskInfo.PartitionStyle = PARTITION_STYLE_MBR;
-        CreateSignature(&DiskInfo.Mbr.Signature);
-
-        Status = CreateDisk(CurrentDisk->DiskNumber, &DiskInfo);
-        if (!NT_SUCCESS(Status))
-        {
-            DPRINT1("CreateDisk() failed!\n");
-            CurrentPartition = NULL;
-            CurrentVolume = NULL;
-            return EXIT_SUCCESS;
-        }
-
-        CurrentDisk->StartSector.QuadPart = (ULONGLONG)CurrentDisk->SectorAlignment;
-        CurrentDisk->EndSector.QuadPart = min(CurrentDisk->SectorCount.QuadPart, 0x100000000) - 1;
-
-        ScanForUnpartitionedMbrDiskSpace(CurrentDisk);
-    }
-
     for (i = 3; i < argc; i++)
     {
         if (_wcsicmp(argv[i], L"noerr") == 0)
@@ -1194,6 +1151,11 @@ CreatePrimaryPartition(
     else if (CurrentDisk->PartitionStyle == PARTITION_STYLE_GPT)
     {
         CreatePrimaryGptPartition(ullSize, pszPartitionType);
+    }
+    else
+    {
+        /* RAW: no partition table was found on the disk. It is not initialized here: CONVERT does that */
+        CheckPartitionLayoutForChange(CurrentDisk);
     }
 
     return EXIT_SUCCESS;

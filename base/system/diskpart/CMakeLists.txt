@@ -44,6 +44,7 @@ list(APPEND SOURCE
     select.c
     setid.c
     shrink.c
+    tablecheck.c
     uniqueid.c
     diskpart.h)
 

@@ -736,6 +736,11 @@ IsPartitionLayoutConsistent(
     _In_ PDISKENTRY DiskEntry);
 
 BOOLEAN
+IsPartitionTableUsable(
+    _In_ PDISKENTRY DiskEntry,
+    _Out_ PCWSTR *Reason);
+
+BOOLEAN
 CheckPartitionLayoutForChange(
     _In_ PDISKENTRY DiskEntry);
 

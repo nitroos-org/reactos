@@ -240,6 +240,9 @@ shrink_main(
         goto done;
     }
 
+    if (!CheckPartitionLayoutForChange(PartEntry->DiskEntry))
+        goto done;
+
     /* The new partition's sectors: FSCTL_SHRINK_VOLUME counts the boot sector copy in the last one. */
     Status = ShrinkRequest(hVolume, ShrinkPrepare, (LONGLONG)((ullLength - ullShrink * SIZE_1MB) / ulBytesPerSector));
     if (NT_SUCCESS(Status))
