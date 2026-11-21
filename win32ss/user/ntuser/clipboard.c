@@ -468,6 +468,13 @@ IntClipDibValidate(PCLIPBOARDDATA pMemObj, BOOL bV5Source, BOOL bForBitmap)
             default:
                 return FALSE;
         }
+
+        /* GDI makes a device bitmap of up to 32 bits per pixel from it, however few bytes the block
+           holds (run length and the compressed layouts decode into it), and sizes its rows in 32 bits:
+           a width of 2^27 pixels or more wraps that size and the decoder then writes past the bitmap.
+           The size of the image must be one GDI can create (1 GiB at 32 bits per pixel at most). */
+        if (lWidth > 0x1000000 || (ULONGLONG)lWidth * (ULONGLONG)(lHeight < 0 ? -(LONGLONG)lHeight : (LONGLONG)lHeight) > 0x10000000)
+            return FALSE;
     }
 
     /* the colour table, the masks and the bits of an uncompressed image must be in the block */
