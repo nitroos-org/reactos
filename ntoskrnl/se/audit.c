@@ -812,9 +812,6 @@ SepAccessCheckAndAuditAlarm(
                       ResultListLength * sizeof(*GrantedAccessList),
                       sizeof(*GrantedAccessList));
 
-        /* The flag is written back too: it must be user memory */
-        ProbeForWriteBoolean(GenerateOnClose);
-
         /* Probe generic mapping and make a local copy */
         ProbeForRead(GenericMapping, sizeof(*GenericMapping), sizeof(ULONG));
         LocalGenericMapping = *GenericMapping;
@@ -880,6 +877,22 @@ SepAccessCheckAndAuditAlarm(
         Status = STATUS_PRIVILEGE_NOT_HELD;
         goto Cleanup;
     }
+
+    /*
+     * The flag is written back too: it must be user memory. Probed after
+     * the privilege check: without the privilege Windows Server 2022 reports
+     * STATUS_PRIVILEGE_NOT_HELD also for a bad GenerateOnClose (measured).
+     */
+    _SEH2_TRY
+    {
+        ProbeForWriteBoolean(GenerateOnClose);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+        _SEH2_YIELD(goto Cleanup);
+    }
+    _SEH2_END;
 
     /* Generic access must already be mapped to non-generic access types! */
     if (DesiredAccess & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL))
