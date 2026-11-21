@@ -260,6 +260,9 @@ BOOL BIDI_DetermineLevels(const WCHAR *string, unsigned int count, const SCRIPT_
         const SCRIPT_CONTROL *c, WORD *levels, WORD *overrides);
 BOOL BIDI_GetStrengths(const WCHAR *string, unsigned int count,
         const SCRIPT_CONTROL *c, WORD *strength);
+#ifdef __REACTOS__
+BOOL BIDI_LevelsAllBase(const WCHAR *string, unsigned int count);
+#endif
 INT BIDI_ReorderV2lLevel(int level, int *pIndices, const BYTE* plevel, int cch, BOOL fReverse);
 INT BIDI_ReorderL2vLevel(int level, int *pIndices, const BYTE* plevel, int cch, BOOL fReverse);
 HRESULT SHAPE_ContextualShaping(HDC hdc, ScriptCache *psc, SCRIPT_ANALYSIS *psa, WCHAR* pwcChars,

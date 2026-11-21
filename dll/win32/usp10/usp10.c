@@ -996,6 +996,29 @@ static enum usp10_script get_char_script(const WCHAR *str, unsigned int index,
     return range->script;
 }
 
+#ifdef __REACTOS__
+/* The script of U+0000-U+00FF, computed once per process by get_char_script itself: for these characters its result
+   depends on the character alone (no surrogate pair, GetStringTypeW does not depend on the locale), so the table gives
+   exactly what the call gives. Filled in a local copy and published with an interlocked store; a thread that finds it
+   not published yet computes it as well (same values). */
+static enum usp10_script latin1_scripts[0x100];
+static LONG latin1_scripts_ready;
+
+static void init_latin1_scripts(void)
+{
+    enum usp10_script table[0x100];
+    unsigned int consumed;
+    WCHAR ch;
+
+    if (InterlockedCompareExchange(&latin1_scripts_ready, 0, 0))
+        return;
+    for (ch = 0; ch < 0x100; ch++)
+        table[ch] = get_char_script(&ch, 0, 1, &consumed);
+    memcpy(latin1_scripts, table, sizeof(table));
+    InterlockedExchange(&latin1_scripts_ready, 1);
+}
+#endif
+
 static int __cdecl compare_FindGlyph(const void *a, const void* b)
 {
     const FindGlyph_struct *find = (FindGlyph_struct*)a;
@@ -1350,8 +1373,16 @@ static HRESULT _ItemizeInternal(const WCHAR *pwcInChars, int cInChars,
     if (!(scripts = calloc(cInChars, sizeof(*scripts))))
         return E_OUTOFMEMORY;
 
+#ifdef __REACTOS__
+    init_latin1_scripts();
+#endif
     for (i = 0; i < cInChars; i++)
     {
+#ifdef __REACTOS__
+        if (!consumed && pwcInChars[i] < 0x100)
+            scripts[i] = latin1_scripts[pwcInChars[i]];
+        else
+#endif
         if (!consumed)
         {
             scripts[i] = get_char_script(pwcInChars,i,cInChars,&consumed);
@@ -1436,6 +1467,19 @@ static HRESULT _ItemizeInternal(const WCHAR *pwcInChars, int cInChars,
         }
     }
 
+#ifdef __REACTOS__
+    /* A left-to-right paragraph (base level 0, no override) whose characters can only resolve to level 0 and has no
+       bidi control (forceLevels): the pass below would give every character level 0 and then drop the levels again
+       (see the check after it), so the result is known without running it. Text of the Latin and other left-to-right
+       scripts (an edit control analyses every line with this state) does not pay for the bidi algorithm. */
+    if (psState && psControl && !psState->fOverrideDirection && !psState->uBidiLevel && !forceLevels &&
+        BIDI_LevelsAllBase(pwcInChars, cInChars))
+    {
+        baselevel = 0;
+        baselayout = 0;
+    }
+    else
+#endif
     if (psState && psControl)
     {
         if (!(levels = calloc(cInChars, sizeof(*levels))))
