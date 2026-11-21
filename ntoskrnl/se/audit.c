@@ -831,18 +831,20 @@ SepAccessCheckAndAuditAlarm(
      * With a token handle (the ByHandle form; the handle value was copied by
      * the system service) the client is that token, which needs TOKEN_QUERY
      * (Microsoft Learn, AccessCheckByTypeResultListAndAuditAlarmByHandleW,
-     * ClientToken). It is referenced as NtAccessCheck references its token,
-     * the token pseudo handles included. An impersonation token must allow
-     * identification, as for NtAccessCheck; a primary token is checked as it
-     * is (as before this change).
+     * ClientToken). Only a real handle names it: the token pseudo handles are
+     * refused with STATUS_INVALID_HANDLE, as Windows Server 2022 refuses them
+     * here (measured), although NtAccessCheck takes them. An impersonation
+     * token must allow identification, as for NtAccessCheck; a primary token
+     * is checked as it is (as before this change, and as on Windows).
      */
     if (ClientTokenHandle != NULL)
     {
-        Status = SepReferenceTokenHandle(*ClientTokenHandle,
-                                         TOKEN_QUERY,
-                                         UserMode,
-                                         &ClientToken,
-                                         NULL);
+        Status = ObReferenceObjectByHandle(*ClientTokenHandle,
+                                           TOKEN_QUERY,
+                                           SeTokenObjectType,
+                                           UserMode,
+                                           (PVOID*)&ClientToken,
+                                           NULL);
         if (!NT_SUCCESS(Status))
         {
             DPRINT("Failed to reference token handle %p: 0x%lx\n",
