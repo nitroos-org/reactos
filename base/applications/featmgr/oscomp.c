@@ -863,7 +863,19 @@ static void SetInstalled(LPCWSTR id, DWORD v)
 }
 
 /* AnyOff of the record, and Panther\components.txt: [Installed] and [Omitted] from the record */
-static void RewriteRecord(LPCWSTR added, FILE *log)
+/* is id one of the components being added (order[0..n-1])? */
+static BOOL InAdded(WCHAR order[][32], int n, LPCWSTR id)
+{
+    int i;
+    for (i = 0; i < n; i++)
+        if (!_wcsicmp(order[i], id)) return TRUE;
+    return FALSE;
+}
+
+/* The components in order[0..nOrder-1] count as installed: the file is written BEFORE the registry says so, so that a power
+ * cut between the two leaves the file ahead (an update then puts the component's files back, harmless) and the registry
+ * behind (a second "featmgr /enable" adds it again), never the other way round. */
+static void RewriteRecord(LPCWSTR added, WCHAR order[][32], int nOrder, FILE *log)
 {
     HKEY hk;
     DWORD anyOff = 0, v;
@@ -884,6 +896,7 @@ static void RewriteRecord(LPCWSTR added, FILE *log)
     {
         DWORD inst = 1;
         RecordGet(list[k].Id, &inst, NULL, 0);
+        if (InAdded(order, nOrder, list[k].Id)) inst = 1;
         if (!inst) anyOff = 1;
     }
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, COMPONENTS_KEY, 0, KEY_SET_VALUE, &hk) == ERROR_SUCCESS)
@@ -929,18 +942,29 @@ static void RewriteRecord(LPCWSTR added, FILE *log)
             DWORD inst = 1;
             WCHAR nm[FM_MAX_NAME];
             RecordGet(list[k].Id, &inst, nm, ARRAYSIZE(nm));
+            if (InAdded(order, nOrder, list[k].Id)) inst = 1;
             if ((v == 0) != (inst != 0)) continue;
             APPEND("%ws=%ws\r\n", list[k].Id, nm[0] ? nm : list[k].Id);
         }
     }
-    h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h != INVALID_HANDLE_VALUE)
     {
-        WriteFile(h, out, (DWORD)len, &got, NULL);
-        CloseHandle(h);
+        /* written beside and moved over the old file: a power cut leaves the old record or the new one, not half of one */
+        WCHAR tmp[MAX_PATH];
+        BOOL wrote = FALSE;
+
+        StringCchPrintfW(tmp, ARRAYSIZE(tmp), L"%s.new", path);
+        h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            wrote = WriteFile(h, out, (DWORD)len, &got, NULL) && got == (DWORD)len && FlushFileBuffers(h);
+            CloseHandle(h);
+        }
+        if (!wrote || !MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        {
+            LOGF(log, L"warn: cannot update %s\n", path);
+            DeleteFileW(tmp);
+        }
     }
-    else
-        LOGF(log, L"warn: cannot update %s\n", path);
     if (old) HeapFree(GetProcessHeap(), 0, old);
     HeapFree(GetProcessHeap(), 0, out);
     HeapFree(GetProcessHeap(), 0, list);
@@ -1128,9 +1152,9 @@ HRESULT FmOsCompEnable(LPCWSTR id, FILE *log)
     RegisterVulkanIcd(&map, log);
     LOGF(log, L"%d Start menu entries made\n", links);
 
+    RewriteRecord(id, order, n, log);
     for (i = 0; i < n; i++)
         SetInstalled(order[i], 1);
-    RewriteRecord(id, log);
     LOGF(log, L"component '%s' installed\n", id);
 
 done:
