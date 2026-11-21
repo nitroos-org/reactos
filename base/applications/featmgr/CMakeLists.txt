@@ -7,7 +7,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 add_executable(featmgr cli.c engine.c components.c oscomp.c shelldefaults.c rapps_import.c native.c natgen.c zipinst.c rappsdb.c scoop.c scoopdefaults.c featmgr.rc)
 set_module_type(featmgr win32cui UNICODE)
 target_link_libraries(featmgr uuid minizip zlib)
-add_importlibs(featmgr advapi32 shlwapi shell32 ole32 user32 wininet crypt32 setupapi msvcrt kernel32 ntdll)
+add_importlibs(featmgr advapi32 shlwapi shell32 ole32 user32 gdi32 wininet crypt32 setupapi msvcrt kernel32 ntdll)
 add_cd_file(TARGET featmgr DESTINATION reactos/system32 FOR all)
 
 # --- refreshenv: re-read PATH into the cmd / PowerShell window that is open (a child like featmgr cannot) ---

@@ -692,8 +692,8 @@ static HKEY RootOf(LPCWSTR s)
     return NULL;
 }
 
-/* One AddReg line of registry.inf (fields: root, key, value name, flags, data...). */
-static BOOL ApplyRegLine(WCHAR **f, int n, FILE *log)
+/* One AddReg line of registry.inf (fields: root, key, value name, flags, data...), into the key it names. */
+static BOOL ApplyRegLineOne(WCHAR **f, int n, FILE *log)
 {
     HKEY root = RootOf(f[0]), hk;
     DWORD flags = 0, type = REG_SZ, cb;
@@ -755,6 +755,43 @@ static BOOL ApplyRegLine(WCHAR **f, int n, FILE *log)
     if (rc != ERROR_SUCCESS)
         LOGF(log, L"  warn: cannot set a value of %s\\%s (%ld)\n", f[0], f[1], rc);
     return rc == ERROR_SUCCESS;
+}
+
+/* A line for HKLM\SYSTEM\CurrentControlSet is a line of the control set that setup builds and then copies (ControlSet002 is
+ * that copy, taken when setup ends): a Standard installation has the value in both, so the add writes it to every control set
+ * that exists, not only to the current one. */
+static BOOL ApplyRegLine(WCHAR **f, int n, FILE *log)
+{
+    static const WCHAR prefix[] = L"SYSTEM\\CurrentControlSet\\";
+    BOOL ok = ApplyRegLineOne(f, n, log);
+
+    if (ok && n >= 2 && n <= 64 && RootOf(f[0]) == HKEY_LOCAL_MACHINE && !_wcsnicmp(f[1], prefix, ARRAYSIZE(prefix) - 1))
+    {
+        HKEY hk;
+        DWORD cur = 1, cb = sizeof(cur), type, k;
+
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\Select", 0, KEY_QUERY_VALUE, &hk) == ERROR_SUCCESS)
+        {
+            if (RegQueryValueExW(hk, L"Current", NULL, &type, (LPBYTE)&cur, &cb) != ERROR_SUCCESS || type != REG_DWORD) cur = 1;
+            RegCloseKey(hk);
+        }
+        for (k = 1; k <= 9; k++)
+        {
+            WCHAR set[40], alt[MAX_PATH + 40];
+            WCHAR *g[64];
+            int i;
+
+            if (k == cur) continue;
+            StringCchPrintfW(set, ARRAYSIZE(set), L"SYSTEM\\ControlSet%03lu", k);
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, set, 0, KEY_QUERY_VALUE, &hk) != ERROR_SUCCESS) continue;
+            RegCloseKey(hk);
+            StringCchPrintfW(alt, ARRAYSIZE(alt), L"%s\\%s", set, f[1] + ARRAYSIZE(prefix) - 1);
+            for (i = 0; i < n; i++) g[i] = f[i];
+            g[1] = alt;
+            ApplyRegLineOne(g, n, log);
+        }
+    }
+    return ok;
 }
 
 /* The AddReg lines of registry.inf of the medium that a component being added owns (and no left-out one does). */
@@ -943,6 +980,75 @@ static void RegisterVulkanIcd(const FILEMAP *m, FILE *log)
     if (RegSetValueExW(hk, path, 0, REG_DWORD, (const BYTE *)&zero, sizeof(zero)) == ERROR_SUCCESS)
         LOGF(log, L"  Vulkan driver registered: %s\n", path);
     RegCloseKey(hk);
+}
+
+/* Fonts: the Fonts folder is registered by the system the first time it starts, when the list under
+ * HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts is empty (win32k scans the folder and writes one value per face); a
+ * font that arrives later is registered the way the Fonts folder of the shell does it (dll/shellext/fontext): AddFontResourceW
+ * makes the font known to the running system (GetFontResourceInfoW only knows loaded fonts), the value is the name that
+ * GetFontResourceInfoW gives (" (TrueType)" added for .ttf/.ttc/.otf/.otc), its data the file name, and WM_FONTCHANGE tells the
+ * programs that are running. */
+BOOL WINAPI GetFontResourceInfoW(LPCWSTR, LPDWORD, LPVOID, DWORD);
+
+static void RegisterFonts(const FILEMAP *m, FILE *log)
+{
+    static const LPCWSTR exts[] = { L".ttf", L".ttc", L".otf", L".otc", L".fon", L".fnt" };
+    WCHAR win[MAX_PATH], dir[MAX_PATH];
+    HKEY hk = NULL;
+    int i, k, done = 0;
+    size_t dl;
+
+    if (!GetWindowsDirectoryW(win, ARRAYSIZE(win))) return;
+    StringCchPrintfW(dir, ARRAYSIZE(dir), L"%s\\Fonts\\", win);
+    dl = wcslen(dir);
+    for (i = 0; i < m->installed.n; i++)
+    {
+        LPCWSTR path = m->installed.p[i], ext = PathFindExtensionW(path), file;
+        DWORD cb = 0;
+        WCHAR name[256];
+        BOOL isFont = FALSE, ttf;
+
+        if (_wcsnicmp(path, dir, dl) || wcschr(path + dl, L'\\')) continue;      /* directly in the Fonts folder */
+        for (k = 0; k < (int)ARRAYSIZE(exts); k++) if (!_wcsicmp(ext, exts[k])) isFont = TRUE;
+        if (!isFont) continue;
+        file = path + dl;
+        /* GetFontResourceInfoW only knows fonts that the system has loaded: load first */
+        if (!AddFontResourceW(path))
+        {
+            LOGF(log, L"  warn: cannot load the font %s\n", file);
+            continue;
+        }
+        if (!GetFontResourceInfoW(path, &cb, NULL, 1) || !cb || cb > sizeof(name) - 32 * sizeof(WCHAR) ||
+            !GetFontResourceInfoW(path, &cb, name, 1))
+        {
+            LOGF(log, L"  warn: no font name in %s (%lu)\n", file, GetLastError());
+            RemoveFontResourceW(path);
+            continue;
+        }
+        ttf = !_wcsicmp(ext, L".ttf") || !_wcsicmp(ext, L".ttc") || !_wcsicmp(ext, L".otf") || !_wcsicmp(ext, L".otc");
+        if (ttf) StringCchCatW(name, ARRAYSIZE(name), L" (TrueType)");
+        if (!hk && RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts", 0, NULL, 0,
+                                   KEY_SET_VALUE, NULL, &hk, NULL) != ERROR_SUCCESS)
+        {
+            hk = NULL;
+            LOGF(log, L"  warn: cannot open the Fonts key\n");
+            return;
+        }
+        if (RegSetValueExW(hk, name, 0, REG_SZ, (const BYTE *)file, (DWORD)((wcslen(file) + 1) * sizeof(WCHAR))) != ERROR_SUCCESS)
+        {
+            LOGF(log, L"  warn: cannot register %s\n", name);
+            continue;
+        }
+        done++;
+        LOGF(log, L"  font registered: %s\n", name);
+    }
+    if (hk) RegCloseKey(hk);
+    if (done)
+    {
+        DWORD_PTR r;
+        SendMessageTimeoutW(HWND_BROADCAST, WM_FONTCHANGE, 0, 0, SMTO_ABORTIFHUNG, 2000, &r);
+        LOGF(log, L"%d fonts registered; they are available now, no restart is needed\n", done);
+    }
 }
 
 #ifdef FEATMGR_WOW64REG
@@ -1294,6 +1400,7 @@ HRESULT FmOsCompEnable(LPCWSTR id, FILE *log)
     LOGF(log, L"%d registry lines added\n", regLines);
     links = AddShortcuts(&map, log);
     RegisterVulkanIcd(&map, log);
+    RegisterFonts(&map, log);
     LOGF(log, L"%d Start menu entries made\n", links);
 #ifdef FEATMGR_WOW64REG
     if (InAdded(order, n, L"wow64"))
