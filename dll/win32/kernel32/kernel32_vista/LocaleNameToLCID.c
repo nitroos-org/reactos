@@ -257,8 +257,13 @@ BasepIsAcceptedNameCached(
         if (!c)
             break;
     }
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* loads are not reordered with other loads here */
+    return i < LOCALE_NAME_MAX_LENGTH && g_AcceptedSeq[slot] == seq;
+#else
     /* the full barrier keeps the reads above before this one */
     return i < LOCALE_NAME_MAX_LENGTH && InterlockedCompareExchange(&g_AcceptedSeq[slot], seq, seq) == seq;
+#endif
 }
 
 static VOID
