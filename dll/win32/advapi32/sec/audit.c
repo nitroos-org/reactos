@@ -50,12 +50,12 @@ AuditAlarmFreeNames(PUNICODE_STRING Names)
 }
 
 /*
- * The result of the access check and audit alarm functions with one result.
- * When the check could not run the function fails and leaves the outputs
- * alone. When it ran, AccessStatus says whether access is granted; a denial
- * also fails the function with the reason of the denial as the last error
- * (a caller that looks only at the return value does not take a denial for
- * a grant).
+ * The result of the access check and audit alarm functions with one result,
+ * as AccessCheck reports it (measured on Windows Server 2022): when the check
+ * could not run the function fails and leaves GrantedAccess and AccessStatus
+ * alone; when it ran the function succeeds and AccessStatus says whether
+ * access is granted, a denial with its reason as the last error.
+ * pfGenerateOnClose is written in both cases (FALSE when the call failed).
  */
 static BOOL
 AuditAlarmResult(NTSTATUS Status,
@@ -64,19 +64,19 @@ AuditAlarmResult(NTSTATUS Status,
                  LPBOOL AccessStatus,
                  LPBOOL pfGenerateOnClose)
 {
+    *pfGenerateOnClose = (BOOL)GenerateOnClose;
+
     if (!NT_SUCCESS(Status))
     {
         SetLastError(RtlNtStatusToDosError(Status));
         return FALSE;
     }
 
-    *pfGenerateOnClose = (BOOL)GenerateOnClose;
-
     if (!NT_SUCCESS(LocalAccessStatus))
     {
         *AccessStatus = FALSE;
         SetLastError(RtlNtStatusToDosError(LocalAccessStatus));
-        return FALSE;
+        return TRUE;
     }
 
     *AccessStatus = TRUE;
@@ -99,6 +99,9 @@ AuditAlarmResultList(NTSTATUS Status,
 
     C_ASSERT(sizeof(*AccessStatusList) == sizeof(NTSTATUS));
 
+    /* Written also when the call failed, as Windows does (FALSE then) */
+    *pfGenerateOnClose = (BOOL)GenerateOnClose;
+
     if (!NT_SUCCESS(Status))
     {
         SetLastError(RtlNtStatusToDosError(Status));
@@ -109,7 +112,6 @@ AuditAlarmResultList(NTSTATUS Status,
     for (i = 0; i < ObjectTypeListLength; i++)
         AccessStatusList[i] = RtlNtStatusToDosError(NtAccessStatusList[i]);
 
-    *pfGenerateOnClose = (BOOL)GenerateOnClose;
     return TRUE;
 }
 
@@ -174,7 +176,7 @@ AccessCheckAndAuditAlarmW(LPCWSTR SubsystemName,
     UNICODE_STRING ObjectTypeNameU;
     UNICODE_STRING ObjectNameU;
     NTSTATUS LocalAccessStatus;
-    BOOLEAN GenerateOnClose;
+    BOOLEAN GenerateOnClose = FALSE;
     NTSTATUS Status;
 
     RtlInitUnicodeString(&SubsystemNameU,
@@ -585,7 +587,7 @@ AccessCheckByTypeResultListAndAuditAlarmByHandleW(IN LPCWSTR SubsystemName,
                                                   OUT LPBOOL pfGenerateOnClose)
 {
     UNICODE_STRING SubsystemNameU, ObjectTypeNameU, ObjectNameU;
-    BOOLEAN GenerateOnClose;
+    BOOLEAN GenerateOnClose = FALSE;
     NTSTATUS Status;
 
     RtlInitUnicodeString(&SubsystemNameU, SubsystemName);
@@ -691,7 +693,7 @@ AccessCheckByTypeResultListAndAuditAlarmW(IN LPCWSTR SubsystemName,
                                           OUT LPBOOL pfGenerateOnClose)
 {
     UNICODE_STRING SubsystemNameU, ObjectTypeNameU, ObjectNameU;
-    BOOLEAN GenerateOnClose;
+    BOOLEAN GenerateOnClose = FALSE;
     NTSTATUS Status;
 
     RtlInitUnicodeString(&SubsystemNameU, SubsystemName);
@@ -795,7 +797,7 @@ AccessCheckByTypeAndAuditAlarmW(IN LPCWSTR SubsystemName,
 {
     UNICODE_STRING SubsystemNameU, ObjectTypeNameU, ObjectNameU;
     NTSTATUS LocalAccessStatus;
-    BOOLEAN GenerateOnClose;
+    BOOLEAN GenerateOnClose = FALSE;
     NTSTATUS Status;
 
     RtlInitUnicodeString(&SubsystemNameU, SubsystemName);
