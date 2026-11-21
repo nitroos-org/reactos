@@ -433,6 +433,8 @@ nd6_input(struct pbuf *p, struct netif *inp)
         if (na_hdr->flags & ND6_FLAG_OVERRIDE) {
           MEMCPY(neighbor_cache[i].lladdr, lladdr_opt->addr, inp->hwaddr_len);
         }
+        /* NitroOS: the IsRouter flag follows the R flag of every advertisement for the entry (RFC 4861 7.2.5) */
+        neighbor_cache[i].advrouter = (na_hdr->flags & ND6_FLAG_ROUTER) ? 1 : 0;
       }
     } else {
       /* This is a solicited NA.
@@ -475,6 +477,8 @@ nd6_input(struct pbuf *p, struct netif *inp)
       neighbor_cache[i].netif = inp;
       neighbor_cache[i].state = ND6_REACHABLE;
       neighbor_cache[i].counter.reachable_time = reachable_time;
+      /* NitroOS: the IsRouter flag follows the R flag of the advertisement (RFC 4861 7.2.5) */
+      neighbor_cache[i].advrouter = (na_hdr->flags & ND6_FLAG_ROUTER) ? 1 : 0;
 
       /* Send queued packets, if any. */
       if (neighbor_cache[i].q != NULL) {
@@ -679,6 +683,15 @@ nd6_input(struct pbuf *p, struct netif *inp)
         LWIP_HOOK_ND6_ROUTES_CHANGED();
       }
 #endif
+    }
+
+    /* NitroOS: a router advertisement says the sender is a router (RFC 4861 6.3.4: its IsRouter flag is set), also
+       when it advertises a lifetime of 0 (it stops being a default router, not a router) */
+    {
+      s8_t n = nd6_find_neighbor_cache_entry(ip6_current_src_addr());
+      if (n >= 0) {
+        neighbor_cache[n].advrouter = 1;
+      }
     }
 
     if (i < 0) {
@@ -1783,6 +1796,7 @@ nd6_free_neighbor_cache_entry(s8_t i)
 
   neighbor_cache[i].state = ND6_NO_ENTRY;
   neighbor_cache[i].isrouter = 0;
+  neighbor_cache[i].advrouter = 0;
   neighbor_cache[i].netif = NULL;
   neighbor_cache[i].counter.reachable_time = 0;
   ip6_addr_set_zero(&(neighbor_cache[i].next_hop_address));

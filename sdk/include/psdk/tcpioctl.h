@@ -403,6 +403,7 @@ typedef struct _TCP_IPV6_NEIGHBOR_ROW
     ULONG Flags;            /* TCP_IPV6_NEIGHBOR_ROUTER */
     ULONG LinkLength;       /* 0 while the neighbour has not answered */
     UCHAR LinkAddress[8];
+    ULONG LastReachable;    /* ms since it was last confirmed reachable (Reachable and Stale; 0 otherwise) */
 } TCP_IPV6_NEIGHBOR_ROW, *PTCP_IPV6_NEIGHBOR_ROW;
 
 /* An on-link prefix a router advertisement gave; Lifetime: seconds left of its valid lifetime */

@@ -293,6 +293,28 @@ Route6AddressPrefixSeen(struct netif *netif, s8_t Slot, const ip6_addr_t *Prefix
     return FALSE;
 }
 
+/* Whether a router advertisement gave netif the on-link prefix Prefix/Length (core lock held): the table then lists
+   that prefix once, as the advertisement's row, also when a configured address is in it (Windows Server 2022: one
+   on-link row for the prefix after "netsh interface ipv6 add address" of an address in an advertised prefix) */
+static
+BOOLEAN
+Route6PrefixAdvertised(struct netif *netif, const ip6_addr_t *Prefix, UCHAR Length)
+{
+    s8_t i;
+
+    if (Length != 64)
+        return FALSE;
+    for (i = 0; i < LWIP_ND6_NUM_PREFIXES; i++)
+    {
+        const struct nd6_prefix_list_entry *Entry = &prefix_list[i];
+
+        if (Entry->netif == netif && Entry->invalidation_timer != 0 && netif_is_up(netif) &&
+            ip6_addr_net_zoneless_eq(&Entry->prefix, Prefix))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 /* The best route to Dest (no zone), over any interface or only over Only (core lock held) */
 static
 BOOLEAN
@@ -758,7 +780,8 @@ TCPQueryIpv6Routes(PVOID Out, ULONG OutSize)
                 u32_t Valid, Preferred;
 
                 if (!Route6AddressPrefix(netif, Slot, &Prefix, &Length) ||
-                    Route6AddressPrefixSeen(netif, Slot, &Prefix, Length))
+                    Route6AddressPrefixSeen(netif, Slot, &Prefix, Length) ||
+                    Route6PrefixAdvertised(netif, &Prefix, Length))
                     continue;
                 Valid = netif_ip6_addr_valid_life(netif, Slot);
                 Preferred = netif_ip6_addr_pref_life(netif, Slot);

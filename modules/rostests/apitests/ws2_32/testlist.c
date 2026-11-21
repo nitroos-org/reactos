@@ -32,6 +32,7 @@ extern void func_getaddrinfocanon(void);
 extern void func_GetHostNameW(void);
 extern void func_addresschange(void);
 extern void func_addrchange6(void);
+extern void func_connectbyname(void);
 extern void func_asyncselect(void);
 extern void func_gethostname(void);
 extern void func_getnameinfo(void);
@@ -157,6 +158,7 @@ const struct test winetest_testlist[] =
     { "notconn", func_notconn },
     { "addresschange", func_addresschange },
     { "addrchange6", func_addrchange6 },
+    { "connectbyname", func_connectbyname },
     { "asyncselect", func_asyncselect },
     { "tcpnodelay", func_tcpnodelay },
     { "tcpchurn", func_tcpchurn },

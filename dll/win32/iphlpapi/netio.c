@@ -654,7 +654,9 @@ static void fill_unicast_row(const NETIO_IF *If, const MIB_IPADDRROW *Address, P
   Out->InterfaceLuid.Value = If->Luid;
   Out->InterfaceIndex = If->Index;
   Out->OnLinkPrefixLength = mask_to_prefix_length(Address->dwMask);
-  Out->DadState = IpDadStatePreferred;
+  /* the addresses of a disconnected interface stay and are Deprecated until the link is back (Windows Server 2022:
+     GetUnicastIpAddressTable during link drops of 1 to 120 s; the lifetimes do not change) */
+  Out->DadState = (If->Loopback || If->Connected) ? IpDadStatePreferred : IpDadStateDeprecated;
   Out->ValidLifetime = 0xffffffff;
   Out->PreferredLifetime = 0xffffffff;
   Out->CreationTimeStamp.QuadPart = boot_time_filetime();
@@ -712,6 +714,8 @@ static void fill_unicast_row6(const NETIO_IF *If, const TCP_IPV6_ADDRESS_ROW *Ad
   Out->OnLinkPrefixLength = (UINT8)Address->PrefixLength;
   Out->SkipAsSource = (Address->Flags & TCP_IPV6_ADDRESS_SKIP_AS_SOURCE) != 0;
   Out->DadState = Address->DadState;
+  if (!If->Loopback && !If->Connected && Out->DadState == IpDadStatePreferred)
+    Out->DadState = IpDadStateDeprecated;
   Out->CreationTimeStamp.QuadPart = boot_time_filetime();
 }
 

@@ -768,7 +768,9 @@ Ipv6ShowNeighbors(
                 wcscpy(Physical, L"00-00-00-00-00-00");
             }
 
-            PrintMessage(L"%-44s  %-17s  %s \n", Address, Physical, NeighborState(Row->State));
+            /* Windows Server 2022: "Stale (Router)", "Reachable (Router)" for a neighbour that is a router */
+            PrintMessage(L"%-44s  %-17s  %s%s \n", Address, Physical, NeighborState(Row->State),
+                         (Row->Flags & 1) ? L" (Router)" : L""); /* IsRouter */
         }
     }
 

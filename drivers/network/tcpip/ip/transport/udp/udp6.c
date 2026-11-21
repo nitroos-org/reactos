@@ -180,6 +180,33 @@ Udp6NetifHasAddress(struct netif *netif)
     return FALSE;
 }
 
+/* No route only because the link of the interface that would carry the datagram is down (core lock held): Windows
+ * keeps its routes over a media disconnect and drops a datagram sent meanwhile without an error (Windows Server 2022:
+ * UDP sendto over IPv4 and IPv6 during link drops of 1 to 120 s returned no error). lwIP routes nothing over an
+ * interface without link, so this is TRUE when an interface that is up but has lost its link has an address that is
+ * not link-local (it had the routes for such a destination), or any address for a link-local destination */
+static BOOLEAN
+Udp6OnlyLinkDown(const ip6_addr_t *Dest)
+{
+    struct netif *netif;
+    s8_t i;
+
+    if (ip6_addr_isloopback(Dest) || ip6_addr_ismulticast(Dest))
+        return FALSE;
+    NETIF_FOREACH(netif)
+    {
+        if (!netif_is_up(netif) || netif_is_link_up(netif) || (Loopback && netif == Loopback->TCPContext))
+            continue;
+        for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; i++)
+        {
+            if (ip6_addr_isvalid(netif_ip6_addr_state(netif, i)) &&
+                (ip6_addr_islinklocal(Dest) || !ip6_addr_islinklocal(netif_ip6_addr(netif, i))))
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 /* lwIP's route to Dest (core lock held; echo6.c too). lwIP falls back to its default interface when it has no route,
  * which is the loopback interface on a machine without an IPv6 adapter: that is no route, except for ::1 (Windows
  * answers no route: WSAENETUNREACH / ERROR_NETWORK_UNREACHABLE, oracle for the echo) */
@@ -833,22 +860,31 @@ UDPSendDatagram6(
         Selected = netif ? ip6_select_source_address(netif, &Dest) : NULL;
         if (!Selected)
         {
+            /* the link is down: sent and lost, as on Windows (Udp6OnlyLinkDown) */
+            NTSTATUS Lost = Udp6OnlyLinkDown(&Dest) ? STATUS_SUCCESS : STATUS_NETWORK_UNREACHABLE;
+
             pbuf_free(p);
             UNLOCK_TCPIP_CORE();
             if (Copy)
                 ExFreePoolWithTag(Copy, UDP6_TAG);
-            return STATUS_NETWORK_UNREACHABLE;
+            if (NT_SUCCESS(Lost))
+                *DataUsed = DataSize;
+            return Lost;
         }
         ip6_addr_copy(Source, *ip_2_ip6(Selected));
     }
 
     if (!netif)
     {
+        NTSTATUS Lost = Udp6OnlyLinkDown(&Dest) ? STATUS_SUCCESS : STATUS_NETWORK_UNREACHABLE;
+
         pbuf_free(p);
         UNLOCK_TCPIP_CORE();
         if (Copy)
             ExFreePoolWithTag(Copy, UDP6_TAG);
-        return STATUS_NETWORK_UNREACHABLE;
+        if (NT_SUCCESS(Lost))
+            *DataUsed = DataSize;
+        return Lost;
     }
 
     Header = (PUDP_HEADER)p->payload;
@@ -870,6 +906,9 @@ UDPSendDatagram6(
         Result = ERR_VAL;
     else
         Result = Ip6SendFragmented(p, &Source, &Dest, Multicast ? McastHops : Hops, 0, IP6_NEXTH_UDP, netif);
+    /* an interface without link has no route lwIP uses: lost without an error, as on Windows (Udp6OnlyLinkDown) */
+    if (Result == ERR_RTE && !netif_is_link_up(netif))
+        Result = ERR_OK;
 
     /* Only a datagram that was sent (or is kept for neighbour discovery, which counts as sent) reaches the members
        here: nobody sees one whose sendto fails */

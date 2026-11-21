@@ -9,6 +9,7 @@ list(APPEND SOURCE
     loopbackalias.c
     addresschange.c
     addrchange6.c
+    connectbyname.c
     asyncselect.c
     backlog.c
     basehandle.c

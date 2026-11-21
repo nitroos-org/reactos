@@ -291,7 +291,9 @@ NTSTATUS TCPTranslateError(const err_t err)
         case ERR_OK: Status = STATUS_SUCCESS; return Status; //0
         case ERR_MEM: Status = STATUS_INSUFFICIENT_RESOURCES; break; //-1
         case ERR_BUF: Status = STATUS_BUFFER_TOO_SMALL; break; //-2
-        case ERR_TIMEOUT: Status = STATUS_TIMEOUT; break; // -3
+        /* a connection attempt that got no answer (lwIP's SYN retransmissions ran out): WSAETIMEDOUT, as on
+           Windows; STATUS_TIMEOUT is a success code */
+        case ERR_TIMEOUT: Status = STATUS_IO_TIMEOUT; break; // -3
         case ERR_RTE: Status = STATUS_NETWORK_UNREACHABLE; break; //-4
         case ERR_INPROGRESS: Status = STATUS_PENDING; return Status; //-5
         case ERR_VAL: Status = STATUS_INVALID_PARAMETER; break; //-6

@@ -102,6 +102,9 @@ char		*option_as_string(unsigned int code, unsigned char *data, int len);
 int		 fork_privchld(int, int);
 int              check_arp( struct interface_info *ip, struct client_lease *lp );
 static VOID      DeleteLeftoverAddresses(PDHCP_ADAPTER Adapter, IPAddr Keep);
+static BOOL      LeaseAddressHeld(PDHCP_ADAPTER Adapter, IPAddr Address, ULONG Mask);
+static void      drop_lease_config(struct interface_info *ip);
+static BOOL      reboot_keep_lease(struct interface_info *ip, time_t cur_time);
 
 #define	ADVANCE(x, n) (x += ROUNDUP((n)->sa_len))
 
@@ -361,6 +364,15 @@ dhcpack(struct packet *packet)
 	    ip->client->state != S_REBINDING)
 		return;
 
+	/* The check of a lease (INIT-REBOOT) asks for the address the client holds: an ACK for another address is no answer
+	   to it (Windows Server 2022 ignores it and goes on asking; taking it would move the client to whatever subnet,
+	   router and name servers the ACK names) */
+	if (ip->client->state == S_REBOOTING && ip->client->active &&
+	    memcmp(&packet->raw->yiaddr, ip->client->active->address.iabuf, 4)) {
+		note("DHCPACK for another address than the one checked: ignored");
+		return;
+	}
+
 	note("DHCPACK from %s", piaddr(packet->client_addr));
 
 	lease = packet_to_lease(packet);
@@ -567,13 +579,21 @@ void setup_adapter( PDHCP_ADAPTER Adapter, struct client_lease *new_lease ) {
     CHAR AddressBuffer[32];
     struct in_addr addr;
     HKEY hkey;
+    BOOL KeepAddress = FALSE;
 
     strcat(Buffer, Adapter->DhclientInfo.name);
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, Buffer, 0, KEY_WRITE, &hkey) != ERROR_SUCCESS)
         hkey = NULL;
 
 
-    if( Adapter->NteContext )
+    /* A lease that confirms the address the adapter holds already (a renewal, or the check of the lease after the link
+       came back) leaves it in place: deleting and adding it again would end every TCP connection that uses it.
+       Windows keeps the address over both (Windows Server 2022, link drops of 1 to 120 s: no address change) */
+    if( Adapter->NteContext && new_lease->options[DHO_SUBNET_MASK].len == (int)sizeof(ULONG) )
+        KeepAddress = LeaseAddressHeld( Adapter, *((IPAddr*)new_lease->address.iabuf),
+                                        *((ULONG*)new_lease->options[DHO_SUBNET_MASK].data) );
+
+    if( Adapter->NteContext && !KeepAddress )
     {
         DeleteIPAddress( Adapter->NteContext );
         Adapter->NteContext = 0;
@@ -585,14 +605,17 @@ void setup_adapter( PDHCP_ADAPTER Adapter, struct client_lease *new_lease ) {
 
     /* Set up our default router if we got one from the DHCP server */
     if( new_lease->options[DHO_SUBNET_MASK].len == (int)sizeof(ULONG) ) {
-        DWORD err;
+        DWORD err = NO_ERROR;
 
-        err = AddIPAddress
+        if( !KeepAddress )
+            err = AddIPAddress
             ( *((ULONG*)new_lease->address.iabuf),
               *((ULONG*)new_lease->options[DHO_SUBNET_MASK].data),
               Adapter->IfMib.dwIndex,
               &Adapter->NteContext,
               &Adapter->NteInstance );
+        if (err == NO_ERROR)
+            Adapter->NteMask = *((ULONG*)new_lease->options[DHO_SUBNET_MASK].data);
         if (hkey && err == NO_ERROR) {
             RegSetValueExA(hkey, "DhcpIPAddress", 0, REG_SZ, (LPBYTE)piaddr(new_lease->address), strlen(piaddr(new_lease->address))+1);
             addr.S_un.S_addr = *((ULONG*)new_lease->options[DHO_SUBNET_MASK].data);
@@ -624,6 +647,10 @@ void setup_adapter( PDHCP_ADAPTER Adapter, struct client_lease *new_lease ) {
         Adapter->RouterMib.dwForwardMetric1 = 1;
         Adapter->RouterMib.dwForwardIfIndex = Adapter->IfMib.dwIndex;
 
+        /* the default route of a confirmed lease stays as well when the router is the same */
+        if( KeepAddress && Adapter->RouterMib.dwForwardNextHop == *((ULONG*)new_lease->options[DHO_ROUTERS].data) ) {
+            err = NO_ERROR;
+        } else {
         if( Adapter->RouterMib.dwForwardNextHop ) {
             /* If we set a default route before, delete it before continuing */
             DeleteIpForwardEntry( &Adapter->RouterMib );
@@ -633,6 +660,7 @@ void setup_adapter( PDHCP_ADAPTER Adapter, struct client_lease *new_lease ) {
             *((ULONG*)new_lease->options[DHO_ROUTERS].data);
 
         err = CreateIpForwardEntry( &Adapter->RouterMib );
+        }
 
         if( err != NO_ERROR )
             warning("CreateIpForwardEntry: %d\n", err);
@@ -1096,6 +1124,10 @@ dhcpnak(struct packet *packet)
 		return;
 	}
 
+	/* The address of the lease (kept over a link drop, or being renewed) must not be used any more (RFC 2131 3.2,
+	   4.4.5): it goes at once with the default route and the name servers of the lease, before the client starts over */
+	drop_lease_config(ip);
+
 	free_client_lease(ip->client->active);
 	ip->client->active = NULL;
 
@@ -1120,6 +1152,16 @@ send_discover(void *ipp)
         DH_DbgPrint(MID_TRACE,("Doing discover on interface %p\n",ip));
 
         time(&cur_time);
+
+	/* A lease whose check after a link drop got no answer (send_request: INIT-REBOOT -> INIT) may be used for the rest
+	   of its time (RFC 2131 3.2), not longer: when it expires while the client is still looking for a server, its
+	   address, default route and name servers go */
+	if (ip->client->active && cur_time >= ip->client->active->expiry) {
+		note("lease of %s expired while looking for a server", piaddr(ip->client->active->address));
+		drop_lease_config(ip);
+		free_client_lease(ip->client->active);
+		ip->client->active = NULL;
+	}
 
 	/* Figure out how long it's been since we started transmitting. */
 	interval = cur_time - ip->client->first_sending;
@@ -1188,6 +1230,11 @@ send_discover(void *ipp)
 		ip->client->interval =
 			(ip->client->first_sending +
 			 ip->client->config->timeout) - cur_time + 1;
+
+	/* ... and the next look no later than the end of a lease still held (see above) */
+	if (ip->client->active &&
+	    cur_time + ip->client->interval > ip->client->active->expiry)
+		ip->client->interval = ip->client->active->expiry - cur_time + 1;
 
 	/* Record the number of seconds since we started sending. */
 	if (interval < 65536)
@@ -1267,6 +1314,86 @@ FindExistingAddress(DWORD IfIndex, IPAddr Want, IPAddr *Address, ULONG *Context)
 
     free(Info);
     return Found;
+}
+
+/*
+ * The configuration a lease brought, when the client may not use the lease any more (a DHCPNAK, a lease that expired while
+ * no server answered): the address this service added for it, the default route and the name servers and domain. An
+ * address that is not a lease's (automatic private, alternate configuration: NteMask 0) stays.
+ */
+static void
+drop_lease_config(struct interface_info *ip)
+{
+    PDHCP_ADAPTER Adapter = AdapterFindInfo(ip);
+
+    if (!Adapter)
+        return;
+    if (Adapter->NteContext && !Adapter->NteMask)
+        return;
+    reset_adapter(Adapter);
+    Adapter->RouterMib.dwForwardNextHop = 0;
+    Adapter->NteMask = 0;
+    unset_name_servers(Adapter);
+    unset_domain(Adapter);
+}
+
+/*
+ * The check of a lease (INIT-REBOOT, after a link drop or a renewal asked for) got no answer at all. Windows Server 2022
+ * then keeps the lease while its default gateway answers (measured: no DHCP server answering, the gateway there: the
+ * address stays Preferred, no DHCPDISCOVER follows) and renews it as usual (RFC 2131 3.2: the client MAY use the address
+ * for the rest of the lease). Without an answer from the gateway the client is on another network: the lease
+ * configuration goes and the client starts over (DHCPDISCOVER, then an automatic private address). A lease without a
+ * router is kept (nothing to ask; the expiry ends it).
+ * TRUE when the lease is kept (bound again, renewal timer set).
+ */
+static BOOL
+reboot_keep_lease(struct interface_info *ip, time_t cur_time)
+{
+    PDHCP_ADAPTER Adapter = AdapterFindInfo(ip);
+    struct client_lease *l = ip->client->active;
+    IPAddr Router, Source;
+    ULONG Mac[2], Length = sizeof(Mac);
+    DWORD Error;
+
+    if (!Adapter || !l || cur_time >= l->expiry || !Adapter->NteContext || !Adapter->NteMask)
+        return FALSE;
+    /* a lease without a router (an isolated network) has nothing to ask: it is kept for the rest of its time, as
+       before this check (the expiry still ends it) */
+    if (l->options[DHO_ROUTERS].len < 4)
+        goto keep;
+    memcpy(&Router, l->options[DHO_ROUTERS].data, 4);
+    memcpy(&Source, l->address.iabuf, 4);
+    /* SendARP asks again even for a neighbour in the cache (tcpip keeps the cache over a link drop) */
+    Error = SendARP(Router, Source, Mac, &Length);
+    if (Error != NO_ERROR || Length == 0)
+    {
+        note("no DHCP answer and the router of the lease of %s does not answer (%lu): its configuration goes",
+             piaddr(l->address), Error);
+        drop_lease_config(ip);
+        return FALSE;
+    }
+    note("no DHCP answer, the lease's router answers: the lease of %s is kept", piaddr(l->address));
+keep:
+    cancel_timeout(send_request, ip);
+    ip->client->state = S_BOUND;
+    add_timeout(l->renewal > cur_time ? l->renewal : cur_time + 1, state_bound, ip);
+    return TRUE;
+}
+
+/*
+ * Does the adapter still hold Address (network order) with Mask as the address this service added for its lease (context
+ * Adapter->NteContext)? Then a lease that confirms it changes nothing in the stack.
+ */
+static BOOL
+LeaseAddressHeld(PDHCP_ADAPTER Adapter, IPAddr Address, ULONG Mask)
+{
+    IPAddr Held;
+    ULONG Context;
+
+    /* the mask is not part of what FindExistingAddress compares: a lease with another mask is applied again */
+    if (Adapter->NteMask != Mask)
+        return FALSE;
+    return FindExistingAddress(Adapter->IfMib.dwIndex, Address, &Held, &Context) && Context == Adapter->NteContext;
 }
 
 /*
@@ -1378,6 +1505,7 @@ state_panic(void *ipp)
             {
                 DH_DbgPrint(MID_TRACE,("DHCPCSVC: Adopting the alternate configuration address already on the adapter\n"));
                 Adapter->NteContext = NteContext;
+                Adapter->NteMask = 0;
                 Adapter->NteInstance = 0;
             }
             else
@@ -1387,6 +1515,7 @@ state_panic(void *ipp)
                                       Adapter->IfMib.dwIndex,
                                       &Adapter->NteContext,
                                       &Adapter->NteInstance);
+                Adapter->NteMask = 0;
                 if (!NT_SUCCESS(Status))
                     DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
             }
@@ -1518,6 +1647,7 @@ state_panic(void *ipp)
                                       Adapter->IfMib.dwIndex,
                                       &Adapter->NteContext,
                                       &Adapter->NteInstance);
+                Adapter->NteMask = 0;
                 if (!NT_SUCCESS(Status))
                     DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
 
@@ -1581,6 +1711,8 @@ send_request(void *ipp)
 	if ((ip->client->state == S_REBOOTING ||
 	    ip->client->state == S_REQUESTING) &&
 	    interval > ip->client->config->reboot_timeout) {
+		if (ip->client->state == S_REBOOTING && reboot_keep_lease(ip, cur_time))
+			return;
 		ip->client->state = S_INIT;
 		cancel_timeout(send_request, ip);
 		state_init(ip);

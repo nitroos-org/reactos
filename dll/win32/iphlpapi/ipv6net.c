@@ -279,7 +279,9 @@ DWORD Ipv6GetNeighborRows(PMIB_IPNET_ROW2 *Rows, ULONG *Count)
     memcpy(Row->PhysicalAddress, Source->LinkAddress, Length);
     Row->PhysicalAddressLength = Length;
     Row->Flags = (Source->Flags & TCP_IPV6_NEIGHBOR_ROUTER) ? 1 : 0;
-    Row->ReachabilityTime.LastReachable = (Source->State == 5) ? GetTickCount() : 0;
+    /* ms since the neighbour was last confirmed reachable (Windows: 0 up to the reachable time while Reachable,
+       growing while Stale), not the system uptime */
+    Row->ReachabilityTime.LastReachable = Source->LastReachable;
   }
 
   /* the groups an Ethernet interface receives: all nodes, and the solicited-node group of each address */

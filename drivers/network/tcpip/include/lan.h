@@ -43,6 +43,7 @@ typedef struct LAN_ADAPTER {
     KSPIN_LOCK Lock;                        /* Lock for this structure */
     UCHAR State, OldState;                  /* State of the adapter */
     BOOLEAN CompletingReset;                /* Reset is finishing */
+    BOOLEAN IpConfigured;                   /* The IPv4 configuration was read: it stays over a media disconnect */
     KSPIN_LOCK ReconfigureLock;             /* Protects the next five; never held across NDIS calls */
     BOOLEAN Unbinding;                      /* LANUnregisterAdapter runs: no reconfiguration starts */
     BOOLEAN ReconfigureQueued;              /* Reconfiguration worker queued or running */
