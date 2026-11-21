@@ -23,9 +23,9 @@
  * only part 1 runs and nothing is created (for a read-only run on Windows).
  *
  * Both parts run the same equality matrix: every DACL x owner x client token x request x object type
- * list, each AuditAlarm form against its AccessCheck form. The return value is not compared: on a
- * denial the AuditAlarm forms with one result fail (AccessStatus FALSE, the reason in the last error),
- * while AccessCheck succeeds with AccessStatus FALSE.
+ * list, each AuditAlarm form against its AccessCheck form. On a denial the AuditAlarm forms with one
+ * result succeed with AccessStatus FALSE and the reason in the last error, as AccessCheck does
+ * (measured on Windows Server 2022).
  */
 
 #include "precomp.h"
@@ -579,11 +579,11 @@ static BOOL SameSingle(const OUTCOME *Plain, const OUTCOME *Audit)
 {
     if (!Plain->Return)
         return !Audit->Return && Audit->Error == Plain->Error;
+    if (!Audit->Return || Audit->GenerateOnClose != FALSE)
+        return FALSE;
     if (!!Plain->Status[0] != !!Audit->Status[0] || Plain->Granted[0] != Audit->Granted[0])
         return FALSE;
-    if (Plain->Status[0])
-        return Audit->Return && Audit->GenerateOnClose == FALSE;
-    return !Audit->Return && Audit->Error == Plain->Error;
+    return Plain->Status[0] || Audit->Error == Plain->Error;
 }
 
 static BOOL SameList(const OUTCOME *Plain, const OUTCOME *Audit, DWORD Count)
@@ -765,7 +765,7 @@ static void ByTypeRows(DWORD Flags)
 
     /* A denied request is denied */
     CallByTypeAndAuditAlarm(Sd, Tokens[K_SELF], R2, Flags, NULL, 0, &Out);
-    CHECK(!Out.Return && Out.Error == ERROR_ACCESS_DENIED, "ByType denied: ret %d err %lu\n", Out.Return, Out.Error);
+    CHECK(Out.Return && Out.Error == ERROR_ACCESS_DENIED, "ByType denied: ret %d err %lu\n", Out.Return, Out.Error);
     CHECK(Out.Status[0] == FALSE && Out.Granted[0] == 0, "ByType denied: status %lu granted 0x%lx\n",
           Out.Status[0], Out.Granted[0]);
 
@@ -829,7 +829,7 @@ static void ByTypeRows(DWORD Flags)
           Out.Granted[1], Out.Status[1], Out.Granted[2], Out.Status[2], Out.Granted[3], Out.Status[3]);
     /* Without a result list the object is the root: R2 is denied (B, a child of the root, lacks it) */
     CallByTypeAndAuditAlarm(SdObject, Tokens[K_SELF], R2, Flags, List, 4, &Out);
-    CHECK(!Out.Return && Out.Error == ERROR_ACCESS_DENIED, "ByType object ACEs: ret %d err %lu\n", Out.Return,
+    CHECK(Out.Return && Out.Status[0] == FALSE && Out.Error == ERROR_ACCESS_DENIED, "ByType object ACEs: ret %d err %lu\n", Out.Return,
           Out.Error);
 
     /* A restricted token: the DACL allows Administrators only, the restricting SID is Everyone */
@@ -838,10 +838,10 @@ static void ByTypeRows(DWORD Flags)
     if (Sd)
     {
         CallByTypeAndAuditAlarm(Sd, Tokens[K_RESTRICTED], R1, Flags, NULL, 0, &Out);
-        CHECK(!Out.Return && Out.Error == ERROR_ACCESS_DENIED, "restricted token: ret %d err %lu\n", Out.Return,
+        CHECK(Out.Return && Out.Status[0] == FALSE && Out.Error == ERROR_ACCESS_DENIED, "restricted token: ret %d err %lu\n", Out.Return,
               Out.Error);
         CallByTypeAndAuditAlarm(Sd, Tokens[K_ADMINS_DENY_ONLY], R1, Flags, NULL, 0, &Out);
-        CHECK(!Out.Return && Out.Error == ERROR_ACCESS_DENIED, "deny-only Administrators: ret %d err %lu\n",
+        CHECK(Out.Return && Out.Status[0] == FALSE && Out.Error == ERROR_ACCESS_DENIED, "deny-only Administrators: ret %d err %lu\n",
               Out.Return, Out.Error);
         if (Flags == AUDIT_ALLOW_NO_PRIVILEGE)
         {
@@ -897,6 +897,7 @@ static void ByTypeRows(DWORD Flags)
         CHECK(!Return && GetLastError() == ERROR_INVALID_SECURITY_DESCR, "no owner: ret %d err %lu\n", Return,
               GetLastError());
         CHECK(Granted == SENTINEL && Status == SENTINEL, "no owner: outputs written\n");
+        CHECK(OnClose == FALSE, "no owner: on close %d (written FALSE on a failure, as on Windows)\n", OnClose);
 
         /* The ANSI forms */
         SetLastError(0xdeadbeef);
@@ -961,19 +962,29 @@ static void ByHandleTokenRows(DWORD Flags)
           Out.Error);
     CheckOutputsUntouched(__LINE__, "bad token handle", &Out, 3);
 
+    /* The token pseudo handles name no token here (Windows Server 2022: ERROR_INVALID_HANDLE) */
+    CallByHandle(Sd, Tokens[K_SELF], (HANDLE)(LONG_PTR)-4, R1, Flags, List, 3, &Out);
+    CHECK(!Out.Return && Out.Error == ERROR_INVALID_HANDLE, "process token pseudo handle: ret %d err %lu\n",
+          Out.Return, Out.Error);
+    CheckOutputsUntouched(__LINE__, "process token pseudo handle", &Out, 3);
+    CallByHandle(Sd, Tokens[K_SELF], (HANDLE)(LONG_PTR)-6, R1, Flags, List, 3, &Out);
+    CHECK(!Out.Return && Out.Error == ERROR_INVALID_HANDLE, "effective token pseudo handle: ret %d err %lu\n",
+          Out.Return, Out.Error);
+
     /*
-     * Not checked, only printed (the public documentation leaves them open; compare with Windows):
-     * the ByHandle form while the thread is not impersonating, with a primary token, and a result
-     * list of 0x1001 entries.
+     * As measured on Windows Server 2022: the ByHandle form works while the thread is not
+     * impersonating and with a primary token; a result list of 0x1001 entries is refused.
      */
     CallByHandle(Sd, NULL, Tokens[K_SELF], R1, Flags, List, 3, &Out);
-    Note("PROBE ByHandle not impersonating: ret %d err %lu [0x%lx 0x%lx]\n", Out.Return, Out.Error,
-         Out.Granted[0], Out.Status[0]);
+    CHECK(Out.Return && Out.Granted[0] == R1 && Out.Status[0] == ERROR_SUCCESS,
+          "ByHandle not impersonating: ret %d err %lu [0x%lx 0x%lx]\n", Out.Return, Out.Error,
+          Out.Granted[0], Out.Status[0]);
     if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &Process))
     {
         CallByHandle(Sd, Tokens[K_SELF], Process, R1, Flags, List, 3, &Out);
-        Note("PROBE ByHandle primary token: ret %d err %lu [0x%lx 0x%lx]\n", Out.Return, Out.Error,
-             Out.Granted[0], Out.Status[0]);
+        CHECK(Out.Return && Out.Granted[0] == R1 && Out.Status[0] == ERROR_SUCCESS,
+              "ByHandle primary token: ret %d err %lu [0x%lx 0x%lx]\n", Out.Return, Out.Error,
+              Out.Granted[0], Out.Status[0]);
         CloseHandle(Process);
     }
     {
@@ -999,7 +1010,8 @@ static void ByHandleTokenRows(DWORD Flags)
                                                                L"Object", Sd, NULL, R1, AuditEventObjectAccess, Flags,
                                                                Big, 0x1001, &Mapping, FALSE, Granted, Status,
                                                                &OnClose);
-            Note("PROBE ResultList of 0x1001 entries: ret %d err %lu\n", Return, GetLastError());
+            CHECK(!Return && GetLastError() == ERROR_INVALID_PARAMETER, "ResultList of 0x1001 entries: ret %d err %lu\n",
+                  Return, GetLastError());
             Revert();
         }
         HeapFree(GetProcessHeap(), 0, Big);
@@ -1008,7 +1020,11 @@ static void ByHandleTokenRows(DWORD Flags)
         HeapFree(GetProcessHeap(), 0, Status);
     }
 
-    /* An anonymous level token cannot identify the client */
+    /*
+     * An anonymous level token cannot identify the client. Windows Server 2022 evaluates such a token
+     * given by handle (the thread forms refuse it there too); NtAccessCheck refuses it on both systems,
+     * so this form refuses it as well rather than grant what the access check itself does not.
+     */
     if (OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE, &Process))
     {
         Anonymous = ImpersonationCopy(Process, SecurityAnonymous);
@@ -1099,7 +1115,7 @@ static void RunWithPrivilege(void)
 
     /* AccessCheckAndAuditAlarm: denied, granted, MAXIMUM_ALLOWED */
     CallAndAuditAlarm(Sd, Tokens[K_SELF], R2, &Out);
-    CHECK(!Out.Return && Out.Error == ERROR_ACCESS_DENIED && Out.Status[0] == FALSE && Out.Granted[0] == 0,
+    CHECK(Out.Return && Out.Error == ERROR_ACCESS_DENIED && Out.Status[0] == FALSE && Out.Granted[0] == 0,
           "AndAuditAlarm denied: ret %d err %lu status %lu granted 0x%lx\n", Out.Return, Out.Error, Out.Status[0],
           Out.Granted[0]);
     CallAndAuditAlarm(Sd, Tokens[K_SELF], R1, &Out);
@@ -1127,8 +1143,8 @@ static void RunWithPrivilege(void)
         Return = AccessCheckAndAuditAlarmA("AccessCheckAuditAlarm", NULL, "TestObject", NULL, Sd, R4, &Mapping, TRUE,
                                            &Granted, &Status, &OnClose);
         Revert();
-        CHECK(!Return && Status == FALSE && Granted == 0, "AndAuditAlarmA denied: ret %d status %d granted 0x%lx\n",
-              Return, Status, Granted);
+        CHECK(Return && Status == FALSE && Granted == 0 && OnClose == FALSE,
+              "AndAuditAlarmA denied: ret %d status %d granted 0x%lx on close %d\n", Return, Status, Granted, OnClose);
     }
 
     ByTypeRows(0);
