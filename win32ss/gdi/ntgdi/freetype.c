@@ -275,6 +275,24 @@ typedef struct _ADVANCE_CACHE_ENTRY
 } ADVANCE_CACHE_ENTRY;
 static ADVANCE_CACHE_ENTRY g_AdvanceCache[ADVANCE_CACHE_SLOTS];
 
+/* The glyph index of a character in a face. Looking it up asks FreeType's character map (a binary search of the
+ * segments of a format 4 table, after a walk over the face's charmaps for the symbol one), which was more than half
+ * of the time of measuring an 80 character string and a fifth to a third of drawing one. The results are kept here
+ * by face, active charmap and character (direct mapped; the FreeType lock protects it, the entries of a face are
+ * dropped with it in RemoveCacheEntries). 1024 entries of 24 bytes: the table is 24 KB of the module's data. A
+ * missing glyph (index 0) is a result too. */
+#define CHAR_INDEX_CACHE_SLOTS 1024
+typedef struct _CHAR_INDEX_ENTRY
+{
+    FT_Face Face;       /* NULL: empty */
+    FT_CharMap CharMap; /* the face's active charmap when the entry was made */
+    UINT Code;
+    FT_UInt Index;
+} CHAR_INDEX_ENTRY;
+static CHAR_INDEX_ENTRY g_CharIndexCache[CHAR_INDEX_CACHE_SLOTS];
+#define CHAR_INDEX_SLOT(Face, Code) \
+    (((Code) ^ ((Code) >> 10) ^ (UINT)((ULONG_PTR)(Face) >> 5)) % CHAR_INDEX_CACHE_SLOTS)
+
 static PWCHAR g_ElfScripts[32] =   /* These are in the order of the fsCsb[0] bits */
 {
     L"Western", /* 00 */
@@ -540,6 +558,12 @@ RemoveCacheEntries(FT_Face Face)
     {
         if (g_AdvanceCache[i].bValid && g_AdvanceCache[i].Hashed.Face == Face)
             g_AdvanceCache[i].bValid = FALSE;
+    }
+
+    for (i = 0; i < CHAR_INDEX_CACHE_SLOTS; i++)
+    {
+        if (g_CharIndexCache[i].Face == Face)
+            g_CharIndexCache[i].Face = NULL;
     }
 
     for (CurrentEntry = g_FontCacheListHead.Flink;
@@ -4758,6 +4782,30 @@ get_glyph_index_flagged(FT_Face face, FT_ULong code, BOOL fCodeAsIndex)
     return (fCodeAsIndex ? code : get_glyph_index(face, code));
 }
 
+/* get_glyph_index through g_CharIndexCache; the FreeType lock is held (the callers load glyphs or set sizes too) */
+static FT_UInt FASTCALL
+get_glyph_index_cached(FT_Face face, UINT code)
+{
+    CHAR_INDEX_ENTRY *pEntry = &g_CharIndexCache[CHAR_INDEX_SLOT(face, code)];
+
+    ASSERT_FREETYPE_LOCK_HELD();
+
+    if (pEntry->Face == face && pEntry->Code == code && pEntry->CharMap == face->charmap)
+        return pEntry->Index;
+
+    pEntry->Index = get_glyph_index(face, code);
+    pEntry->Face = face;
+    pEntry->CharMap = face->charmap;
+    pEntry->Code = code;
+    return pEntry->Index;
+}
+
+static inline FT_UInt FASTCALL
+get_glyph_index_flagged_cached(FT_Face face, UINT code, BOOL fCodeAsIndex)
+{
+    return (fCodeAsIndex ? code : get_glyph_index_cached(face, code));
+}
+
 static inline VOID
 FontLink_Chain_Dump(
     _In_ PFONTLINK_CHAIN pChain)
@@ -4816,7 +4864,7 @@ FontLink_Chain_FindGlyph(
     FT_Face face;
 
     // Try the default font at first
-    index = get_glyph_index_flagged(pChain->pDefFace, code, fCodeAsIndex);
+    index = get_glyph_index_flagged_cached(pChain->pDefFace, code, fCodeAsIndex);
     if (index)
     {
         DPRINT("code: 0x%08X, index: 0x%08X, fCodeAsIndex:%d\n", code, index, fCodeAsIndex);
@@ -4839,7 +4887,7 @@ FontLink_Chain_FindGlyph(
             continue; // This link is not useful, check the next one
 
         face = pFontLink->SharedFace->Face;
-        index = get_glyph_index(face, code);
+        index = get_glyph_index_cached(face, code);
         if (!index)
             continue; // The glyph does not exist, continue searching
 
@@ -4859,7 +4907,7 @@ FontLink_Chain_FindGlyph(
 
     // No target glyph found in the chain: use default glyph
     code = s_chFontLinkDefaultChar;
-    index = get_glyph_index(*pFace, code);
+    index = get_glyph_index_cached(*pFace, code);
     DPRINT("code: 0x%08X, index: 0x%08X\n", code, index);
     pCache->Hashed.Face = *pFace = pChain->pDefFace;
     return index;
