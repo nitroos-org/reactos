@@ -51,8 +51,31 @@ gajBitsPerFormat[11] =
     0, /* 10: BMF_PNG */
 };
 
-// From Yuan, ScanLineSize = (Width * bitcount + 31)/32
-#define WIDTH_BYTES_ALIGN32(cx, bpp) ((((cx) * (bpp) + 31) & ~31) >> 3)
+/*
+ * Size in bytes of cLines rows of cx pixels of cPlanes * cBitCount bits, each row DWORD aligned.
+ * The header fields are caller controlled: the arithmetic is done in 64 bits and a size that is
+ * negative or does not fit a LONG (the kernel refuses those images anyway) gives 0, never a
+ * wrapped, smaller size that would then be used to size a copy.
+ */
+static
+UINT
+DIB_ImageBytes(
+    LONG cx,
+    ULONG cPlanes,
+    ULONG cBitCount,
+    ULONGLONG cLines)
+{
+    ULONGLONG cjRow;
+
+    if (cx < 0)
+        return 0;
+
+    cjRow = (((ULONGLONG)cx * cPlanes * cBitCount + 31) & ~31ULL) >> 3;
+    if ((cLines != 0) && (cjRow > (ULONGLONG)MAXLONG / cLines))
+        return 0;
+
+    return (UINT)(cjRow * cLines);
+}
 
 /*
  *           DIB_BitmapInfoSize
@@ -128,16 +151,16 @@ DIB_BitmapMaxBitsSize(
     if (Info->bmiHeader.biSize == sizeof(BITMAPCOREHEADER))
     {
         PBITMAPCOREHEADER Core = (PBITMAPCOREHEADER) Info;
-        Ret = WIDTH_BYTES_ALIGN32(Core->bcWidth * Core->bcPlanes,
-                Core->bcBitCount) * ScanLines;
+        Ret = DIB_ImageBytes(Core->bcWidth, Core->bcPlanes, Core->bcBitCount, ScanLines);
     }
     else /* assume BITMAPINFOHEADER */
     {
         if ((Info->bmiHeader.biCompression == BI_RGB) || (Info->bmiHeader.biCompression == BI_BITFIELDS))
         {
-            Ret = WIDTH_BYTES_ALIGN32(
-                    Info->bmiHeader.biWidth * Info->bmiHeader.biPlanes,
-                    Info->bmiHeader.biBitCount) * ScanLines;
+            Ret = DIB_ImageBytes(Info->bmiHeader.biWidth,
+                                 Info->bmiHeader.biPlanes,
+                                 Info->bmiHeader.biBitCount,
+                                 ScanLines);
         }
         else
         {
@@ -229,17 +252,18 @@ GdiGetBitmapBitsSize(
     if (lpbmi->bmiHeader.biSize == sizeof(BITMAPCOREHEADER))
     {
         PBITMAPCOREHEADER Core = (PBITMAPCOREHEADER) lpbmi;
-        Ret =
-        WIDTH_BYTES_ALIGN32(Core->bcWidth * Core->bcPlanes,
-                Core->bcBitCount) * Core->bcHeight;
+        Ret = DIB_ImageBytes(Core->bcWidth, Core->bcPlanes, Core->bcBitCount, Core->bcHeight);
     }
     else /* assume BITMAPINFOHEADER */
     {
         if (!(lpbmi->bmiHeader.biCompression) || (lpbmi->bmiHeader.biCompression == BI_BITFIELDS))
         {
-            Ret = WIDTH_BYTES_ALIGN32(
-                    lpbmi->bmiHeader.biWidth * lpbmi->bmiHeader.biPlanes,
-                    lpbmi->bmiHeader.biBitCount) * abs(lpbmi->bmiHeader.biHeight);
+            /* abs(MINLONG) is negative: take the height in 64 bits */
+            LONGLONG cLines = lpbmi->bmiHeader.biHeight;
+            Ret = DIB_ImageBytes(lpbmi->bmiHeader.biWidth,
+                                 lpbmi->bmiHeader.biPlanes,
+                                 lpbmi->bmiHeader.biBitCount,
+                                 (ULONGLONG)((cLines < 0) ? -cLines : cLines));
         }
         else
         {
@@ -992,7 +1016,7 @@ SetDIBitsToDevice(
     /* Get bits per pixel from the format */
     cBitsPixel = gajBitsPerFormat[iFormat];
 
-    cjWidth = WIDTH_BYTES_ALIGN32(pConvertedInfo->bmiHeader.biWidth, cBitsPixel);
+    cjWidth = DIB_ImageBytes(pConvertedInfo->bmiHeader.biWidth, 1, cBitsPixel, 1);
 
     /* Calculate the correct bitmap size in bytes */
     if (!NT_SUCCESS(RtlULongMult(cjWidth, max(ScanLines, LinesCopied), &cjBits)))
