@@ -26,6 +26,7 @@ extern void func_desktop(void);
 extern void func_DesktopHeapNonInteractive(void);
 extern void func_DesktopOtherThreadApis(void);
 extern void func_ClipboardFormatListener(void);
+extern void func_ClipboardInteractiveRows(void);
 extern void func_ClipboardSetData(void);
 extern void func_ClipboardMedBatch(void);
 extern void func_ClipboardSynthBitmap(void);
@@ -193,6 +194,7 @@ const struct test winetest_testlist[] =
     { "DesktopHeapNonInteractive", func_DesktopHeapNonInteractive },
     { "DesktopOtherThreadApis", func_DesktopOtherThreadApis },
     { "ClipboardFormatListener", func_ClipboardFormatListener },
+    { "ClipboardInteractiveRows", func_ClipboardInteractiveRows },
     { "ClipboardSetData", func_ClipboardSetData },
     { "ClipboardMedBatch", func_ClipboardMedBatch },
     { "ClipboardSynthBitmap", func_ClipboardSynthBitmap },
