@@ -779,6 +779,19 @@ static BOOL DetectPathFor(const FM_FEATURE *f, LPWSTR out, DWORD cch)
     return FALSE;
 }
 
+/* A native entry that has both a DetectPath and the name of its Uninstall registration (RegName / UninstallName) is
+ * installed when its file is there AND the product is registered: an installer that was cut in the middle (a power
+ * cut inside the MSI) leaves the file without the registration, and Windows Installer's roll-back does not run again.
+ * An entry without a registration name is detected by its file alone. */
+static BOOL DetectFilePresent(const FM_FEATURE *f, LPCWSTR path)
+{
+    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES)
+        return FALSE;
+    if (f->Detect[0] && !_wcsicmp(f->Provider, L"native") && f->RegName[0])
+        return FmNativeIsInstalled(f->RegName, f->Name);
+    return TRUE;
+}
+
 static void ResolveState(FM_FEATURE *f)
 {
     WCHAR p[MAX_PATH];
@@ -793,7 +806,7 @@ static void ResolveState(FM_FEATURE *f)
     }
     else if (f->Tier != FM_TIER_SOFTWARE) return;
     else if (DetectPathFor(f, p, MAX_PATH))
-        present = GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
+        present = DetectFilePresent(f, p);
     else if (!_wcsicmp(f->Provider, L"native") && (f->RegName[0] || f->Name[0]))
         present = FmNativeIsInstalled(f->RegName, f->Name);       /* the Uninstall keys, as RAPPS saw it; installs done by hand count */
     else return;
@@ -3016,7 +3029,8 @@ static int DetectInstalledNow(const FM_FEATURE *f)
         FmNativeInvalidate();
         return FmNativeIsInstalled(f->RegName, f->Name) ? 1 : 0;
     }
-    return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES ? 1 : 0;
+    FmNativeInvalidate();   /* the registration may have appeared since the programs were read */
+    return DetectFilePresent(f, p) ? 1 : 0;
 }
 
 static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
