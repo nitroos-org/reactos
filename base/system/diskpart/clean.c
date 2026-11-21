@@ -30,6 +30,8 @@ clean_main(
     IO_STATUS_BLOCK IoStatusBlock;
     HANDLE FileHandle = NULL;
     LARGE_INTEGER Offset, Count, MaxCount;
+    GET_LENGTH_INFORMATION LengthInfo;
+    ULONGLONG ullDiskSize;
     NTSTATUS Status;
 
     DPRINT("Clean()\n");
@@ -153,10 +155,20 @@ clean_main(
         goto done;
     }
 
+    /*
+     * The size of the disk: the number of sectors that the geometry gives (cylinders * heads * sectors) is
+     * smaller than the disk, and the backup GPT sits in its real last sector.
+     */
+    ullDiskSize = CurrentDisk->SectorCount.QuadPart * CurrentDisk->BytesPerSector;
+    Status = NtDeviceIoControlFile(FileHandle, NULL, NULL, NULL, &IoStatusBlock, IOCTL_DISK_GET_LENGTH_INFO,
+                                   NULL, 0, &LengthInfo, sizeof(LengthInfo));
+    if (NT_SUCCESS(Status) && (ULONGLONG)LengthInfo.Length.QuadPart > ullDiskSize)
+        ullDiskSize = (ULONGLONG)LengthInfo.Length.QuadPart;
+
     /* Clean sectors */
     if (bAll)
     {
-        MaxCount.QuadPart = (CurrentDisk->SectorCount.QuadPart * CurrentDisk->BytesPerSector) / (1024 * 1024);
+        MaxCount.QuadPart = ullDiskSize / (1024 * 1024);
         for (Count.QuadPart = 0; Count.QuadPart < MaxCount.QuadPart; Count.QuadPart++)
         {
             Offset.QuadPart = Count.QuadPart * (1024 * 1024);
@@ -177,7 +189,7 @@ clean_main(
             }
         }
 
-        Size = (ULONG)(CurrentDisk->SectorCount.QuadPart * CurrentDisk->BytesPerSector) % (1024 * 1024);
+        Size = (ULONG)(ullDiskSize % (1024 * 1024));
         if (Size != 0)
         {
             Offset.QuadPart += (1024 * 1024);
@@ -219,7 +231,7 @@ clean_main(
         }
 
         /* Clean the last MB */
-        Offset.QuadPart = (CurrentDisk->SectorCount.QuadPart * CurrentDisk->BytesPerSector) - (1024 * 1024);
+        Offset.QuadPart = ullDiskSize - (1024 * 1024);
         Status = NtWriteFile(FileHandle,
                              NULL,
                              NULL,
