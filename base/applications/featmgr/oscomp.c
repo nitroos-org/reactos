@@ -331,7 +331,54 @@ typedef struct _MAPENTRY
     WCHAR *name;    /* name in the cabinet */
     WCHAR *rel;     /* destination relative to the Windows directory */
     BOOL used;
+    int cab;        /* which cabinet of txtsetup.sif [Cabinets] */
+    int ordinal;    /* how many members of that cabinet with the same name come before it (names are not unique: bin\testdata) */
 } MAPENTRY;
+
+/* How often each name has been seen in a cabinet (or its file list): the cabinet and its inf list the files in the same order */
+typedef struct _NAMECOUNTS
+{
+    WCHAR **name;
+    int *count;
+    int n, cap;
+} NAMECOUNTS;
+
+/* the number of earlier members called name; counts this one */
+static int CountName(NAMECOUNTS *t, LPCWSTR name)
+{
+    int i;
+
+    for (i = 0; i < t->n; i++)
+        if (!_wcsicmp(t->name[i], name)) return t->count[i]++;
+    if (t->n == t->cap)
+    {
+        int nc = t->cap ? t->cap * 2 : 512;
+        WCHAR **nn = t->name ? HeapReAlloc(GetProcessHeap(), 0, t->name, nc * sizeof(WCHAR *)) : HeapAlloc(GetProcessHeap(), 0, nc * sizeof(WCHAR *));
+        int *ncn;
+
+        if (!nn) return 0;
+        t->name = nn;
+        ncn = t->count ? HeapReAlloc(GetProcessHeap(), 0, t->count, nc * sizeof(int)) : HeapAlloc(GetProcessHeap(), 0, nc * sizeof(int));
+        if (!ncn) return 0;
+        t->count = ncn;
+        t->cap = nc;
+    }
+    t->name[t->n] = StrDupW(name);
+    if (!t->name[t->n]) return 0;
+    t->count[t->n] = 1;
+    t->n++;
+    return 0;
+}
+
+static void FreeNames(NAMECOUNTS *t)
+{
+    int i;
+
+    for (i = 0; i < t->n; i++) LocalFree(t->name[i]);
+    if (t->name) HeapFree(GetProcessHeap(), 0, t->name);
+    if (t->count) HeapFree(GetProcessHeap(), 0, t->count);
+    ZeroMemory(t, sizeof(*t));
+}
 
 typedef struct _FILEMAP
 {
@@ -341,7 +388,7 @@ typedef struct _FILEMAP
     PATLIST installed;      /* full paths that were added, for the Start menu entries */
 } FILEMAP;
 
-static void MapAdd(FILEMAP *m, LPCWSTR name, LPCWSTR rel)
+static void MapAdd(FILEMAP *m, LPCWSTR name, LPCWSTR rel, int cab, int ordinal)
 {
     if (m->n == m->cap)
     {
@@ -353,6 +400,8 @@ static void MapAdd(FILEMAP *m, LPCWSTR name, LPCWSTR rel)
     m->e[m->n].name = StrDupW(name);
     m->e[m->n].rel = StrDupW(rel);
     m->e[m->n].used = FALSE;
+    m->e[m->n].cab = cab;
+    m->e[m->n].ordinal = ordinal;
     if (m->e[m->n].name && m->e[m->n].rel) m->n++;
 }
 
@@ -372,6 +421,7 @@ static BOOL BuildMap(LPCWSTR medium, const PATLIST *mine, const PATLIST *others,
     HINF txt, inf;
     INFCONTEXT c, fc, dc;
     UINT err;
+    int cabIndex = 0;
 
     StringCchPrintfW(path, ARRAYSIZE(path), L"%s\\txtsetup.sif", medium);
     txt = SetupOpenInfFileW(path, NULL, INF_STYLE_WIN4, &err);
@@ -386,8 +436,11 @@ static BOOL BuildMap(LPCWSTR medium, const PATLIST *mine, const PATLIST *others,
     {
         WCHAR dirId[32], dirv[MAX_PATH], src[MAX_PATH], tgt[MAX_PATH], rel[MAX_PATH], sizeText[32];
         LPCWSTR d;
+        NAMECOUNTS seen = {0};
+        int ord, cabNo;
 
         if (!SetupGetStringFieldW(&c, 1, cab, ARRAYSIZE(cab), NULL)) continue;
+        cabNo = cabIndex++;
         StringCchPrintfW(path, ARRAYSIZE(path), L"%s\\%s", medium, cab);
         dot = wcsrchr(path, L'.');
         if (dot) *dot = L'\0';
@@ -409,6 +462,7 @@ static BOOL BuildMap(LPCWSTR medium, const PATLIST *mine, const PATLIST *others,
             {
                 if (!SetupGetStringFieldW(&fc, 0, src, ARRAYSIZE(src), NULL) ||
                     !SetupGetStringFieldW(&fc, 1, dirId, ARRAYSIZE(dirId), NULL)) continue;
+                ord = CountName(&seen, src);      /* every file of the cabinet, selected or not */
                 if (!SetupGetStringFieldW(&fc, 2, tgt, ARRAYSIZE(tgt), NULL)) tgt[0] = L'\0';
                 if (!SetupFindFirstLineW(inf, L"Directories", dirId, &dc) || !SetupGetStringFieldW(&dc, 1, dirv, ARRAYSIZE(dirv), NULL))
                     continue;
@@ -423,11 +477,12 @@ static BOOL BuildMap(LPCWSTR medium, const PATLIST *mine, const PATLIST *others,
                     LOGF(log, L"warn: ignored, its destination leaves the system folder: %s\n", rel);
                     continue;
                 }
-                MapAdd(m, src, rel);
+                MapAdd(m, src, rel, cabNo, ord);
                 if (SetupGetStringFieldW(&fc, 3, sizeText, ARRAYSIZE(sizeText), NULL))
                     m->bytes += _wcstoui64(sizeText, NULL, 10);
             } while (SetupFindNextLine(&fc, &fc));
         }
+        FreeNames(&seen);
         SetupCloseInfFile(inf);
     } while (SetupFindNextLine(&c, &c));
     SetupCloseInfFile(txt);
@@ -443,6 +498,8 @@ typedef struct _EXTRACT
     int total;
     DWORD error;
     ULONGLONG doneBytes;
+    NAMECOUNTS seen;    /* members of the cabinet being read, by name */
+    int cab;
 } EXTRACT;
 
 static UINT CALLBACK CabCallback(PVOID ctx, UINT notif, UINT_PTR p1, UINT_PTR p2)
@@ -455,13 +512,13 @@ static UINT CALLBACK CabCallback(PVOID ctx, UINT notif, UINT_PTR p1, UINT_PTR p2
         case SPFILENOTIFY_FILEINCABINET:
         {
             FILE_IN_CABINET_INFO_W *fi = (FILE_IN_CABINET_INFO_W *)p1;
-            int i;
+            int i, ord = CountName(&x->seen, fi->NameInCabinet);     /* the 2nd member called x.dll is the 2nd line called x.dll */
             for (i = 0; i < x->map->n; i++)
             {
                 MAPENTRY *e = &x->map->e[i];
                 WCHAR dir[MAX_PATH];
 
-                if (e->used || _wcsicmp(e->name, fi->NameInCabinet)) continue;
+                if (e->used || e->cab != x->cab || e->ordinal != ord || _wcsicmp(e->name, fi->NameInCabinet)) continue;
                 e->used = TRUE;
                 StringCchPrintfW(fi->FullTargetName, MAX_PATH, L"%s\\%s", x->windir, e->rel);
                 StringCchCopyW(dir, ARRAYSIZE(dir), fi->FullTargetName);
@@ -770,6 +827,27 @@ static int AddShortcuts(const FILEMAP *m, FILE *log)
     return made;
 }
 
+/* The Vulkan loader finds the software driver through the value names of HKLM\SOFTWARE\Khronos\Vulkan\Drivers (data 0 =
+ * enabled). Setup's second stage writes the value when lvp_icd.json is there; a component added later has to do the same,
+ * or the driver is on the disk and no Vulkan program finds it. */
+static void RegisterVulkanIcd(const FILEMAP *m, FILE *log)
+{
+    WCHAR win[MAX_PATH], path[MAX_PATH];
+    HKEY hk;
+    DWORD zero = 0;
+    int i;
+
+    if (!GetWindowsDirectoryW(win, ARRAYSIZE(win))) return;
+    StringCchPrintfW(path, ARRAYSIZE(path), L"%s\\system32\\lvp_icd.json", win);
+    for (i = 0; i < m->installed.n; i++)
+        if (!_wcsicmp(m->installed.p[i], path)) break;
+    if (i == m->installed.n) return;
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Khronos\\Vulkan\\Drivers", 0, NULL, 0, KEY_SET_VALUE, NULL, &hk, NULL) != ERROR_SUCCESS) return;
+    if (RegSetValueExW(hk, path, 0, REG_DWORD, (const BYTE *)&zero, sizeof(zero)) == ERROR_SUCCESS)
+        LOGF(log, L"  Vulkan driver registered: %s\n", path);
+    RegCloseKey(hk);
+}
+
 /* ---- record update ------------------------------------------------------- */
 
 static void SetInstalled(LPCWSTR id, DWORD v)
@@ -1017,11 +1095,15 @@ HRESULT FmOsCompEnable(LPCWSTR id, FILE *log)
     if (txt == INVALID_HANDLE_VALUE) { hr = E_FAIL; goto done; }
     if (SetupFindFirstLineW(txt, L"Cabinets", NULL, &c))
     {
+        int cabNo = 0;
+
         do
         {
             if (!SetupGetStringFieldW(&c, 1, cab, ARRAYSIZE(cab), NULL)) continue;
             StringCchPrintfW(path, ARRAYSIZE(path), L"%s\\%s", medium, cab);
             FmOpStep(L"Copying files from %s", cab);
+            FreeNames(&x.seen);
+            x.cab = cabNo++;
             if (!SetupIterateCabinetW(path, 0, CabCallback, &x))
             {
                 LOGF(log, L"error: cannot read the cabinet %s (%lu)\n", path, GetLastError());
@@ -1029,6 +1111,7 @@ HRESULT FmOsCompEnable(LPCWSTR id, FILE *log)
             }
         } while (SetupFindNextLine(&c, &c));
     }
+    FreeNames(&x.seen);
     SetupCloseInfFile(txt);
     LOGF(log, L"copied %d of %d files\n", x.done, map.n);
     if (x.error || x.done < map.n)
@@ -1042,6 +1125,7 @@ HRESULT FmOsCompEnable(LPCWSTR id, FILE *log)
     regLines = AddRegistryLines(medium, &myReg, &otherReg, log);
     LOGF(log, L"%d registry lines added\n", regLines);
     links = AddShortcuts(&map, log);
+    RegisterVulkanIcd(&map, log);
     LOGF(log, L"%d Start menu entries made\n", links);
 
     for (i = 0; i < n; i++)
