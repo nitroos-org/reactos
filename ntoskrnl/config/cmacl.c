@@ -2026,12 +2026,15 @@ CmpAclRecordDenial(
 #define CMP_ACL_TRANSITION_WALKED   1   /* the machine hives were checked and the marker written */
 #define CMP_ACL_TRANSITION_TRUSTED  2   /* the marker says enforcement ran since the last check */
 #define CMP_ACL_TRANSITION_SETUP    3   /* setup runs: checked after it */
-#define CMP_ACL_TRANSITION_NOMARKER 4   /* checked, but the marker could not be written (checked again next boot) */
+#define CMP_ACL_TRANSITION_NOMARKER 4   /* checked, but not written: a replacement or the walk failed, the
+                                           hives could not be flushed, or the marker could not be written
+                                           (checked again next boot) */
 
 static LONG CmpAclRestamped;
 static LONG CmpAclRestampUserOwned;
 static LONG CmpAclRestampFailed;
 static LONG CmpAclRestampPrinted;
+static LONG CmpAclWalkIncomplete;    /* keys or subtrees the walk could not look at */
 static ULONG CmpAclTransitionState;
 static ULONG CmpAclTransitionMs;     /* how long the check took (boot time it cost) */
 
@@ -2389,13 +2392,32 @@ CmpAclCheckStoredKey(
         /* The handle was opened with OBJ_OPENLINK: it is the link key itself */
         Status = ZwDeleteKey(Key);
         if (NT_SUCCESS(Status))
-            Reasons |= CMP_ACL_LINK_DELETED;
-        if (Name)
         {
-            CmpAclRecordRestamp(Name, Reasons & ~CMP_ACL_LINK_DELETED, Owner, Status);
-            CmpFree(Name, 0);
+            Reasons |= CMP_ACL_LINK_DELETED;
+            if (Name)
+            {
+                CmpAclRecordRestamp(Name, Reasons & ~CMP_ACL_LINK_DELETED, Owner, Status);
+                CmpFree(Name, 0);
+            }
+            return Reasons;
         }
-        return Reasons;
+        /*
+         * Not deleted: the failure is counted (the marker is not written, the
+         * next boot tries again), and the link at least gets the descriptor a
+         * key there gets, so that its owner can no longer change its target.
+         */
+        if (Name)
+            CmpAclRecordRestamp(Name, Reasons, Owner, Status);
+        Reasons &= ~CMP_ACL_PLANTED_LINK;
+        if (NT_SUCCESS(ObReferenceObjectByHandle(Key, 0, CmpKeyObjectType, KernelMode, (PVOID *)&KeyBody, NULL)))
+        {
+            CmpLockRegistry();
+            Kcb = KeyBody->KeyControlBlock;
+            if (Kcb && !Kcb->Delete)
+                NewSd = CmpAclDefaultKeySd(Kcb);
+            CmpUnlockRegistry();
+            ObDereferenceObject(KeyBody);
+        }
     }
 
     Status = STATUS_INSUFFICIENT_RESOURCES;
@@ -2451,6 +2473,7 @@ CmpAclWalk(
     if (!Stack)
     {
         InterlockedIncrement(&CmpAclErrors);
+        InterlockedIncrement(&CmpAclWalkIncomplete);
         return;
     }
 
@@ -2459,6 +2482,9 @@ CmpAclWalk(
     Status = ZwOpenKey(&Stack[0].Key, CMP_ACL_RESET_ACCESS, &Attributes);
     if (!NT_SUCCESS(Status))
     {
+        /* A listed key that does not exist (Wow6432Node on a 32-bit system) has nothing to check */
+        if (Status != STATUS_OBJECT_NAME_NOT_FOUND && Status != STATUS_OBJECT_PATH_NOT_FOUND)
+            InterlockedIncrement(&CmpAclWalkIncomplete);
         ExFreePoolWithTag(Stack, TAG_CM_ACL);
         return;
     }
@@ -2477,7 +2503,13 @@ CmpAclWalk(
                                 Info, sizeof(InfoBuffer) - sizeof(WCHAR), &Length);
         if (!NT_SUCCESS(Status))
         {
-            /* Done with this key (or its subkey's name does not fit, which no name does) */
+            /*
+             * Done with this key. Anything but the end of its subkeys (no name is
+             * longer than the buffer: the parse refuses components over 512 bytes)
+             * leaves the rest unchecked: counted, so that the marker is not written.
+             */
+            if (Status != STATUS_NO_MORE_ENTRIES)
+                InterlockedIncrement(&CmpAclWalkIncomplete);
             ZwClose(Stack[Depth].Key);
             if (Depth == 0)
                 break;
@@ -2492,7 +2524,12 @@ CmpAclWalk(
                                    Stack[Depth].Key, NULL);
         Status = ZwOpenKey(&Child, CMP_ACL_RESET_ACCESS, &Attributes);
         if (!NT_SUCCESS(Status))
+        {
+            /* Gone meanwhile (a kernel-mode writer at boot) is fine; anything else leaves the subtree unchecked */
+            if (Status != STATUS_OBJECT_NAME_NOT_FOUND)
+                InterlockedIncrement(&CmpAclWalkIncomplete);
             continue;
+        }
         if (CmpAclCheckStoredKey(Child, FALSE, OwnerOnly) & CMP_ACL_LINK_DELETED)
         {
             /* A deleted link: the next subkey now has its index */
@@ -2870,6 +2907,31 @@ CmpAclMarkerWrite(VOID)
 }
 
 /*
+ * Write every hive with changes to its file now (all of them: the flush of a
+ * key of the master hive flushes the hive list), and wait for it. Fails if a
+ * hive could not be written, or if hive writes are off for this boot.
+ */
+static
+NTSTATUS
+CmpAclFlushHives(VOID)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Registry\\Machine");
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE Key;
+    NTSTATUS Status;
+
+    if (CmpNoWrite)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = ZwOpenKey(&Key, KEY_READ, &Attributes);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Status = ZwFlushKey(Key);
+    ZwClose(Key);
+    return Status;
+}
+
+/*
  * The transition to enforcement: the first boot that enforces after boots
  * that did not (or after the marker went missing) checks the stored
  * descriptors of the machine hives' security-relevant keys and replaces the
@@ -3028,15 +3090,37 @@ CmpAclBootHivesLoaded(
     {
         LARGE_INTEGER Start, End;
 
+        NTSTATUS FlushStatus;
+
         KeQuerySystemTime(&Start);
         CmpAclTransition();
         KeQuerySystemTime(&End);
         CmpAclTransitionMs = (ULONG)((End.QuadPart - Start.QuadPart) / 10000);
-        CmpAclTransitionState = CmpAclMarkerWrite() ? CMP_ACL_TRANSITION_WALKED : CMP_ACL_TRANSITION_NOMARKER;
+
+        /*
+         * The marker says the work is done, so it is written only when it is:
+         * every replacement succeeded, the walk saw every key, and the hives
+         * that hold the new descriptors are on disk. The marker is written
+         * through at once while the hives would otherwise be written by the
+         * lazy flusher seconds later: a power cut in between left the marker
+         * and the planted descriptors (the next boot trusted the marker and
+         * did not check again).
+         */
+        FlushStatus = CmpAclFlushHives();
+        if (CmpAclRestampFailed == 0 && CmpAclWalkIncomplete == 0 && NT_SUCCESS(FlushStatus) &&
+            CmpAclMarkerWrite())
+        {
+            CmpAclTransitionState = CMP_ACL_TRANSITION_WALKED;
+        }
+        else
+        {
+            CmpAclTransitionState = CMP_ACL_TRANSITION_NOMARKER;
+        }
         DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL,
                    "CM-ACL: transition check: %ld stored descriptors replaced (%ld owned by non-administrators), "
-                   "%ld failed, marker %s\n",
-                   CmpAclRestamped, CmpAclRestampUserOwned, CmpAclRestampFailed,
+                   "%ld failed, %ld not checked, flush 0x%lx, marker %s\n",
+                   CmpAclRestamped, CmpAclRestampUserOwned, CmpAclRestampFailed, CmpAclWalkIncomplete,
+                   FlushStatus,
                    CmpAclTransitionState == CMP_ACL_TRANSITION_WALKED ? "written" : "NOT written");
     }
     CmpAclPublish();
@@ -3320,6 +3404,7 @@ CmpAclPublish(VOID)
     CmpAclSetDword(Key, L"Restamped", (ULONG)CmpAclRestamped);
     CmpAclSetDword(Key, L"RestampUserOwned", (ULONG)CmpAclRestampUserOwned);
     CmpAclSetDword(Key, L"RestampFailed", (ULONG)CmpAclRestampFailed);
+    CmpAclSetDword(Key, L"TransitionIncomplete", (ULONG)CmpAclWalkIncomplete);
     CmpAclSetDword(Key, L"Checks", (ULONG)CmpAclChecks);
     CmpAclSetDword(Key, L"Denials", (ULONG)CmpAclDenials);
     CmpAclSetDword(Key, L"Entries", (ULONG)CmpAclEntryCount);
