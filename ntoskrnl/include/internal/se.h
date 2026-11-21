@@ -958,6 +958,33 @@ SepReleaseSecurityQualityOfService(
     _In_ BOOLEAN CaptureIfKernel);
 
 //
+// Access check functions
+//
+VOID
+SepSetAccessCheckResults(
+    _Out_writes_(UseResultList ? ObjectTypeListLength : 1) PACCESS_MASK GrantedAccessList,
+    _Out_writes_(UseResultList ? ObjectTypeListLength : 1) PNTSTATUS AccessStatusList,
+    _In_ BOOLEAN UseResultList,
+    _In_ ULONG ObjectTypeListLength,
+    _In_ ACCESS_MASK GrantedAccess,
+    _In_ NTSTATUS AccessStatus);
+
+VOID
+SepAccessCheckCaptured(
+    _In_ PSECURITY_DESCRIPTOR CapturedSecurityDescriptor,
+    _In_ PTOKEN Token,
+    _In_ PACCESS_TOKEN PrimaryToken,
+    _In_opt_ PSID CapturedPrincipalSelfSid,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ ACCESS_MASK PreviouslyGrantedAccess,
+    _In_reads_opt_(ObjectTypeListLength) POBJECT_TYPE_LIST_INTERNAL CapturedObjectTypeList,
+    _In_ ULONG ObjectTypeListLength,
+    _In_ PGENERIC_MAPPING CapturedGenericMapping,
+    _In_ BOOLEAN UseResultList,
+    _Out_writes_(UseResultList ? ObjectTypeListLength : 1) PACCESS_MASK GrantedAccessList,
+    _Out_writes_(UseResultList ? ObjectTypeListLength : 1) PNTSTATUS AccessStatusList);
+
+//
 // Object type list functions
 //
 PGUID

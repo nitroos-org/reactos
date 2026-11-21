@@ -412,10 +412,11 @@ SePrivilegedServiceAuditAlarm(
 }
 
 /**
- * @unimplemented
  * @brief
- * Worker function that serves as the main heart and brain of the whole
- * concept and implementation of auditing in the kernel.
+ * Worker of the access check and audit alarm services: runs the access
+ * check of NtAccessCheck* on captured input. All parameters are kernel
+ * copies made by SepAccessCheckAndAuditAlarm; the output buffers are
+ * kernel buffers. No audit record is generated (see the end).
  *
  * @param[in] SubsystemName
  * A Unicode string that represents the name of a subsystem that
@@ -426,7 +427,12 @@ SePrivilegedServiceAuditAlarm(
  * is to be done.
  *
  * @param[in] SubjectContext
- * Security subject context.
+ * The captured security subject context of the caller (its primary
+ * token is the fallback token of the access check worker).
+ *
+ * @param[in] ClientToken
+ * The token of the client whose access is checked: the impersonation
+ * token of the thread, or the token given by handle.
  *
  * @param[in] ObjectTypeName
  * A Unicode string that represents the name of an object type.
@@ -490,6 +496,7 @@ SepAccessCheckAndAuditAlarmWorker(
     _In_ PUNICODE_STRING SubsystemName,
     _In_opt_ PVOID HandleId,
     _In_ PSECURITY_SUBJECT_CONTEXT SubjectContext,
+    _In_ PTOKEN ClientToken,
     _In_ PUNICODE_STRING ObjectTypeName,
     _In_ PUNICODE_STRING ObjectName,
     _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
@@ -500,26 +507,76 @@ SepAccessCheckAndAuditAlarmWorker(
     _In_reads_opt_(ObjectTypeListLength) POBJECT_TYPE_LIST_INTERNAL ObjectTypeList,
     _In_ ULONG ObjectTypeListLength,
     _In_ PGENERIC_MAPPING GenericMapping,
-    _Out_writes_(ObjectTypeListLength) PACCESS_MASK GrantedAccessList,
-    _Out_writes_(ObjectTypeListLength) PNTSTATUS AccessStatusList,
+    _Out_writes_(UseResultList ? ObjectTypeListLength : 1) PACCESS_MASK GrantedAccessList,
+    _Out_writes_(UseResultList ? ObjectTypeListLength : 1) PNTSTATUS AccessStatusList,
     _Out_ PBOOLEAN GenerateOnClose,
     _In_ BOOLEAN UseResultList)
 {
-    ULONG ResultListLength, i;
+    ACCESS_MASK PreviouslyGrantedAccess = 0;
+    PPRIVILEGE_SET Privileges = NULL;
+    NTSTATUS Status;
 
-    /* Get the length of the result list */
-    ResultListLength = UseResultList ? ObjectTypeListLength : 1;
+    PAGED_CODE();
 
-    /// FIXME: we should do some real work here...
-    UNIMPLEMENTED;
+    UNREFERENCED_PARAMETER(SubsystemName);
+    UNREFERENCED_PARAMETER(HandleId);
+    UNREFERENCED_PARAMETER(ObjectTypeName);
+    UNREFERENCED_PARAMETER(ObjectName);
+    UNREFERENCED_PARAMETER(AuditType);
+    UNREFERENCED_PARAMETER(HaveAuditPrivilege);
 
-    /// HACK: we just pretend all access is granted!
-    for (i = 0; i < ResultListLength; i++)
+    /*
+     * The access check is the one of NtAccessCheck, NtAccessCheckByType and
+     * NtAccessCheckByTypeResultList, in the same order: first the rights that
+     * come from privileges (ACCESS_SYSTEM_SECURITY needs SeSecurityPrivilege
+     * of the client, WRITE_OWNER can come from SeTakeOwnershipPrivilege),
+     * then the shared evaluation of the descriptor (implicit owner rights,
+     * OWNER RIGHTS, the DACL, object ACEs with the type list, restricting
+     * SIDs, MAXIMUM_ALLOWED). The client token is the impersonation token of
+     * the thread or the token given by handle, never the token of the caller.
+     */
+    Status = SePrivilegePolicyCheck(&DesiredAccess,
+                                    &PreviouslyGrantedAccess,
+                                    NULL,
+                                    ClientToken,
+                                    &Privileges,
+                                    UserMode);
+    if (!NT_SUCCESS(Status))
     {
-        GrantedAccessList[i] = DesiredAccess;
-        AccessStatusList[i] = STATUS_SUCCESS;
+        /* As NtAccessCheck: the call succeeds and the result is the failure */
+        SepSetAccessCheckResults(GrantedAccessList,
+                                 AccessStatusList,
+                                 UseResultList,
+                                 ObjectTypeListLength,
+                                 0,
+                                 Status);
+    }
+    else
+    {
+        /* The audit forms return no privilege set */
+        if (Privileges != NULL)
+            SeFreePrivileges(Privileges);
+
+        SepAccessCheckCaptured(SecurityDescriptor,
+                               ClientToken,
+                               SubjectContext->PrimaryToken,
+                               PrincipalSelfSid,
+                               DesiredAccess,
+                               PreviouslyGrantedAccess,
+                               ObjectTypeList,
+                               ObjectTypeListLength,
+                               GenericMapping,
+                               UseResultList,
+                               GrantedAccessList,
+                               AccessStatusList);
     }
 
+    /*
+     * No audit record is written: the kernel has no security event log
+     * (SeOpenObjectAuditAlarm and friends are stubs as well). Without an
+     * audit there is nothing to report when the handle is closed, so
+     * GenerateOnClose is always FALSE, also with SeAuditPrivilege.
+     */
     *GenerateOnClose = FALSE;
 
     return STATUS_SUCCESS;
@@ -633,7 +690,7 @@ SepAccessCheckAndAuditAlarm(
     SECURITY_SUBJECT_CONTEXT SubjectContext;
     ULONG ResultListLength;
     GENERIC_MAPPING LocalGenericMapping;
-    PTOKEN SubjectContextToken, ClientToken;
+    PTOKEN ClientToken;
     BOOLEAN AllocatedResultLists;
     BOOLEAN HaveAuditPrivilege;
     PSECURITY_DESCRIPTOR CapturedSecurityDescriptor;
@@ -647,8 +704,16 @@ SepAccessCheckAndAuditAlarm(
     NTSTATUS Status;
     PAGED_CODE();
 
-    /* Only user mode is supported! */
-    ASSERT(ExGetPreviousMode() != KernelMode);
+    /*
+     * Only user mode is supported: every argument is captured from user
+     * memory. A kernel-mode caller (Zw*) is refused instead of having its
+     * kernel buffers probed as user buffers.
+     */
+    if (ExGetPreviousMode() == KernelMode)
+    {
+        DPRINT1("Access check and audit alarm from kernel mode is not supported\n");
+        return STATUS_NOT_IMPLEMENTED;
+    }
 
     /* Start clean */
     AllocatedResultLists = FALSE;
@@ -659,26 +724,33 @@ SepAccessCheckAndAuditAlarm(
     CapturedObjectName.Buffer = NULL;
     CapturedPrincipalSelfSid = NULL;
     CapturedObjectTypeList = NULL;
+    SafeGrantedAccessList = &GrantedAccess;
+    SafeAccessStatusList = &AccessStatus;
 
     /* Validate AuditType */
     if ((AuditType != AuditEventObjectAccess) &&
         (AuditType != AuditEventDirectoryServiceAccess))
     {
-        DPRINT1("Invalid audit type: %u\n", AuditType);
+        DPRINT("Invalid audit type: %u\n", AuditType);
         return STATUS_INVALID_PARAMETER;
     }
 
     /* Capture the security subject context */
     SeCaptureSubjectContext(&SubjectContext);
 
-    /* Did the caller pass a token handle? */
+    /*
+     * Without a token handle the client is the impersonation token of the
+     * thread: "AccessCheckAndAuditAlarm fails if the calling thread is not
+     * impersonating a client" (Microsoft Learn, AccessCheckAndAuditAlarmW,
+     * Remarks). Its level must allow identification, as for NtAccessCheck.
+     */
     if (ClientTokenHandle == NULL)
     {
         /* Check if we have a token in the subject context */
         if (SubjectContext.ClientToken == NULL)
         {
             Status = STATUS_NO_IMPERSONATION_TOKEN;
-            DPRINT1("No token\n");
+            DPRINT("No token\n");
             goto Cleanup;
         }
 
@@ -686,10 +758,14 @@ SepAccessCheckAndAuditAlarm(
         if (SubjectContext.ImpersonationLevel < SecurityIdentification)
         {
             Status = STATUS_BAD_IMPERSONATION_LEVEL;
-            DPRINT1("Invalid impersonation level 0x%lx\n",
-                    SubjectContext.ImpersonationLevel);
+            DPRINT("Invalid impersonation level 0x%lx\n",
+                   SubjectContext.ImpersonationLevel);
             goto Cleanup;
         }
+
+        /* Keep a reference of our own, released like the one of a token handle */
+        ClientToken = (PTOKEN)SubjectContext.ClientToken;
+        ObReferenceObject(ClientToken);
     }
 
     /* Are we using a result list? */
@@ -700,7 +776,7 @@ SepAccessCheckAndAuditAlarm(
         if ((ResultListLength == 0) || (ResultListLength > 0x1000))
         {
             Status = STATUS_INVALID_PARAMETER;
-            DPRINT1("Invalid ResultListLength: 0x%lx\n", ResultListLength);
+            DPRINT("Invalid ResultListLength: 0x%lx\n", ResultListLength);
             goto Cleanup;
         }
 
@@ -736,44 +812,69 @@ SepAccessCheckAndAuditAlarm(
                       ResultListLength * sizeof(*GrantedAccessList),
                       sizeof(*GrantedAccessList));
 
+        /* The flag is written back too: it must be user memory */
+        ProbeForWriteBoolean(GenerateOnClose);
+
         /* Probe generic mapping and make a local copy */
         ProbeForRead(GenericMapping, sizeof(*GenericMapping), sizeof(ULONG));
-        LocalGenericMapping = * GenericMapping;
+        LocalGenericMapping = *GenericMapping;
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
         Status = _SEH2_GetExceptionCode();
-        DPRINT1("Exception while probing parameters: 0x%lx\n", Status);
+        DPRINT("Exception while probing parameters: 0x%lx\n", Status);
         _SEH2_YIELD(goto Cleanup);
     }
     _SEH2_END;
 
-    /* Do we have a client token? */
+    /*
+     * With a token handle (the ByHandle form; the handle value was copied by
+     * the system service) the client is that token, which needs TOKEN_QUERY
+     * (Microsoft Learn, AccessCheckByTypeResultListAndAuditAlarmByHandleW,
+     * ClientToken). It is referenced as NtAccessCheck references its token,
+     * the token pseudo handles included. An impersonation token must allow
+     * identification, as for NtAccessCheck; a primary token is checked as it
+     * is (as before this change).
+     */
     if (ClientTokenHandle != NULL)
     {
-        /* Reference the client token */
-        Status = ObReferenceObjectByHandle(*ClientTokenHandle,
-                                           TOKEN_QUERY,
-                                           SeTokenObjectType,
-                                           UserMode,
-                                           (PVOID*)&ClientToken,
-                                           NULL);
+        Status = SepReferenceTokenHandle(*ClientTokenHandle,
+                                         TOKEN_QUERY,
+                                         UserMode,
+                                         &ClientToken,
+                                         NULL);
         if (!NT_SUCCESS(Status))
         {
-            DPRINT1("Failed to reference token handle %p: %lx\n",
-                    *ClientTokenHandle, Status);
+            DPRINT("Failed to reference token handle %p: 0x%lx\n",
+                   *ClientTokenHandle, Status);
+            ClientToken = NULL;
             goto Cleanup;
         }
 
-        SubjectContextToken = SubjectContext.ClientToken;
-        SubjectContext.ClientToken = ClientToken;
+        if ((ClientToken->TokenType == TokenImpersonation) &&
+            (ClientToken->ImpersonationLevel < SecurityIdentification))
+        {
+            Status = STATUS_BAD_IMPERSONATION_LEVEL;
+            DPRINT("Invalid impersonation level 0x%lx of the token\n",
+                   ClientToken->ImpersonationLevel);
+            goto Cleanup;
+        }
     }
 
-    /* Check for audit privilege */
+    /*
+     * SeAuditPrivilege is checked in the primary token of the calling
+     * process, not in the client token: "The system checks for this
+     * privilege in the primary token of the calling process, not the
+     * impersonation token of the thread. If the Flags parameter includes
+     * the AUDIT_ALLOW_NO_PRIVILEGE flag, the function performs the access
+     * check without generating audit messages when the privilege is not
+     * enabled." (Microsoft Learn, AccessCheckByTypeAndAuditAlarmW, Remarks;
+     * the same for AccessCheckAndAuditAlarmW, where Flags is always 0.)
+     */
     HaveAuditPrivilege = SeCheckAuditPrivilege(&SubjectContext, UserMode);
     if (!HaveAuditPrivilege && !(Flags & AUDIT_ALLOW_NO_PRIVILEGE))
     {
-        DPRINT1("Caller does not have SeAuditPrivilege\n");
+        DPRINT("Caller does not have SeAuditPrivilege\n");
         Status = STATUS_PRIVILEGE_NOT_HELD;
         goto Cleanup;
     }
@@ -781,7 +882,7 @@ SepAccessCheckAndAuditAlarm(
     /* Generic access must already be mapped to non-generic access types! */
     if (DesiredAccess & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL))
     {
-        DPRINT1("Generic access rights requested: 0x%lx\n", DesiredAccess);
+        DPRINT("Generic access rights requested: 0x%lx\n", DesiredAccess);
         Status = STATUS_GENERIC_NOT_MAPPED;
         goto Cleanup;
     }
@@ -794,7 +895,15 @@ SepAccessCheckAndAuditAlarm(
                                          &CapturedSecurityDescriptor);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("Failed to capture security descriptor!\n");
+        DPRINT("Failed to capture security descriptor!\n");
+        goto Cleanup;
+    }
+
+    /* A NULL descriptor is captured as NULL; there is nothing to check against */
+    if (CapturedSecurityDescriptor == NULL)
+    {
+        Status = STATUS_INVALID_SECURITY_DESCR;
+        DPRINT("No security descriptor\n");
         goto Cleanup;
     }
 
@@ -803,7 +912,7 @@ SepAccessCheckAndAuditAlarm(
         (SepGetGroupFromDescriptor(CapturedSecurityDescriptor) == NULL))
     {
         Status = STATUS_INVALID_SECURITY_DESCR;
-        DPRINT1("Invalid security descriptor\n");
+        DPRINT("Invalid security descriptor\n");
         goto Cleanup;
     }
 
@@ -813,7 +922,7 @@ SepAccessCheckAndAuditAlarm(
                                           SubsystemName);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("Failed to capture subsystem name!\n");
+        DPRINT("Failed to capture subsystem name!\n");
         goto Cleanup;
     }
 
@@ -823,7 +932,7 @@ SepAccessCheckAndAuditAlarm(
                                           ObjectTypeName);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("Failed to capture object type name!\n");
+        DPRINT("Failed to capture object type name!\n");
         goto Cleanup;
     }
 
@@ -833,7 +942,7 @@ SepAccessCheckAndAuditAlarm(
                                           ObjectName);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("Failed to capture object name!\n");
+        DPRINT("Failed to capture object name!\n");
         goto Cleanup;
     }
 
@@ -848,7 +957,7 @@ SepAccessCheckAndAuditAlarm(
                                &CapturedPrincipalSelfSid);
         if (!NT_SUCCESS(Status))
         {
-            DPRINT1("Failed to capture PrincipalSelfSid!\n");
+            DPRINT("Failed to capture PrincipalSelfSid!\n");
             goto Cleanup;
         }
     }
@@ -860,7 +969,7 @@ SepAccessCheckAndAuditAlarm(
                                      &CapturedObjectTypeList);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("Failed to capture object type list!\n");
+        DPRINT("Failed to capture object type list!\n");
         goto Cleanup;
     }
 
@@ -868,6 +977,7 @@ SepAccessCheckAndAuditAlarm(
     Status = SepAccessCheckAndAuditAlarmWorker(&CapturedSubsystemName,
                                                HandleId,
                                                &SubjectContext,
+                                               ClientToken,
                                                &CapturedObjectTypeName,
                                                &CapturedObjectName,
                                                CapturedSecurityDescriptor,
@@ -901,7 +1011,7 @@ SepAccessCheckAndAuditAlarm(
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
         Status = _SEH2_GetExceptionCode();
-        DPRINT1("Exception while copying back data: 0x%lx\n", Status);
+        DPRINT("Exception while copying back data: 0x%lx\n", Status);
     }
     _SEH2_END;
 
@@ -926,10 +1036,7 @@ Cleanup:
         SeReleaseSecurityDescriptor(CapturedSecurityDescriptor, UserMode, FALSE);
 
     if (ClientToken != NULL)
-    {
         ObDereferenceObject(ClientToken);
-        SubjectContext.ClientToken = SubjectContextToken;
-    }
 
     if (AllocatedResultLists)
         ExFreePoolWithTag(SafeGrantedAccessList, TAG_SEPA);
