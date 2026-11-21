@@ -359,4 +359,41 @@ START_TEST(FindNLSString)
     CheckDefined(COMPARE_STRING, L"a\xdc00", 2, FALSE, NOERR, __LINE__);
     CheckDefined(COMPARE_STRING, L"a\xd800\xdc00", 3, TRUE, NOERR, __LINE__);
 
+    /* The order of the checks and the size of the version structure (measured on Windows Server 2022) */
+    {
+        static const DWORD BadSizes[] = { 0, 4, 8, 11, 13, 16, 20, 24, 28, 36, 40, 0xffffffff };
+        NLSVERSIONINFOEX Version;
+        BOOL Result;
+        ULONG n;
+
+#define CHECK_IND(Size, Func, Flags, Str, Len, Expected, ExpectedError) \
+    ZeroMemory(&Version, sizeof(Version)); \
+    Version.dwNLSVersionInfoSize = Size; \
+    SetLastError(NOERR); \
+    Result = pIsNLSDefinedString(Func, Flags, (LPNLSVERSIONINFO)&Version, Str, Len); \
+    ok(Result == Expected, "line %d: got %d\n", __LINE__, Result); \
+    ok(GetLastError() == ExpectedError, "line %d: error %lu, expected %lu\n", __LINE__, GetLastError(), (DWORD)ExpectedError)
+        CHECK_IND(12, COMPARE_STRING, 0, Source, -1, TRUE, NOERR);
+        CHECK_IND(32, COMPARE_STRING, 0, Source, -1, TRUE, NOERR);
+        for (n = 0; n < ARRAYSIZE(BadSizes); n++)
+        {
+            CHECK_IND(BadSizes[n], COMPARE_STRING, 0, Source, -1, FALSE, ERROR_INSUFFICIENT_BUFFER);
+        }
+        CHECK_IND(12, COMPARE_STRING, 0, Source, 0, FALSE, ERROR_INVALID_PARAMETER);
+        CHECK_IND(12, COMPARE_STRING, 0, L"", 0, FALSE, ERROR_INVALID_PARAMETER);
+        CHECK_IND(12, COMPARE_STRING, 0, L"", -1, TRUE, NOERR);
+        CHECK_IND(12, COMPARE_STRING, 0, Source, -2, TRUE, NOERR);
+        CHECK_IND(12, COMPARE_STRING, 1, Source, -1, FALSE, ERROR_INVALID_FLAGS);
+        CHECK_IND(12, COMPARE_STRING, 0xffff, Source, -1, FALSE, ERROR_INVALID_FLAGS);
+        CHECK_IND(12, COMPARE_STRING, 5, NULL, -1, FALSE, ERROR_INVALID_PARAMETER);
+        CHECK_IND(12, COMPARE_STRING, 5, Source, 0, FALSE, ERROR_INVALID_PARAMETER);
+        CHECK_IND(12, 7, 5, Source, -1, FALSE, ERROR_INVALID_FLAGS);
+        CHECK_IND(12, 7, 0, NULL, -1, FALSE, ERROR_INVALID_PARAMETER);
+        CHECK_IND(12, 7, 0, Source, 0, FALSE, ERROR_INVALID_PARAMETER);
+        CHECK_IND(99, 7, 0, Source, -1, FALSE, ERROR_INSUFFICIENT_BUFFER);
+        CHECK_IND(99, COMPARE_STRING, 5, Source, -1, FALSE, ERROR_INSUFFICIENT_BUFFER);
+        CHECK_IND(99, COMPARE_STRING, 0, NULL, -1, FALSE, ERROR_INSUFFICIENT_BUFFER);
+        CHECK_IND(99, COMPARE_STRING, 0, Source, 0, FALSE, ERROR_INSUFFICIENT_BUFFER);
+#undef CHECK_IND
+    }
 }
