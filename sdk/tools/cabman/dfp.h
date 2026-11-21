@@ -142,6 +142,7 @@ private:
     char SourceDir[256];
     FILE* InfFileHandle;
     FILE* SizeFileHandle;
+    ULONG SizedLineCount;
     bool InfModeEnabled;
 };
 

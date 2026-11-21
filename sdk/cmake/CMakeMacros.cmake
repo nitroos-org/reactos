@@ -463,13 +463,21 @@ function(create_iso_lists)
     # reserved area holds 60000 bytes at most and the list is close to that. Setup and the Features tool read the plain
     # file reactos.inf next to the cabinet, and the update tooling reads reactos.inf in the build directory. The copy
     # above stays as a dependency, so that the cabinet is rebuilt whenever the list changes.
+    # The same run writes reactos.sizes, the sizes of the files of the cabinet for the page of Setup that asks which
+    # components to install: it is made whenever a file of the cabinet changes, so its sizes are never stale.
     add_custom_command(
-        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/reactos.cab
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/reactos.cab ${CMAKE_CURRENT_BINARY_DIR}/reactos.sizes
         COMMAND native-cabman -C ${REACTOS_BINARY_DIR}/boot/bootdata/packages/reactos.dff -N -P ${REACTOS_SOURCE_DIR}
         DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/reactos.inf native-cabman ${_filelist})
 
-    add_custom_target(reactos_cab DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/reactos.cab)
+    add_custom_target(reactos_cab DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/reactos.cab ${CMAKE_CURRENT_BINARY_DIR}/reactos.sizes)
     add_dependencies(reactos_cab reactos_cab_inf)
+
+    add_cd_file(
+        TARGET reactos_cab
+        FILE ${CMAKE_CURRENT_BINARY_DIR}/reactos.sizes
+        DESTINATION reactos
+        NO_CAB FOR bootcd regtest)
 
     # Add reactos.cab into the BootCD
     add_cd_file(
