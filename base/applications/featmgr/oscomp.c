@@ -19,6 +19,9 @@
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <strsafe.h>
+#ifdef FEATMGR_WOW64REG
+#include "../../../dll/win32/syssetup/wow64reg.h"
+#endif
 
 #define COMPONENTS_KEY  L"SOFTWARE\\ReactOS\\Nitro\\Components"
 #define LOGF(log, ...) do { if (log) { fwprintf((log), __VA_ARGS__); fflush(log); } } while (0)
@@ -500,6 +503,7 @@ typedef struct _EXTRACT
     ULONGLONG doneBytes;
     NAMECOUNTS seen;    /* members of the cabinet being read, by name */
     int cab;
+    WCHAR last[MAX_PATH];   /* the file being written: named in the message when the cabinet read stops */
 } EXTRACT;
 
 static UINT CALLBACK CabCallback(PVOID ctx, UINT notif, UINT_PTR p1, UINT_PTR p2)
@@ -521,6 +525,7 @@ static UINT CALLBACK CabCallback(PVOID ctx, UINT notif, UINT_PTR p1, UINT_PTR p2
                 if (e->used || e->cab != x->cab || e->ordinal != ord || _wcsicmp(e->name, fi->NameInCabinet)) continue;
                 e->used = TRUE;
                 StringCchPrintfW(fi->FullTargetName, MAX_PATH, L"%s\\%s", x->windir, e->rel);
+                StringCchCopyW(x->last, ARRAYSIZE(x->last), fi->FullTargetName);
                 StringCchCopyW(dir, ARRAYSIZE(dir), fi->FullTargetName);
                 PathRemoveFileSpecW(dir);
                 SHCreateDirectoryExW(NULL, dir, NULL);
@@ -848,6 +853,51 @@ static void RegisterVulkanIcd(const FILEMAP *m, FILE *log)
     RegCloseKey(hk);
 }
 
+#ifdef FEATMGR_WOW64REG
+/* The 32-bit COM servers of SysWOW64: setup's second stage registers them with the 32-bit regsvr32 over the list of
+ * syssetup.inf ([Wow64RegisterCore], [Wow64RegisterExtra]); this is the same list and the same code (wow64reg.c), run when
+ * the 32-bit side is added after the installation. The keys are written at once, no restart is needed. A power cut in the
+ * middle leaves the component not recorded as installed: the next "featmgr /enable wow64" copies and registers again
+ * (registering twice gives the same registry). Returns ERROR_SUCCESS, or the error of a DLL of the core set. */
+static void Wow64RegLog(PVOID ctx, PCWSTR msg)
+{
+    LOGF((FILE *)ctx, L"  %s\n", msg);
+}
+
+static void Wow64RegProgress(PVOID ctx, PCWSTR dll, ULONG done, ULONG total)
+{
+    UNREFERENCED_PARAMETER(ctx);
+    if (dll) FmOpStep(L"Registering the 32-bit components (%lu of %lu): %s", done + 1, total, dll);
+}
+
+static DWORD RegisterWow64Side(FILE *log)
+{
+    WCHAR win[MAX_PATH], path[MAX_PATH];
+    HINF inf;
+    DWORD err;
+    WOW64REG_CALLBACKS cb;
+
+    if (!GetWindowsDirectoryW(win, ARRAYSIZE(win))) return GetLastError();
+    StringCchPrintfW(path, ARRAYSIZE(path), L"%s\\inf\\syssetup.inf", win);
+    inf = SetupOpenInfFileW(path, NULL, INF_STYLE_WIN4, NULL);
+    if (inf == INVALID_HANDLE_VALUE)
+    {
+        err = GetLastError();
+        LOGF(log, L"error: cannot read %s (%lu)\n", path, err);
+        return err ? err : ERROR_FILE_NOT_FOUND;
+    }
+    LOGF(log, L"registering the 32-bit components (this can take a minute on a slow machine; no restart is needed)\n");
+    cb.Log = Wow64RegLog;
+    cb.Progress = Wow64RegProgress;
+    cb.Context = log;
+    err = Wow64RegisterDlls(inf, &cb);
+    SetupCloseInfFile(inf);
+    if (err) LOGF(log, L"32-bit registration: a core component failed (%lu)\n", err);
+    else LOGF(log, L"32-bit components registered\n");
+    return err;
+}
+#endif
+
 /* ---- record update ------------------------------------------------------- */
 
 static void SetInstalled(LPCWSTR id, DWORD v)
@@ -1130,8 +1180,10 @@ HRESULT FmOsCompEnable(LPCWSTR id, FILE *log)
             x.cab = cabNo++;
             if (!SetupIterateCabinetW(path, 0, CabCallback, &x))
             {
-                LOGF(log, L"error: cannot read the cabinet %s (%lu)\n", path, GetLastError());
-                x.error = x.error ? x.error : GetLastError();
+                DWORD ce = GetLastError();
+
+                LOGF(log, L"error: cannot read the cabinet %s (%lu)%s%s\n", path, ce, x.last[0] ? L"; stopped at " : L"", x.last);
+                x.error = x.error ? x.error : ce;
             }
         } while (SetupFindNextLine(&c, &c));
     }
@@ -1151,6 +1203,21 @@ HRESULT FmOsCompEnable(LPCWSTR id, FILE *log)
     links = AddShortcuts(&map, log);
     RegisterVulkanIcd(&map, log);
     LOGF(log, L"%d Start menu entries made\n", links);
+#ifdef FEATMGR_WOW64REG
+    if (InAdded(order, n, L"wow64"))
+    {
+        DWORD werr;
+
+        FmOpStep(L"Registering the 32-bit components");
+        werr = RegisterWow64Side(log);
+        if (werr != ERROR_SUCCESS)
+        {
+            FmSetLastMessage(L"The 32-bit components of '%s' could not all be registered (error %lu). The component was not marked as installed: run the command again.", id, werr);
+            hr = HRESULT_FROM_WIN32(werr);
+            goto done;
+        }
+    }
+#endif
 
     RewriteRecord(id, order, n, log);
     for (i = 0; i < n; i++)

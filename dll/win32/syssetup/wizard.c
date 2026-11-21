@@ -25,6 +25,7 @@
 #include <tzlib.h>
 #include <strsafe.h>
 #include <reactos/buildno.h>
+#include "wow64reg.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -2503,161 +2504,26 @@ RegistrationNotificationProc(PVOID Context,
 #if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
 #ifdef REGISTER_SYSWOW64
 /* Registration must execute in the guest: provider and COM registrations
- * belong in the redirected 32-bit registry view. Keep these lists in sync
- * with the registration-capable runtime in packages/syswow64.lst.
- * A failure in the core set fails the setup. */
-static const WCHAR *Wow64CoreDlls[] =
+ * belong in the redirected 32-bit registry view. The list of DLLs is in
+ * syssetup.inf ([Wow64RegisterCore], [Wow64RegisterExtra]) and the code is
+ * wow64reg.c, both shared with "featmgr /enable wow64" (the 32-bit side
+ * added after the installation). A failure in the core set fails the setup. */
+static VOID
+Wow64RegLog(
+    _In_opt_ PVOID Context,
+    _In_ PCWSTR Message)
 {
-    L"ole32.dll", L"oleaut32.dll", L"rsaenh.dll", L"wintrust.dll",
-    L"softpub.dll", L"mscat32.dll", L"msisip.dll", L"pwrshsip.dll", L"cryptnet.dll", L"winhttp.dll", L"shell32.dll",
-    L"msxml3.dll",
-    /* The rest of the shipped SysWOW64 COM set that setup registers for
-     * the native view (OleControlDlls in syssetup.inf). Without these a
-     * 32-bit client gets REGDB_E_CLASSNOTREG: browseui (CLSID_ACLMulti,
-     * used by installer UIs) and windowscodecs (PNG/JPEG decoders, so
-     * GDI+ image load) are the ones that bit real installers. */
-    L"browseui.dll", L"windowscodecs.dll", L"avifil32.dll", L"comdlg32.dll",
-    L"iertutil.dll", L"ieframe.dll", L"shdocvw.dll", L"mlang.dll", L"msctf.dll", L"msi.dll",
-    L"msimtf.dll", L"oleacc.dll", L"olepro32.dll", L"propsys.dll",
-    L"rpcrt4.dll", L"urlmon.dll",
-    /* IServiceProvider proxy/stub: CoRegisterClassObject(CLSCTX_LOCAL_SERVER)
-     * marshals it, so 32-bit COM servers (Google Updater) need it */
-    L"actxprxy.dll",
-    /* CLSID_TaskScheduler: 32-bit updaters register their wake tasks */
-    L"taskschd.dll",
-    /* CLSID_WbemLocator, SWbemLocator and the WMI path parser: 32-bit WMI
-     * clients (installers, VBScript from SysWOW64) create them by CLSID */
-    L"wbem\\wbemprox.dll", L"wbem\\wbemdisp.dll", L"wbem\\wmiutils.dll",
-    /* Script engines and WScript.Shell/FileSystemObject for 32-bit scripts */
-    L"vbscript.dll", L"jscript.dll", L"scrrun.dll", L"wshom.ocx"
-};
-
-/* Best-effort: a failure of one of these is logged, never fatal */
-static const WCHAR *Wow64ExtraDlls[] =
-{
-    /* The COM servers among the other SysWOW64 files (DirectShow, DirectMusic,
-     * DirectPlay, ATL, the shell and Internet helpers): the same set that setup
-     * registers for the native view (OleControlDlls in syssetup.inf) */
-    L"atl.dll", L"acppage.dll", L"amstream.dll", L"cabview.dll", L"comcat.dll",
-    /* quartz and devenum register through each other: whichever goes first fails once, so
-     * RegisterWow64List retries a failed DLL after the others */
-    L"d3dxof.dll", L"quartz.dll", L"devenum.dll", L"qcap.dll", L"qedit.dll",
-    L"dmband.dll", L"dmcompos.dll", L"dmime.dll", L"dmloader.dll", L"dmscript.dll",
-    L"dmstyle.dll", L"dmusic.dll", L"dplayx.dll", L"dpnet.dll", L"dpnhupnp.dll",
-    L"dxdiagn.dll", L"fontext.dll", L"hlink.dll", L"hnetcfg.dll", L"ieproxy.dll",
-    L"inetcomm.dll", L"inseng.dll", L"itss.dll", L"mmcshext.dll", L"mstask.dll",
-    L"msxml6.dll", L"objsel.dll", L"pstorec.dll", L"sendmail.dll", L"sti.dll",
-    L"stobject.dll",
-    /* CLSID_ExplorerBrowser and the namespace tree control: the Vista-style Open/Save dialog
-     * (IFileDialog) creates the ExplorerBrowser for its folder tree and file list, and without the
-     * registration a 32-bit dialog is blank (REGDB_E_CLASSNOTREG). Registers after the core set (shell32, ole32), which it loads */
-    L"explorerframe.dll",
-    /* BITS proxy/stub: the interface and proxy CLSID registrations of the 32-bit view, so a
-     * 32-bit BITS client can marshal to the 64-bit service (CLSID itself: hivesft_amd64.inf) */
-    L"qmgrprxy.dll",
-    /* The remaining SysWOW64 COM servers that setup registers for the native view (OleControlDlls
-     * in syssetup.inf). Without them a 32-bit game or client gets REGDB_E_CLASSNOTREG for
-     * DirectDraw/DirectSound/DirectInput/UI Automation/MSHTML/HTML Help/ADSI. mshtml registers
-     * after the core set (urlmon, shdocvw, ieframe); its typelib step fails under WoW64
-     * (TYPE_E_CANTLOADLIBRARY, class keys are written first), hence a logged non-fatal failure.
-     * cryptdlg (DllRegisterServer fails natively too) and wininet (no DllRegisterServer) register
-     * no CLSID and are left out */
-    L"activeds.dll", L"ddraw.dll", L"dinput.dll", L"dinput8.dll", L"dsound.dll",
-    L"hhctrl.ocx", L"mshtml.dll", L"uiautomationcore.dll", L"wuapi.dll"
-};
-
-static DWORD
-RunWow64Regsvr32(
-    _In_ PCWSTR Application,
-    _In_ PCWSTR Directory,
-    _In_ PCWSTR Dll)
-{
-    WCHAR Command[2 * MAX_PATH + 64];
-    STARTUPINFOW Startup = {sizeof(Startup)};
-    PROCESS_INFORMATION Process;
-    DWORD ExitCode, Wait, Error;
-
-    _snwprintf(Command, ARRAYSIZE(Command), L"\"%s\" /s \"%s\\%s\"",
-               Application, Directory, Dll);
-    if (!CreateProcessW(Application, Command, NULL, NULL, FALSE, 0,
-                        NULL, NULL, &Startup, &Process))
-        return GetLastError();
-    Wait = WaitForSingleObject(Process.hProcess, 60000);
-    if (Wait == WAIT_OBJECT_0)
-    {
-        Error = GetExitCodeProcess(Process.hProcess, &ExitCode) ?
-                (ExitCode ? ERROR_DLL_INIT_FAILED : ERROR_SUCCESS) : GetLastError();
-    }
-    else
-    {
-        Error = Wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
-        TerminateProcess(Process.hProcess, Error);
-        WaitForSingleObject(Process.hProcess, INFINITE);
-    }
-    CloseHandle(Process.hThread);
-    CloseHandle(Process.hProcess);
-    return Error;
-}
-
-/* Registers each DLL of the list with the 32-bit regsvr32. Pass 0 registers every DLL; pass 1
- * repeats those that failed, now that the rest is in place (quartz and devenum need each other).
- * A failure does not stop the remaining DLLs. Returns the first error of the second pass. */
-static DWORD
-RegisterWow64List(
-    _In_ PCWSTR Application,
-    _In_ PCWSTR Directory,
-    _In_reads_(Count) const WCHAR **Dlls,
-    _In_ ULONG Count,
-    _In_ BOOL Fatal)
-{
-    DWORD Result = ERROR_SUCCESS, Error;
-    DWORD Failed[(sizeof(Wow64CoreDlls) + sizeof(Wow64ExtraDlls)) / sizeof(Wow64CoreDlls[0])] = {0};
-    ULONG Pass, i;
-
-    for (Pass = 0; Pass < 2; ++Pass)
-    {
-        for (i = 0; i < Count; ++i)
-        {
-            if (Pass && !Failed[i]) continue;
-            Error = RunWow64Regsvr32(Application, Directory, Dlls[i]);
-            Failed[i] = Error;
-            if (Error && Pass)
-            {
-                WCHAR Message[MAX_PATH + 96];
-
-                DPRINT1("SysWOW64 registration of %S failed: %lu%s\n",
-                        Dlls[i], Error, Fatal ? "" : " (not fatal)");
-                _snwprintf(Message, ARRAYSIZE(Message),
-                           L"SysWOW64 registration of %s failed: %lu%s",
-                           Dlls[i], Error, Fatal ? L"" : L" (not fatal)");
-                LogItem(NULL, Message);
-                if (Fatal && Result == ERROR_SUCCESS) Result = Error;
-            }
-        }
-    }
-    return Result;
+    UNREFERENCED_PARAMETER(Context);
+    DPRINT1("%S\n", Message);
+    LogItem(NULL, L"%s", Message);
 }
 
 static DWORD
 RegisterWow64Dlls(VOID)
 {
-    WCHAR Directory[MAX_PATH], Application[MAX_PATH];
-    DWORD Count, Result;
+    WOW64REG_CALLBACKS Callbacks = {Wow64RegLog, NULL, NULL};
 
-    Count = GetWindowsDirectoryW(Directory, ARRAYSIZE(Directory));
-    if (!Count) return GetLastError();
-    if (Count + ARRAYSIZE(L"\\SysWOW64\\regsvr32.exe") > ARRAYSIZE(Application))
-        return ERROR_INSUFFICIENT_BUFFER;
-    wcscat(Directory, L"\\SysWOW64");
-    wcscpy(Application, Directory);
-    wcscat(Application, L"\\regsvr32.exe");
-
-    /* The core set failing fails the setup; the extras are best-effort */
-    Result = RegisterWow64List(Application, Directory, Wow64CoreDlls,
-                               ARRAYSIZE(Wow64CoreDlls), TRUE);
-    RegisterWow64List(Application, Directory, Wow64ExtraDlls,
-                      ARRAYSIZE(Wow64ExtraDlls), FALSE);
-    return Result;
+    return Wow64RegisterDlls(hSysSetupInf, &Callbacks);
 }
 #endif /* REGISTER_SYSWOW64 */
 

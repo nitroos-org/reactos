@@ -21,6 +21,15 @@ target_link_libraries(optfeatures uuid)
 add_importlibs(optfeatures advapi32 shlwapi shell32 ole32 comctl32 user32 gdi32 wininet crypt32 setupapi msvcrt kernel32 ntdll)
 add_cd_file(TARGET optfeatures DESTINATION reactos/system32 FOR all)
 
+# "featmgr /enable wow64" after the installation registers the 32-bit COM servers with the code and the list that setup's
+# second stage uses (dll/win32/syssetup/wow64reg.c, [Wow64RegisterCore] / [Wow64RegisterExtra] of syssetup.inf)
+if(SYSWOW64)
+    foreach(_fm_target featmgr optfeatures)
+        target_sources(${_fm_target} PRIVATE ${CMAKE_SOURCE_DIR}/dll/win32/syssetup/wow64reg.c)
+        target_compile_definitions(${_fm_target} PRIVATE FEATMGR_WOW64REG)
+    endforeach()
+endif()
+
 # --- optionalfeatures.exe: the Windows name; launches optfeatures.exe (no Control Panel icon, appwiz.cpl hosts it) ---
 add_executable(optionalfeatures optionalfeatures.c optionalfeatures.rc)
 set_module_type(optionalfeatures win32gui UNICODE)
