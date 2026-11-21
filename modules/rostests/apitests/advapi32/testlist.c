@@ -8,6 +8,7 @@ extern void func_AccessCheckAuditAlarmStress(void);
 extern void func_AccessCheckDifferential(void);
 extern void func_AccessCheckObjectTypeList(void);
 extern void func_AddMandatoryAce(void);
+extern void func_SddlNullAcl(void);
 extern void func_AuditCategories(void);
 extern void func_CveEventWrite(void);
 extern void func_DynamicTimeZone(void);
@@ -179,6 +180,7 @@ const struct test winetest_testlist[] =
     { "AccessCheckDifferential", func_AccessCheckDifferential },
     { "AccessCheckObjectTypeList", func_AccessCheckObjectTypeList },
     { "AddMandatoryAce", func_AddMandatoryAce },
+    { "SddlNullAcl", func_SddlNullAcl },
     { "AuditCategories", func_AuditCategories },
     { "CveEventWrite", func_CveEventWrite },
     { "DynamicTimeZone", func_DynamicTimeZone },
