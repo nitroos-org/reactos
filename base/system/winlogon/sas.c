@@ -1172,6 +1172,14 @@ DoGenericAction(
                 }
             }
             break;
+        case WLX_SAS_ACTION_PWD_CHANGED: /* 0x06 */
+            /* The password was changed from the Logged-On SAS dialog: back to the application desktop, logged on */
+            if (Session->LogonState == STATE_LOGGED_ON_SAS)
+            {
+                SwitchDesktop(Session->ApplicationDesktop);
+                Session->LogonState = STATE_LOGGED_ON;
+            }
+            break;
         case WLX_SAS_ACTION_NONE: /* 0x02 */
             if (Session->LogonState == STATE_LOGGED_OFF_SAS)
             {
@@ -1315,11 +1323,14 @@ DispatchSAS(
                     SwitchDesktop(Session->WinlogonDesktop);
                     wlxAction = (DWORD)Session->Gina.Functions.WlxLoggedOnSAS(Session->Gina.Context, dwSasType, NULL);
                     if ((wlxAction == WLX_SAS_ACTION_NONE) ||
+                        (wlxAction == WLX_SAS_ACTION_PWD_CHANGED) ||
                         (wlxAction == WLX_SAS_ACTION_TASKLIST))
                     {
                         /*
                          * If the user canceled (WLX_SAS_ACTION_NONE) the
-                         * Logged-On SAS dialog, or clicked on the Task-Manager
+                         * Logged-On SAS dialog, changed the password
+                         * (WLX_SAS_ACTION_PWD_CHANGED: nothing else to do),
+                         * or clicked on the Task-Manager
                          * button (WLX_SAS_ACTION_TASKLIST), switch back to
                          * the application desktop and return to log-on state.
                          * In the latter case, the Task-Manager is launched
