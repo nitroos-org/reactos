@@ -4170,7 +4170,7 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
 {
     DWORD supported_flags = NORM_IGNORECASE|NORM_IGNORENONSPACE|NORM_IGNORESYMBOLS|SORT_STRINGSORT
                            |NORM_IGNOREKANATYPE|NORM_IGNOREWIDTH|LOCALE_USE_CP_ACP;
-    DWORD semistub_flags = NORM_LINGUISTIC_CASING|LINGUISTIC_IGNORECASE|0x10000000;
+    DWORD semistub_flags = NORM_LINGUISTIC_CASING|LINGUISTIC_IGNORECASE|LINGUISTIC_IGNOREDIACRITIC|0x10000000;
     /* 0x10000000 is related to diacritics in Arabic, Japanese, and Hebrew */
     INT ret;
     static int once;
@@ -4184,6 +4184,17 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
         SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
     }
+
+#if (WINVER >= 0x0600)
+    /* A name that names no locale is refused (measured on Windows Server 2022: ERROR_INVALID_PARAMETER for
+       "xx-invalid", "x" and "en-US-"). NULL, "" (invariant) and LOCALE_NAME_SYSTEM_DEFAULT are taken. */
+    if (locale && locale[0] && strcmpW(locale, L"!x-sys-default-locale" /* LOCALE_NAME_SYSTEM_DEFAULT */) &&
+        !LocaleNameToLCID(locale, LOCALE_ALLOW_NEUTRAL_NAMES))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+#endif
 
     if (flags & ~(supported_flags|semistub_flags))
     {
@@ -4204,6 +4215,8 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
     /* The comparison only knows NORM_IGNORECASE; linguistic case folding is the closest it has */
     if (flags & LINGUISTIC_IGNORECASE)
         flags |= NORM_IGNORECASE;
+    if (flags & LINGUISTIC_IGNOREDIACRITIC)
+        flags |= NORM_IGNORENONSPACE;
 #endif
     ret = wine_compare_string(flags, str1, len1, str2, len2);
 

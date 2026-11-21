@@ -2630,7 +2630,40 @@ IsNLSDefinedString(IN NLS_FUNCTION Function,
                    IN LPCWSTR lpString,
                    IN INT cchStr)
 {
-    STUB;
+    INT i;
+
+    /* Only the comparison function is defined (measured on Windows Server 2022: ERROR_INVALID_FLAGS for any
+       other value, ERROR_INVALID_PARAMETER for no string) */
+    if (Function != COMPARE_STRING)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return FALSE;
+    }
+    if (!lpString)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* A string is defined when it holds no unpaired surrogate (measured: FALSE with the last error untouched) */
+    if (cchStr < 0)
+        cchStr = lstrlenW(lpString);
+    for (i = 0; i < cchStr; i++)
+    {
+        WCHAR c = lpString[i];
+
+        if (c >= 0xd800 && c <= 0xdbff)
+        {
+            if (i + 1 < cchStr && lpString[i + 1] >= 0xdc00 && lpString[i + 1] <= 0xdfff)
+                i++;
+            else
+                return FALSE;
+        }
+        else if (c >= 0xdc00 && c <= 0xdfff)
+        {
+            return FALSE;
+        }
+    }
     return TRUE;
 }
 

@@ -1316,6 +1316,19 @@ FindNLSStringEx(
     }
     if (!Direction) dwFindNLSStringFlags |= FIND_FROMSTART;
 
+    /* The comparison flags the search takes (measured on Windows Server 2022): not SORT_STRINGSORT, not the
+       undocumented 0x10000000 or 0x8 and nothing above NORM_LINGUISTIC_CASING; NORM_IGNORENONSPACE together with
+       LINGUISTIC_IGNOREDIACRITIC is refused too. CompareStringEx itself is more tolerant. */
+    if (dwFindNLSStringFlags & ~(FindFlags | NORM_IGNORECASE | NORM_IGNORENONSPACE | NORM_IGNORESYMBOLS |
+                                 LINGUISTIC_IGNORECASE | LINGUISTIC_IGNOREDIACRITIC | NORM_IGNOREKANATYPE |
+                                 NORM_IGNOREWIDTH | NORM_LINGUISTIC_CASING) ||
+        (dwFindNLSStringFlags & (NORM_IGNORENONSPACE | LINGUISTIC_IGNOREDIACRITIC)) ==
+        (NORM_IGNORENONSPACE | LINGUISTIC_IGNOREDIACRITIC))
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return -1;
+    }
+
     if (cchSource == -1) cchSource = lstrlenW(lpStringSource);
     if (cchValue == -1) cchValue = lstrlenW(lpStringValue);
 
@@ -1360,5 +1373,32 @@ FindNLSStringEx(
         offset += inc;
     }
     return -1;
+}
+
+/******************************************************************************
+ *           FindNLSString    (KERNEL32.@)
+ *
+ * The LCID form of FindNLSStringEx. An LCID is taken when LCIDToLocaleName names a locale for it (measured on
+ * Windows Server 2022: LOCALE_NEUTRAL, the user and system defaults, custom-range LCIDs, neutral languages and
+ * sort-order LCIDs are taken, an LCID that names nothing is ERROR_INVALID_PARAMETER); the rest is FindNLSStringEx.
+ */
+INT
+WINAPI
+FindNLSString(
+    _In_ LCID Locale,
+    _In_ DWORD dwFindNLSStringFlags,
+    _In_ LPCWSTR lpStringSource,
+    _In_ INT cchSource,
+    _In_ LPCWSTR lpStringValue,
+    _In_ INT cchValue,
+    _Out_opt_ LPINT pcchFound)
+{
+    WCHAR Name[LOCALE_NAME_MAX_LENGTH];
+
+    if (!LCIDToLocaleName(Locale, Name, RTL_NUMBER_OF(Name), LOCALE_ALLOW_NEUTRAL_NAMES))
+        return -1;
+
+    return FindNLSStringEx(Name, dwFindNLSStringFlags, lpStringSource, cchSource, lpStringValue, cchValue,
+                           pcchFound, NULL, NULL, 0);
 }
 #endif /* DLL_EXPORT_VERSION */
