@@ -10,6 +10,7 @@ extern void func_BeginPath(void);
 extern void func_BezierExtremeCoords(void);
 extern void func_BitBltBrushOrigin(void);
 extern void func_BitBltPointer(void);
+extern void func_BitmapSizeOverflow(void);
 extern void func_ClipExtremeCoords(void);
 extern void func_CombineRgn(void);
 extern void func_CombineTransform(void);
@@ -129,6 +130,7 @@ const struct test winetest_testlist[] =
     { "BezierExtremeCoords", func_BezierExtremeCoords },
     { "BitBltBrushOrigin", func_BitBltBrushOrigin },
     { "BitBltPointer", func_BitBltPointer },
+    { "BitmapSizeOverflow", func_BitmapSizeOverflow },
     { "ClipExtremeCoords", func_ClipExtremeCoords },
     { "CombineRgn", func_CombineRgn },
     { "CombineTransform", func_CombineTransform },
