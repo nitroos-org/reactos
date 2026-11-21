@@ -23,6 +23,7 @@ static KMT_IRP_HANDLER TestIrpHandler;
 
 #define PROVIDER_NAME L"KmtestMupEx"
 #define LEGACY_NAME L"Kmtest-MupProvider" /* the device of the test driver */
+#define CACHE_PREFIX L"\\kmcache\\" /* the UNC server the provider claims, one share at a time */
 
 static PDEVICE_OBJECT TestDevice;
 
@@ -30,6 +31,7 @@ static PDEVICE_OBJECT TestDevice;
 static struct
 {
     ULONG Creates;
+    ULONG Queries;
     PDEVICE_OBJECT Device;
     WCHAR Name[128];
 } Seen;
@@ -357,6 +359,107 @@ TestRegisteredByName(VOID)
     EXPECT_REFUSED(L"\\Device\\Mup\\;" LEGACY_NAME L"\\server\\share", STATUS_OBJECT_PATH_INVALID);
 }
 
+/* An open of a UNC path that reaches the provider, with the number of path queries it cost */
+static
+VOID
+ExpectCachedOpen(
+    _In_ PCWSTR Path,
+    _In_ PCWSTR Expected,
+    _In_ ULONG ExpectedQueries,
+    _In_ int Line)
+{
+    ULONG Before = Seen.Queries;
+
+    ExpectOpen(Path, Expected, STATUS_SUCCESS, Line);
+    ok(Seen.Queries - Before == ExpectedQueries, "line %d: %ls: %lu path queries, expected %lu\n",
+       Line, Path, Seen.Queries - Before, ExpectedQueries);
+}
+
+/* An open of a UNC path that fails, with no create reaching the provider */
+static
+VOID
+ExpectFailedOpen(
+    _In_ PCWSTR Path,
+    _In_ int Line)
+{
+    ULONG Before = Seen.Creates;
+    NTSTATUS Status;
+
+    Status = DoCreate(Path, NULL);
+    ok(!NT_SUCCESS(Status), "line %d: %ls: status 0x%08lx\n", Line, Path, Status);
+    ok(Seen.Creates == Before, "line %d: %ls: %lu creates reached the provider\n", Line, Path, Seen.Creates - Before);
+}
+
+/*
+ * The table of known prefixes: a provider that accepted a prefix is not asked again for the
+ * next open under it (until the prefix expires), a prefix of a provider that deregistered is
+ * forgotten, and so is one whose provider registers again
+ */
+static
+VOID
+TestKnownPrefixes(VOID)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Device\\" PROVIDER_NAME);
+    UNICODE_STRING LegacyName = RTL_CONSTANT_STRING(L"\\Device\\" LEGACY_NAME);
+    HANDLE MupHandle = NULL, LegacyHandle = NULL;
+    NTSTATUS Status;
+
+    Status = pFsRtlRegisterUncProviderEx(&MupHandle, &Name, TestDevice, 0);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    /* The first open under a prefix asks the provider, the next ones do not */
+    ExpectCachedOpen(L"\\Device\\Mup\\kmcache\\share\\a", L"\\kmcache\\share\\a", 1, __LINE__);
+    ExpectCachedOpen(L"\\Device\\Mup\\kmcache\\share\\b", L"\\kmcache\\share\\b", 0, __LINE__);
+    ExpectCachedOpen(L"\\Device\\Mup\\kmcache\\share\\a", L"\\kmcache\\share\\a", 0, __LINE__);
+    ExpectCachedOpen(L"\\Device\\Mup\\KMCACHE\\SHARE\\sub\\c", L"\\KMCACHE\\SHARE\\sub\\c", 0, __LINE__);
+    /* Another share is another prefix, a share that merely starts alike is not the same */
+    ExpectCachedOpen(L"\\Device\\Mup\\kmcache\\other\\a", L"\\kmcache\\other\\a", 1, __LINE__);
+    ExpectCachedOpen(L"\\Device\\Mup\\kmcache\\share2\\a", L"\\kmcache\\share2\\a", 1, __LINE__);
+    ExpectCachedOpen(L"\\Device\\Mup\\kmcache\\share\\a", L"\\kmcache\\share\\a", 0, __LINE__);
+    /* A path nobody claims is asked for every time and fails */
+    {
+        ULONG Before = Seen.Queries;
+
+        ExpectFailedOpen(L"\\Device\\Mup\\kmnone\\share\\a", __LINE__);
+        ExpectFailedOpen(L"\\Device\\Mup\\kmnone\\share\\a", __LINE__);
+        ok(Seen.Queries - Before == 2, "%lu path queries for two failing opens\n", Seen.Queries - Before);
+    }
+
+    /* The provider deregisters: its prefixes are of no use any more */
+    FsRtlDeregisterUncProvider(MupHandle);
+    ExpectFailedOpen(L"\\Device\\Mup\\kmcache\\share\\a", __LINE__);
+    ExpectFailedOpen(L"\\Device\\Mup\\kmcache\\other\\a", __LINE__);
+
+    /* And registers again: a prefix of the old registration is not used for the new one */
+    MupHandle = NULL;
+    Status = pFsRtlRegisterUncProviderEx(&MupHandle, &Name, TestDevice, 0);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    ExpectCachedOpen(L"\\Device\\Mup\\kmcache\\share\\a", L"\\kmcache\\share\\a", 1, __LINE__);
+    ExpectCachedOpen(L"\\Device\\Mup\\kmcache\\share\\a", L"\\kmcache\\share\\a", 0, __LINE__);
+
+    /* Two providers claim one prefix: whichever MUP picked, the opens work while either is there */
+    Status = FsRtlRegisterUncProvider(&LegacyHandle, &LegacyName, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ExpectOpen(L"\\Device\\Mup\\kmcache\\both\\a", L"\\kmcache\\both\\a", STATUS_SUCCESS, __LINE__);
+        ExpectOpen(L"\\Device\\Mup\\kmcache\\both\\b", L"\\kmcache\\both\\b", STATUS_SUCCESS, __LINE__);
+
+        FsRtlDeregisterUncProvider(LegacyHandle);
+        ZwClose(LegacyHandle);
+        ExpectOpen(L"\\Device\\Mup\\kmcache\\both\\c", L"\\kmcache\\both\\c", STATUS_SUCCESS, __LINE__);
+        ExpectOpen(L"\\Device\\Mup\\kmcache\\share\\c", L"\\kmcache\\share\\c", STATUS_SUCCESS, __LINE__);
+    }
+
+    FsRtlDeregisterUncProvider(MupHandle);
+    ExpectFailedOpen(L"\\Device\\Mup\\kmcache\\both\\d", __LINE__);
+    ExpectFailedOpen(L"\\Device\\Mup\\kmcache\\share\\d", __LINE__);
+}
+
 /*
  * UNC opens while the provider registers and deregisters by device object: every open goes
  * through MUP's prefix query loop, which must not use the device of a provider that
@@ -467,8 +570,45 @@ TestIrpHandler(
     else if (IoStack->Parameters.DeviceIoControl.IoControlCode == IOCTL_REDIR_QUERY_PATH ||
              IoStack->Parameters.DeviceIoControl.IoControlCode == IOCTL_REDIR_QUERY_PATH_EX)
     {
-        /* MUP asks every provider for every UNC path: none is ours */
-        Status = STATUS_BAD_NETWORK_PATH;
+        PWSTR Path;
+        ULONG Chars, Accepted;
+
+        /* Both are METHOD_NEITHER: the request is Type3InputBuffer, the response goes to UserBuffer */
+        if (IoStack->Parameters.DeviceIoControl.IoControlCode == IOCTL_REDIR_QUERY_PATH_EX)
+        {
+            PQUERY_PATH_REQUEST_EX Request = IoStack->Parameters.DeviceIoControl.Type3InputBuffer;
+
+            Path = Request->PathName.Buffer;
+            Chars = Request->PathName.Length / sizeof(WCHAR);
+        }
+        else
+        {
+            PQUERY_PATH_REQUEST Request = IoStack->Parameters.DeviceIoControl.Type3InputBuffer;
+
+            Path = Request->FilePathName;
+            Chars = Request->PathNameLength / sizeof(WCHAR);
+        }
+
+        /* MUP asks every provider for every UNC path: only \kmcache\<share> is ours */
+        Seen.Queries++;
+        Accepted = 0;
+        if (Chars > RTL_NUMBER_OF(CACHE_PREFIX) - 1 &&
+            !_wcsnicmp(Path, CACHE_PREFIX, RTL_NUMBER_OF(CACHE_PREFIX) - 1))
+        {
+            Accepted = RTL_NUMBER_OF(CACHE_PREFIX) - 1;
+            while (Accepted < Chars && Path[Accepted] != L'\\')
+                Accepted++;
+        }
+
+        if (Accepted != 0)
+        {
+            ((PQUERY_PATH_RESPONSE)Irp->UserBuffer)->LengthAccepted = Accepted * sizeof(WCHAR);
+            Irp->IoStatus.Information = sizeof(QUERY_PATH_RESPONSE);
+        }
+        else
+        {
+            Status = STATUS_BAD_NETWORK_PATH;
+        }
     }
     else if (((IoStack->Parameters.DeviceIoControl.IoControlCode & 0xFFC) >> 2) == IOCTL_RUN_MUP_TEST)
     {
@@ -485,6 +625,7 @@ TestIrpHandler(
             TestMupNamespace();
             TestRegisteredByDevice();
             TestRegisteredByName();
+            TestKnownPrefixes();
             TestQueryRace();
             TestDevice = NULL;
         }

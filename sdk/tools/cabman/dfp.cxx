@@ -12,6 +12,7 @@
  *   CSH 15/08-2003 Made it portable
  *   CF  04/05-2007 Made it compatible with 64-bit operating systems
  */
+#include <ctype.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include "cabman.h"
@@ -46,6 +47,7 @@ CDFParser::CDFParser()
     InfModeEnabled = false;
     InfFileHandle = NULL;
     SizeFileHandle = NULL;
+    SizedLineCount = 0;
 }
 
 CDFParser::~CDFParser()
@@ -85,7 +87,11 @@ CDFParser::~CDFParser()
     if (InfFileHandle != NULL)
         fclose(InfFileHandle);
     if (SizeFileHandle != NULL)
+    {
+        /* the count that tells a complete file from one cut short (see WriteInfLine) */
+        fprintf(SizeFileHandle, "\r\n[SizeCheck]\r\nFiles=%lu\r\n", (unsigned long)SizedLineCount);
         fclose(SizeFileHandle);
+    }
 }
 
 /*
@@ -94,6 +100,10 @@ CDFParser::~CDFParser()
  * Setup (the page that asks which components to install) adds the sizes up per component from the second
  * one. It is a separate file so that the first keeps the format every reader of the inf expects.
  * Neither is stored in the cabinet header: the per-cabinet reserved area (-RC) holds 60000 bytes at most.
+ *
+ * -I writes the inf only, -N (the cabinet itself, which is built again whenever one of its files changes)
+ * the sizes only, and without either option both. The sizes file ends with a [SizeCheck] section, the
+ * number of lines of the file list, so that a reader can tell a file that was cut short.
  */
 void CDFParser::WriteInfLine(char* InfLine, const char* SizedLine)
 {
@@ -101,10 +111,7 @@ void CDFParser::WriteInfLine(char* InfLine, const char* SizedLine)
     char eolbuf[2];
     const char* destpath;
 
-    if (DontGenerateInf)
-        return;
-
-    if (SizeFileHandle == NULL && InfFileNameSet)
+    if (!InfFileOnly && SizeFileHandle == NULL && InfFileNameSet)
     {
         char* dot;
 
@@ -127,7 +134,15 @@ void CDFParser::WriteInfLine(char* InfLine, const char* SizedLine)
         {
             DPRINT(MIN_TRACE, ("Error writing the sizes file.\n"));
         }
+        else if (SizedLine != NULL)
+        {
+            /* a line of the file list (the lines of the header go without a size) */
+            SizedLineCount++;
+        }
     }
+
+    if (DontGenerateInf)
+        return;
 
     if (InfFileHandle == NULL)
     {
@@ -1178,6 +1193,35 @@ ULONG CDFParser::PerformFileCopy()
 
             snprintf(InfLine, _countof(InfLine) - 1,
                      "%s=%s", GetFileName(SrcName).c_str(), DstName);
+
+            /*
+             * Two lines for one target file (same directory, same name, whatever the case) leave it to Setup
+             * to decide which member wins; refuse them. DstName is "dir", "dir,target" or "dir,target,...".
+             */
+            {
+                std::string Target(DstName);
+                std::string Name = GetFileName(SrcName);
+                size_t Pos = Target.find(',');
+
+                if (Pos != std::string::npos)
+                {
+                    size_t End = Target.find(',', Pos + 1);
+                    std::string Renamed = Target.substr(Pos + 1, (End == std::string::npos) ? End : End - Pos - 1);
+
+                    if (!Renamed.empty())
+                        Name = Renamed;
+                    Target.resize(Pos);
+                }
+                Target += "\\" + Name;
+                for (size_t k = 0; k < Target.size(); k++)
+                    Target[k] = (char)tolower((unsigned char)Target[k]);
+
+                if (!InstalledTargets.insert(Target).second)
+                {
+                    printf("ERROR: %s is listed twice for the same target directory (%s).\n", SrcName, DstName);
+                    return CAB_STATUS_FAILURE;
+                }
+            }
             while ((Comma = strchr(Comma, ',')) != NULL)
             {
                 CommaCount++;

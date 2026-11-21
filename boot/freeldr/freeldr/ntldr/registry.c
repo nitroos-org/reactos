@@ -440,12 +440,25 @@ RegRecoverHiveFromLog(
         return FALSE;
     }
 
-    /* Make sure the log holds every dirty block */
+    /*
+     * Make sure the log holds every dirty block. A dirty vector holds only
+     * 0xFF (dirty) and 0 (clean) bytes, as the kernel checks it; any other
+     * byte means a damaged log, which is not applied.
+     */
     DirtyCount = 0;
     for (BlockIndex = 0; BlockIndex < StorageLength; ++BlockIndex)
     {
-        if (DirtyVector[BlockIndex + sizeof(HV_LOG_DIRTY_SIGNATURE)] == HV_LOG_DIRTY_BLOCK)
+        UCHAR DirtyFlag = DirtyVector[BlockIndex + sizeof(HV_LOG_DIRTY_SIGNATURE)];
+
+        if (DirtyFlag == HV_LOG_DIRTY_BLOCK)
+        {
             DirtyCount++;
+        }
+        else if (DirtyFlag != 0)
+        {
+            ERR("The hive log dirty vector is damaged (block %lu)\n", BlockIndex);
+            return FALSE;
+        }
     }
     DirtyBlocks = DirtyVector + VectorSize;
     if ((LogSize - HV_LOG_HEADER_SIZE - VectorSize) / HBLOCK_SIZE < DirtyCount)

@@ -7,6 +7,9 @@
 
 #pragma once
 
+#include <set>
+#include <string>
+
 #include "cabinet.h"
 
 typedef struct _CABINET_NAME
@@ -116,6 +119,8 @@ private:
     bool CabinetCreated;
     bool DiskCreated;
     bool FolderCreated;
+    /* The files installed so far ("directory\name", lower case): a second line for one target is an error */
+    std::set<std::string> InstalledTargets;
     /* Standard directive variable */
     bool Cabinet;
     ULONG CabinetFileCountThreshold;
@@ -142,6 +147,7 @@ private:
     char SourceDir[256];
     FILE* InfFileHandle;
     FILE* SizeFileHandle;
+    ULONG SizedLineCount;
     bool InfModeEnabled;
 };
 

@@ -76,12 +76,16 @@ CompareUnicodeStrings(IN PUNICODE_STRING Prefix,
         if (Prefix->Buffer[i] != String->Buffer[i]) break;
     }
 
-    /* Save the characters we found */
-    FoundPrefix = Prefix->Buffer[i];
-    FoundString = String->Buffer[i];
+    /* Save the characters we found (only if there are any left to read) */
+    FoundPrefix = FoundString = UNICODE_NULL;
+    if (i < ScanLength)
+    {
+        FoundPrefix = Prefix->Buffer[i];
+        FoundString = String->Buffer[i];
+    }
 
     /* Check if we exausted the search above */
-    if (i == CaseCheckChar)
+    if (i == CaseCheckChar && i < ScanLength)
     {
         /* Do a case-insensitive search */
         p = &Prefix->Buffer[i];
