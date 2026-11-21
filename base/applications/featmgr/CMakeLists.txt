@@ -55,7 +55,8 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/nitro-rdp.ini
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/payload/gl-sw-pack/glsw-pack.txt
             DESTINATION reactos/Featmgr/Payload/gl-sw-pack FOR all)
 
-# --- PowerShell 7 (LTS) preinstall, and the Firefox entry: software-tier entries (amd64 only; the x86 pwsh does not start yet, PS7-x86-pwsh-mscoree) ---
+# --- PowerShell 7 (LTS) and Firefox: software-tier entries, amd64 and i386. Only amd64 has the PowerShell 7 preinstall below;
+# i386 lists both and downloads them on request (the catalog entry catalog/x86/powershell-7.ini carries the name powershell-7.ini on the CD). ---
 # The manifest always ships (Provider=native). The official MSI (MIT) is NOT in git: stage-powershell7.sh downloads it
 # at configure time from the pinned release URL and checks the pinned SHA-256 (POWERSHELL7_MSI=<file> for an offline
 # host). When it is staged, the install image (bootcd / regtest, not the live CD) carries it, with the licence and
@@ -65,10 +66,14 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/payload/gl-sw-pack/glsw-pack.txt
 # Optional Features entry downloads the MSI at install time, as before. The [powershell-7] section of Catalog\components.ini
 # only serves first boot (optfeatures /firstboot): the preinstalled pwsh is detected there and never downloaded. Firefox
 # (catalog/firefox.ini + components.ini) is not bundled: it is downloaded from Mozilla at first boot.
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/firefox.ini
+            DESTINATION reactos/Featmgr/Catalog FOR all)
+if(ARCH STREQUAL "i386")
+    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/x86/powershell-7.ini
+                DESTINATION reactos/Featmgr/Catalog NAME_ON_CD powershell-7.ini FOR all)
+endif()
 if(ARCH STREQUAL "amd64")
     add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/powershell-7.ini
-                DESTINATION reactos/Featmgr/Catalog FOR all)
-    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/firefox.ini
                 DESTINATION reactos/Featmgr/Catalog FOR all)
 
     option(FEATMGR_PS7_PREINSTALL "amd64: bundle the PowerShell 7 MSI in the image and install it during setup (downloaded at configure)" ON)
