@@ -54,6 +54,8 @@ Arch         = amd64
 Profiles     = standard
 FeaturesNeed = wine-gecko, dotnet-framework-4.8, firefox
 Files        = SysWOW64\*, Microsoft.NET\Framework\v4.0.30319\wminet_utils.dll, winsxs\x86_*, winsxs\manifests\x86_*
+; The 32-bit view of the WinRT activation classes names DLLs of SysWOW64: not added without them, added with the component.
+Registry     = "HKLM\SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\*"
 
 [powershell7]
 Description  = %powershell7.desc%
