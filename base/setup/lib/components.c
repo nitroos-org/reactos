@@ -774,6 +774,11 @@ ComponentsProfileSelection(
 {
     COMPONENT_CHOICE Unset[COMPONENT_MAX];
 
+    /* "standard" is everything that exists in this edition, whatever the Profiles lines of a damaged or older
+     * components.inf say: Enter on the page must never leave something out that the person did not choose */
+    if (Profile == COMPONENT_PROFILE_STANDARD)
+        return ComponentsApplicableMask(State->Count, State->Desc);
+
     RtlFillMemory(Unset, sizeof(Unset), (UCHAR)COMPONENT_UNSET);
     return ComponentsResolve(State->Count, State->Desc, Profile, Unset);
 }
