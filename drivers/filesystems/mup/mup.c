@@ -462,14 +462,16 @@ VOID
 MupInvalidatePrefixTable(VOID)
 {
     PMUP_PFX Prefix;
-    PLIST_ENTRY Entry;
+    PLIST_ENTRY Entry, NextEntry;
 
     /* Browse the prefix table */
     ExAcquireResourceExclusiveLite(&MupPrefixTableLock, TRUE);
     for (Entry = MupPrefixList.Flink;
          Entry != &MupPrefixList;
-         Entry = Entry->Flink)
+         Entry = NextEntry)
     {
+        /* Removing the entry drops the table's reference, which can be the last one and frees the node */
+        NextEntry = Entry->Flink;
         Prefix = CONTAINING_RECORD(Entry, MUP_PFX, PrefixListEntry);
 
         /* And remove any entry in it */
