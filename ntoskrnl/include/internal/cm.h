@@ -112,6 +112,7 @@
 #define CM_REGACL_OP_LINKNODE                           3
 #define CM_REGACL_OP_FOLLOWLINK                         4
 #define CM_REGACL_OP_RESTAMP                            5   /* a stored descriptor reset at boot */
+#define CM_REGACL_OP_KEPTGRANT                          6   /* kept at boot although others may change the key */
 
 //
 // EnlistKeyBodyWithKCB Flags

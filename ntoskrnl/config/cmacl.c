@@ -149,8 +149,8 @@ static const PCSTR CmpAclRuleNames[CmpAclRuleMax] =
     "taskcache", "eventlog", "default", "user", "user-unknown", "other"
 };
 
-static const PCSTR CmpAclOpNames[] = { "open", "create", "createlink", "linknode", "followlink", "restamp" };
-C_ASSERT(RTL_NUMBER_OF(CmpAclOpNames) == CM_REGACL_OP_RESTAMP + 1);
+static const PCSTR CmpAclOpNames[] = { "open", "create", "createlink", "linknode", "followlink", "restamp", "keptgrant" };
+C_ASSERT(RTL_NUMBER_OF(CmpAclOpNames) == CM_REGACL_OP_KEPTGRANT + 1);
 static const PCSTR CmpAclModeNames[] = { "legacy", "audit", "enforce" };
 static const PCSTR CmpAclSourceNames[] = { "default", "registry", "bootoption" };
 
@@ -2035,6 +2035,7 @@ static LONG CmpAclRestampUserOwned;
 static LONG CmpAclRestampFailed;
 static LONG CmpAclRestampPrinted;
 static LONG CmpAclWalkIncomplete;    /* keys or subtrees the walk could not look at */
+static LONG CmpAclKeptGrants;        /* administrators' keys kept although others may change them */
 static ULONG CmpAclTransitionState;
 static ULONG CmpAclTransitionMs;     /* how long the check took (boot time it cost) */
 
@@ -2179,10 +2180,15 @@ CmpAclSdPlanted(
     return Reasons;
 }
 
-/* Record a key whose stored descriptor was replaced: counted, printed (capped) and logged */
+/*
+ * Record a key whose stored descriptor was replaced (Operation
+ * CM_REGACL_OP_RESTAMP), or kept although it lets others than administrators
+ * change the key (CM_REGACL_OP_KEPTGRANT): counted, printed (capped) and logged
+ */
 static
 VOID
 CmpAclRecordRestamp(
+    _In_ ULONG Operation,
     _In_ PCUNICODE_STRING KeyName,
     _In_ ULONG Reasons,
     _In_opt_ PSID OldOwner,
@@ -2194,11 +2200,13 @@ CmpAclRecordRestamp(
     USHORT KeyChars;
     PWCHAR p;
 
-    if (NT_SUCCESS(Status))
+    if (Operation == CM_REGACL_OP_KEPTGRANT)
+        InterlockedIncrement(&CmpAclKeptGrants);
+    else if (NT_SUCCESS(Status))
         InterlockedIncrement(&CmpAclRestamped);
     else
         InterlockedIncrement(&CmpAclRestampFailed);
-    if (Reasons & CMP_ACL_PLANTED_OWNER)
+    if (Operation == CM_REGACL_OP_RESTAMP && (Reasons & CMP_ACL_PLANTED_OWNER))
         InterlockedIncrement(&CmpAclRestampUserOwned);
 
     RtlInitEmptyUnicodeString(&Owner, OwnerBuffer, sizeof(OwnerBuffer));
@@ -2208,8 +2216,9 @@ CmpAclRecordRestamp(
     if (InterlockedIncrement(&CmpAclRestampPrinted) <= CMP_ACL_RESTAMP_PRINT_MAX)
     {
         DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL,
-                   "CM-ACL: %wZ: stored descriptor replaced (reasons 0x%lx, owner was %wZ): 0x%lx\n",
-                   KeyName, Reasons, &Owner, Status);
+                   "CM-ACL: %wZ: stored descriptor %s (reasons 0x%lx, owner %wZ): 0x%lx\n",
+                   KeyName, Operation == CM_REGACL_OP_KEPTGRANT ? "kept, others may change the key" : "replaced",
+                   Reasons, &Owner, Status);
     }
 
     /* The file log: one entry per key, never deduplicated, within the boot's entry budget */
@@ -2232,7 +2241,7 @@ CmpAclRecordRestamp(
     RtlZeroMemory(Entry, FIELD_OFFSET(CMP_ACL_ENTRY, Strings));
     Entry->Id = (ULONG)InterlockedIncrement(&CmpAclNextId);
     Entry->Slot = MAXULONG;
-    Entry->Operation = CM_REGACL_OP_RESTAMP;
+    Entry->Operation = Operation;
     Entry->Rule = CmpAclRuleCell;
     Entry->Desired = Reasons;
     Entry->ShadowStatus = Status;
@@ -2330,7 +2339,7 @@ CmpAclCheckStoredKey(
     PUNICODE_STRING Name = NULL;
     PVOID PoolCopy = NULL;
     PSID Owner = NULL;
-    ULONG Reasons = 0;
+    ULONG Reasons = 0, Kept = 0;
     BOOLEAN Link = FALSE;
     NTSTATUS Status;
 
@@ -2348,7 +2357,17 @@ CmpAclCheckStoredKey(
         {
             Reasons = CmpAclSdPlanted(Sd, &Owner);
             if (OwnerOnly && !(Reasons & CMP_ACL_PLANTED_OWNER))
+            {
+                /*
+                 * Kept, but logged: an installer may have granted this on purpose,
+                 * or a non-administrator may have changed the DACL of an
+                 * administrator's key while nothing was enforced (that keeps the
+                 * owner: nobody can make Administrators the owner but its members).
+                 * The descriptor cannot tell which; the administrator's review can.
+                 */
+                Kept = Reasons;
                 Reasons = 0;
+            }
             /* The boot self-check's repair: this descriptor is what shuts SYSTEM out of a boot key */
             if (Force && !Reasons)
                 Reasons = CMP_ACL_PLANTED_SYSTEM | CMP_ACL_PLANTED_INHERIT;
@@ -2380,12 +2399,23 @@ CmpAclCheckStoredKey(
                 NewSd = CmpAclDefaultKeySd(Kcb);
             Name = CmpConstructName(Kcb);
         }
+        else if (Kept)
+        {
+            Name = CmpConstructName(Kcb);
+        }
     }
     CmpUnlockRegistry();
     ObDereferenceObject(KeyBody);
 
     if (!Reasons)
+    {
+        if (Name)
+        {
+            CmpAclRecordRestamp(CM_REGACL_OP_KEPTGRANT, Name, Kept, Owner, STATUS_SUCCESS);
+            CmpFree(Name, 0);
+        }
         return 0;
+    }
 
     if (Reasons & CMP_ACL_PLANTED_LINK)
     {
@@ -2396,7 +2426,7 @@ CmpAclCheckStoredKey(
             Reasons |= CMP_ACL_LINK_DELETED;
             if (Name)
             {
-                CmpAclRecordRestamp(Name, Reasons & ~CMP_ACL_LINK_DELETED, Owner, Status);
+                CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons & ~CMP_ACL_LINK_DELETED, Owner, Status);
                 CmpFree(Name, 0);
             }
             return Reasons;
@@ -2407,7 +2437,7 @@ CmpAclCheckStoredKey(
          * key there gets, so that its owner can no longer change its target.
          */
         if (Name)
-            CmpAclRecordRestamp(Name, Reasons, Owner, Status);
+            CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons, Owner, Status);
         Reasons &= ~CMP_ACL_PLANTED_LINK;
         if (NT_SUCCESS(ObReferenceObjectByHandle(Key, 0, CmpKeyObjectType, KernelMode, (PVOID *)&KeyBody, NULL)))
         {
@@ -2431,7 +2461,7 @@ CmpAclCheckStoredKey(
     }
     if (Name)
     {
-        CmpAclRecordRestamp(Name, Reasons, Owner, Status);
+        CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons, Owner, Status);
         CmpFree(Name, 0);
     }
     return Reasons;
@@ -2607,7 +2637,7 @@ CmpAclStampPolicySd(
     ZwClose(Key);
     if (Name)
     {
-        CmpAclRecordRestamp(Name, CMP_ACL_PLANTED_SYSTEM | CMP_ACL_PLANTED_INHERIT, NULL, Status);
+        CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, CMP_ACL_PLANTED_SYSTEM | CMP_ACL_PLANTED_INHERIT, NULL, Status);
         CmpFree(Name, 0);
     }
 }
@@ -2943,7 +2973,9 @@ CmpAclFlushHives(VOID)
  * for example HKLM\SOFTWARE\<vendor> before an administrator installed that
  * vendor's program, which then reads its settings from a key the user still
  * writes). Every key replaced is logged (op "restamp", the old owner as
- * "user").
+ * "user"); a key there that is kept although others than administrators may
+ * change it is logged too (op "keptgrant": an installer's grant, or a DACL a
+ * non-administrator changed on an administrator's key, which keeps its owner).
  */
 static
 VOID
@@ -3118,9 +3150,9 @@ CmpAclBootHivesLoaded(
         }
         DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL,
                    "CM-ACL: transition check: %ld stored descriptors replaced (%ld owned by non-administrators), "
-                   "%ld failed, %ld not checked, flush 0x%lx, marker %s\n",
+                   "%ld failed, %ld not checked, %ld kept although others may change them, flush 0x%lx, marker %s\n",
                    CmpAclRestamped, CmpAclRestampUserOwned, CmpAclRestampFailed, CmpAclWalkIncomplete,
-                   FlushStatus,
+                   CmpAclKeptGrants, FlushStatus,
                    CmpAclTransitionState == CMP_ACL_TRANSITION_WALKED ? "written" : "NOT written");
     }
     CmpAclPublish();
@@ -3405,6 +3437,7 @@ CmpAclPublish(VOID)
     CmpAclSetDword(Key, L"RestampUserOwned", (ULONG)CmpAclRestampUserOwned);
     CmpAclSetDword(Key, L"RestampFailed", (ULONG)CmpAclRestampFailed);
     CmpAclSetDword(Key, L"TransitionIncomplete", (ULONG)CmpAclWalkIncomplete);
+    CmpAclSetDword(Key, L"KeptGrants", (ULONG)CmpAclKeptGrants);
     CmpAclSetDword(Key, L"Checks", (ULONG)CmpAclChecks);
     CmpAclSetDword(Key, L"Denials", (ULONG)CmpAclDenials);
     CmpAclSetDword(Key, L"Entries", (ULONG)CmpAclEntryCount);
@@ -3429,7 +3462,7 @@ CmpAclFormatEntry(
     CmpAclLineFormat(Line, ",\"id\":%lu,\"op\":\"%s\",\"key\":", Entry->Id, CmpAclOpNames[Entry->Operation]);
     CmpAclLineString(Line, p, Entry->KeyChars, CMP_ACL_LINE_KEY_BYTES);
     p += Entry->KeyChars;
-    if (Entry->Operation == CM_REGACL_OP_RESTAMP)
+    if (Entry->Operation == CM_REGACL_OP_RESTAMP || Entry->Operation == CM_REGACL_OP_KEPTGRANT)
     {
         /* A stored descriptor replaced at boot: why (CMP_ACL_PLANTED_*), its owner, the set's status */
         CmpAclLineFormat(Line, ",\"reasons\":\"0x%lx\",\"status\":\"0x%08lx\",\"oldowner\":",
