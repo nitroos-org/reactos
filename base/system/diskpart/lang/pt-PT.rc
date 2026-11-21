@@ -73,6 +73,8 @@ BEGIN
     IDS_CREATE_PARTITION_FAIL "\nO DiskPart não conseguiu criar a partição especificada.\n"
     IDS_CREATE_PARTITION_SUCCESS "\nO DiskPart conseguiu criar a partição especificada.\n"
     IDS_CREATE_PARTITION_INVALID_STYLE "\nNão é possível criar partições lógicas ou estendidas num disco GPT.\nEm vez disso, crie uma partição primária num disco GPT.\n"
+    IDS_PARTITION_LAYOUT_INVALID "\nThe partition table of this disk has partitions that overlap or lie outside the usable area.\nDiskPart does not change it.\n"
+    IDS_CREATE_PARTITION_TABLE_FULL "\nThe partition table of this disk has no free entry for another partition.\n"
 END
 
 STRINGTABLE

@@ -11,6 +11,23 @@
 #define NDEBUG
 #include <debug.h>
 
+/*
+ * A size in MB as a count of sectors. A size that does not fit gives the largest number, which no
+ * unpartitioned space has: the command fails and nothing is written (the product must not wrap
+ * around to a small size, or to 0 which stands for "all of the space").
+ */
+static
+ULONGLONG
+MegabytesToSectors(
+    _In_ ULONGLONG ullMegabytes,
+    _In_ ULONG ulBytesPerSector)
+{
+    if (ullMegabytes > _UI64_MAX / (1024 * 1024))
+        return _UI64_MAX;
+
+    return (ullMegabytes * 1024 * 1024) / ulBytesPerSector;
+}
+
 static
 PPARTENTRY
 InsertGptPartition(
@@ -132,6 +149,15 @@ CreateEfiPartition(
         return EXIT_SUCCESS;
     }
 
+    if (!CheckPartitionLayoutForChange(CurrentDisk))
+        return EXIT_SUCCESS;
+
+    if (!HasFreeGptSlot(CurrentDisk))
+    {
+        ConResPuts(StdOut, IDS_CREATE_PARTITION_TABLE_FULL);
+        return EXIT_SUCCESS;
+    }
+
     for (i = 3; i < argc; i++)
     {
         if (_wcsicmp(argv[i], L"noerr") == 0)
@@ -191,7 +217,7 @@ CreateEfiPartition(
 
     /* Size */
     if (ullSize != 0)
-        ullSectorCount = (ullSize * 1024 * 1024) / CurrentDisk->BytesPerSector;
+        ullSectorCount = MegabytesToSectors(ullSize, CurrentDisk->BytesPerSector);
     else
         ullSectorCount = 0;
 
@@ -354,6 +380,9 @@ CreateExtendedPartition(
         return EXIT_SUCCESS;
     }
 
+    if (!CheckPartitionLayoutForChange(CurrentDisk))
+        return EXIT_SUCCESS;
+
     if (CurrentDisk->ExtendedPartition != NULL)
     {
         ConPuts(StdOut, L"We already have an extended partition on this disk!\n");
@@ -361,7 +390,7 @@ CreateExtendedPartition(
     }
 
     if (ullSize != 0)
-        ullSectorCount = (ullSize * 1024 * 1024) / CurrentDisk->BytesPerSector;
+        ullSectorCount = MegabytesToSectors(ullSize, CurrentDisk->BytesPerSector);
     else
         ullSectorCount = 0;
 
@@ -485,6 +514,9 @@ CreateLogicalPartition(
         return EXIT_SUCCESS;
     }
 
+    if (!CheckPartitionLayoutForChange(CurrentDisk))
+        return EXIT_SUCCESS;
+
     for (i = 3; i < argc; i++)
     {
         if (_wcsicmp(argv[i], L"noerr") == 0)
@@ -575,7 +607,7 @@ CreateLogicalPartition(
     DPRINT1("Partition Type: %hx\n", PartitionType);
 
     if (ullSize != 0)
-        ullSectorCount = (ullSize * 1024 * 1024) / CurrentDisk->BytesPerSector;
+        ullSectorCount = MegabytesToSectors(ullSize, CurrentDisk->BytesPerSector);
     else
         ullSectorCount = 0;
 
@@ -705,6 +737,15 @@ CreateMsrPartition(
         return EXIT_SUCCESS;
     }
 
+    if (!CheckPartitionLayoutForChange(CurrentDisk))
+        return EXIT_SUCCESS;
+
+    if (!HasFreeGptSlot(CurrentDisk))
+    {
+        ConResPuts(StdOut, IDS_CREATE_PARTITION_TABLE_FULL);
+        return EXIT_SUCCESS;
+    }
+
     for (i = 3; i < argc; i++)
     {
         if (_wcsicmp(argv[i], L"noerr") == 0)
@@ -764,7 +805,7 @@ CreateMsrPartition(
 
     /* Size */
     if (ullSize != 0)
-        ullSectorSize = (ullSize * 1024 * 1024) / CurrentDisk->BytesPerSector;
+        ullSectorSize = MegabytesToSectors(ullSize, CurrentDisk->BytesPerSector);
     else
         ullSectorSize = 0;
 
@@ -819,6 +860,9 @@ CreatePrimaryMbrPartition(
     INT length;
     NTSTATUS Status;
 
+    if (!CheckPartitionLayoutForChange(CurrentDisk))
+        return;
+
     if (pszPartitionType)
     {
         length = wcslen(pszPartitionType);
@@ -851,7 +895,7 @@ CreatePrimaryMbrPartition(
     }
 
     if (ullSize != 0)
-        ullSectorCount = (ullSize * 1024 * 1024) / CurrentDisk->BytesPerSector;
+        ullSectorCount = MegabytesToSectors(ullSize, CurrentDisk->BytesPerSector);
     else
         ullSectorCount = 0;
 
@@ -957,6 +1001,15 @@ CreatePrimaryGptPartition(
     GUID guidPartitionType;
     NTSTATUS Status;
 
+    if (!CheckPartitionLayoutForChange(CurrentDisk))
+        return;
+
+    if (!HasFreeGptSlot(CurrentDisk))
+    {
+        ConResPuts(StdOut, IDS_CREATE_PARTITION_TABLE_FULL);
+        return;
+    }
+
     /* Partition Type */
     if (pszPartitionType)
     {
@@ -973,7 +1026,7 @@ CreatePrimaryGptPartition(
 
     /* Size */
     if (ullSize != 0)
-        ullSectorCount = (ullSize * 1024 * 1024) / CurrentDisk->BytesPerSector;
+        ullSectorCount = MegabytesToSectors(ullSize, CurrentDisk->BytesPerSector);
     else
         ullSectorCount = 0;
 
