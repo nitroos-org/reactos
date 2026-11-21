@@ -147,6 +147,25 @@ int kshim_jnl_degrade(struct block_device *b);
 void kshim_jnl_patch(struct block_device *b, int to_overlay, u64 off, u8 *buf, size_t len);
 int kshim_jnl_holds(struct block_device *b, u64 off, u64 len);
 
+/*
+ * Writes that reach the volume's place on the medium (not the journal area): every in-place pass of the journal, and every
+ * write that does not go through the overlay (file data, the degraded and unjournaled modes, no journal).  kshim_home_mark
+ * records [off, off+len) before the write is sent (the writes outside the volume lock: again when it has ended);
+ * kshim_home_all records a change of anything (activation, degrade, the lock holder's direct writes, a replaced medium).  kshim_home_changed: nonzero when a write recorded after generation @since
+ * may have touched [off, off+len) (two pages that hash alike only make it say so more often); since = kshim_home_now().
+ */
+#define KSHIM_HOME_N 4096	/* slots of the per-page table (kshim_bdev_open allocates it) */
+void kshim_home_mark(struct block_device *b, u64 off, u64 len);
+void kshim_home_all(struct block_device *b);
+u64 kshim_home_now(struct block_device *b);
+int kshim_home_changed(struct block_device *b, u64 off, u64 len, u64 since);
+/*
+ * Under the volume lock, no journal I/O in flight and nothing sealed: copies to @buf the bytes of [off, off+len) as the retained
+ * transaction holds them (what its checkpoint writes in place) and returns 0 when it holds every sector of them; 1 when it holds
+ * none (every committed change of them is in place); -ENOENT when it holds some, or something is sealed or in flight.
+ */
+int kshim_jnl_retained_copy(struct block_device *b, u64 off, u32 len, u8 *buf);
+
 /* Clusters freed by a transaction that is not covered by aux_done: noted at the free, skipped by the allocator (see kshim_jnl.c). */
 void kshim_resv_note(struct block_device *b, u64 lcn, u64 nr, u64 tag);
 u64 kshim_resv_skip(struct block_device *b, u64 lcn, u64 *next);

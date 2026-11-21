@@ -802,6 +802,13 @@ struct block_device { void *osdev; u64 size; unsigned int logical_block_size; st
 	unsigned long kshim_wr_failed; /* device writes that failed, all paths (unmount: commit nothing after one) */
 	int kshim_gone; /* the medium was replaced: every device read and write fails */
 	int kshim_frozen; /* the disk was written under the mount: every device write fails */
+	/* Writes that can change the volume's bytes on the medium outside the journal area (kshim_home_mark, kshim_jnl.c):
+	 * a count, and per hash of a 4 KiB device page the count at its last write (NULL: not recorded, every write counts as
+	 * one over everything: kshim_home_wide).  Lets the flush know, without reading the device, that a record it saw on the
+	 * medium is still there (core/ngcore.c ngc_flush_home). */
+	unsigned long long kshim_home_gen __attribute__((aligned(8)));
+	unsigned long long kshim_home_wide __attribute__((aligned(8)));	/* the count at the last write over everything */
+	unsigned long long *kshim_home_pg;
 	/* Set by the NT glue: waits until no file-data write the glue issued outside the volume lock is on
 	 * its way to the device (nt/write.c, NgDrainDataIoCallback).  Called under the volume lock, before clusters
 	 * are freed and before the device stops being the volume's. */

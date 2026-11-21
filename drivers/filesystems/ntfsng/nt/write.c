@@ -810,11 +810,40 @@ BOOLEAN NgDropIfDiscardable(PNG_VCB Vcb, PIRP Irp, PNTSTATUS Status)
     return TRUE;
 }
 
+/* Before and after a transfer of file data the glue sends itself: the places it writes, for ngc_flush_home (core/ngcore.c). */
+static VOID NgDioMark(PNG_VCB Vcb, const struct ngc_dio *Dio)
+{
+    ULONG r;
+    for (r = 0; r < Dio->nruns; r++)
+        ngc_home_mark(Vcb->Core, Dio->run[r].dev, Dio->run[r].len);
+}
+
+static int NgDioTransferDo(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Buffer, PUCHAR Bounce, PMDL Mdl);
+static int NgDioZeroTransferDo(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Bounce);
+
 /*
  * The device part of an unlocked paging write (no CoreLock): each run through a bounce buffer, as the
  * core's own data writes go (ngc_dev_write), with the same device request (ngos_dev_write).
  */
 static int NgDioTransfer(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Buffer, PUCHAR Bounce, PMDL Mdl)
+{
+    int Ret;
+    NgDioMark(Vcb, Dio);
+    Ret = NgDioTransferDo(Vcb, Dio, Buffer, Bounce, Mdl);
+    NgDioMark(Vcb, Dio);
+    return Ret;
+}
+
+static int NgDioZeroTransfer(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Bounce)
+{
+    int Ret;
+    NgDioMark(Vcb, Dio);
+    Ret = NgDioZeroTransferDo(Vcb, Dio, Bounce);
+    NgDioMark(Vcb, Dio);
+    return Ret;
+}
+
+static int NgDioTransferDo(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Buffer, PUCHAR Bounce, PMDL Mdl)
 {
     ULONG r, Done;
 
@@ -871,7 +900,7 @@ static int NgDioTransfer(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Buffer, 
 }
 
 /* The zero runs of a gap piece (ngc_dio_zero_begin): the bounce buffer, zeroed, written run by run. */
-static int NgDioZeroTransfer(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Bounce)
+static int NgDioZeroTransferDo(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Bounce)
 {
     ULONG r, Done;
     RtlZeroMemory(Bounce, NG_DIO_BOUNCE);
@@ -1818,8 +1847,10 @@ NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
      * an offline tool) relies on that: a hive whose header was written after a flush that grew it must not look longer
      * than its file.  The commit may still be retained (durable in the journal, two device flushes), and stays so when
      * the file's base MFT record on the disk already is its current one apart from times and attributes (an overwrite
-     * inside the file, ngc_record_home): then a reader finds everything of it as now.  Otherwise the retained pages are
-     * written in place (ngc_checkpoint: one more device flush), together with whatever else was retained.
+     * inside the file): then a reader finds everything of it as now.  The flush knows that without reading the disk when
+     * it saw or put the record there itself and no write since can have touched it (Fcb->Home, ngc_flush_home); else it
+     * reads the record.  Otherwise the retained pages are written in place (ngc_checkpoint: one more device flush),
+     * together with whatever else was retained.
      * FlushAlwaysInPlace=1: every flush checkpoints; FlushJournalOnly=1: none does, as before (comparison).
      */
     if (NgGlobal.FlushAlwaysInPlace)
@@ -1831,9 +1862,14 @@ NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     else
     {
         Err = NgCommitEx(Vcb, TRUE);
-        if (!Err && !NgGlobal.FlushJournalOnly &&
-            (Fcb->IsDirectory || NgEnsureNode(Fcb) || !ngc_record_home(Vcb->Core, Fcb->Node)))
-            Err = ngc_checkpoint(Vcb->Core);
+        if (!Err && !NgGlobal.FlushJournalOnly)
+        {
+            if (Fcb->IsDirectory || NgEnsureNode(Fcb))
+                Err = ngc_checkpoint(Vcb->Core);
+            else
+                Err = ngc_flush_home(Vcb->Core, Fcb->Node, &Fcb->Home, Fcb->HomeFresh);
+            Fcb->HomeFresh = FALSE;
+        }
     }
     Vcb->Syncs++;
     NgReleaseCore(Vcb);

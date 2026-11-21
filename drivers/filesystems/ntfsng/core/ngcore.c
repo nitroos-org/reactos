@@ -1821,6 +1821,7 @@ void ngc_medium_gone(ngc_vol *v)
 	kshim_dio_drain(v->bdev);
 	kshim_jnl_quiesce(v->bdev);	/* the journal I/O of an unlocked commit is device I/O too */
 	v->bdev->kshim_gone = 1;
+	kshim_home_all(v->bdev);
 	v->sb->s_flags |= SB_RDONLY;
 }
 
@@ -1833,6 +1834,7 @@ void ngc_stop_writes(ngc_vol *v)
 	kshim_dio_drain(v->bdev);
 	kshim_jnl_quiesce(v->bdev);
 	v->bdev->kshim_frozen = 1;
+	kshim_home_all(v->bdev);	/* the holder's writes can be anywhere */
 	v->sb->s_flags |= SB_RDONLY;
 }
 
@@ -2088,10 +2090,11 @@ static const struct attr_record *ngc_rec_next(const u8 *rec, u32 rs, u32 *pos)
 	return ERR_PTR(-EIO);
 }
 
-static int ngc_rec_open(u8 *rec, u32 rs, u32 *pos)
+/* The offset of the first attribute of a fixed-up record in use; -EIO when the header is not one. */
+static int ngc_rec_attrs(const u8 *rec, u32 rs, u32 *pos)
 {
 	const struct mft_record *m = (const struct mft_record *)rec;
-	if (m->magic != magic_FILE || post_read_mst_fixup((struct ntfs_record *)rec, rs))
+	if (m->magic != magic_FILE)
 		return -EIO;
 	*pos = le16_to_cpu(m->attrs_offset);
 	if (!(m->flags & MFT_RECORD_IN_USE) || *pos < offsetof(struct mft_record, reserved) || *pos >= rs ||
@@ -2100,30 +2103,76 @@ static int ngc_rec_open(u8 *rec, u32 rs, u32 *pos)
 	return 0;
 }
 
-/*
- * Whether a reader of the volume itself (no journal replay: the boot loader, another system, an offline tool) finds @n as it
- * is now.  1: the base MFT record of @n on the device holds every attribute the record in memory holds, byte for byte, apart
- * from $STANDARD_INFORMATION (times and file attributes): the same names (so the same directory entries), the same data
- * attribute (size, initialized size, allocated size and runs, or the resident data), the same flags and link count.  The
- * memory side is $MFT's page cache, which a commit wrote back.  0 in every other case and whenever it cannot tell: a
- * directory, a named stream, a file with an attribute list or extension records, a record larger than a page or a cluster,
- * a commit's I/O in flight, a read error.  Under the volume lock, between core operations, after a commit.
- */
-int ngc_record_home(ngc_vol *v, ngc_node *n)
+/* Removes the update sequence fix-ups of a record as written (once per buffer). */
+static int ngc_rec_open(u8 *rec, u32 rs)
 {
-	struct inode *vi = (struct inode *)n;
+	u32 pos;
+	const struct mft_record *m = (const struct mft_record *)rec;
+	if (m->magic != magic_FILE || post_read_mst_fixup((struct ntfs_record *)rec, rs))
+		return -EIO;
+	return ngc_rec_attrs(rec, rs, &pos);
+}
+
+/*
+ * 1: two fixed-up records hold the same attributes, byte for byte, apart from $STANDARD_INFORMATION (times and file
+ * attributes), and the same flags, link count, sequence number and base reference: the same names (so the same directory
+ * entries), the same data attribute (size, initialized size, allocated size and runs, or the resident data).  0 otherwise and
+ * when either is damaged.
+ */
+static int ngc_rec_same(const u8 *mem, const u8 *dev, u32 rs)
+{
+	const struct mft_record *a = (const struct mft_record *)mem, *c = (const struct mft_record *)dev;
+	u32 pm, pd;
+	if (ngc_rec_attrs(mem, rs, &pm) || ngc_rec_attrs(dev, rs, &pd))
+		return 0;
+	if (a->flags != c->flags || a->link_count != c->link_count || a->sequence_number != c->sequence_number ||
+	    a->base_mft_record != c->base_mft_record)
+		return 0;
+	for (;;) {
+		const struct attr_record *x = ngc_rec_next(mem, rs, &pm), *y = ngc_rec_next(dev, rs, &pd);
+		if (IS_ERR(x) || IS_ERR(y))
+			return 0;
+		if (!x || !y)
+			return !x && !y;
+		if (x->length != y->length || memcmp(x, y, le32_to_cpu(x->length)))
+			return 0;
+	}
+}
+
+/*
+ * What a flush last knew to be a file's base MFT record on the medium itself (ngc_flush_home): @rec, fixed up, was there
+ * apart from $STANDARD_INFORMATION when the count of writes to the volume's place was @gen (kshim_home_now).  As long as no
+ * write recorded after @gen may have touched @dev (kshim_home_changed), it still is: nothing else writes there.
+ */
+struct ngc_home {
+	u64 mft_no;
+	u64 dev;			/* device offset of the record */
+	u64 gen;
+	u32 rs;				/* 0: holds nothing */
+	u16 seq;
+	u8 rec[];
+};
+
+void ngc_home_free(ngc_home *h)
+{
+	kfree(h);
+}
+
+void ngc_home_mark(ngc_vol *v, unsigned long long off, unsigned long long len)
+{
+	kshim_home_mark(v->bdev, off, len);
+}
+
+/* The device offset of @ni's base record, when a flush can judge the file by that record alone (see ngc_flush_home). */
+static int ngc_home_where(ngc_vol *v, struct inode *vi, u64 *dev)
+{
 	struct ntfs_inode *ni = NTFS_I(vi), *mft_ni;
 	struct ntfs_volume *vol = NTFS_SB(v->sb);
-	struct block_device *b = v->bdev;
-	u32 rs = vol->mft_record_size, pm, pd;
+	u32 rs = vol->mft_record_size;
 	u64 off;
 	s64 lcn;
-	u8 *mem = NULL, *dev = NULL;
-	struct folio *f;
-	int home = 0;
-
-	if (!vi || S_ISDIR(vi->i_mode) || NInoAttr(ni) || NInoAttrList(ni) || ni->nr_extents ||
-	    rs > PAGE_SIZE || rs > vol->cluster_size || (b->jnl && kshim_jnl_busy(b)))
+	if (S_ISDIR(vi->i_mode) || NInoAttr(ni) || NInoAttrList(ni) || ni->nr_extents || rs > PAGE_SIZE ||
+	    rs > vol->cluster_size)
 		return 0;
 	off = (u64)ni->mft_no << vol->mft_record_size_bits;
 	mft_ni = NTFS_I(vol->mft_ino);
@@ -2132,41 +2181,160 @@ int ngc_record_home(ngc_vol *v, ngc_node *n)
 	up_read(&mft_ni->runlist.lock);
 	if (lcn < 0)
 		return 0;
-	mem = kmalloc(rs, GFP_NOFS);
-	dev = kmalloc(rs, GFP_NOFS);
-	if (!mem || !dev)
-		goto out;
+	*dev = ((u64)lcn << vol->cluster_size_bits) + (off & vol->cluster_size_mask);
+	return 1;
+}
+
+/* @ni's base record as $MFT's page cache holds it (what the commit wrote), fixed up; NULL when it cannot be had. */
+static u8 *ngc_home_mem(struct ntfs_volume *vol, struct ntfs_inode *ni)
+{
+	u64 off = (u64)ni->mft_no << vol->mft_record_size_bits;
+	u32 rs = vol->mft_record_size;
+	u8 *mem = kmalloc(rs, GFP_NOFS);
+	struct folio *f;
+	if (!mem)
+		return NULL;
 	f = read_mapping_folio(vol->mft_ino->i_mapping, (pgoff_t)(off >> PAGE_SHIFT), NULL);
-	if (IS_ERR(f))
-		goto out;
+	if (IS_ERR(f)) {
+		kfree(mem);
+		return NULL;
+	}
 	memcpy(mem, (u8 *)folio_address(f) + (off & (PAGE_SIZE - 1)), rs);
 	folio_put(f);
-	/* The device itself, past every overlay of the journal: what a reader that does not replay it gets. */
-	if (ngos_dev_read(b->osdev, ((u64)lcn << vol->cluster_size_bits) + (off & vol->cluster_size_mask), dev, rs))
-		goto out;
-	if (ngc_rec_open(mem, rs, &pm) || ngc_rec_open(dev, rs, &pd))
-		goto out;
-	{
-		const struct mft_record *a = (const struct mft_record *)mem, *c = (const struct mft_record *)dev;
-		if (a->flags != c->flags || a->link_count != c->link_count || a->sequence_number != c->sequence_number ||
-		    a->base_mft_record != c->base_mft_record)
-			goto out;
+	if (ngc_rec_open(mem, rs)) {
+		kfree(mem);
+		return NULL;
 	}
-	for (;;) {
-		const struct attr_record *x = ngc_rec_next(mem, rs, &pm), *y = ngc_rec_next(dev, rs, &pd);
-		if (IS_ERR(x) || IS_ERR(y))
+	return mem;
+}
+
+/*
+ * The record at @dev on the medium itself, past every overlay of the journal (what a reader that does not replay it gets),
+ * fixed up; NULL when it cannot be had.  Read in whole logical sectors of the device: on a disk with 4 KiB sectors a 1 KiB
+ * record is a slice of one.
+ */
+static u8 *ngc_home_dev(struct block_device *b, u64 dev, u32 rs)
+{
+	u32 bs = b->logical_block_size, span;
+	u64 a;
+	u8 *buf;
+	if (bs < 512 || (bs & (bs - 1)))
+		return NULL;
+	a = dev & ~(u64)(bs - 1);
+	span = (u32)((dev - a + rs + bs - 1) & ~(u64)(bs - 1));
+	if (span > 64 * 1024 || a + span > b->size)
+		return NULL;
+	buf = kmalloc(span, GFP_NOFS);
+	if (!buf)
+		return NULL;
+	if (ngos_dev_read(b->osdev, a, buf, span)) {
+		kfree(buf);
+		return NULL;
+	}
+	if (dev != a)
+		memmove(buf, buf + (dev - a), rs);
+	if (ngc_rec_open(buf, rs)) {
+		kfree(buf);
+		return NULL;
+	}
+	return buf;
+}
+
+static void ngc_home_keep(ngc_home **memo, struct ntfs_inode *ni, u64 dev, u32 rs, u64 gen, const u8 *rec)
+{
+	struct ngc_home *h = *memo;
+	if (h && h->rs != rs) {
+		kfree(h);
+		*memo = h = NULL;
+	}
+	if (!h) {
+		h = kmalloc(sizeof(*h) + rs, GFP_NOFS);
+		if (!h)
+			return;
+		*memo = h;
+	}
+	h->mft_no = ni->mft_no;
+	h->seq = ni->seq_no;
+	h->dev = dev;
+	h->gen = gen;
+	memcpy(h->rec, rec, rs);
+	h->rs = rs;
+}
+
+/*
+ * After a retained commit of a flush (ngc_commit_begin with retain), under the volume lock, between core operations: makes
+ * the flushed file complete on the volume itself, not only in the journal, as ngc_checkpoint does for everything retained.
+ * Invariant when it returns 0: a reader that does not replay the journal (the boot loader, another system, an offline tool)
+ * finds the file's base record on the medium as the commit left it apart from $STANDARD_INFORMATION (so its size, allocation,
+ * initialized size, runs, names, flags and link count; its data was on the medium before the commit), or everything committed
+ * is in place.  The checkpoint is skipped when nothing committed waits to go in place, when the retained transaction holds no
+ * sector of the record (every committed change of it is in place), and when the record on the medium already is the one in
+ * memory apart from $STANDARD_INFORMATION (an overwrite inside the file): the file is complete there.
+ *
+ * Knowing what the medium holds without reading it (@memo, per file, kept by the caller, freed with ngc_home_free): the record
+ * this function last found there (read and compared equal) or put there (the retained transaction's image of it, which the
+ * checkpoint wrote), with the count of writes to the volume's place at that moment.  While kshim_home_changed says that no
+ * write since may have touched the record's page, the medium still holds that record, and comparing the record in memory with
+ * it answers as the device would; otherwise (any doubt) the device is read as before, except for the first flush of a file the
+ * caller's create made (@fresh): its record cannot be on the medium unless a checkpoint put it there, so it goes in place
+ * without the read (a checkpoint is always allowed).  Cannot tell (a directory, a named
+ * stream, an attribute list or extension records, a record larger than a page or a cluster, journal I/O in flight, a read
+ * error): the checkpoint runs.
+ */
+int ngc_flush_home(ngc_vol *v, ngc_node *n, ngc_home **memo, int fresh)
+{
+	struct block_device *b = v->bdev;
+	struct inode *vi = (struct inode *)n;
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct ntfs_inode *ni = vi ? NTFS_I(vi) : NULL;
+	struct ngc_home *h = *memo;
+	u32 rs = vol->mft_record_size;
+	u8 *mem = NULL, *dev = NULL, *img = NULL;
+	u64 at = 0, gen;
+	int err = 0, known;
+
+	if (!b->jnl || sb_rdonly(v->sb))
+		return 0;
+	if (!kshim_jnl_retained(b) && !kshim_jnl_busy(b))
+		return 0;	/* everything committed is in place already */
+	known = vi && !kshim_jnl_busy(b) && ngc_home_where(v, vi, &at) && (img = kmalloc(rs, GFP_NOFS)) != NULL;
+	if (known) {
+		/*
+		 * Nothing is sealed and no journal I/O runs (the volume lock is held), so the retained transaction is what the
+		 * checkpoint would write.  When it holds no sector of the record, every committed change of the record is in place
+		 * already; when it holds all of them, its image is what the medium holds after the checkpoint.
+		 */
+		int r = kshim_jnl_retained_copy(b, at, rs, img);
+		if (r == 1)
 			goto out;
-		if (!x || !y) {
-			home = !x && !y;
-			goto out;
+		if (r || ngc_rec_open(img, rs)) {
+			kfree(img);
+			img = NULL;
 		}
-		if (x->length != y->length || memcmp(x, y, le32_to_cpu(x->length)))
-			goto out;
+		mem = ngc_home_mem(vol, ni);
 	}
+	if (mem) {
+		if (h && h->rs == rs && h->mft_no == ni->mft_no && h->seq == ni->seq_no && h->dev == at &&
+		    !kshim_home_changed(b, at, rs, h->gen)) {
+			if (ngc_rec_same(mem, h->rec, rs))
+				goto out;	/* the medium holds it: no read */
+		} else if (!fresh) {
+			gen = kshim_home_now(b);	/* before the read: a write after it counts against what the read found */
+			dev = ngc_home_dev(b, at, rs);
+			if (dev && ngc_rec_same(mem, dev, rs)) {
+				ngc_home_keep(memo, ni, at, rs, gen, dev);
+				goto out;
+			}
+		}
+	}
+	err = ngc_checkpoint(v);
+	if (!err && img)
+		ngc_home_keep(memo, ni, at, rs, kshim_home_now(b), img);
 out:
 	kfree(mem);
 	kfree(dev);
-	return home;
+	kfree(img);
+	return err;
 }
 
 /* Overlay pages that make the next operation commit first: half the journal, at most NGC_JNL_COMMIT_PAGES. */

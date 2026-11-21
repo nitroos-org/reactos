@@ -1714,6 +1714,8 @@ walked:
         Fcb->LogicalVdl = Fcb->Header.FileSize.QuadPart;
         /* A new segment holds pages read from the stream, none past its end (a read past it is zero filled) */
         Fcb->TailZeroFrom = Fcb->Header.FileSize.QuadPart;
+        /* Its record was made by this create: the first flush need not read the disk (not shared yet: no lock needed). */
+        Fcb->HomeFresh = CreatedNode && !Stream.Length;
         Found = NgInsertOrFindFcb(Vcb, Fcb);
         Opening = TRUE;
         if (Found != Fcb)
