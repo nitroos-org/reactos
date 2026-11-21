@@ -25,6 +25,7 @@ list(APPEND SOURCE
     CancelIoEx.c
     IocpCancelStatus.c
     IocpThreadExit.c
+    IoCompletionWait.c
     TerminateProcessWait.c
     ApplicationRestart.c
     AppModel.c

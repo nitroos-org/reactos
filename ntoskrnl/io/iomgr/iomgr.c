@@ -309,6 +309,12 @@ IopCreateObjectTypes(VOID)
                                        NULL,
                                        &IoCompletionType))) return FALSE;
 
+    /*
+     * A completion port handle can be waited on: the wait is on the queue itself, which is signalled while it holds
+     * a packet (not on the always signalled default object).
+     */
+    IoCompletionType->DefaultObject = UlongToPtr(FIELD_OFFSET(KQUEUE, Header));
+
     /* Initialize the File object type  */
     RtlInitUnicodeString(&Name, L"File");
     ObjectTypeInitializer.DefaultNonPagedPoolCharge = sizeof(FILE_OBJECT);
