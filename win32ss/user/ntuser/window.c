@@ -4126,18 +4126,27 @@ IntIsSystemClassExtra(PWND Window)
             Window->pcls->fnid == FNID_MENU);
 }
 
-static LONG_PTR
-co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULONG Size, BOOL bAlter, BOOL bUserMode)
+/* WM_STYLECHANGING goes to the window's thread, which may destroy the window in it:
+   the caller holds a reference, and nothing of the window is used once it is destroyed */
+static BOOL
+IntStyleChangeWindowGone(PWND Window)
 {
-   PWND Window, Parent;
+   if (!(Window->state & WNDS_DESTROYED))
+      return FALSE;
+
+   EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+   return TRUE;
+}
+
+static LONG_PTR
+co_IntSetWindowLongPtrRef(PWND Window, HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULONG Size, BOOL bAlter, BOOL bUserMode)
+{
+   PWND Parent;
    PWINSTATION_OBJECT WindowStation;
    LONG_PTR OldValue;
    STYLESTRUCT Style;
 
-   if (!(Window = UserGetWindowObject(hWnd)))
-   {
-      return 0;
-   }
+   ASSERT_REFS_CO(Window);
 
    if ((INT)Index >= 0)
    {
@@ -4205,6 +4214,8 @@ co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULO
             Style.styleNew = NewValue;
 
             co_IntSendMessage(hWnd, WM_STYLECHANGING, GWL_EXSTYLE, (LPARAM) &Style);
+            if (IntStyleChangeWindowGone(Window))
+               return 0;
 
             /*
              * Remove extended window style bit WS_EX_TOPMOST for shell windows.
@@ -4246,7 +4257,11 @@ co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULO
             Style.styleNew = NewValue;
 
             if (!bAlter)
+            {
                 co_IntSendMessage(hWnd, WM_STYLECHANGING, GWL_STYLE, (LPARAM) &Style);
+                if (IntStyleChangeWindowGone(Window))
+                   return 0;
+            }
 
             /* WS_CLIPSIBLINGS can't be reset on top-level windows */
             if (UserIsDesktopWindow(Window->spwndParent)) Style.styleNew |= WS_CLIPSIBLINGS;
@@ -4345,6 +4360,26 @@ co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULO
    }
 
    return OldValue;
+}
+
+static LONG_PTR
+co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULONG Size, BOOL bAlter, BOOL bUserMode)
+{
+   PWND Window;
+   LONG_PTR Ret;
+   USER_REFERENCE_ENTRY Ref;
+
+   if (!(Window = UserGetWindowObject(hWnd)))
+   {
+      return 0;
+   }
+
+   /* The style messages are sent to the window's thread, which may destroy it meanwhile */
+   UserRefObjectCo(Window, &Ref);
+   Ret = co_IntSetWindowLongPtrRef(Window, hWnd, Index, NewValue, Ansi, Size, bAlter, bUserMode);
+   UserDerefObjectCo(Window);
+
+   return Ret;
 }
 
 LONG FASTCALL
