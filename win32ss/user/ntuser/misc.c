@@ -543,8 +543,12 @@ NtUserGetGuiResources(
    DWORD Ret = 0;
 
    TRACE("Enter NtUserGetGuiResources\n");
-   UserEnterShared();
 
+   /* The process is referenced outside the USER lock and let go of after it: when
+      this is its last reference (another thread closed the handle, the process has
+      ended), deleting it can delete its job, and deleting a job with UI limits calls
+      win32k, which takes the USER lock exclusively; this thread must not hold it
+      shared then. */
    Status = ObReferenceObjectByHandle(hProcess,
                                       PROCESS_QUERY_INFORMATION,
                                       *PsProcessType,
@@ -555,13 +559,14 @@ NtUserGetGuiResources(
    if(!NT_SUCCESS(Status))
    {
       SetLastNtError(Status);
-      goto Exit; // Return 0
+      return 0;
    }
+
+   UserEnterShared();
 
    W32Process = (PPROCESSINFO)Process->Win32Process;
    if(!W32Process)
    {
-      ObDereferenceObject(Process);
       EngSetLastError(ERROR_INVALID_PARAMETER);
       goto Exit; // Return 0
    }
@@ -585,11 +590,10 @@ NtUserGetGuiResources(
          }
    }
 
-   ObDereferenceObject(Process);
-
 Exit:
    TRACE("Leave NtUserGetGuiResources, ret=%lu\n", Ret);
    UserLeave();
+   ObDereferenceObject(Process);
    return Ret;
 }
 
