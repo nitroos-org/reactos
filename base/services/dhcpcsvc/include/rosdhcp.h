@@ -83,6 +83,8 @@ typedef struct _DHCP_ADAPTER
     MIB_IPADDRROW  IfAddr;
     SOCKADDR       Address;
     ULONG NteContext,NteInstance;
+    ULONG NteMask;                  /* mask of the lease address NteContext holds (0: it is not a lease's address) */
+    BOOL MediaDisconnected;         /* the link was down at the last look: the lease is checked when it comes back */
     struct interface_info DhclientInfo;
     struct client_state DhclientState;
     struct client_config DhclientConfig;

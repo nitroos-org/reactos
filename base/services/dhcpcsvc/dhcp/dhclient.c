@@ -102,6 +102,7 @@ char		*option_as_string(unsigned int code, unsigned char *data, int len);
 int		 fork_privchld(int, int);
 int              check_arp( struct interface_info *ip, struct client_lease *lp );
 static VOID      DeleteLeftoverAddresses(PDHCP_ADAPTER Adapter, IPAddr Keep);
+static BOOL      LeaseAddressHeld(PDHCP_ADAPTER Adapter, IPAddr Address, ULONG Mask);
 
 #define	ADVANCE(x, n) (x += ROUNDUP((n)->sa_len))
 
@@ -567,13 +568,21 @@ void setup_adapter( PDHCP_ADAPTER Adapter, struct client_lease *new_lease ) {
     CHAR AddressBuffer[32];
     struct in_addr addr;
     HKEY hkey;
+    BOOL KeepAddress = FALSE;
 
     strcat(Buffer, Adapter->DhclientInfo.name);
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, Buffer, 0, KEY_WRITE, &hkey) != ERROR_SUCCESS)
         hkey = NULL;
 
 
-    if( Adapter->NteContext )
+    /* A lease that confirms the address the adapter holds already (a renewal, or the check of the lease after the link
+       came back) leaves it in place: deleting and adding it again would end every TCP connection that uses it.
+       Windows keeps the address over both (Windows Server 2022, link drops of 1 to 120 s: no address change) */
+    if( Adapter->NteContext && new_lease->options[DHO_SUBNET_MASK].len == (int)sizeof(ULONG) )
+        KeepAddress = LeaseAddressHeld( Adapter, *((IPAddr*)new_lease->address.iabuf),
+                                        *((ULONG*)new_lease->options[DHO_SUBNET_MASK].data) );
+
+    if( Adapter->NteContext && !KeepAddress )
     {
         DeleteIPAddress( Adapter->NteContext );
         Adapter->NteContext = 0;
@@ -585,14 +594,17 @@ void setup_adapter( PDHCP_ADAPTER Adapter, struct client_lease *new_lease ) {
 
     /* Set up our default router if we got one from the DHCP server */
     if( new_lease->options[DHO_SUBNET_MASK].len == (int)sizeof(ULONG) ) {
-        DWORD err;
+        DWORD err = NO_ERROR;
 
-        err = AddIPAddress
+        if( !KeepAddress )
+            err = AddIPAddress
             ( *((ULONG*)new_lease->address.iabuf),
               *((ULONG*)new_lease->options[DHO_SUBNET_MASK].data),
               Adapter->IfMib.dwIndex,
               &Adapter->NteContext,
               &Adapter->NteInstance );
+        if (err == NO_ERROR)
+            Adapter->NteMask = *((ULONG*)new_lease->options[DHO_SUBNET_MASK].data);
         if (hkey && err == NO_ERROR) {
             RegSetValueExA(hkey, "DhcpIPAddress", 0, REG_SZ, (LPBYTE)piaddr(new_lease->address), strlen(piaddr(new_lease->address))+1);
             addr.S_un.S_addr = *((ULONG*)new_lease->options[DHO_SUBNET_MASK].data);
@@ -624,6 +636,10 @@ void setup_adapter( PDHCP_ADAPTER Adapter, struct client_lease *new_lease ) {
         Adapter->RouterMib.dwForwardMetric1 = 1;
         Adapter->RouterMib.dwForwardIfIndex = Adapter->IfMib.dwIndex;
 
+        /* the default route of a confirmed lease stays as well when the router is the same */
+        if( KeepAddress && Adapter->RouterMib.dwForwardNextHop == *((ULONG*)new_lease->options[DHO_ROUTERS].data) ) {
+            err = NO_ERROR;
+        } else {
         if( Adapter->RouterMib.dwForwardNextHop ) {
             /* If we set a default route before, delete it before continuing */
             DeleteIpForwardEntry( &Adapter->RouterMib );
@@ -633,6 +649,7 @@ void setup_adapter( PDHCP_ADAPTER Adapter, struct client_lease *new_lease ) {
             *((ULONG*)new_lease->options[DHO_ROUTERS].data);
 
         err = CreateIpForwardEntry( &Adapter->RouterMib );
+        }
 
         if( err != NO_ERROR )
             warning("CreateIpForwardEntry: %d\n", err);
@@ -1270,6 +1287,22 @@ FindExistingAddress(DWORD IfIndex, IPAddr Want, IPAddr *Address, ULONG *Context)
 }
 
 /*
+ * Does the adapter still hold Address (network order) with Mask as the address this service added for its lease (context
+ * Adapter->NteContext)? Then a lease that confirms it changes nothing in the stack.
+ */
+static BOOL
+LeaseAddressHeld(PDHCP_ADAPTER Adapter, IPAddr Address, ULONG Mask)
+{
+    IPAddr Held;
+    ULONG Context;
+
+    /* the mask is not part of what FindExistingAddress compares: a lease with another mask is applied again */
+    if (Adapter->NteMask != Mask)
+        return FALSE;
+    return FindExistingAddress(Adapter->IfMib.dwIndex, Address, &Held, &Context) && Context == Adapter->NteContext;
+}
+
+/*
  * Delete what an earlier run of this service left on the adapter and the current configuration replaces: automatic
  * private addresses and the address of the alternate configuration, except Keep (network order), the address this run
  * uses. Without this a lease bound right after a restart (or an alternate configuration applied after one) leaves the
@@ -1378,6 +1411,7 @@ state_panic(void *ipp)
             {
                 DH_DbgPrint(MID_TRACE,("DHCPCSVC: Adopting the alternate configuration address already on the adapter\n"));
                 Adapter->NteContext = NteContext;
+                Adapter->NteMask = 0;
                 Adapter->NteInstance = 0;
             }
             else
@@ -1387,6 +1421,7 @@ state_panic(void *ipp)
                                       Adapter->IfMib.dwIndex,
                                       &Adapter->NteContext,
                                       &Adapter->NteInstance);
+                Adapter->NteMask = 0;
                 if (!NT_SUCCESS(Status))
                     DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
             }
@@ -1518,6 +1553,7 @@ state_panic(void *ipp)
                                       Adapter->IfMib.dwIndex,
                                       &Adapter->NteContext,
                                       &Adapter->NteInstance);
+                Adapter->NteMask = 0;
                 if (!NT_SUCCESS(Status))
                     DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
 

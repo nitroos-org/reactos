@@ -406,10 +406,21 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
     struct interface_info *ifi = NULL;
     struct protocol *proto;
     int i, AdapterCount = 0, Broadcast;
+    /* an address or link change wakes the look at the adapters at once (tcpip completes NotifyAddrChange on every
+       media connect and disconnect): a link that is back has its lease checked without waiting for the next poll */
+    OVERLAPPED ChangeOverlapped = { 0 };
+    HANDLE ChangeHandle = NULL, WaitHandles[2];
+    BOOL ChangePending = FALSE;
+    DWORD WaitResult;
+
+    ChangeOverlapped.hEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
 
     while (TRUE)
     {
        DH_DbgPrint(MID_TRACE,("Getting Adapter List...\n"));
+
+       if (ChangeOverlapped.hEvent && !ChangePending)
+           ChangePending = (NotifyAddrChange(&ChangeHandle, &ChangeOverlapped) == ERROR_IO_PENDING);
 
        while( (Error = GetIfTable(Table, &Size, 0 )) ==
                ERROR_INSUFFICIENT_BUFFER ) {
@@ -440,11 +451,32 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
 
                 /* This is an existing adapter */
                 if (InterfaceConnected(&Table->table[i])) {
+                    /* the link came back (the look after every media change is at once: NotifyAddrChange below) */
+                    BOOL Reconnected = Adapter->MediaDisconnected;
+
+                    Adapter->MediaDisconnected = FALSE;
+
                     /* We're still active so we stay in the list */
                     ifi = &Adapter->DhclientInfo;
 
+                    if (Reconnected && proto && Adapter->DhclientInfo.client->active &&
+                        (Adapter->DhclientInfo.client->state == S_BOUND ||
+                         Adapter->DhclientInfo.client->state == S_RENEWING ||
+                         Adapter->DhclientInfo.client->state == S_REBINDING))
+                    {
+                        /* The address of the lease stayed over the media disconnect (tcpip keeps it): check that the
+                           lease still holds on this link with a DHCPREQUEST for it (RFC 2131 3.2 INIT-REBOOT), what
+                           Windows Server 2022 sends at once after every link drop of 1 s and more. An ACK leaves the
+                           address in place, a NAK starts over (DHCPDISCOVER) */
+                        DH_DbgPrint(MID_TRACE,("DHCPCSVC: link of adapter %d is back: checking the lease\n",
+                                               Table->table[i].dwIndex));
+                        cancel_timeout(state_bound, &Adapter->DhclientInfo);
+                        cancel_timeout(send_request, &Adapter->DhclientInfo);
+                        state_reboot(&Adapter->DhclientInfo);
+                        SetEvent(hAdapterStateChangedEvent);
+                    }
                     /* This is a hack because IP helper API sucks */
-                    if (IsReconnectHackNeeded(Adapter, &Table->table[i]))
+                    else if (IsReconnectHackNeeded(Adapter, &Table->table[i]))
                     {
                         /* This handles a disconnect/reconnect */
 
@@ -465,12 +497,9 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
                     }
 
                 } else {
-                    if (proto)
-                        remove_protocol(proto);
-
-                    /* We've lost our link so out we go */
-                    RemoveEntryList(&Adapter->ListEntry);
-                    free(Adapter);
+                    /* The link is down (cable out, switch port bounce, Wi-Fi roam): the adapter, its lease and the
+                       address stay, as on Windows; the lease is checked when the link comes back */
+                    Adapter->MediaDisconnected = TRUE;
                 }
 
                 ApiUnlock();
@@ -570,18 +599,22 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
                 DH_DbgPrint(MID_TRACE,("Adapter %d was rejected\n",
                                        Table->table[i].dwIndex));
         }
-#if 0
-        Error = NotifyAddrChange(NULL, NULL);
-        if (Error != NO_ERROR)
-            break;
-#else
-        if (WaitForSingleObject(hStopEvent, 3000) == WAIT_OBJECT_0)
+        WaitHandles[0] = hStopEvent;
+        WaitHandles[1] = ChangeOverlapped.hEvent;
+        WaitResult = WaitForMultipleObjects(ChangePending ? 2 : 1, WaitHandles, FALSE, 3000);
+        if (WaitResult == WAIT_OBJECT_0)
         {
             DPRINT("Stopping the discovery thread!\n");
             break;
         }
-#endif
+        if (WaitResult == WAIT_OBJECT_0 + 1)
+            ChangePending = FALSE;
     }
+
+    if (ChangePending)
+        CancelIPChangeNotify(&ChangeOverlapped);
+    if (ChangeOverlapped.hEvent)
+        CloseHandle(ChangeOverlapped.hEvent);
 
     if (Table)
         free(Table);

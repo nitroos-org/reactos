@@ -357,6 +357,8 @@ Server_StaticRefreshParams(
                        AdapterIndex,
                        &Adapter->NteContext,
                        &Adapter->NteInstance);
+    /* not a lease's address: a lease never confirms it in place (setup_adapter) */
+    Adapter->NteMask = 0;
 
     if (hAdapterStateChangedEvent != NULL)
         SetEvent(hAdapterStateChangedEvent);
