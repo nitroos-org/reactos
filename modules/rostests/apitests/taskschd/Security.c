@@ -12,6 +12,7 @@
  * other's tasks. A user's calls run in a child process that logs the user on and impersonates it.
  */
 
+#define COBJMACROS
 #include <apitest.h>
 
 #include <windef.h>
@@ -638,6 +639,25 @@ static void child_main(int argc, char **argv)
         prin_xml(xml, principal, tag, start);
         hr = register_task(path, xml, TASK_CREATE);
     }
+    else if (!strcmp(op, "connect"))
+    {
+        /* what schtasks.exe and every scheduler client does first: ITaskService::Connect as this user */
+        ITaskService *service = NULL;
+        VARIANT empty;
+
+        VariantInit(&empty);
+        hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+        if (SUCCEEDED(hr))
+        {
+            hr = CoCreateInstance(&CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&service);
+            if (hr == S_OK)
+            {
+                hr = ITaskService_Connect(service, empty, empty, empty, empty);
+                ITaskService_Release(service);
+            }
+            CoUninitialize();
+        }
+    }
     else if (!strcmp(op, "folders"))
     {
         for (i = 0; i < count; i++)
@@ -823,6 +843,22 @@ static void test_users(char **argv)
 done:
     delete_user(alice);
     delete_user(bob);
+}
+
+/* A standard user connects to the scheduler: the Schedule service is running, and a standard user may query it
+ * but not start it, so the connection must not depend on the right to start */
+static void test_standard_user_connect(char **argv)
+{
+    static WCHAR dave[32];
+    static NET_CALL dave_call;
+    HRESULT hr;
+
+    if (!create_user(&dave_call, dave, L"tsD", 104729)) return;
+
+    hr = as_user(argv, "connect", dave, "-", 0, 0);
+    ok(hr == S_OK, "standard user: ITaskService::Connect: 0x%lx\n", hr);
+
+    delete_user(dave);
 }
 
 /* the SID of an account, or NULL */
@@ -1025,6 +1061,7 @@ START_TEST(TaskSchedulerSecurity)
     if (section("overlap")) test_run_overlap();
     if (section("local")) test_not_local();
     if (section("overflow")) test_survives_overflow();
+    if (section("connect")) test_standard_user_connect(argv);
     if (section("users")) test_users(argv);
     if (section("principals")) test_principals(argv);
 
