@@ -144,7 +144,8 @@ ProbeAndCaptureUnicodeString(OUT PUNICODE_STRING Dest,
                              IN const UNICODE_STRING *UnsafeSrc)
 {
     NTSTATUS Status = STATUS_SUCCESS;
-    PWCHAR Buffer = NULL;
+    /* Set in the try block and freed in the except block: it must not live only in a register */
+    PWCHAR _SEH2_VOLATILE Buffer = NULL;
     ASSERT(Dest != NULL);
 
     /* Probe the structure and buffer*/
