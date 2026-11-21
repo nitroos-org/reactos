@@ -448,10 +448,14 @@ IntGdiCreateMaskFromRLE(
     DWORD Height,
     ULONG Compression,
     const BYTE* Bits,
-    DWORD BitsSize)
+    DWORD BitsSize,
+    BOOL bTopDown)
 {
     HBITMAP Mask;
     DWORD x, y;
+/* The run length data starts with the first line in memory, which is the bottom line of a bottom-up
+   image (DecompressBitmap fills the source surface that way); the mask must mark the same lines */
+#define MASK_LINE(_y) (bTopDown ? (_y) : (Height - 1 - (_y)))
     SURFOBJ* SurfObj;
     UINT i = 0;
     BYTE Data, NumPixels, ToSkip;
@@ -473,7 +477,8 @@ IntGdiCreateMaskFromRLE(
 
     x = y = 0;
 
-    while (i < BitsSize)
+    /* Every code is two bytes: stop when the second one is not there */
+    while ((BitsSize >= 2) && (i < BitsSize - 1))
     {
         NumPixels = Bits[i];
         Data = Bits[i + 1];
@@ -487,7 +492,7 @@ IntGdiCreateMaskFromRLE(
             if (NumPixels == 0)
                 continue;
 
-            DIB_1BPP_HLine(SurfObj, x, x + NumPixels, y, 1);
+            DIB_1BPP_HLine(SurfObj, x, x + NumPixels, MASK_LINE(y), 1);
             x += NumPixels;
             continue;
         }
@@ -539,7 +544,7 @@ IntGdiCreateMaskFromRLE(
 
         if (NumPixels != 0)
         {
-            DIB_1BPP_HLine(SurfObj, x, x + NumPixels, y, 1);
+            DIB_1BPP_HLine(SurfObj, x, x + NumPixels, MASK_LINE(y), 1);
             x += NumPixels;
         }
         i += ToSkip;
@@ -548,6 +553,7 @@ IntGdiCreateMaskFromRLE(
 done:
     EngUnlockSurface(SurfObj);
     return Mask;
+#undef MASK_LINE
 }
 
 W32KAPI
@@ -737,7 +743,8 @@ NtGdiSetDIBitsToDeviceInternal(
             ScanLines,
             bmi->bmiHeader.biCompression,
             Bits,
-            cjMaxBits);
+            cjMaxBits,
+            bmi->bmiHeader.biHeight < 0);
         if (!hMaskBitmap)
         {
             EngSetLastError(ERROR_NO_SYSTEM_RESOURCES);
@@ -901,7 +908,11 @@ GreGetDIBitsInternal(
         Info = DIB_ConvertBitmapInfo((BITMAPINFO*)pbmci, Usage);
         if(Info == NULL)
         {
+            /* Nothing was converted, so there is nothing to convert back at done:
+               DIB_FreeConvertedBitmapInfo would read the NULL info (a core header with
+               DIB_PAL_COLORS on a bitmap of more than 8 bpp got here) */
             DPRINT1("Error, could not convert the BITMAPCOREINFO!\n");
+            pbmci = NULL;
             ScanLines = 0;
             goto done;
         }
@@ -923,7 +934,9 @@ GreGetDIBitsInternal(
 
     if (Bits || bpp)
     {
-        if ((height == 0 || width == 0) || (compr && compr != BI_BITFIELDS && compr != BI_RGB))
+        /* abs(MINLONG) is MINLONG: the scan line arithmetic below would go negative */
+        if ((height == 0 || width == 0 || height == MINLONG) ||
+            (compr && compr != BI_BITFIELDS && compr != BI_RGB))
         {
             ScanLines = 0;
             goto done;
@@ -969,7 +982,7 @@ GreGetDIBitsInternal(
         {
             if(Usage == DIB_RGB_COLORS)
             {
-                ULONG colors = min(psurf->ppal->NumColors, 256);
+                ULONG colors = min(psurf->ppal->NumColors, 1UL << bpp);
                 if(colors != 256) Info->bmiHeader.biClrUsed = colors;
                 for(i = 0; i < colors; i++)
                 {
@@ -1000,12 +1013,16 @@ GreGetDIBitsInternal(
                    a black/white palette):
                    Generate the color map from the selected palette */
                 PPALETTE pDcPal = PALETTE_ShareLockPalette(pDC->dclevel.hpal);
+                ULONG cColors;
                 if(!pDcPal)
                 {
                     ScanLines = 0 ;
                     goto done ;
                 }
-                for (i = 0; i < pDcPal->NumColors; i++)
+                /* A logical palette can have far more entries than the colour table has room
+                   for (1 << bpp, at most 256): copy no more than that */
+                cColors = min(pDcPal->NumColors, 1UL << bpp);
+                for (i = 0; i < cColors; i++)
                 {
                     rgbQuads[i].rgbRed      = pDcPal->IndexedColors[i].peRed;
                     rgbQuads[i].rgbGreen    = pDcPal->IndexedColors[i].peGreen;
@@ -1279,11 +1296,12 @@ NtGdiGetDIBitsInternal(
     }
 
     /* Use maximum size */
-    cjMaxInfo = min(cjMaxInfo, sizeof(BITMAPV5HEADER) + 256 * sizeof(RGBQUAD));
+    cjMaxInfo = min(cjMaxInfo, CJ_MAX_BITMAPINFO);
 
-    // HACK: the underlying code sucks and doesn't care for the size, so we
-    // give it the maximum ever needed
-    cjAlloc = sizeof(BITMAPV5HEADER) + 256 * sizeof(RGBQUAD);
+    /* GreGetDIBitsInternal writes a colour table of up to 256 entries behind the header, wherever
+       biSize puts it, and biSize may be as large as cjMaxInfo. Make room for a full table behind
+       the largest header we accept, so those writes stay inside the buffer. */
+    cjAlloc = CJ_MAX_BITMAPINFO + 256 * sizeof(RGBQUAD);
 
     /* Allocate a buffer the bitmapinfo */
     pbmiSafe = ExAllocatePoolWithTag(PagedPool, cjAlloc, 'imBG');
@@ -1292,6 +1310,9 @@ NtGdiGetDIBitsInternal(
         /* Fail */
         return 0;
     }
+
+    /* Nothing behind the captured bytes may be uninitialized pool */
+    RtlZeroMemory(pbmiSafe, cjAlloc);
 
     /* Use SEH */
     _SEH2_TRY
@@ -2293,6 +2314,29 @@ DIB_CreateDIBSection(
         return (HBITMAP)NULL;
     }
 
+    /* The pitch below is computed from biBitCount and the surface format must have the same
+       number of bits per pixel, or the surface rows are wider than the pitch (biBitCount 3 made a
+       4 bpp surface on a 3 bpp pitch, biPlanes 2 an 8 bpp surface on a 4 bpp pitch) and drawing
+       runs past the end of the bits. A DIB has one plane; only the bit counts a DIB can have are
+       accepted, with a non-zero plane count (as the Wine gdi32 bitmap test expects of Windows). */
+    if ((bi->biPlanes == 0) ||
+        ((bi->biBitCount != 1) && (bi->biBitCount != 4) && (bi->biBitCount != 8) &&
+         (bi->biBitCount != 16) && (bi->biBitCount != 24) && (bi->biBitCount != 32)) ||
+        ((ULONG)bi->biPlanes * bi->biBitCount > 32))
+    {
+        DPRINT1("Invalid format: %u planes, %u bits\n", bi->biPlanes, bi->biBitCount);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return (HBITMAP)NULL;
+    }
+
+    /* A DIB section without pixels has nothing to map */
+    if ((bi->biWidth == 0) || (bi->biHeight == 0))
+    {
+        DPRINT1("Empty DIB section %ld x %ld\n", bi->biWidth, bi->biHeight);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return (HBITMAP)NULL;
+    }
+
     effHeight = bi->biHeight >= 0 ? bi->biHeight : -bi->biHeight;
 
     if (ovr_pitch)
@@ -2334,8 +2378,11 @@ DIB_CreateDIBSection(
     {
         totalSize = bi->biSizeImage;
     }
-    else if (!NT_SUCCESS(RtlULongMult(ulPitch, (ULONG)effHeight, &totalSize)))
+    else if (!NT_SUCCESS(RtlULongMult(ulPitch, (ULONG)effHeight, &totalSize)) ||
+             (totalSize > MAXLONG))
     {
+        /* A surface holds at most MAXLONG bytes (SURFACE_AllocSurface): refuse before
+           allocating the user memory */
         DPRINT1("Size overflow: pitch %lu, height %d\n", ulPitch, effHeight);
         EngSetLastError(ERROR_INVALID_PARAMETER);
         return (HBITMAP)NULL;
@@ -2412,7 +2459,7 @@ DIB_CreateDIBSection(
     res = GreCreateBitmapEx(bm.bmWidth,
                             abs(bm.bmHeight),
                             bm.bmWidthBytes,
-                            BitmapFormat(bi->biBitCount * bi->biPlanes, bi->biCompression),
+                            BitmapFormat(bi->biBitCount, bi->biCompression),
                             BMF_DONTCACHE | BMF_USERMEM | BMF_NOZEROINIT |
                             ((bi->biHeight < 0) ? BMF_TOPDOWN : 0),
                             totalSize,
@@ -2542,7 +2589,20 @@ DIB_GetBitmapInfo( const BITMAPINFOHEADER *header, LONG *width,
 
 INT APIENTRY DIB_GetDIBImageBytes(INT  width, INT height, INT depth)
 {
-    return WIDTH_BYTES_ALIGN32(width, depth) * (height < 0 ? -height : height);
+    ULONGLONG cjRow, cjImage, cLines;
+
+    /* The header fields are user controlled: compute in 64 bits and return 0 (no image) for
+       anything that is negative or does not fit, instead of a wrapped, too small size */
+    if ((width < 0) || (depth <= 0))
+        return 0;
+
+    cLines = (height < 0) ? (ULONGLONG)(-(LONGLONG)height) : (ULONGLONG)height;
+    cjRow = (((ULONGLONG)width * (ULONG)depth + 31) & ~31ULL) >> 3;
+    if ((cLines != 0) && (cjRow > (ULONGLONG)MAXLONG / cLines))
+        return 0;
+
+    cjImage = cjRow * cLines;
+    return (INT)cjImage;
 }
 
 /***********************************************************************
@@ -2660,10 +2720,12 @@ DIB_ConvertBitmapInfo (CONST BITMAPINFO* pbmi, DWORD Usage)
         return NULL;
     }
 
-    pNewBmi = ExAllocatePoolWithTag(PagedPool, sizeof(BITMAPINFOHEADER) + ColorsSize, TAG_DIB);
+    /* Room for a full colour table, whatever the bit count: GreGetDIBitsInternal fills up to 256
+       entries (or 256 WORD indices) into the converted info */
+    pNewBmi = ExAllocatePoolWithTag(PagedPool, sizeof(BITMAPINFOHEADER) + 256 * sizeof(RGBQUAD), TAG_DIB);
     if(!pNewBmi) return NULL;
 
-    RtlZeroMemory(pNewBmi, sizeof(BITMAPINFOHEADER) + ColorsSize);
+    RtlZeroMemory(pNewBmi, sizeof(BITMAPINFOHEADER) + 256 * sizeof(RGBQUAD));
 
     pNewBmi->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     pNewBmi->bmiHeader.biBitCount = pbmci->bmciHeader.bcBitCount;
@@ -2700,7 +2762,7 @@ FASTCALL
 DIB_FreeConvertedBitmapInfo(BITMAPINFO* converted, BITMAPINFO* orig, DWORD usage)
 {
     BITMAPCOREINFO* pbmci;
-    if(converted == orig)
+    if((converted == NULL) || (converted == orig))
         return;
 
     if(usage == -1)

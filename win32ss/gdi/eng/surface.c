@@ -124,13 +124,13 @@ SURFACE_AllocSurface(
     _In_opt_ PVOID pvBits)
 {
     ULONG cBitsPixel, cjBits, cjObject;
+    ULONGLONG cjRow, cjWidth64;
     PSURFACE psurf;
     SURFOBJ *pso;
     PVOID pvSection;
 
     NT_ASSERT(!pvBits || (iType == STYPE_BITMAP));
     NT_ASSERT((iFormat <= BMF_32BPP) || (cjBufSize != 0));
-    NT_ASSERT((LONG)cy > 0);
 
     /* Verify format */
     if ((iFormat < BMF_1BPP) || (iFormat > BMF_PNG))
@@ -139,20 +139,51 @@ SURFACE_AllocSurface(
         return NULL;
     }
 
+    /* sizlBitmap is a pair of LONGs: a dimension above MAXLONG cannot be represented, every user of the
+       surface would see a negative size. */
+    if ((cx > MAXLONG) || (cy > MAXLONG))
+    {
+        DPRINT1("Invalid size: cx %lu, cy %lu\n", cx, cy);
+        return NULL;
+    }
+    NT_ASSERT(cy != 0);
+
     /* Get bits per pixel from the format */
     cBitsPixel = gajBitsPerFormat[iFormat];
 
+    /* The row size is computed in 64 bits. In 32 bits cx * cBitsPixel wraps for cx >= 2^27 (32 bpp) and the
+       surface would be allocated with short (even empty) rows while it keeps the full width, so every
+       blit or decoder that trusts sizlBitmap writes behind the object. */
+    cjRow = (((ULONGLONG)cx * cBitsPixel + 31) & ~31ULL) >> 3;
+
     /* Are bits and a width in bytes given? */
-    if (pvBits && cjWidth)
+    if (pvBits && cjWidth && cBitsPixel)
     {
         /* Align the width (Windows compatibility, drivers expect that) */
-        cjWidth = WIDTH_BYTES_ALIGN32((cjWidth << 3) / cBitsPixel, cBitsPixel);
+        cjWidth64 = ((((ULONGLONG)cjWidth << 3) / cBitsPixel * cBitsPixel + 31) & ~31ULL) >> 3;
+
+        /* GDI's own callers pass the size of the buffer too. A row shorter than cx pixels would let the
+           surface address more than the buffer has: refuse it. (Display drivers pass no size: their
+           buffer and stride are theirs, as before.) */
+        if ((cjBufSize != 0) && (cjWidth64 < cjRow))
+        {
+            DPRINT1("Stride %lu too small for %lu pixels of %lu bits\n", cjWidth, cx, cBitsPixel);
+            return NULL;
+        }
     }
     else
     {
         /* Calculate width from the bitmap width in pixels */
-        cjWidth = WIDTH_BYTES_ALIGN32(cx, cBitsPixel);
+        cjWidth64 = cjRow;
     }
+
+    /* lDelta is a LONG */
+    if (cjWidth64 > MAXLONG)
+    {
+        DPRINT1("Row too large: cx %lu, %lu bits per pixel\n", cx, cBitsPixel);
+        return NULL;
+    }
+    cjWidth = (ULONG)cjWidth64;
 
     /* Is this an uncompressed format? */
     if (iFormat <= BMF_32BPP)
@@ -199,25 +230,31 @@ SURFACE_AllocSurface(
         cjBits = cjBufSize;
     }
 
+    /* The DIB functions address a row as pvScan0 + y * lDelta in LONG arithmetic. That only holds
+       while the whole image fits a LONG: a 64-bit process could make a DIB section of more than
+       2 GB, and the blits then computed row addresses outside of it. */
+    if (cjBits > MAXLONG)
+    {
+        DPRINT1("Bitmap too large: %lu bytes (%lu x %lu)\n", cjBits, cjWidth, cy);
+        return NULL;
+    }
+
     /* Check if we need an extra large object */
     if ((iType == STYPE_BITMAP) && (pvBits == NULL) &&
         !(fjBitmap & BMF_USERMEM) && !(fjBitmap & BMF_KMSECTION))
     {
         /* Allocate an object large enough to hold the bits */
-        cjObject = sizeof(SURFACE) + cjBits;
+        if (!NT_SUCCESS(RtlULongAdd(sizeof(SURFACE), cjBits, &cjObject)))
+        {
+            /* Fail! */
+            DPRINT1("Overflow calculating cjObject: cjBits %lu\n", cjBits);
+            return NULL;
+        }
     }
     else
     {
         /* Otherwise just allocate the SURFACE structure */
         cjObject = sizeof(SURFACE);
-    }
-
-    /* Check for arithmetic overflow */
-    if (cjObject < sizeof(SURFACE))
-    {
-        /* Fail! */
-        DPRINT1("Overflow calculating cjObject: cjBits %lu\n", cjBits);
-        return NULL;
     }
 
     /* Allocate a SURFACE object */

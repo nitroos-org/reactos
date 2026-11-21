@@ -108,8 +108,11 @@ SURFACE_ShareLockByPointer(PSURFACE psurf)
 extern UCHAR gajBitsPerFormat[];
 #define BitsPerFormat(Format) gajBitsPerFormat[Format]
 
-#define WIDTH_BYTES_ALIGN32(cx, bpp) ((((cx) * (bpp) + 31) & ~31) >> 3)
-#define WIDTH_BYTES_ALIGN16(cx, bpp) ((((cx) * (bpp) + 15) & ~15) >> 3)
+/* Row size in bytes, computed in 64 bits: in 32 bits cx * bpp wraps from 2^32 / bpp pixels and gave
+   a short or empty row for a wide bitmap. Use these only on the width of an existing surface (its row
+   fits a LONG, SURFACE_AllocSurface checks that); a width from a caller needs the 64 bit check there. */
+#define WIDTH_BYTES_ALIGN32(cx, bpp) ((ULONG)((((ULONGLONG)(ULONG)(cx) * (bpp) + 31) & ~31ULL) >> 3))
+#define WIDTH_BYTES_ALIGN16(cx, bpp) ((ULONG)((((ULONGLONG)(ULONG)(cx) * (bpp) + 15) & ~15ULL) >> 3))
 
 ULONG
 FASTCALL
