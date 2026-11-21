@@ -12,6 +12,7 @@
  *   CSH 15/08-2003 Made it portable
  *   CF  04/05-2007 Made it compatible with 64-bit operating systems
  */
+#include <ctype.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include "cabman.h"
@@ -1178,6 +1179,35 @@ ULONG CDFParser::PerformFileCopy()
 
             snprintf(InfLine, _countof(InfLine) - 1,
                      "%s=%s", GetFileName(SrcName).c_str(), DstName);
+
+            /*
+             * Two lines for one target file (same directory, same name, whatever the case) leave it to Setup
+             * to decide which member wins; refuse them. DstName is "dir", "dir,target" or "dir,target,...".
+             */
+            {
+                std::string Target(DstName);
+                std::string Name = GetFileName(SrcName);
+                size_t Pos = Target.find(',');
+
+                if (Pos != std::string::npos)
+                {
+                    size_t End = Target.find(',', Pos + 1);
+                    std::string Renamed = Target.substr(Pos + 1, (End == std::string::npos) ? End : End - Pos - 1);
+
+                    if (!Renamed.empty())
+                        Name = Renamed;
+                    Target.resize(Pos);
+                }
+                Target += "\\" + Name;
+                for (size_t k = 0; k < Target.size(); k++)
+                    Target[k] = (char)tolower((unsigned char)Target[k]);
+
+                if (!InstalledTargets.insert(Target).second)
+                {
+                    printf("ERROR: %s is listed twice for the same target directory (%s).\n", SrcName, DstName);
+                    return CAB_STATUS_FAILURE;
+                }
+            }
             while ((Comma = strchr(Comma, ',')) != NULL)
             {
                 CommaCount++;

@@ -308,6 +308,8 @@ macro(dir_to_num dir var)
         set(${var} 107)
     elseif(${dir} STREQUAL reactos/system32/WindowsPowerShell/v1.0/Modules/NitroDiag)
         set(${var} 108)
+    elseif(${dir} STREQUAL reactos/bin/testdata/old)
+        set(${var} 109)
 
     else()
         message(FATAL_ERROR "Wrong destination: ${dir}")

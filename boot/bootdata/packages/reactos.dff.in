@@ -127,6 +127,7 @@ Signature = "$Windows NT$"
 106 = system32\WinMetadata
 107 = SystemTemp
 108 = system32\WindowsPowerShell\v1.0\Modules\NitroDiag
+109 = bin\testdata\old
 
 .InfEnd
 
