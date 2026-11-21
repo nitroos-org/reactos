@@ -38,19 +38,36 @@ typedef struct _FH_DATA
     ULONG NameCount;
 } FH_DATA;
 
+/* A raw read of the volume is made of whole sectors (a disk with 4 KiB sectors refuses a 1 KiB read): read those that hold the range. */
 static BOOLEAN FhRead(FH_VOL *V, ULONGLONG Offset, PVOID Buffer, ULONG Length)
 {
     LARGE_INTEGER Li;
     DWORD Done;
-    Li.QuadPart = Offset;
-    return SetFilePointerEx(V->Volume, Li, NULL, FILE_BEGIN) && ReadFile(V->Volume, Buffer, Length, &Done, NULL) && Done == Length;
+    ULONG Sector = V->Sector ? V->Sector : 512, Span;
+    ULONGLONG Start = Offset - Offset % Sector;
+    PUCHAR Tmp;
+    BOOLEAN Ok;
+    Span = (ULONG)((Offset - Start + Length + Sector - 1) / Sector * Sector);
+    Tmp = HeapAlloc(GetProcessHeap(), 0, Span);
+    if (!Tmp)
+        return FALSE;
+    Li.QuadPart = Start;
+    Ok = SetFilePointerEx(V->Volume, Li, NULL, FILE_BEGIN) && ReadFile(V->Volume, Tmp, Span, &Done, NULL) && Done == Span;
+    if (Ok)
+        memcpy(Buffer, Tmp + (Offset - Start), Length);
+    HeapFree(GetProcessHeap(), 0, Tmp);
+    return Ok;
 }
 
-/* Update sequence array: the last two bytes of every sector hold the sequence number; the real bytes are in the array. */
+/*
+ * Update sequence array: the last two bytes of every 512-byte block of the record hold the sequence number, the real bytes
+ * are in the array (the stride is 512 bytes whatever the disk's sector size).
+ */
 static BOOLEAN FhFixup(PUCHAR Rec, ULONG Size, ULONG Sector)
 {
     USHORT UsaOfs = *(PUSHORT)(Rec + 4), UsaCount = *(PUSHORT)(Rec + 6), i;
     PUSHORT Usa;
+    Sector = 512;
     if (memcmp(Rec, "FILE", 4) || UsaOfs + UsaCount * 2u > Size || UsaCount == 0 || (UsaCount - 1u) * Sector != Size)
         return FALSE;
     Usa = (PUSHORT)(Rec + UsaOfs);
@@ -379,6 +396,167 @@ START_TEST(NtfsFlushHome)
     }
 
 out:
+    if (Buf)
+        HeapFree(GetProcessHeap(), 0, Buf);
+    if (Disk)
+        HeapFree(GetProcessHeap(), 0, Disk);
+    CloseHandle(V.Volume);
+    NtCleanup();
+}
+
+/* Appends to Other and flushes it: everything committed so far, the test file's changes included, is written in place. */
+static VOID FhOtherFlush(HANDLE Other, PUCHAR Buf, PCSTR What)
+{
+    DWORD Done;
+    FhFill(Buf, 20000, 77);
+    ok(WriteFile(Other, Buf, 20000, &Done, NULL) && Done == 20000, "%s: append to the other file: %lu\n", What, GetLastError());
+    ok(FlushFileBuffers(Other), "%s: flush of the other file: %lu\n", What, GetLastError());
+}
+
+static VOID FhSetSize(HANDLE File, LONGLONG Size, PCSTR What)
+{
+    LARGE_INTEGER Li;
+    Li.QuadPart = Size;
+    ok(SetFilePointerEx(File, Li, NULL, FILE_BEGIN) && SetEndOfFile(File), "%s: size %I64d: %lu\n", What, Size, GetLastError());
+}
+
+static VOID FhExpectSize(FH_VOL *V, HANDLE File, ULONGLONG Size, PCSTR What)
+{
+    FH_DATA D;
+    if (FhDisk(V, File, &D, What))
+        ok(D.Size == Size, "%s: size on the disk %I64u, expected %I64u\n", What, D.Size, Size);
+}
+
+/*
+ * The flush may know, without reading the disk, that the file's record there already is the current one (it saw or put it
+ * there itself, and nothing has written its place since).  Every change that puts the record back to a state the flush saw
+ * before, after another file's flush wrote an intermediate state in place, must still reach the disk; so must changes made
+ * through a second handle, and the state after the file was closed and opened again.
+ */
+START_TEST(NtfsFlushHomeKnown)
+{
+    FH_VOL V;
+    FH_DATA D;
+    WCHAR Path[MAX_PATH], Path2[MAX_PATH], Link[MAX_PATH], OtherPath[MAX_PATH];
+    PUCHAR Buf = NULL, Disk = NULL;
+    HANDLE File = INVALID_HANDLE_VALUE, File2 = INVALID_HANDLE_VALUE, Other = INVALID_HANDLE_VALUE;
+    const DWORD Share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    DWORD Done;
+    LARGE_INTEGER Li;
+    ULONG Round;
+
+    if (!NtInit("NtfsFlushHomeKnown"))
+        return;
+    RtlZeroMemory(&V, sizeof(V));
+    if (!FhOpen(&V))
+    {
+        skip("The volume of %ls cannot be read raw as NTFS (error %lu)\n", NtTestDir(), GetLastError());
+        if (V.Volume && V.Volume != INVALID_HANDLE_VALUE)
+            CloseHandle(V.Volume);
+        NtCleanup();
+        return;
+    }
+    Buf = HeapAlloc(GetProcessHeap(), 0, 100000);
+    Disk = HeapAlloc(GetProcessHeap(), 0, 8192);
+    NtPath(Path, L"known.bin");
+    NtPath(Path2, L"known2.bin");
+    NtPath(Link, L"knownlink.bin");
+    NtPath(OtherPath, L"other.bin");
+    File = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, Share, NULL, CREATE_ALWAYS, 0, NULL);
+    Other = CreateFileW(OtherPath, GENERIC_READ | GENERIC_WRITE, Share, NULL, CREATE_ALWAYS, 0, NULL);
+    ok(File != INVALID_HANDLE_VALUE && Other != INVALID_HANDLE_VALUE, "Creating the files: %lu\n", GetLastError());
+    if (File == INVALID_HANDLE_VALUE || Other == INVALID_HANDLE_VALUE || !Buf || !Disk)
+        goto out;
+
+    /* The record is put in place by the first flush; overwrites inside the file leave it as it is */
+    FhFill(Buf, 70000, 1);
+    ok(WriteFile(File, Buf, 70000, &Done, NULL) && Done == 70000, "write: %lu\n", GetLastError());
+    ok(FlushFileBuffers(File), "flush: %lu\n", GetLastError());
+    FhExpectSize(&V, File, 70000, "first flush");
+    for (Round = 0; Round < 3; Round++)
+    {
+        FhFill(Buf, 5000, 10 + Round);
+        Li.QuadPart = 8192 * Round + 100;
+        ok(SetFilePointerEx(File, Li, NULL, FILE_BEGIN) && WriteFile(File, Buf, 5000, &Done, NULL), "overwrite %lu: %lu\n", Round, GetLastError());
+        ok(FlushFileBuffers(File), "flush overwrite %lu: %lu\n", Round, GetLastError());
+        if (FhDisk(&V, File, &D, "overwrite"))
+        {
+            ok(D.Size == 70000, "overwrite %lu: size on the disk %I64u\n", Round, D.Size);
+            ok(FhDiskBytes(&V, &D, Li.QuadPart, Disk, 5000) && !memcmp(Disk, Buf, 5000), "overwrite %lu: the bytes on the disk differ\n", Round);
+        }
+    }
+
+    /* Size: 70000 flushed; 140000 written in place by the other file's flush; back to 70000 and flushed: 70000 on the disk */
+    FhSetSize(File, 140000, "extend");
+    FhOtherFlush(Other, Buf, "extend");
+    if (FhDisk(&V, File, &D, "extend") && D.Size != 140000)
+        trace("extend: the other file's flush left size %I64u on the disk (not the intermediate state)\n", D.Size);
+    FhSetSize(File, 70000, "truncate back");
+    ok(FlushFileBuffers(File), "flush after the truncation: %lu\n", GetLastError());
+    FhExpectSize(&V, File, 70000, "truncated back");
+
+    /* Name: known2 flushed; known in place through the other file's flush; known2 again and flushed: known2 on the disk */
+    ok(MoveFileExW(Path, Path2, 0), "rename: %lu\n", GetLastError());
+    ok(FlushFileBuffers(File), "flush after the rename: %lu\n", GetLastError());
+    ok(MoveFileExW(Path2, Path, 0), "rename back: %lu\n", GetLastError());
+    FhOtherFlush(Other, Buf, "rename back");
+    ok(MoveFileExW(Path, Path2, 0), "rename again: %lu\n", GetLastError());
+    ok(FlushFileBuffers(File), "flush after the second rename: %lu\n", GetLastError());
+    if (FhDisk(&V, File, &D, "renamed again"))
+        ok(FhHasName(&D, L"known2.bin") && !FhHasName(&D, L"known.bin"), "renamed again: %lu names on the disk, first '%ls'\n",
+           D.NameCount, D.NameCount ? D.Names[0] : L"");
+
+    /* Links: two names flushed; one in place through the other file's flush; two again and flushed: two on the disk */
+    ok(CreateHardLinkW(Link, Path2, NULL), "hard link: %lu\n", GetLastError());
+    ok(FlushFileBuffers(File), "flush after the link: %lu\n", GetLastError());
+    ok(DeleteFileW(Link), "delete the link: %lu\n", GetLastError());
+    FhOtherFlush(Other, Buf, "unlink");
+    ok(CreateHardLinkW(Link, Path2, NULL), "hard link again: %lu\n", GetLastError());
+    ok(FlushFileBuffers(File), "flush after the second link: %lu\n", GetLastError());
+    if (FhDisk(&V, File, &D, "linked again"))
+        ok(FhHasName(&D, L"known2.bin") && FhHasName(&D, L"knownlink.bin"), "linked again: %lu names on the disk\n", D.NameCount);
+    ok(DeleteFileW(Link), "delete the link: %lu\n", GetLastError());
+    ok(FlushFileBuffers(File), "flush after the unlink: %lu\n", GetLastError());
+    if (FhDisk(&V, File, &D, "unlinked"))
+        ok(FhHasName(&D, L"known2.bin") && !FhHasName(&D, L"knownlink.bin"), "unlinked: %lu names on the disk\n", D.NameCount);
+
+    /* A second handle changes the size; the first one flushes */
+    File2 = CreateFileW(Path2, GENERIC_READ | GENERIC_WRITE, Share, NULL, OPEN_EXISTING, 0, NULL);
+    ok(File2 != INVALID_HANDLE_VALUE, "second handle: %lu\n", GetLastError());
+    if (File2 != INVALID_HANDLE_VALUE)
+    {
+        FhSetSize(File2, 90000, "second handle");
+        ok(FlushFileBuffers(File), "flush through the first handle: %lu\n", GetLastError());
+        FhExpectSize(&V, File, 90000, "second handle");
+        CloseHandle(File2);
+    }
+
+    /* Closed and opened again: an overwrite and a flush keep size and data right on the disk */
+    CloseHandle(File);
+    File = CreateFileW(Path2, GENERIC_READ | GENERIC_WRITE, Share, NULL, OPEN_EXISTING, 0, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "reopen: %lu\n", GetLastError());
+    if (File != INVALID_HANDLE_VALUE)
+    {
+        FhFill(Buf, 3000, 55);
+        Li.QuadPart = 40000;
+        ok(SetFilePointerEx(File, Li, NULL, FILE_BEGIN) && WriteFile(File, Buf, 3000, &Done, NULL), "overwrite after reopen: %lu\n", GetLastError());
+        ok(FlushFileBuffers(File), "flush after reopen: %lu\n", GetLastError());
+        if (FhDisk(&V, File, &D, "reopened"))
+        {
+            ok(D.Size == 90000, "reopened: size on the disk %I64u\n", D.Size);
+            ok(FhDiskBytes(&V, &D, 40000, Disk, 3000) && !memcmp(Disk, Buf, 3000), "reopened: the bytes on the disk differ\n");
+        }
+    }
+
+out:
+    if (File != INVALID_HANDLE_VALUE)
+        CloseHandle(File);
+    if (Other != INVALID_HANDLE_VALUE)
+        CloseHandle(Other);
+    DeleteFileW(Path);
+    DeleteFileW(Path2);
+    DeleteFileW(Link);
+    DeleteFileW(OtherPath);
     if (Buf)
         HeapFree(GetProcessHeap(), 0, Buf);
     if (Disk)
