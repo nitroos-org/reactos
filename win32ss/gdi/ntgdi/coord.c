@@ -423,7 +423,8 @@ NtGdiTransformPoints(
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
-        /* Do not set last error */
+        /* Do not set last error; Windows fails the call for a buffer it cannot read or write */
+        ret = FALSE;
         _SEH2_YIELD(goto leave;)
     }
     _SEH2_END;
