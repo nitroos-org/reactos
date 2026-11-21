@@ -7342,6 +7342,7 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
     BOOLEAN PageableVad = FALSE;
     SIZE_T PRegionSize;
     PVOID PBaseAddress;
+    SIZE_T CallerRegionSize;
     LONG_PTR AlreadyDecommitted, CommitReduction = 0;
     LONG_PTR FirstCommit;
     ULONG_PTR StartingAddress, EndingAddress;
@@ -7390,6 +7391,7 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
         //
         PBaseAddress = *UBaseAddress;
         PRegionSize = *URegionSize;
+        CallerRegionSize = PRegionSize;
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -7920,6 +7922,12 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
         MiReturnPrivateCommitCredit(CommitReduction);
     MiReturnProcessCommit(Process, CommitReduction);
     if ((FreeType & MEM_RELEASE) && !(FreeType & MEM_PRESERVE_PLACEHOLDER)) Process->VirtualSize -= PRegionSize;
+
+    //
+    // A decommit that asked for the whole region (size 0) gets 0 back: only the range that was
+    // given is reported (a release and a decommit with a size write the range they freed)
+    //
+    if (FreeType == MEM_DECOMMIT && CallerRegionSize == 0) PRegionSize = 0;
 
     //
     // Unlock the address space and free the VAD in failure cases. Next,

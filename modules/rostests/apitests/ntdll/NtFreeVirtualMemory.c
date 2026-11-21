@@ -860,6 +860,8 @@ static void Test_NtFreeVirtualMemory_InteriorBase(void)
         ok_eq_pointer(Address, Base);
         if (Type == MEM_RELEASE)
             ok_eq_hex(Size, RegionBytes);
+        else
+            ok_eq_hex(Size, 0); /* a decommit that asked for the whole region gets 0 back (Windows) */
         Status = NtQueryVirtualMemory(NtCurrentProcess(), (PUCHAR)Base + RegionBytes - PAGE_SIZE,
                                       MemoryBasicInformation, &Mbi, sizeof(Mbi), NULL);
         ok_ntstatus(Status, STATUS_SUCCESS);

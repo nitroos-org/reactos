@@ -388,6 +388,14 @@ NtUserSetSysColors(
 
    UserEnterExclusive();
 
+   /* The process window station must be the interactive one and its handle must allow
+      changing attributes (Windows: ERROR_ACCESS_DENIED for a handle without WINSTA_WRITEATTRIBUTES) */
+   if (!CheckWinstaAttributeAccess(WINSTA_WRITEATTRIBUTES))
+   {
+      UserLeave();
+      return FALSE;
+   }
+
    _SEH2_TRY
    {
       ProbeForRead(lpaElements, cElements * sizeof(INT), 1);

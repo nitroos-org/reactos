@@ -91,7 +91,7 @@ static NTSTATUS NgName(PNG_VCB Vcb, PNG_CCB Ccb, PFILE_NAME_INFORMATION N, ULONG
 /*
  * FileNormalizedNameInformation: the path of the open file from the volume root with the long names as
  * stored on disk (no 8.3 names, the case of the disk), built from the names of the directories up to the
- * root. The stream suffix of the open name stays. The whole name is cut to what fits (STATUS_BUFFER_OVERFLOW).
+ * root. The name of a named stream stays (":stream"), its type (":$DATA") does not. The whole name is cut to what fits (STATUS_BUFFER_OVERFLOW).
  */
 static NTSTATUS NgNormalizedName(PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb, PFILE_NAME_INFORMATION N, ULONG Room, PULONG Used)
 {
@@ -131,7 +131,26 @@ static NTSTATUS NgNormalizedName(PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb, PFILE_NA
         for (i = LastSlash; i < Chars; i++)
             if (Ccb->Path.Buffer[i] == L':')
             {
+                static const WCHAR DataSuffix[] = L":$DATA";
+                ULONG SuffixChars = RTL_NUMBER_OF(DataSuffix) - 1;
+
                 StreamChars = Chars - i;
+                /* Windows leaves the type of the stream out: "f::$DATA" is "f", "f:s:$DATA" is "f:s" */
+                if (StreamChars >= SuffixChars)
+                {
+                    ULONG k;
+                    BOOLEAN Same = TRUE;
+
+                    for (k = 0; k < SuffixChars; k++)
+                        if (RtlUpcaseUnicodeChar(Ccb->Path.Buffer[Chars - SuffixChars + k]) != DataSuffix[k])
+                            Same = FALSE;
+                    if (Same)
+                    {
+                        StreamChars -= SuffixChars;
+                        if (StreamChars == 1)   /* only the colon of an empty stream name is left */
+                            StreamChars = 0;
+                    }
+                }
                 if (StreamChars < 256)
                 {
                     Pos -= StreamChars;

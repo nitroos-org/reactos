@@ -20,6 +20,7 @@ extern void func_NtfsDirRename(void);
 extern void func_NtfsFlushHome(void);
 extern void func_NtfsHardLink(void);
 extern void func_NtfsInherit(void);
+extern void func_NtfsNormalizedName(void);
 extern void func_NtfsNotifyRename(void);
 extern void func_NtfsNotifyScale(void);
 extern void func_NtfsOpenById(void);
@@ -60,6 +61,7 @@ const struct test winetest_testlist[] =
     { "NtfsFlushHome", func_NtfsFlushHome },
     { "NtfsHardLink", func_NtfsHardLink },
     { "NtfsInherit", func_NtfsInherit },
+    { "NtfsNormalizedName", func_NtfsNormalizedName },
     { "NtfsNotifyRename", func_NtfsNotifyRename },
     { "NtfsNotifyScale", func_NtfsNotifyScale },
     { "NtfsOpenById", func_NtfsOpenById },
