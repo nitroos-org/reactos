@@ -111,6 +111,7 @@ list(APPEND SOURCE
     StretchBlt.c
     TextTransform.c
     ThreadContextGdi.c
+    TransformPointsBadPointer.c
     TranslateCharsetInfo.c
     UniscribeForwarders.c
     WidePen.c

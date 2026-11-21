@@ -164,6 +164,43 @@ SetMapMode(
 }
 
 
+/*
+ * Windows answers LPtoDP/DPtoLP for a DC whose transform is the identity without a call to the kernel, so
+ * a pointer that is NULL or invalid is not looked at and the call succeeds (measured on Windows Server 2022:
+ * MM_TEXT and MM_ANISOTROPIC with 1:1 extents, no origin, no world transform; MM_ISOTROPIC and every other
+ * state go to the kernel, which fails for a pointer it cannot read or write).
+ */
+static
+BOOL
+IntIsIdentityTransformDc(
+    _In_ HDC hdc,
+    _In_ PDC_ATTR pdcattr)
+{
+    XFORM xf;
+
+    if ((pdcattr->iMapMode != MM_TEXT) && (pdcattr->iMapMode != MM_ANISOTROPIC))
+        return FALSE;
+
+    if ((pdcattr->szlWindowExt.cx != 1) || (pdcattr->szlWindowExt.cy != 1) ||
+        (pdcattr->szlViewportExt.cx != 1) || (pdcattr->szlViewportExt.cy != 1))
+        return FALSE;
+
+    if (pdcattr->ptlWindowOrg.x || pdcattr->ptlWindowOrg.y ||
+        pdcattr->ptlViewportOrg.x || pdcattr->ptlViewportOrg.y)
+        return FALSE;
+
+    if (pdcattr->iGraphicsMode == GM_ADVANCED)
+    {
+        if (!NtGdiGetTransform(hdc, GdiWorldSpaceToPageSpace, &xf))
+            return FALSE;
+        if (xf.eM11 != 1.0f || xf.eM22 != 1.0f || xf.eM12 != 0.0f || xf.eM21 != 0.0f ||
+            xf.eDx != 0.0f || xf.eDy != 0.0f)
+            return FALSE;
+    }
+
+    return TRUE;
+}
+
 BOOL
 WINAPI
 DPtoLP(
@@ -182,14 +219,12 @@ DPtoLP(
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    if (lpPoints == NULL)
-    {
-        return TRUE;
-    }
-
     pdcattr = GdiGetDcAttr(hdc);
     if (pdcattr == NULL)
         return FALSE;
+
+    if (IntIsIdentityTransformDc(hdc, pdcattr))
+        return TRUE;
 
     if (pdcattr->iMapMode == MM_ISOTROPIC)
     {
@@ -220,14 +255,12 @@ LPtoDP(
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    if (lpPoints == NULL)
-    {
-        return TRUE;
-    }
-
     pdcattr = GdiGetDcAttr(hdc);
     if (pdcattr == NULL)
         return FALSE;
+
+    if (IntIsIdentityTransformDc(hdc, pdcattr))
+        return TRUE;
 
     return NtGdiTransformPoints(hdc, lpPoints, lpPoints, nCount, GdiLpToDp);
 }
