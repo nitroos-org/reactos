@@ -1359,6 +1359,32 @@ DispatchSAS(
             return;
 
         case WLX_SAS_TYPE_SCRNSVR_TIMEOUT:
+            /*
+             * The screen saver is the logged-on user's: it does not start when nobody is logged on or while a SAS
+             * dialog is shown. It does start on a locked workstation (it runs on its own desktop, over the
+             * lock screen, as on Windows) and returns to the lock screen.
+             */
+            if (Session->LogonState != STATE_LOGGED_ON &&
+                Session->LogonState != STATE_LOCKED)
+            {
+                SetEvent(Session->hEndOfScreenSaver);
+                return;
+            }
+
+            /*
+             * Requests for a start that were queued while a screen saver was running (the idle timeout is
+             * detected in two places) reach us right after it ended: the user has just woken it, do not
+             * start it again. The same when the last saver ended by itself, or could not run, and there has
+             * been no input since: the idle time is still over, but a saver that fails would be started
+             * again every few seconds.
+             */
+            if (Session->bScreenSaverRan &&
+                ((GetTickCount() - Session->LastScreenSaverEnd) < 2000 || NoInputSinceScreenSaver(Session)))
+            {
+                SetEvent(Session->hEndOfScreenSaver);
+                return;
+            }
+
             if (!Session->Gina.Functions.WlxScreenSaverNotify(Session->Gina.Context, &bSecure))
             {
                 /* Skip start of screen saver */
@@ -1366,12 +1392,9 @@ DispatchSAS(
             }
             else
             {
-                StartScreenSaver(Session);
-                if (bSecure)
-                {
+                /* Runs the saver until it ends; when it was a password protected one, lock the workstation */
+                if (StartScreenSaver(Session, bSecure))
                     wlxAction = WLX_SAS_ACTION_LOCK_WKSTA;
-//                    DoGenericAction(Session, WLX_SAS_ACTION_LOCK_WKSTA);
-                }
             }
             break;
 

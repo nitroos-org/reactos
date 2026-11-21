@@ -65,7 +65,13 @@ static const WCHAR* VAL_HOVERWIDTH = L"MouseHoverWidth";
 static const WCHAR* VAL_HOVERHEIGHT = L"MouseHoverHeight";
 static const WCHAR* VAL_SENSITIVITY = L"MouseSensitivity";
 
+#ifndef SPI_GETSCREENSAVESECURE
+#define SPI_GETSCREENSAVESECURE 0x0076
+#define SPI_SETSCREENSAVESECURE 0x0077
+#endif
+
 static const WCHAR* KEY_DESKTOP = L"Control Panel\\Desktop";
+static const WCHAR* KEY_DESKTOP_POLICY = L"Software\\Policies\\Microsoft\\Windows\\Control Panel\\Desktop";
 static const WCHAR* VAL_SCRTO = L"ScreenSaveTimeOut";
 static const WCHAR* VAL_SCRNSV = L"SCRNSAVE.EXE";
 static const WCHAR* VAL_SCRACT = L"ScreenSaveActive";
@@ -161,15 +167,31 @@ SpiLoadUserPrefMask(DWORD dValue)
 static
 DWORD
 SpiLoadTimeOut(VOID)
-{   // Must have the string!
+{
     WCHAR szApplicationName[MAX_PATH];
+    INT iTimeOut;
+
+    /* The user policy "Screen saver timeout" overrides the user's value (0 = never) */
+    iTimeOut = SpiLoadInt(KEY_DESKTOP_POLICY, VAL_SCRTO, -1);
+    if (iTimeOut >= 0)
+        return iTimeOut;
+
+    /* A stored timeout counts with or without a saver file: "(None)" with the password protection of the saver
+     * locks the workstation when the time has passed (measured on Windows Server 2022) */
+    iTimeOut = SpiLoadInt(KEY_DESKTOP, VAL_SCRTO, -1);
+    if (iTimeOut >= 0)
+        return iTimeOut;
+
+    /* No timeout stored: 10 minutes when there is a saver (the user's, or that of the policy), else none */
     RtlZeroMemory(&szApplicationName, sizeof(szApplicationName));
-    if (!RegReadUserSetting(KEY_DESKTOP, VAL_SCRNSV, REG_SZ, &szApplicationName, sizeof(szApplicationName)))
+    if ((RegReadUserSetting(KEY_DESKTOP_POLICY, VAL_SCRNSV, REG_SZ, &szApplicationName, sizeof(szApplicationName)) &&
+         szApplicationName[0] != 0) ||
+        (RegReadUserSetting(KEY_DESKTOP, VAL_SCRNSV, REG_SZ, &szApplicationName, sizeof(szApplicationName)) &&
+         szApplicationName[0] != 0))
     {
-        return 0;
+        return 600;
     }
-    if (szApplicationName[0] == 0) return 0;
-    return SpiLoadInt(KEY_DESKTOP, VAL_SCRTO, 600);
+    return 0;
 }
 
 static
@@ -330,11 +352,12 @@ SpiUpdatePerUserSystemParameters(VOID)
     gspv.dwForegroundFlashCount = 3;
 
     gspv.iScrSaverTimeout = SpiLoadTimeOut();
-    gspv.bScrSaverActive = FALSE;
+    /* The stored ScreenSaveActive does not count at logon on Windows Server 2022 (measured: a profile with the value 0
+     * or none and a timeout has an active saver): a saver with a timeout is active, one without is not (see
+     * SPI_GETSCREENSAVEACTIVE) */
+    gspv.bScrSaverActive = TRUE;
     gspv.bScrSaverRunning = FALSE;
-#if(WINVER >= 0x0600)
-    gspv.bScrSaverSecure = FALSE;
-#endif
+    gspv.bScrSaverSecure = SpiLoadInt(KEY_DESKTOP, L"ScreenSaverIsSecure", 0) != 0;
 
     gspv.bFastTaskSwitch = TRUE;
 
@@ -843,6 +866,24 @@ SpiNotifyNCMetricsChanged(VOID)
     return TRUE;
 }
 
+/* While a screen saver runs or the workstation is locked (the Winlogon desktop has the input) the settings
+ * of the screen saver cannot be changed: Windows fails the call with ERROR_OPERATION_IN_PROGRESS */
+static
+BOOL
+SpiScreenSaverSetBlocked(VOID)
+{
+    PDESKTOP pdeskActive = IntGetActiveDesktop();
+
+    if (gspv.bScrSaverRunning ||
+        (pdeskActive != NULL && pdeskActive->pDeskInfo != NULL &&
+         _wcsicmp(pdeskActive->pDeskInfo->szDesktopName, L"Winlogon") == 0))
+    {
+        EngSetLastError(ERROR_OPERATION_IN_PROGRESS);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static
 UINT_PTR
 SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
@@ -894,12 +935,23 @@ SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
             return SpiGetInt(pvParam, &gspv.iScrSaverTimeout, fl);
 
         case SPI_SETSCREENSAVETIMEOUT:
+            if (SpiScreenSaverSetBlocked())
+                return 0;
+            /* As on Windows: giving a timeout to a saver that had none turns the saver on (not stored) */
+            if (uiParam != 0 && gspv.iScrSaverTimeout == 0)
+                gspv.bScrSaverActive = TRUE;
             return SpiSetInt(&gspv.iScrSaverTimeout, uiParam, KEY_DESKTOP, VAL_SCRTO, fl);
 
         case SPI_GETSCREENSAVEACTIVE:
-            return SpiGetInt(pvParam, &gspv.bScrSaverActive, fl);
+        {
+            /* A screen saver with no timeout is not active */
+            BOOL bActive = gspv.bScrSaverActive && gspv.iScrSaverTimeout != 0;
+            return SpiGetInt(pvParam, &bActive, fl);
+        }
 
         case SPI_SETSCREENSAVEACTIVE:
+            if (SpiScreenSaverSetBlocked())
+                return 0;
             return SpiSetInt(&gspv.bScrSaverActive, uiParam, KEY_DESKTOP, VAL_SCRACT, fl);
 
         case SPI_GETGRIDGRANULARITY:
@@ -1597,8 +1649,11 @@ SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
             return SpiGetInt(pvParam, &gspv.bScrSaverRunning, fl);
 
         case SPI_SETSCREENSAVERRUNNING:
-            // FIXME: also return value?
-            return SpiSetBool(&gspv.bScrSaverRunning, uiParam, KEY_MOUSE, L"", fl);
+            /* Only the logon process (winlogon, which runs the screen saver) says that a saver runs.
+             * On Windows the call of any other process fails and changes nothing. */
+            if (gpidLogon != PsGetCurrentProcessId())
+                return 0;
+            return SpiSetBool(&gspv.bScrSaverRunning, uiParam, KEY_MOUSE, L"", fl & ~SPIF_UPDATEINIFILE);
 
 #if(WINVER >= 0x0600)
         case SPI_GETAUDIODESCRIPTION:
@@ -1607,13 +1662,17 @@ SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
         case SPI_SETAUDIODESCRIPTION:
             ERR("SPI_SETAUDIODESCRIPTION is unimplemented\n");
             break;
+#endif
 
+        /* Not under WINVER >= 0x0600: this module is built for 0x0502 and the password protection of the
+         * screen saver is read by winlogon and by the display control panel whatever the version is */
         case SPI_GETSCREENSAVESECURE:
             return SpiGetInt(pvParam, &gspv.bScrSaverSecure, fl);
 
         case SPI_SETSCREENSAVESECURE:
-            return SpiSetBool(&gspv.bScrSaverSecure, uiParam, KEY_DESKTOP, L"ScreenSaverIsSecure", fl);
-#endif
+            if (SpiScreenSaverSetBlocked())
+                return 0;
+            return SpiSetBool(&gspv.bScrSaverSecure, uiParam ? 1 : 0, KEY_DESKTOP, L"ScreenSaverIsSecure", fl);
 
         case SPI_GETACTIVEWINDOWTRACKING:
             return SpiGetUserPref(UPM_ACTIVEWINDOWTRACKING, pvParam, fl);
@@ -1918,9 +1977,7 @@ SpiGetSetProbeBuffer(UINT uiAction, UINT uiParam, PVOID pvParam)
         case SPI_GETSHOWIMEUI:
         case SPI_GETMOUSESPEED:
         case SPI_GETSCREENSAVERRUNNING:
-#if(WINVER >= 0x0600)
         case SPI_GETSCREENSAVESECURE:
-#endif
         case SPI_GETACTIVEWINDOWTRACKING:
         case SPI_GETMENUANIMATION:
         case SPI_GETCOMBOBOXANIMATION:

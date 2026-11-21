@@ -3647,7 +3647,7 @@ NtUserSwitchDesktop(HDESK hdesk)
     UserEnterExclusive();
     TRACE("Enter NtUserSwitchDesktop(0x%p)\n", hdesk);
 
-    Status = IntValidateDesktopHandle(hdesk, UserMode, 0, &pdesk);
+    Status = IntValidateDesktopHandle(hdesk, UserMode, DESKTOP_SWITCHDESKTOP, &pdesk);
     if (!NT_SUCCESS(Status))
     {
         ERR("Validation of desktop handle 0x%p failed\n", hdesk);

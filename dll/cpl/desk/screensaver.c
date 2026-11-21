@@ -80,11 +80,21 @@ GetCurrentScreenSaverValue(LPTSTR lpValue)
 }
 
 
+/* Windows Vista and later; the check box and winlogon use them whatever the version this is built for */
+#ifndef SPI_GETSCREENSAVESECURE
+#define SPI_GETSCREENSAVESECURE 0x0076
+#define SPI_SETSCREENSAVESECURE 0x0077
+#endif
+
+static BOOL
+GetScreenSaverSecurePolicy(PBOOL pbSecure);
+
 static VOID
 SelectionChanged(HWND hwndDlg, PDATA pData)
 {
     HWND hwndCombo;
     BOOL bEnable;
+    BOOL bPolicy;
     INT i;
 
     hwndCombo = GetDlgItem(hwndDlg, IDC_SCREENS_LIST);
@@ -98,7 +108,8 @@ SelectionChanged(HWND hwndDlg, PDATA pData)
 
     EnableWindow(GetDlgItem(hwndDlg, IDC_SCREENS_SETTINGS), bEnable);
     EnableWindow(GetDlgItem(hwndDlg, IDC_SCREENS_TESTSC), bEnable);
-    EnableWindow(GetDlgItem(hwndDlg, IDC_SCREENS_USEPASSCHK), bEnable);
+    /* A policy fixes the state of the check box */
+    EnableWindow(GetDlgItem(hwndDlg, IDC_SCREENS_USEPASSCHK), bEnable && !GetScreenSaverSecurePolicy(&bPolicy));
     EnableWindow(GetDlgItem(hwndDlg, IDC_SCREENS_TIMEDELAY), bEnable);
     EnableWindow(GetDlgItem(hwndDlg, IDC_SCREENS_TIME), bEnable);
     EnableWindow(GetDlgItem(hwndDlg, IDC_WAITTEXT), bEnable);
@@ -362,48 +373,78 @@ ScreenSaverPreview(HWND hwndDlg, PDATA pData)
 }
 
 
+/*
+ * The user policy "Password protect the screen saver" is stored in
+ * HKCU\Software\Policies\Microsoft\Windows\Control Panel\Desktop : ScreenSaverIsSecure.
+ * When it is present the check box shows it and the user cannot change it.
+ * Returns TRUE if the policy is present, with its state in *pbSecure.
+ */
+static BOOL
+GetScreenSaverSecurePolicy(PBOOL pbSecure)
+{
+    HKEY hKey;
+    PWCHAR pwszData;
+    DWORD dwType, cbData = 0;
+    BOOL bFound = FALSE;
+
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"Software\\Policies\\Microsoft\\Windows\\Control Panel\\Desktop",
+                      0,
+                      KEY_QUERY_VALUE,
+                      &hKey) != ERROR_SUCCESS)
+    {
+        return FALSE;
+    }
+
+    /* Read the value whole, as winlogon does: a string with trailing text counts, one without its terminator does not */
+    if (RegQueryValueExW(hKey, L"ScreenSaverIsSecure", NULL, &dwType, NULL, &cbData) == ERROR_SUCCESS &&
+        cbData <= 4096 &&
+        ((dwType == REG_DWORD && cbData == sizeof(DWORD)) ||
+         (dwType == REG_SZ && cbData >= sizeof(WCHAR))))
+    {
+        pwszData = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cbData + sizeof(WCHAR));
+        if (pwszData)
+        {
+            if (RegQueryValueExW(hKey, L"ScreenSaverIsSecure", NULL, &dwType, (LPBYTE)pwszData, &cbData) == ERROR_SUCCESS)
+            {
+                if (dwType == REG_DWORD && cbData == sizeof(DWORD))
+                {
+                    *pbSecure = (*(PDWORD)pwszData != 0);
+                    bFound = TRUE;
+                }
+                else if (dwType == REG_SZ && cbData >= sizeof(WCHAR) &&
+                         pwszData[cbData / sizeof(WCHAR) - 1] == UNICODE_NULL)
+                {
+                    *pbSecure = (_wtoi(pwszData) != 0);
+                    bFound = TRUE;
+                }
+            }
+            HeapFree(GetProcessHeap(), 0, pwszData);
+        }
+    }
+
+    RegCloseKey(hKey);
+    return bFound;
+}
+
+
 static VOID
 CheckRegScreenSaverIsSecure(HWND hwndDlg)
 {
-    HKEY hKey;
-    TCHAR szBuffer[2];
-    DWORD bufferSize = sizeof(szBuffer);
-    DWORD varType = REG_SZ;
-    LONG result;
+    BOOL bSecure = FALSE;
 
-    if (RegOpenKeyEx(HKEY_CURRENT_USER,
-                     _T("Control Panel\\Desktop"),
-                     0,
-                     KEY_ALL_ACCESS,
-                     &hKey) == ERROR_SUCCESS)
+    /* The policy decides when it is present, else the user's own setting */
+    if (!GetScreenSaverSecurePolicy(&bSecure))
     {
-        result = RegQueryValueEx(hKey,
-                                _T("ScreenSaverIsSecure"),
-                                0,
-                                &varType,
-                                (LPBYTE)szBuffer,
-                                &bufferSize);
-        RegCloseKey(hKey);
-
-        if (result == ERROR_SUCCESS)
-        {
-            if (_ttoi(szBuffer) == 1)
-            {
-                SendDlgItemMessage(hwndDlg,
-                                   IDC_SCREENS_USEPASSCHK,
-                                   BM_SETCHECK,
-                                   (WPARAM)BST_CHECKED,
-                                   0);
-                return;
-            }
-        }
-
-        SendDlgItemMessage(hwndDlg,
-                           IDC_SCREENS_USEPASSCHK,
-                           BM_SETCHECK,
-                           (WPARAM)BST_UNCHECKED,
-                           0);
+        if (!SystemParametersInfo(SPI_GETSCREENSAVESECURE, 0, &bSecure, 0))
+            bSecure = FALSE;
     }
+
+    SendDlgItemMessage(hwndDlg,
+                       IDC_SCREENS_USEPASSCHK,
+                       BM_SETCHECK,
+                       (WPARAM)(bSecure ? BST_CHECKED : BST_UNCHECKED),
+                       0);
 }
 
 
@@ -595,7 +636,7 @@ SetScreenSaver(HWND hwndDlg, PDATA pData)
     {
         INT Time;
         BOOL bRet;
-        TCHAR Sec;
+        BOOL bPolicy;
         UINT Ret;
 
         /* Set the screensaver */
@@ -619,19 +660,19 @@ SetScreenSaver(HWND hwndDlg, PDATA pData)
             SystemParametersInfo(SPI_SETSCREENSAVEACTIVE, FALSE, 0, SPIF_UPDATEINIFILE);
         }
 
-        /* Set the secure value */
-        Ret = SendDlgItemMessage(hwndDlg,
-                                 IDC_SCREENS_USEPASSCHK,
-                                 BM_GETCHECK,
+        /* Set the secure value (not when a policy fixes it) */
+        if (!GetScreenSaverSecurePolicy(&bPolicy))
+        {
+            Ret = SendDlgItemMessage(hwndDlg,
+                                     IDC_SCREENS_USEPASSCHK,
+                                     BM_GETCHECK,
+                                     0,
+                                     0);
+            SystemParametersInfo(SPI_SETSCREENSAVESECURE,
+                                 (Ret == BST_CHECKED) ? TRUE : FALSE,
                                  0,
-                                 0);
-        Sec = (Ret == BST_CHECKED) ? _T('1') : _T('0');
-        RegSetValueEx(regKey,
-                      _T("ScreenSaverIsSecure"),
-                      0,
-                      REG_SZ,
-                      (PBYTE)&Sec,
-                      sizeof(TCHAR));
+                                 SPIF_UPDATEINIFILE);
+        }
 
         /* Set the screensaver time delay */
         Time = GetDlgItemInt(hwndDlg,

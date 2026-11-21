@@ -108,9 +108,7 @@ typedef struct _SPIVALUES
     INT iScrSaverTimeout;
     BOOL bScrSaverActive;
     BOOL bScrSaverRunning;
-#if(WINVER >= 0x0600)
     BOOL bScrSaverSecure;
-#endif
 
     /* Power */
     INT iLowPwrTimeout;

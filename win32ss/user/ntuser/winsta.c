@@ -2410,10 +2410,17 @@ NtUserLockWorkStation(VOID)
 {
     BOOL ret;
     PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+    PDESKTOP pdeskActive;
 
     UserEnterExclusive();
 
-    if (pti->rpdesk == IntGetActiveDesktop())
+    pdeskActive = IntGetActiveDesktop();
+
+    /* The caller is on the desktop that has the input, or a screen saver runs on its own desktop (which has
+     * the input) and the caller is on the same window station: Windows locks in both cases */
+    if (pti->rpdesk == pdeskActive ||
+        (pdeskActive != NULL && ppiScrnSaver != NULL && ppiScrnSaver->rpdeskStartup == pdeskActive &&
+         pti->rpdesk != NULL && pti->rpdesk->rpwinstaParent == pdeskActive->rpwinstaParent))
     {
         ret = UserPostMessage(hwndSAS, WM_LOGONNOTIFY, LN_LOCK_WORKSTATION, 0);
     }

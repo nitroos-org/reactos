@@ -364,7 +364,77 @@ WlxInitialize(
 }
 
 /*
+ * Reads a number (REG_SZ "0"/"1" as written by the control panel and by SystemParametersInfo, or REG_DWORD)
+ * from a value of a key below the logged-on user's registry hive.
+ * Returns TRUE if the value exists and holds a number, with the setting in *pbSecure.
+ */
+static
+BOOL
+ReadScreenSaverFlag(
+    _In_ HKEY hUserKey,
+    _In_ PCWSTR pszSubKey,
+    _In_ PCWSTR pszValue,
+    _Out_ PBOOL pbSecure)
+{
+    HKEY hKey;
+    PWCHAR pwszData;
+    DWORD dwType, cbData = 0;
+    BOOL bFound = FALSE;
+    LONG rc;
+
+    rc = RegOpenKeyExW(hUserKey, pszSubKey, 0, KEY_QUERY_VALUE, &hKey);
+    if (rc != ERROR_SUCCESS)
+        return FALSE;
+
+    /* The value may be of any length (Windows accepts a string with trailing text): ask for the size */
+    rc = RegQueryValueExW(hKey, pszValue, NULL, &dwType, NULL, &cbData);
+    if (rc == ERROR_SUCCESS &&
+        cbData <= 4096 &&
+        ((dwType == REG_DWORD && cbData == sizeof(DWORD)) ||
+         (dwType == REG_SZ && cbData >= sizeof(WCHAR))))
+    {
+        pwszData = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cbData + sizeof(WCHAR));
+        if (pwszData)
+        {
+            rc = RegQueryValueExW(hKey, pszValue, NULL, &dwType, (LPBYTE)pwszData, &cbData);
+            if (rc == ERROR_SUCCESS)
+            {
+                if (dwType == REG_DWORD && cbData == sizeof(DWORD))
+                {
+                    *pbSecure = (*(PDWORD)pwszData != 0);
+                    bFound = TRUE;
+                }
+                else if (dwType == REG_SZ && cbData >= sizeof(WCHAR) &&
+                         pwszData[cbData / sizeof(WCHAR) - 1] == UNICODE_NULL)
+                {
+                    /* A string without its terminator is not a valid value (Windows ignores it) */
+                    *pbSecure = (_wtoi(pwszData) != 0);
+                    bFound = TRUE;
+                }
+            }
+            HeapFree(GetProcessHeap(), 0, pwszData);
+        }
+    }
+    RegCloseKey(hKey);
+    return bFound;
+}
+
+/*
  * @implemented
+ *
+ * Tells winlogon whether the screen saver is to be started (TRUE) and whether the workstation is to be locked
+ * when it ends (*pSecure).
+ *
+ * Policy setting (user policy "Password protect the screen saver"):
+ *    HKCU\Software\Policies\Microsoft\Windows\Control Panel\Desktop : ScreenSaverIsSecure
+ *    When it is present it decides, 0 as well as 1: it overrides the user's setting.
+ * User setting:
+ *    HKCU\Control Panel\Desktop : ScreenSaverIsSecure
+ *    Missing = not protected.
+ * Policy setting "Enable screen saver" (same key, ScreenSaveActive): 0 = no screen saver is started, at the
+ * moment the idle time has passed, whatever the user's settings are (measured on Windows Server 2022).
+ * They are read for the logged-on user (the hive is opened with the user's token; RegOpenLoggedOnHKCU reverts
+ * its impersonation on every path). Nothing can be read when nobody is logged on: not secure, nothing to lock.
  */
 BOOL
 WINAPI
@@ -372,77 +442,49 @@ WlxScreenSaverNotify(
     PVOID pWlxContext,
     BOOL  *pSecure)
 {
-#if 0
     PGINA_CONTEXT pgContext = (PGINA_CONTEXT)pWlxContext;
-    WCHAR szBuffer[2];
-    HKEY hKeyCurrentUser, hKey;
-    DWORD bufferSize = sizeof(szBuffer);
-    DWORD varType = REG_SZ;
+    HKEY hKeyCurrentUser;
+    BOOL bSecure = FALSE;
+    BOOL bStart = TRUE;
+    BOOL bActive;
     LONG rc;
 
     TRACE("(%p %p)\n", pWlxContext, pSecure);
 
-    *pSecure = TRUE;
-
-    /*
-     * Policy setting:
-     *    HKLM\Software\Policies\Microsoft\Windows\Control Panel\Desktop : ScreenSaverIsSecure
-     * User setting:
-     *    HKCU\Control Panel\Desktop : ScreenSaverIsSecure
-     */
-
-    if (!ImpersonateLoggedOnUser(pgContext->UserToken))
+    if (pgContext && pgContext->UserToken)
     {
-        ERR("WL: ImpersonateLoggedOnUser() failed with error %lu\n", GetLastError());
-        *pSecure = FALSE;
-        return TRUE;
-    }
-
-    /* Open the current user HKCU key */
-    rc = RegOpenCurrentUser(MAXIMUM_ALLOWED, &hKeyCurrentUser);
-    TRACE("RegOpenCurrentUser: %ld\n", rc);
-    if (rc == ERROR_SUCCESS)
-    {
-        /* Open the subkey */
-        rc = RegOpenKeyExW(hKeyCurrentUser,
-                           L"Control Panel\\Desktop",
-                           0,
-                           KEY_QUERY_VALUE,
-                           &hKey);
-        TRACE("RegOpenKeyExW: %ld\n", rc);
-        RegCloseKey(hKeyCurrentUser);
-    }
-
-    /* Read the value */
-    if (rc == ERROR_SUCCESS)
-    {
-        rc = RegQueryValueExW(hKey,
-                              L"ScreenSaverIsSecure",
-                              NULL,
-                              &varType,
-                              (LPBYTE)szBuffer,
-                              &bufferSize);
-
-        TRACE("RegQueryValueExW: %ld\n", rc);
-
+        rc = RegOpenLoggedOnHKCU(pgContext->UserToken, KEY_READ, &hKeyCurrentUser);
         if (rc == ERROR_SUCCESS)
         {
-            TRACE("szBuffer: \"%S\"\n", szBuffer);
-            *pSecure = _wtoi(szBuffer);
-        }
+            if (ReadScreenSaverFlag(hKeyCurrentUser,
+                                    L"Software\\Policies\\Microsoft\\Windows\\Control Panel\\Desktop",
+                                    L"ScreenSaveActive",
+                                    &bActive) && !bActive)
+            {
+                bStart = FALSE;
+            }
 
-        RegCloseKey(hKey);
+            if (!ReadScreenSaverFlag(hKeyCurrentUser,
+                                     L"Software\\Policies\\Microsoft\\Windows\\Control Panel\\Desktop",
+                                     L"ScreenSaverIsSecure",
+                                     &bSecure))
+            {
+                if (!ReadScreenSaverFlag(hKeyCurrentUser, L"Control Panel\\Desktop", L"ScreenSaverIsSecure", &bSecure))
+                    bSecure = FALSE;
+            }
+            RegCloseKey(hKeyCurrentUser);
+        }
+        else
+        {
+            WARN("WL: Cannot open the user's registry hive (error %ld), the screen saver is not secure\n", rc);
+        }
     }
 
-    /* Revert the impersonation */
-    RevertToSelf();
+    TRACE("*pSecure: %d\n", bSecure);
+    *pSecure = bSecure;
 
-    TRACE("*pSecure: %ld\n", *pSecure);
-#endif
-
-    *pSecure = FALSE;
-
-    return TRUE;
+    /* The screen saver is started whatever the password setting is */
+    return bStart;
 }
 
 /*

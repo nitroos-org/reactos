@@ -10,6 +10,7 @@
 
 #include "winlogon.h"
 #include <winbase_undoc.h>
+#include <stdlib.h>
 
 /* FUNCTIONS ****************************************************************/
 
@@ -61,6 +62,12 @@ LoadScreenSaverParameters(
     else if (!Enabled)
     {
         TRACE("WL: Screen saver is disabled\n");
+        *Timeout = INFINITE;
+    }
+    else if (*Timeout == 0)
+    {
+        /* A timeout of zero means that the screen saver is never started */
+        TRACE("WL: Screen saver timeout is zero\n");
         *Timeout = INFINITE;
     }
     else
@@ -174,7 +181,14 @@ ScreenSaverThreadMain(
         else if (ret == WAIT_OBJECT_0 + 1)
             LoadScreenSaverParameters(&Timeout);
         else if (ret == WAIT_OBJECT_0 + 2)
+        {
             SystemParametersInfoW(SPI_SETSCREENSAVERRUNNING, FALSE, NULL, 0);
+
+            /* A start that was skipped (the workstation is locked, nobody is logged on) leaves
+             * the user idle: do not ask for the next one at once */
+            if (WaitForSingleObject(HandleArray[0], 1000) == WAIT_OBJECT_0)
+                break;
+        }
     }
 
 cleanup:
@@ -282,9 +296,222 @@ TerminateScreenSaverThread(
 }
 
 
-VOID
-StartScreenSaver(
+/*
+ * The grace period: the time, in milliseconds, between the start of a password protected screen saver
+ * and the moment its end locks the workstation (HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon,
+ * ScreenSaverGracePeriod, in seconds, at most 24 hours; missing = 5 seconds, as on Windows).
+ */
+#define DEFAULT_SCREENSAVER_GRACE_PERIOD 5 /* seconds */
+static
+DWORD
+GetScreenSaverGracePeriod(VOID)
+{
+    HKEY hKey;
+    DWORD Buffer[8]; /* Aligned room for a DWORD or for a string of up to 15 characters */
+    PWCHAR pwszBuffer = (PWCHAR)Buffer;
+    DWORD dwType, cbData, Seconds = DEFAULT_SCREENSAVER_GRACE_PERIOD;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
+                      0,
+                      KEY_QUERY_VALUE,
+                      &hKey) != ERROR_SUCCESS)
+    {
+        return DEFAULT_SCREENSAVER_GRACE_PERIOD * 1000;
+    }
+
+    ZeroMemory(Buffer, sizeof(Buffer));
+    cbData = sizeof(Buffer) - sizeof(WCHAR);
+    if (RegQueryValueExW(hKey,
+                         L"ScreenSaverGracePeriod",
+                         NULL,
+                         &dwType,
+                         (LPBYTE)Buffer,
+                         &cbData) == ERROR_SUCCESS)
+    {
+        if (dwType == REG_DWORD && cbData == sizeof(DWORD))
+        {
+            Seconds = Buffer[0];
+        }
+        else if (dwType == REG_SZ)
+        {
+            pwszBuffer[cbData / sizeof(WCHAR)] = UNICODE_NULL;
+            Seconds = wcstoul(pwszBuffer, NULL, 10);
+        }
+    }
+
+    RegCloseKey(hKey);
+
+    if (Seconds > 24 * 60 * 60)
+        Seconds = 24 * 60 * 60;
+    return Seconds * 1000;
+}
+
+
+/*
+ * The policy "Screen saver executable name":
+ * HKCU\Software\Policies\Microsoft\Windows\Control Panel\Desktop : SCRNSAVE.EXE (REG_SZ, not empty).
+ * Returns ERROR_SUCCESS with the name in Buffer (*pcbData bytes, at most MAX_PATH - 1 characters, terminated).
+ */
+static
+LONG
+ReadPolicyScreenSaverFile(
+    IN HKEY hCurrentUser,
+    OUT PWCHAR Buffer,
+    IN OUT PDWORD pcbData)
+{
+    HKEY hPolicyKey;
+    DWORD dwType, cbData = *pcbData;
+    LONG rc;
+
+    rc = RegOpenKeyExW(hCurrentUser,
+                       L"Software\\Policies\\Microsoft\\Windows\\Control Panel\\Desktop",
+                       0,
+                       KEY_QUERY_VALUE,
+                       &hPolicyKey);
+    if (rc != ERROR_SUCCESS)
+        return rc;
+
+    cbData = MAX_PATH * sizeof(WCHAR) - sizeof(WCHAR);
+    rc = RegQueryValueExW(hPolicyKey, L"SCRNSAVE.EXE", 0, &dwType, (LPBYTE)Buffer, &cbData);
+    RegCloseKey(hPolicyKey);
+
+    if (rc == ERROR_SUCCESS)
+    {
+        Buffer[cbData / sizeof(WCHAR)] = UNICODE_NULL; /* Terminate the string */
+        if (dwType != REG_SZ || Buffer[0] == UNICODE_NULL)
+            rc = ERROR_FILE_NOT_FOUND;
+        else
+            *pcbData = cbData;
+    }
+    return rc;
+}
+
+
+/*
+ * Tells whether the SAS window has a request that ends a running screen saver: a hot key (Ctrl-Alt-Delete,
+ * Win+L, ...), a request to lock the workstation or to log off, or any other SAS. The requests to start a
+ * screen saver that are queued while one runs (win32k asks every second until the saver connects, the idle
+ * thread asks once) are dropped here. Only the first request of each kind is looked at.
+ */
+static
+BOOL
+IsSasRequestPending(
     IN PWLSESSION Session)
+{
+    MSG Message;
+
+    while (PeekMessageW(&Message, Session->SASWindow, WM_LOGONNOTIFY, WM_LOGONNOTIFY, PM_NOREMOVE))
+    {
+        if (Message.wParam == LN_LOCK_WORKSTATION || Message.wParam == LN_LOGOFF)
+            return TRUE;
+        if (Message.wParam != LN_START_SCREENSAVE)
+            break;
+        PeekMessageW(&Message, Session->SASWindow, WM_LOGONNOTIFY, WM_LOGONNOTIFY, PM_REMOVE);
+    }
+
+    while (PeekMessageW(&Message, Session->SASWindow, WLX_WM_SAS, WLX_WM_SAS, PM_NOREMOVE))
+    {
+        if (Message.wParam != WLX_SAS_TYPE_SCRNSVR_TIMEOUT)
+            return TRUE;
+        PeekMessageW(&Message, Session->SASWindow, WLX_WM_SAS, WLX_WM_SAS, PM_REMOVE);
+    }
+
+    return PeekMessageW(&Message, Session->SASWindow, WM_HOTKEY, WM_HOTKEY, PM_NOREMOVE);
+}
+
+
+/*
+ * A password protected screen saver is configured but there is no screen saver file (the setting
+ * "(None)" with "On resume, display the logon screen"): Windows shows the empty screen saver desktop for
+ * the grace period and then locks the workstation, without any input; input within the grace period
+ * ends it without a lock. A grace period of zero locks at once.
+ * Returns TRUE when the workstation is to be locked.
+ */
+static
+BOOL
+RunEmptyScreenSaver(
+    IN PWLSESSION Session,
+    IN DWORD GracePeriod)
+{
+    LASTINPUTINFO InputInfo;
+    DWORD StartTick, LastInput, Elapsed;
+
+    if (GracePeriod == 0)
+        return TRUE;
+
+    InputInfo.cbSize = sizeof(InputInfo);
+    LastInput = GetLastInputInfo(&InputInfo) ? InputInfo.dwTime : 0;
+
+    StartTick = GetTickCount();
+    SwitchDesktop(Session->ScreenSaverDesktop);
+
+    for (;;)
+    {
+        Elapsed = GetTickCount() - StartTick;
+        if (Elapsed >= GracePeriod)
+            return TRUE;
+
+        Sleep(min(50, GracePeriod - Elapsed));
+
+        if (GetLastInputInfo(&InputInfo) && InputInfo.dwTime != LastInput)
+        {
+            SwitchDesktop(Session->LogonState == STATE_LOCKED ? Session->WinlogonDesktop : Session->ApplicationDesktop);
+            return FALSE;
+        }
+    }
+}
+
+
+/*
+ * The time of the last input, as the idle timer of the screen saver sees it. A screen saver that ends by itself
+ * (it crashes at once, or exits for a missing file or device) with no input in between must not be started again
+ * and again while the user is away: the desktop would flash every few seconds and a password protected setting
+ * would never lock, as the saver always ends within the grace period.
+ */
+static
+DWORD
+GetLastInputTime(VOID)
+{
+    LASTINPUTINFO InputInfo;
+
+    InputInfo.cbSize = sizeof(InputInfo);
+    return GetLastInputInfo(&InputInfo) ? InputInfo.dwTime : 0;
+}
+
+static
+VOID
+ScreenSaverEnded(
+    IN PWLSESSION Session,
+    IN DWORD InputAtStart)
+{
+    Session->LastScreenSaverEnd = GetTickCount();
+    Session->bScreenSaverRan = TRUE;
+    Session->InputAtScreenSaverEnd = GetLastInputTime();
+    Session->bScreenSaverNeedsInput = (Session->InputAtScreenSaverEnd == InputAtStart);
+}
+
+/* Tells whether the last screen saver ended (or could not run) with no input since it was asked for, and there is
+ * still no input: a new one has to wait for an input. */
+BOOL
+NoInputSinceScreenSaver(
+    IN PWLSESSION Session)
+{
+    return Session->bScreenSaverNeedsInput && GetLastInputTime() == Session->InputAtScreenSaverEnd;
+}
+
+
+/*
+ * Runs the screen saver of the logged-on user and waits for its end.
+ *
+ * Returns TRUE if the saver was started and ended, it was a password protected one (bSecure)
+ * and it ran for at least the grace period: the caller locks the workstation then.
+ * A saver that could not be started never locks.
+ */
+BOOL
+StartScreenSaver(
+    IN PWLSESSION Session,
+    IN BOOL bSecure)
 {
     HKEY hKey = NULL, hCurrentUser = NULL;
     WCHAR szApplicationName[MAX_PATH];
@@ -297,6 +524,14 @@ StartScreenSaver(
     LONG rc;
     DWORD Status;
     BOOL ret = FALSE;
+    BOOL bLock = FALSE;
+    BOOL bNoSaver = FALSE;
+    BOOL bStartFailed = FALSE;
+    BOOL bSwitched = FALSE;
+    DWORD StartTick = 0;
+    DWORD InputAtStart = GetLastInputTime();
+    /* A machine setting: read as winlogon, not as the user */
+    DWORD GracePeriod = bSecure ? GetScreenSaverGracePeriod() : 0;
 
     if (!ImpersonateLoggedOnUser(Session->UserToken))
     {
@@ -323,22 +558,34 @@ StartScreenSaver(
         goto cleanup;
     }
 
-    rc = RegQueryValueExW(hKey,
-                          L"SCRNSAVE.EXE",
-                          0,
-                          &dwType,
-                          (LPBYTE)szApplicationName,
-                          &bufferSize);
+    /* The policy "Screen saver executable name" decides when it is present (measured on Windows Server 2022) */
+    rc = ReadPolicyScreenSaverFile(hCurrentUser, szApplicationName, &bufferSize);
+    if (rc != ERROR_SUCCESS)
+    {
+        bufferSize = sizeof(szApplicationName) - sizeof(WCHAR);
+        rc = RegQueryValueExW(hKey,
+                              L"SCRNSAVE.EXE",
+                              0,
+                              &dwType,
+                              (LPBYTE)szApplicationName,
+                              &bufferSize);
+    }
+    else
+    {
+        dwType = REG_SZ;
+    }
     if (rc != ERROR_SUCCESS || dwType != REG_SZ)
     {
-        if (rc != ERROR_FILE_NOT_FOUND)
+        if (rc == ERROR_FILE_NOT_FOUND)
+            bNoSaver = TRUE;
+        else
             ERR("WL: RegQueryValueEx error %lu\n", rc);
         goto cleanup;
     }
 
     if (bufferSize == 0)
     {
-        ERR("WL: Buffer size is NULL!\n");
+        bNoSaver = TRUE;
         goto cleanup;
     }
 
@@ -346,7 +593,7 @@ StartScreenSaver(
 
     if (wcslen(szApplicationName) == 0)
     {
-        ERR("WL: Application Name length is zero!\n");
+        bNoSaver = TRUE;
         goto cleanup;
     }
 
@@ -358,8 +605,18 @@ StartScreenSaver(
     StartupInfo.cb = sizeof(STARTUPINFOW);
     StartupInfo.dwFlags = STARTF_SCREENSAVER;
 
-    /* FIXME: Run the screen saver on the secure screen saver desktop if required */
-    StartupInfo.lpDesktop = L"WinSta0\\Default";
+    /* The screen saver runs on its own desktop, so that nothing typed or clicked while it runs
+     * (and nothing typed to wake it) can reach the application desktop */
+    StartupInfo.lpDesktop = L"WinSta0\\Screen-Saver";
+
+    /* Show the screen saver desktop before the saver exists: its window is created and activated on the desktop that
+     * has the input, and the application desktop is out of reach until the saver ends. A saver that is not there is
+     * not shown (nothing would be on the screen for the time it takes to find out) */
+    if (GetFileAttributesW(szApplicationName) != INVALID_FILE_ATTRIBUTES)
+    {
+        SwitchDesktop(Session->ScreenSaverDesktop);
+        bSwitched = TRUE;
+    }
 
     ret = CreateProcessAsUserW(Session->UserToken,
                                szApplicationName,
@@ -375,10 +632,19 @@ StartScreenSaver(
     if (!ret)
     {
         ERR("WL: Unable to start %S, error %lu\n", szApplicationName, GetLastError());
+        if (bSwitched)
+        {
+            SwitchDesktop(Session->LogonState == STATE_LOCKED ? Session->WinlogonDesktop : Session->ApplicationDesktop);
+        }
+        bStartFailed = TRUE;
         goto cleanup;
     }
 
     CloseHandle(ProcessInformation.hThread);
+    StartTick = GetTickCount();
+
+    if (!bSwitched)
+        SwitchDesktop(Session->ScreenSaverDesktop);
 
     SystemParametersInfoW(SPI_SETSCREENSAVERRUNNING, TRUE, NULL, 0);
 
@@ -388,16 +654,55 @@ StartScreenSaver(
     ResetEvent(Session->hUserActivity);
     HandleArray[0] = ProcessInformation.hProcess;
     HandleArray[1] = Session->hUserActivity;
-    Status = WaitForMultipleObjects(2, HandleArray, FALSE, INFINITE);
+    for (;;)
+    {
+        Status = WaitForMultipleObjects(2, HandleArray, FALSE, 100);
+        if (Status != WAIT_TIMEOUT)
+            break;
+
+        /*
+         * This thread owns the SAS window: a Ctrl-Alt-Delete or Win+L (hot keys of that window), a request to
+         * lock the workstation or to log off, that arrives while a saver that does not end on input (it hangs,
+         * or it never created a window) shows the empty screen saver desktop would otherwise wait behind
+         * the saver for ever. End the saver; the request is handled when this function has returned (after
+         * the lock, if the saver was password protected).
+         */
+        if (IsSasRequestPending(Session))
+        {
+            Status = WAIT_OBJECT_0 + 1;
+            break;
+        }
+    }
     if (Status == WAIT_OBJECT_0 + 1)
     {
         /* Kill the screen saver */
         TerminateProcess(ProcessInformation.hProcess, 0);
     }
 
+    /* The saver is gone: tell the window station, as SPI_GETSCREENSAVERRUNNING answers for it */
+    SystemParametersInfoW(SPI_SETSCREENSAVERRUNNING, FALSE, NULL, 0);
+
     SetEvent(Session->hEndOfScreenSaver);
 
     CloseHandle(ProcessInformation.hProcess);
+
+    ScreenSaverEnded(Session, InputAtStart);
+
+    /* The end of the saver locks the workstation, unless it ended within the grace period */
+    if (bSecure && (GetTickCount() - StartTick) >= GracePeriod)
+        bLock = TRUE;
+
+    /* A workstation that is locked (or is to be locked by the caller) goes from the screen saver desktop to the
+     * Winlogon desktop without showing the application desktop in between */
+    if (Session->LogonState == STATE_LOCKED)
+    {
+        SwitchDesktop(Session->WinlogonDesktop);
+        bLock = FALSE;
+    }
+    else if (!bLock)
+    {
+        SwitchDesktop(Session->ApplicationDesktop);
+    }
 
     CallNotificationDlls(Session, StopScreenSaverHandler);
 
@@ -412,9 +717,25 @@ cleanup:
 
     if (!ret)
     {
+        /* Windows locks a workstation with a password protected screen saver setting when there is no
+         * screen saver to show (after the grace period) or when the saver cannot be started (at once) */
+        if (Session->LogonState == STATE_LOCKED)
+            bLock = FALSE; /* locked already, nothing to show */
+        else if (bSecure && bNoSaver)
+            bLock = RunEmptyScreenSaver(Session, GracePeriod);
+        else if (bSecure && bStartFailed)
+            bLock = TRUE;
+
+        if (bNoSaver || bStartFailed)
+        {
+            ScreenSaverEnded(Session, InputAtStart);
+        }
+
         PostMessageW(Session->SASWindow, WLX_WM_SAS, WLX_SAS_TYPE_SCRNSVR_ACTIVITY, 0);
 #ifndef USE_GETLASTINPUTINFO
         InterlockedExchange((LONG*)&Session->LastActivity, GetTickCount());
 #endif
     }
+
+    return bLock;
 }
