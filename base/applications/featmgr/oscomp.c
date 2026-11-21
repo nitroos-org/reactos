@@ -508,6 +508,19 @@ typedef struct _EXTRACT
     BOOL viaTemp;
 } EXTRACT;
 
+/* The data of a file is on the disk when this returns: a power cut after the record says "installed" must not leave a file whose
+ * size is right and whose bytes are not yet written (the cache writes lazily, the same as for the hives). */
+static void FlushPath(LPCWSTR path)
+{
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        FlushFileBuffers(h);
+        CloseHandle(h);
+    }
+}
+
 /* TRUE when both files hold the same bytes */
 static BOOL SameContent(LPCWSTR a, LPCWSTR b)
 {
@@ -614,12 +627,14 @@ static UINT CALLBACK CabCallback(PVOID ctx, UINT notif, UINT_PTR p1, UINT_PTR p2
             {
                 if (FinishTemp(x, fp->Target))
                 {
+                    FlushPath(x->final);
                     x->done++;
                     PatAdd(&x->map->installed, x->final);
                 }
             }
             else
             {
+                FlushPath(fp->Target);
                 x->done++;
                 PatAdd(&x->map->installed, fp->Target);
             }
@@ -1299,6 +1314,10 @@ HRESULT FmOsCompEnable(LPCWSTR id, FILE *log)
     RewriteRecord(id, order, n, log);
     for (i = 0; i < n; i++)
         SetInstalled(order[i], 1);
+    /* the hives are written lazily: "installed" is reported when the registrations and the record are on the disk, not a few
+     * seconds before (a power cut in between would keep the files and lose the keys; the next run repairs that, but should not
+     * have to after a message that said it was done) */
+    RegFlushKey(HKEY_LOCAL_MACHINE);
     LOGF(log, L"component '%s' installed\n", id);
 
 done:
