@@ -174,7 +174,7 @@ MiFindContiguousPages(IN PFN_NUMBER LowestPfn,
                         // Quick sanity check that the last PFN is consistent
                         //
                         EndPfn = Pfn1 + SizeInPages;
-                        ASSERT(EndPfn == MI_PFN_ELEMENT(Page + 1));
+                        ASSERT(EndPfn == MI_PFN_ELEMENT(Page) + 1);
 
                         //
                         // Compute the first page, and make sure it's consistent
