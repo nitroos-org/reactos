@@ -77,17 +77,7 @@ static
 ULONG
 IfcfgAutomaticMetric(PIP_INTERFACE IF)
 {
-    ULONGLONG Speed = (ULONGLONG)IF->Speed * 100;   /* 100 bit/s units */
-
-    if (Speed > 200000000ULL)
-        return 15;
-    if (Speed > 80000000ULL)
-        return 20;
-    if (Speed > 20000000ULL)
-        return 25;
-    if (Speed > 4000000ULL)
-        return 30;
-    return 40;
+    return RouterAutomaticMetric((ULONGLONG)IF->Speed * 100);   /* 100 bit/s units */
 }
 
 /* What the route table adds to a route's metric for the interface of netif (core lock held) */

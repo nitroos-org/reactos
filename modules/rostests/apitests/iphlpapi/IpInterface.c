@@ -354,6 +354,27 @@ static void test_if_entry2(const IF_TABLE2 *Table)
     ok(Row.Type == IF_TYPE_SOFTWARE_LOOPBACK, "Type %lu\n", Row.Type);
 }
 
+/* The automatic interface metric of Windows 10 and later by link speed, for interfaces that are not wireless; Microsoft's
+ * table (Windows 10 and newer, "other interface types"):
+ * https://learn.microsoft.com/troubleshoot/windows-server/networking/automatic-metric-for-ipv4-routes
+ * (measured on a Windows Server 2022 peer with a 1 Gbit/s Ethernet adapter: 25). */
+static ULONG automatic_metric(ULONG64 Bps)
+{
+    static const struct { ULONG64 Min; ULONG Metric; } Table[] =
+    {
+        { 100000000000ULL, 5 }, { 40000000000ULL, 10 }, { 10000000000ULL, 15 }, { 2000000000ULL, 20 },
+        { 200000000ULL, 25 }, { 80000000ULL, 35 }, { 20000000ULL, 45 }, { 4000000ULL, 55 }, { 500000ULL, 65 },
+    };
+    ULONG i;
+
+    for (i = 0; i < ARRAYSIZE(Table); i++)
+    {
+        if (Bps >= Table[i].Min)
+            return Table[i].Metric;
+    }
+    return 75;
+}
+
 static void test_ip_interface(const IF_TABLE2 *IfTable, USHORT Family)
 {
     IPIF_TABLE *Table = SENTINEL;
@@ -403,6 +424,12 @@ static void test_ip_interface(const IF_TABLE2 *IfTable, USHORT Family)
         else
         {
             ok(Row->NlMtu == If->Mtu, "Row %lu: MTU %lu, GetIfTable2 says %lu\n", i, Row->NlMtu, If->Mtu);
+            /* an automatic metric follows the link speed (not for Wi-Fi: another table) */
+            if (Row->UseAutomaticMetric && If->Type != 71 /* IF_TYPE_IEEE80211 */ && If->TransmitLinkSpeed != 0)
+            {
+                ok(Row->Metric == automatic_metric(If->TransmitLinkSpeed), "Row %lu: automatic metric %lu for %I64u bit/s, expected %lu\n",
+                   i, Row->Metric, If->TransmitLinkSpeed, automatic_metric(If->TransmitLinkSpeed));
+            }
         }
 
         /* the same row by luid, and by index */

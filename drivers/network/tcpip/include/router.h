@@ -57,4 +57,7 @@ UINT CopyFIBs( PIP_INTERFACE IF, PFIB_ENTRY Target, UINT Capacity );
 
 UINT ProcessAutoMetric(PIP_INTERFACE Interface);
 
+/* The automatic interface metric for a link speed in bits per second (Windows 10 and later, non-wireless interfaces) */
+ULONG RouterAutomaticMetric(ULONGLONG BitsPerSecond);
+
 /* EOF */
