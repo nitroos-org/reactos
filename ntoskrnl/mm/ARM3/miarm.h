@@ -947,6 +947,7 @@ MI_MAKE_HARDWARE_PTE_KERNEL(IN PMMPTE NewPte,
 
     /* Set the protection and page */
     NewPte->u.Hard.PageFrameNumber = PageFrameNumber;
+    ASSERT(PFN_FROM_PTE(NewPte) == PageFrameNumber);
     NewPte->u.Long |= MmProtectToPteMask[ProtectionMask];
 
     /* Make this valid & global */
@@ -975,6 +976,7 @@ MI_MAKE_HARDWARE_PTE(IN PMMPTE NewPte,
     NewPte->u.Long = MiDetermineUserGlobalPteMask(MappingPte);
     NewPte->u.Long |= MmProtectToPteMask[ProtectionMask];
     NewPte->u.Hard.PageFrameNumber = PageFrameNumber;
+    ASSERT(PFN_FROM_PTE(NewPte) == PageFrameNumber);
 }
 
 //
@@ -1001,6 +1003,7 @@ MI_MAKE_HARDWARE_PTE_USER(IN PMMPTE NewPte,
     NewPte->u.Hard.Valid = TRUE;
     NewPte->u.Hard.Owner = TRUE;
     NewPte->u.Hard.PageFrameNumber = PageFrameNumber;
+    ASSERT(PFN_FROM_PTE(NewPte) == PageFrameNumber);
     NewPte->u.Long |= MmProtectToPteMask[ProtectionMask];
 }
 
@@ -1815,6 +1818,9 @@ FORCEINLINE
 PMMPFN
 MI_PFN_ELEMENT(IN PFN_NUMBER Pfn)
 {
+    /* The database ends at the highest page of RAM: device memory has no entry */
+    ASSERT(Pfn <= MmHighestPhysicalPage);
+
     /* Get the entry */
     return &MmPfnDatabase[Pfn];
 };

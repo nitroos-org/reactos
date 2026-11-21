@@ -722,6 +722,12 @@ MiInitMachineDependent(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
 
     ASSERT(MxPfnAllocation != 0);
 
+    /* The PTE layouts must match the processor's (folds away when they do) */
+    if (!MiIsPteLayoutValid())
+    {
+        KeBugCheck(MEMORY_MANAGEMENT);
+    }
+
     /* Set some hardcoded addresses */
     MmHyperSpaceEnd = (PVOID)HYPER_SPACE_END;
     MmNonPagedSystemStart = (PVOID)MM_SYSTEM_SPACE_START;

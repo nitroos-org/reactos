@@ -52,8 +52,6 @@
 
 #include "ARM3/miarm.h"
 
-static ULONG64 MiPhysMemMaxAddress(VOID);
-
 #undef MmSetPageEntrySectionSegment
 #define MmSetPageEntrySectionSegment(S,O,E) \
         _MmSetPageEntrySectionSegment((S),(O),(E),__FILE__,__LINE__)
@@ -5596,9 +5594,8 @@ Exit:
  * The highest physical address the processor can map, as an exclusive bound:
  * the page-frame field of a PTE is only so wide, and a page above it makes the
  * hardware fault on a present PTE (a view of the physical memory section must
- * not be able to reach that).
+ * not be able to reach that). MmMapIoSpace checks against it too.
  */
-static
 ULONG64
 MiPhysMemMaxAddress(VOID)
 {

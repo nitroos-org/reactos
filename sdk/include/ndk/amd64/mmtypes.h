@@ -62,6 +62,15 @@ C_ASSERT(MM_ALLOCATION_GRANULARITY >= PAGE_SIZE);
 //
 // Page Table Entry Definitions
 //
+// The page frame number of a present 4-level paging entry is bits 12 to 51
+// (Intel SDM vol. 3A, 4.5 "4-Level Paging", tables 4-15 to 4-20; AMD APM
+// vol. 2, 5.3.3 and 5.4 "Page-Translation-Table Entry Fields"): 40 bits, for
+// physical addresses of up to 52 bits. Bits from MAXPHYADDR (CPUID
+// 0x80000008, EAX[7:0]) up to 51 are reserved and must be zero; bits 52 to 62
+// are ignored by the processor (software use), bit 63 is execute-disable.
+// Device memory (a 64-bit PCI BAR) can sit far above the end of RAM.
+// A transition PTE keeps its page frame number in the same bits.
+//
 typedef struct _HARDWARE_PTE
 {
     ULONG64 Valid:1;
@@ -76,8 +85,7 @@ typedef struct _HARDWARE_PTE
     ULONG64 CopyOnWrite:1;
     ULONG64 Prototype:1;
     ULONG64 reserved0:1;
-    ULONG64 PageFrameNumber:28;
-    ULONG64 reserved1:12;
+    ULONG64 PageFrameNumber:40;
     ULONG64 SoftwareWsIndex:11;
     ULONG64 NoExecute:1;
 } HARDWARE_PTE, *PHARDWARE_PTE;
@@ -104,13 +112,8 @@ typedef struct _MMPTE_TRANSITION
     ULONG64 Protection:5;
     ULONG64 Prototype:1;
     ULONG64 Transition:1;
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
-    ULONG64 PageFrameNumber:36;
-    ULONG64 Unused:16;
-#else
-    ULONG64 PageFrameNumber:28;
-    ULONG64 Unused:24;
-#endif
+    ULONG64 PageFrameNumber:40;
+    ULONG64 Unused:12;
 } MMPTE_TRANSITION;
 
 typedef struct _MMPTE_PROTOTYPE
@@ -169,16 +172,14 @@ typedef struct _MMPTE_HARDWARE
     ULONG64 Prototype:1;
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
     ULONG64 Write:1;
-    ULONG64 PageFrameNumber:36;
-    ULONG64 reserved1:4;
+    ULONG64 PageFrameNumber:40;
 #else
 #ifdef CONFIG_SMP
     ULONG64 Write:1;
 #else
     ULONG64 reserved0:1;
 #endif
-    ULONG64 PageFrameNumber:28;
-    ULONG64 reserved1:12;
+    ULONG64 PageFrameNumber:40;
 #endif
     ULONG64 SoftwareWsIndex:11;
     ULONG64 NoExecute:1;
@@ -200,13 +201,9 @@ typedef struct _MMPTE_HARDWARE_LARGEPAGE
     ULONG64 reserved0:1;
     ULONG64 PAT:1;
     ULONG64 reserved1:8;
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
-    ULONG64 PageFrameNumber:27;
-    ULONG64 reserved2:16;
-#else
-    ULONG64 PageFrameNumber:19;
-    ULONG64 reserved2:24;
-#endif
+    ULONG64 PageFrameNumber:31;
+    ULONG64 reserved2:11;
+    ULONG64 NoExecute:1;
 } MMPTE_HARDWARE_LARGEPAGE, *PMMPTE_HARDWARE_LARGEPAGE;
 
 typedef struct _MMPTE
@@ -226,6 +223,18 @@ typedef struct _MMPTE
   MMPDE, *PMMPDE,
   MMPPE, *PMMPPE,
   MMPXE, *PMMPXE;
+
+#ifdef C_ASSERT
+C_ASSERT(sizeof(HARDWARE_PTE) == sizeof(ULONG64));
+C_ASSERT(sizeof(MMPTE_HARDWARE) == sizeof(ULONG64));
+C_ASSERT(sizeof(MMPTE_HARDWARE_LARGEPAGE) == sizeof(ULONG64));
+C_ASSERT(sizeof(MMPTE_TRANSITION) == sizeof(ULONG64));
+C_ASSERT(sizeof(MMPTE_SOFTWARE) == sizeof(ULONG64));
+C_ASSERT(sizeof(MMPTE_PROTOTYPE) == sizeof(ULONG64));
+C_ASSERT(sizeof(MMPTE_SUBSECTION) == sizeof(ULONG64));
+C_ASSERT(sizeof(MMPTE_LIST) == sizeof(ULONG64));
+C_ASSERT(sizeof(MMPTE) == sizeof(ULONG64));
+#endif
 
 #ifdef __cplusplus
 }; // extern "C"

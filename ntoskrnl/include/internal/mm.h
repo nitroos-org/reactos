@@ -1622,6 +1622,10 @@ MmCreatePhysicalMapping(
     _In_ ULONG flProtect,
     _In_ PFN_NUMBER Page);
 
+/* The exclusive bound of the physical addresses the processor can map (MAXPHYADDR) */
+ULONG64
+MiPhysMemMaxAddress(VOID);
+
 ULONG
 NTAPI
 MmGetPageProtect(
