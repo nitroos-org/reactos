@@ -543,6 +543,7 @@ AddMbrPartitionToDisk(
     PartEntry->LogicalPartition = LogicalPartition;
     PartEntry->IsPartitioned = TRUE;
     PartEntry->PartitionNumber = PartitionInfo->PartitionNumber;
+    PartEntry->DisplayNumber = IsContainerPartition(PartEntry->Mbr.PartitionType) ? 0 : PartitionInfo->PartitionNumber;
     PartEntry->PartitionIndex = PartitionIndex;
     PartEntry->InLayout = TRUE;
 
@@ -654,6 +655,7 @@ AddGptPartitionToDisk(
     PartEntry->LogicalPartition = FALSE;
     PartEntry->IsPartitioned = TRUE;
     PartEntry->PartitionNumber = PartitionInfo->PartitionNumber;
+    PartEntry->DisplayNumber = PartitionInfo->PartitionNumber;
     PartEntry->PartitionIndex = PartitionIndex;
     PartEntry->InLayout = TRUE;
 
@@ -2694,6 +2696,15 @@ BOOLEAN
 CheckPartitionLayoutForChange(
     _In_ PDISKENTRY DiskEntry)
 {
+    PCWSTR Reason;
+
+    /* What is on the disk first: a table that cannot be relied on is not changed, not repaired */
+    if (!IsPartitionTableUsable(DiskEntry, &Reason))
+    {
+        ConResPrintf(StdOut, IDS_PARTITION_TABLE_UNSAFE, Reason);
+        return FALSE;
+    }
+
     if (!IsPartitionLayoutConsistent(DiskEntry))
     {
         ConResPuts(StdOut, IDS_PARTITION_LAYOUT_INVALID);
@@ -2749,6 +2760,17 @@ WriteMbrPartitions(
     /* If the disk is not dirty, there is nothing to do */
     if (!DiskEntry->Dirty)
         return STATUS_SUCCESS;
+
+    /* Never write over a table that cannot be relied on (backstop of the checks of the commands) */
+    {
+        PCWSTR TableReason;
+
+        if (!IsPartitionTableUsable(DiskEntry, &TableReason))
+        {
+            DPRINT1("The partition table on the disk cannot be relied on, nothing is written\n");
+            return STATUS_DISK_CORRUPT_ERROR;
+        }
+    }
 
     /* Never write a table with overlapping partitions or partitions outside the usable area */
     if (!IsPartitionLayoutConsistent(DiskEntry))
@@ -2876,6 +2898,17 @@ WriteGptPartitions(
     /* If the disk is not dirty, there is nothing to do */
     if (!DiskEntry->Dirty)
         return STATUS_SUCCESS;
+
+    /* Never write over a table that cannot be relied on (backstop of the checks of the commands) */
+    {
+        PCWSTR TableReason;
+
+        if (!IsPartitionTableUsable(DiskEntry, &TableReason))
+        {
+            DPRINT1("The partition table on the disk cannot be relied on, nothing is written\n");
+            return STATUS_DISK_CORRUPT_ERROR;
+        }
+    }
 
     /* Never write a table with overlapping partitions or partitions outside the usable area */
     if (!IsPartitionLayoutConsistent(DiskEntry))
@@ -3423,6 +3456,106 @@ UpdateGptDiskLayout(
         ZeroMemory(PartitionInfo, sizeof(PARTITION_INFORMATION_EX));
         PartitionInfo->RewritePartition = TRUE;
     }
+}
+
+
+/* Is this entry (of a disk with the given style) a partition, not free space or an entry that was deleted? */
+static
+BOOLEAN
+IsNumberedPartition(
+    _In_ PDISKENTRY DiskEntry,
+    _In_ PPARTENTRY PartEntry)
+{
+    if (DiskEntry->PartitionStyle == PARTITION_STYLE_GPT)
+        return !IsEqualGUID(&PartEntry->Gpt.PartitionType, &PARTITION_ENTRY_UNUSED_GUID);
+
+    return PartEntry->Mbr.PartitionType != PARTITION_ENTRY_UNUSED;
+}
+
+static
+BOOLEAN
+IsExtendedContainerEntry(
+    _In_ PDISKENTRY DiskEntry,
+    _In_ PPARTENTRY PartEntry)
+{
+    return DiskEntry->PartitionStyle == PARTITION_STYLE_MBR && IsContainerPartition(PartEntry->Mbr.PartitionType);
+}
+
+/*
+ * The numbers of the partitions of a disk as the Windows DiskPart shows them: the number the system gave a partition when it
+ * read the table stays with it (the slot order of the table, whatever the order of the offsets); a partition made since gets
+ * the lowest number that no other partition of the disk has. The extended partition is number 0.
+ */
+VOID
+AssignPartitionNumbers(
+    _In_ PDISKENTRY DiskEntry)
+{
+    PLIST_ENTRY Head[2], ListEntry;
+    PPARTENTRY PartEntry, Other;
+    ULONG Which, Number;
+    BOOLEAN InUse;
+
+    Head[0] = &DiskEntry->PrimaryPartListHead;
+    Head[1] = (DiskEntry->PartitionStyle == PARTITION_STYLE_MBR) ? &DiskEntry->LogicalPartListHead : NULL;
+
+    for (Which = 0; Which < 2; Which++)
+    {
+        if (Head[Which] == NULL)
+            continue;
+
+        for (ListEntry = Head[Which]->Flink; ListEntry != Head[Which]; ListEntry = ListEntry->Flink)
+        {
+            PartEntry = CONTAINING_RECORD(ListEntry, PARTENTRY, ListEntry);
+            if (!IsNumberedPartition(DiskEntry, PartEntry))
+                continue;
+
+            if (IsExtendedContainerEntry(DiskEntry, PartEntry))
+            {
+                PartEntry->DisplayNumber = 0;
+                continue;
+            }
+
+            if (PartEntry->DisplayNumber != 0)
+                continue;
+
+            for (Number = 1; ; Number++)
+            {
+                PLIST_ENTRY OtherHead, OtherEntry;
+                ULONG W2;
+
+                InUse = FALSE;
+                for (W2 = 0; W2 < 2 && !InUse; W2++)
+                {
+                    OtherHead = Head[W2];
+                    if (OtherHead == NULL)
+                        continue;
+
+                    for (OtherEntry = OtherHead->Flink; OtherEntry != OtherHead; OtherEntry = OtherEntry->Flink)
+                    {
+                        Other = CONTAINING_RECORD(OtherEntry, PARTENTRY, ListEntry);
+                        if (Other != PartEntry && IsNumberedPartition(DiskEntry, Other) && Other->DisplayNumber == Number)
+                        {
+                            InUse = TRUE;
+                            break;
+                        }
+                    }
+                }
+
+                if (!InUse)
+                    break;
+            }
+
+            PartEntry->DisplayNumber = Number;
+        }
+    }
+}
+
+ULONG
+GetPartitionDisplayNumber(
+    _In_ PPARTENTRY PartEntry)
+{
+    AssignPartitionNumbers(PartEntry->DiskEntry);
+    return PartEntry->DisplayNumber;
 }
 
 

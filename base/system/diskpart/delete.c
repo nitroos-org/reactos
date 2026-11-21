@@ -133,6 +133,7 @@ DeleteMbrPartition(
         CurrentPartition->IsPartitioned = FALSE;
         CurrentPartition->OnDiskPartitionNumber = 0;
         CurrentPartition->PartitionNumber = 0;
+        CurrentPartition->DisplayNumber = 0;
         // CurrentPartition->PartitionIndex = 0;
         CurrentPartition->Mbr.BootIndicator = FALSE;
         CurrentPartition->Mbr.PartitionType = PARTITION_ENTRY_UNUSED;
@@ -237,6 +238,7 @@ DeleteGptPartition(
         CurrentPartition->IsPartitioned = FALSE;
         CurrentPartition->OnDiskPartitionNumber = 0;
         CurrentPartition->PartitionNumber = 0;
+        CurrentPartition->DisplayNumber = 0;
         // CurrentPartition->PartitionIndex = 0;
 
         ZeroMemory(&CurrentPartition->Gpt.PartitionType, sizeof(GUID));
@@ -299,10 +301,7 @@ DeletePartition(
         {
             /* noerr */
             DPRINT("NOERR\n");
-            ConPuts(StdOut, L"The NOERR option is not supported yet!\n");
-#if 0
-            bNoErr = TRUE;
-#endif
+            return RefuseUnsupportedOption(L"NOERR");
         }
     }
 
@@ -330,6 +329,9 @@ DeletePartition(
         ConResPuts(StdOut, IDS_DELETE_PARTITION_SYSTEM);
         return EXIT_SUCCESS;
     }
+
+    if (!CheckPartitionLayoutForChange(CurrentDisk))
+        return EXIT_CMD_FAILED;
 
     if (CurrentDisk->PartitionStyle == PARTITION_STYLE_MBR)
     {

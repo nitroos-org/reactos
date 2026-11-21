@@ -55,7 +55,7 @@ UniqueIdDisk(
         {
             /* noerr */
             DPRINT("NOERR\n");
-            ConPuts(StdOut, L"The NOERR option is not supported yet!\n");
+            return RefuseUnsupportedOption(L"NOERR");
         }
     }
 
@@ -77,6 +77,9 @@ UniqueIdDisk(
             return EXIT_SUCCESS;
         }
     }
+
+    if (!CheckPartitionLayoutForChange(CurrentDisk))
+        return EXIT_CMD_FAILED;
 
     if (CurrentDisk->PartitionStyle == PARTITION_STYLE_GPT)
     {

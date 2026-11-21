@@ -35,10 +35,7 @@ assign_main(
         {
             /* noerr */
             DPRINT("NoErr\n", pszSuffix);
-            ConPuts(StdOut, L"The NOERR option is not supported yet!\n");
-#if 0
-            bNoErr = TRUE;
-#endif
+            return RefuseUnsupportedOption(L"NOERR");
         }
     }
 
@@ -60,8 +57,7 @@ assign_main(
         else if (HasPrefix(argv[i], L"mount=", &pszSuffix))
         {
             DPRINT("Mount\n", pszSuffix);
-            ConPuts(StdOut, L"The MOUNT option is not supported yet!\n");
-            nExclusive++;
+            return RefuseUnsupportedOption(L"MOUNT");
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {

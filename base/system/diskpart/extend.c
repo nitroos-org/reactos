@@ -561,8 +561,7 @@ extend_main(
         else if (HasPrefix(argv[i], L"disk=", &pszSuffix))
         {
             /* disk=<N>: space on another disk makes a spanned volume (dynamic disks) */
-            ConPuts(StdOut, L"The DISK option is not supported yet!\n");
-            return EXIT_SUCCESS;
+            return RefuseUnsupportedOption(L"DISK");
         }
         else if (_wcsicmp(argv[i], L"filesystem") == 0)
         {

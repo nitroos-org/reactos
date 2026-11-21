@@ -78,7 +78,12 @@ typedef enum _EXIT_CODE
     EXIT_FILE,
     EXIT_SERVICE,
     EXIT_SYNTAX,
-    EXIT_EXIT       /* Only used by the exit command */
+    EXIT_EXIT,      /* Only used by the exit command */
+
+    /* The error level of a command that failed in a script: 0x80070057 as the Windows DiskPart gives it (measured), -2147024809 */
+    EXIT_CMD_FAILED = -2147024809,
+    /* 0x8004240F, a range given by offset= that cannot be had (the Virtual Disk Service error "not enough usable space") */
+    EXIT_CMD_NO_SPACE = -2147212273
 } EXIT_CODE;
 
 typedef struct _COMMAND
@@ -155,6 +160,10 @@ typedef struct _PARTENTRY
     ULONG OnDiskPartitionNumber;
     ULONG PartitionNumber;
     ULONG PartitionIndex;
+
+    /* The number LIST/SELECT/DETAIL PARTITION use: the number the system gave the partition when the table was read,
+     * the lowest number not in use for a partition made since; 0 = not given yet (or the extended partition itself) */
+    ULONG DisplayNumber;
 
     /* The entry has a slot (PartitionIndex) in the layout buffer; new entries get theirs when the layout is updated */
     BOOLEAN InLayout;
@@ -579,6 +588,10 @@ merge_main(
     _In_ PWSTR *argv);
 
 /* misc.c */
+EXIT_CODE
+RefuseUnsupportedOption(
+    _In_ PCWSTR pszOption);
+
 BOOL
 IsDecString(
     _In_ PWSTR pszDecString);
@@ -736,6 +749,11 @@ IsPartitionLayoutConsistent(
     _In_ PDISKENTRY DiskEntry);
 
 BOOLEAN
+IsPartitionTableUsable(
+    _In_ PDISKENTRY DiskEntry,
+    _Out_ PCWSTR *Reason);
+
+BOOLEAN
 CheckPartitionLayoutForChange(
     _In_ PDISKENTRY DiskEntry);
 
@@ -751,6 +769,15 @@ VOID
 UpdateGptDiskLayout(
     _In_ PDISKENTRY DiskEntry,
     _In_ BOOL DeleteEntry);
+
+VOID
+AssignPartitionNumbers(
+    _In_ PDISKENTRY DiskEntry);
+
+ULONG
+GetPartitionDisplayNumber(
+    _In_ PPARTENTRY PartEntry);
+
 
 PPARTENTRY
 GetPrevUnpartitionedEntry(

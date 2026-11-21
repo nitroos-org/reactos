@@ -131,7 +131,6 @@ SelectPartition(
     PLIST_ENTRY Entry;
     PPARTENTRY PartEntry;
     ULONG ulValue;
-    ULONG PartNumber = 1;
 
     DPRINT("Select Partition()\n");
 
@@ -152,7 +151,7 @@ SelectPartition(
         if (CurrentPartition == NULL)
             ConResPuts(StdOut, IDS_SELECT_NO_PARTITION);
         else
-            ConResPrintf(StdOut, IDS_SELECT_PARTITION, CurrentPartition);
+            ConResPrintf(StdOut, IDS_SELECT_PARTITION, GetPartitionDisplayNumber(CurrentPartition));
         return EXIT_SUCCESS;
     }
 
@@ -169,73 +168,45 @@ SelectPartition(
         return EXIT_SUCCESS;
     }
 
-    if (CurrentDisk->PartitionStyle == PARTITION_STYLE_MBR)
+    /* The number of a partition is the one LIST PARTITION shows (see AssignPartitionNumbers), not its place in the list */
+    AssignPartitionNumbers(CurrentDisk);
+
     {
-        Entry = CurrentDisk->PrimaryPartListHead.Flink;
-        while (Entry != &CurrentDisk->PrimaryPartListHead)
-        {
-            PartEntry = CONTAINING_RECORD(Entry, PARTENTRY, ListEntry);
+        PLIST_ENTRY Heads[2];
+        ULONG Which;
 
-            if (PartEntry->Mbr.PartitionType != PARTITION_ENTRY_UNUSED)
+        Heads[0] = &CurrentDisk->PrimaryPartListHead;
+        Heads[1] = (CurrentDisk->PartitionStyle == PARTITION_STYLE_MBR) ? &CurrentDisk->LogicalPartListHead : NULL;
+
+        for (Which = 0; Which < 2; Which++)
+        {
+            if (Heads[Which] == NULL)
+                continue;
+
+            for (Entry = Heads[Which]->Flink; Entry != Heads[Which]; Entry = Entry->Flink)
             {
-                if (PartNumber == ulValue)
+                PartEntry = CONTAINING_RECORD(Entry, PARTENTRY, ListEntry);
+
+                if (CurrentDisk->PartitionStyle == PARTITION_STYLE_GPT)
+                {
+                    if (IsEqualGUID(&PartEntry->Gpt.PartitionType, &PARTITION_ENTRY_UNUSED_GUID))
+                        continue;
+                }
+                else
+                {
+                    if (PartEntry->Mbr.PartitionType == PARTITION_ENTRY_UNUSED || IsContainerPartition(PartEntry->Mbr.PartitionType))
+                        continue;
+                }
+
+                if (PartEntry->DisplayNumber == ulValue)
                 {
                     CurrentPartition = PartEntry;
                     /* The partition's volume, if any, gets the focus too. */
                     CurrentVolume = GetVolumeFromPartition(PartEntry);
-                    ConResPrintf(StdOut, IDS_SELECT_PARTITION, PartNumber);
+                    ConResPrintf(StdOut, IDS_SELECT_PARTITION, ulValue);
                     return EXIT_SUCCESS;
                 }
-
-                PartNumber++;
             }
-
-            Entry = Entry->Flink;
-        }
-
-        Entry = CurrentDisk->LogicalPartListHead.Flink;
-        while (Entry != &CurrentDisk->LogicalPartListHead)
-        {
-            PartEntry = CONTAINING_RECORD(Entry, PARTENTRY, ListEntry);
-
-            if (PartEntry->Mbr.PartitionType != PARTITION_ENTRY_UNUSED)
-            {
-                if (PartNumber == ulValue)
-                {
-                    CurrentPartition = PartEntry;
-                    /* The partition's volume, if any, gets the focus too. */
-                    CurrentVolume = GetVolumeFromPartition(PartEntry);
-                    ConResPrintf(StdOut, IDS_SELECT_PARTITION, PartNumber);
-                    return EXIT_SUCCESS;
-                }
-
-                PartNumber++;
-            }
-            Entry = Entry->Flink;
-        }
-    }
-    else if (CurrentDisk->PartitionStyle == PARTITION_STYLE_GPT)
-    {
-        Entry = CurrentDisk->PrimaryPartListHead.Flink;
-        while (Entry != &CurrentDisk->PrimaryPartListHead)
-        {
-            PartEntry = CONTAINING_RECORD(Entry, PARTENTRY, ListEntry);
-
-            if (!IsEqualGUID(&PartEntry->Gpt.PartitionType, &PARTITION_ENTRY_UNUSED_GUID))
-            {
-                if (PartNumber == ulValue)
-                {
-                    CurrentPartition = PartEntry;
-                    /* The partition's volume, if any, gets the focus too. */
-                    CurrentVolume = GetVolumeFromPartition(PartEntry);
-                    ConResPrintf(StdOut, IDS_SELECT_PARTITION, PartNumber);
-                    return EXIT_SUCCESS;
-                }
-
-                PartNumber++;
-            }
-
-            Entry = Entry->Flink;
         }
     }
 

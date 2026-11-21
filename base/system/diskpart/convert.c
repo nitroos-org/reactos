@@ -103,13 +103,13 @@ ConvertGPT(
     if (CurrentDisk->PartitionStyle == PARTITION_STYLE_GPT)
     {
         ConResPuts(StdOut, IDS_CONVERT_GPT_ALREADY);
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
     }
 
     if (GetPrimaryPartitionCount(CurrentDisk) != 0)
     {
         ConResPuts(StdOut, IDS_CONVERT_GPT_NOT_EMPTY);
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
     }
 
 #if 0
@@ -167,8 +167,11 @@ ConvertMBR(
         return EXIT_SUCCESS;
     }
 
-    if ((CurrentDisk->PartitionStyle == PARTITION_STYLE_MBR) ||
-        (CurrentDisk->PartitionStyle == PARTITION_STYLE_RAW))
+    /*
+     * A RAW disk (no partition table that the system could read) is not "already MBR": CONVERT MBR
+     * initialises it, as CONVERT GPT does. CREATE PARTITION does not initialise a disk.
+     */
+    if (CurrentDisk->PartitionStyle == PARTITION_STYLE_MBR)
     {
         ConResPuts(StdOut, IDS_CONVERT_MBR_ALREADY);
         return EXIT_SUCCESS;
@@ -177,7 +180,7 @@ ConvertMBR(
     if (GetPrimaryPartitionCount(CurrentDisk) != 0)
     {
         ConResPuts(StdOut, IDS_CONVERT_MBR_NOT_EMPTY);
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
     }
 
     DiskInfo.PartitionStyle = PARTITION_STYLE_MBR;
