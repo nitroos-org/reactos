@@ -19,11 +19,19 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(regedit);
 
+#ifdef __REACTOS__
+/* Set by the /s switch: Windows regedit shows no message at all then (an import that is refused,
+ * a file that is missing or malformed, an unknown root key), so a script never waits on a box. */
+static BOOL g_silent = FALSE;
+#endif
+
 static void output_writeconsole(const WCHAR *str, DWORD wlen)
 {
 #ifdef __REACTOS__
     /* This is win32gui application, don't ever try writing to console.
      * For the console version we have a separate reg.exe application. */
+    if (g_silent)
+        return;
     MessageBoxW(NULL, str, NULL, MB_ICONERROR);
 #else
     DWORD count;
@@ -264,6 +272,7 @@ BOOL ProcessCmdLine(WCHAR *cmdline)
         case 'S':
 #ifdef __REACTOS__
             silent = TRUE;
+            g_silent = TRUE;
             break;
 #endif
         case 'V':
