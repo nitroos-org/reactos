@@ -1301,6 +1301,15 @@ FindNLSStringEx(
     UNREFERENCED_PARAMETER(lpVersionInformation);
     UNREFERENCED_PARAMETER(lpReserved);
     UNREFERENCED_PARAMETER(sortHandle);
+
+    /* The locale name comes first: a name that is no well-formed tag is refused before anything else is looked at
+       (measured on Windows Server 2022: ERROR_INVALID_PARAMETER for short, empty and NULL strings and for bad flags) */
+    if (!BasepIsLocaleNameAccepted(lpLocaleName))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return -1;
+    }
+
     if (!lpStringSource || cchSource < -1 || !lpStringValue || cchValue < -1)
     {
         SetLastError(ERROR_INVALID_PARAMETER);

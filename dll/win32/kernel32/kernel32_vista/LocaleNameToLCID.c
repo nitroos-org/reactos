@@ -162,3 +162,81 @@ LocaleNameToLCID(
 
     return Lcid;
 }
+
+/*
+ * Whether CompareStringEx and FindNLSStringEx take a locale name. Windows takes every well-formed tag, not only the names it has a locale
+ * for (measured on Windows Server 2022, 6000 names): "en-AT", "en-001", "und", "iw-IL", "en-US-x-foo" and "x-private"
+ * are all taken, and compare like the invariant locale when no locale is installed for them. The grammar measured:
+ *   - 1 to 84 characters; tokens of 1 to 8 ASCII letters or digits, separated by '-'; an '_' is a '-' in a name that
+ *     starts with one letter ("x_foo"), else only once as the last separator behind at least two tokens
+ *     ("de-DE_phoneb", "en-US_foo"; "en_US_foo", "de_phoneb" and "de_AB" are refused, "en_US" is a known name);
+ *   - the first token is a language of 2 or 3 letters, optionally a script of 4 letters, then a region of 2 letters
+ *     or 3 digits, then any tokens; or it is one letter followed by at least one more token ("x-private");
+ *   - after the language (and the script) one letter followed by at least one token is an extension ("en-u-co-phonebk",
+ *     "en-Latn-x-foo"); anything else there ("en-aaa", "en-Latn-foo", "xx-invalid", "de-1901") is refused.
+ * "Invariant", "zh-CHS" and "de_phoneb" are refused by Windows as well.
+ */
+static BOOL BasepIsLocaleNameWellFormed(LPCWSTR name)
+{
+    BYTE len[48], alpha[48], digit[48];
+    ULONG count = 0, total = 0, i, n, underscores = 0;
+    BOOL scripted = FALSE;
+    WCHAR last_sep = 0;
+
+    for (;;)
+    {
+        ULONG tl = 0, a = 0, d = 0;
+
+        while (name[total] && name[total] != '-' && name[total] != '_')
+        {
+            WCHAR c = name[total];
+
+            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+            if (c >= 'a' && c <= 'z') a++;
+            else if (c >= '0' && c <= '9') d++;
+            else return FALSE;
+            if (++tl > 8) return FALSE;
+            total++;
+        }
+        if (!tl || count >= RTL_NUMBER_OF(len)) return FALSE;
+        len[count] = (BYTE)tl; alpha[count] = (a == tl); digit[count] = (d == tl);
+        count++;
+        if (!name[total]) break;
+        last_sep = name[total];
+        if (last_sep == '_') underscores++;
+        total++;
+    }
+    /* the name is at most 84 characters (LOCALE_NAME_MAX_LENGTH is 85 with the terminator) */
+    if (total > 84) return FALSE;
+    if (len[0] == 1 && alpha[0]) return count > 1;
+    /* a sort order after '_' needs a region or more before it ("en-US_foo"); "en_foo" is refused */
+    if (underscores && (underscores > 1 || last_sep != '_' || count < 3)) return FALSE;
+    if (!alpha[0] || len[0] < 2 || len[0] > 3) return FALSE;
+
+    /* the sort order behind an '_' is no script and no region */
+    n = underscores ? count - 1 : count;
+    i = 1;
+    if (i < n && len[i] == 4 && alpha[i]) { i++; scripted = TRUE; }
+    if (i == n) return !underscores;
+    if ((len[i] == 2 && alpha[i]) || (len[i] == 3 && digit[i])) return TRUE;
+    return len[i] == 1 && alpha[i] && (i == 1 || scripted) && count - i >= 2;
+}
+
+BOOL
+BasepIsLocaleNameAccepted(
+    _In_opt_ LPCWSTR name)
+{
+    WCHAR buffer[LOCALE_NAME_MAX_LENGTH];
+    ULONG i;
+
+    /* NULL is the user default locale, "" the invariant locale, and the system default has its own name */
+    if (!name || !name[0] || _wcsicmp(name, L"!x-sys-default-locale") == 0) return TRUE;
+    if (LocaleNameToLCID(name, LOCALE_ALLOW_NEUTRAL_NAMES)) return TRUE;
+    if (BasepIsLocaleNameWellFormed(name)) return TRUE;
+    /* the pseudo-locales and the names a locale has when '_' is read as '-' ("zh_Hant_TW") */
+    if (_wcsicmp(name, L"qps-ploca") == 0 || _wcsicmp(name, L"qps-plocm") == 0) return TRUE;
+    for (i = 0; name[i] && i < RTL_NUMBER_OF(buffer) - 1; i++) buffer[i] = name[i] == L'_' ? L'-' : name[i];
+    if (name[i]) return FALSE;
+    buffer[i] = 0;
+    return LocaleNameToLCID(buffer, LOCALE_ALLOW_NEUTRAL_NAMES) != 0;
+}

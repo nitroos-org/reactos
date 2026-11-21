@@ -4162,6 +4162,10 @@ INT WINAPI CompareStringW(LCID lcid, DWORD flags,
     return CompareStringEx(NULL, flags, str1, len1, str2, len2, NULL, NULL, 0);
 }
 
+#if (WINVER >= 0x0600)
+BOOL BasepIsLocaleNameAccepted(LPCWSTR name); /* kernel32_vista/LocaleNameToLCID.c */
+#endif
+
 /******************************************************************************
  *           CompareStringEx    (KERNEL32.@)
  */
@@ -4186,10 +4190,9 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
     }
 
 #if (WINVER >= 0x0600)
-    /* A name that names no locale is refused (measured on Windows Server 2022: ERROR_INVALID_PARAMETER for
+    /* A name that is no well-formed tag is refused (measured on Windows Server 2022: ERROR_INVALID_PARAMETER for
        "xx-invalid", "x" and "en-US-"). NULL, "" (invariant) and LOCALE_NAME_SYSTEM_DEFAULT are taken. */
-    if (locale && locale[0] && strcmpW(locale, L"!x-sys-default-locale" /* LOCALE_NAME_SYSTEM_DEFAULT */) &&
-        !LocaleNameToLCID(locale, LOCALE_ALLOW_NEUTRAL_NAMES))
+    if (!BasepIsLocaleNameAccepted(locale))
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return 0;

@@ -42,3 +42,9 @@ BasepLocaleNameAlias(
 ULONG
 BasepGetProcessUILanguageIds(
     _Out_writes_(MAX_PROCESS_UI_LANGUAGES) LANGID *Ids);
+
+/* Whether CompareStringEx and FindNLSStringEx take a locale name: NULL, "", the system default, a name with a locale
+   and every well-formed tag (Windows takes those, too) */
+BOOL
+BasepIsLocaleNameAccepted(
+    _In_opt_ LPCWSTR name);

@@ -217,7 +217,7 @@ START_TEST(FindNLSString)
     CheckEx(L"en-US", FIND_FROMSTART | NORM_IGNOREWIDTH, 12, NOERR, __LINE__);
     CheckEx(L"en-US", FIND_FROMSTART | NORM_LINGUISTIC_CASING, 12, NOERR, __LINE__);
 
-    /* Locale names: a name that names no locale is refused by the search and by the comparison */
+    /* Locale names: a name that is no well-formed tag is refused by the search and by the comparison */
     CheckEx(L"xx-invalid", FIND_FROMSTART, -1, ERROR_INVALID_PARAMETER, __LINE__);
     CheckEx(L"x", FIND_FROMSTART, -1, ERROR_INVALID_PARAMETER, __LINE__);
     CheckEx(L"en-US-", FIND_FROMSTART, -1, ERROR_INVALID_PARAMETER, __LINE__);
@@ -238,6 +238,62 @@ START_TEST(FindNLSString)
     CheckCompare(NULL, 0, CSTR_GREATER_THAN, NOERR, __LINE__);
     CheckCompare(LOCALE_NAME_SYSTEM_DEFAULT, 0, CSTR_GREATER_THAN, NOERR, __LINE__);
     CheckCompare(L"de-DE_phoneb", 0, CSTR_GREATER_THAN, NOERR, __LINE__);
+    /* Every well-formed tag is taken, whether the system has a locale for it or not (measured on Windows Server 2022;
+       the grammar is the one of the helper in locale.c) */
+    {
+        static const PCWSTR Taken[] =
+        {
+            L"en-AT", L"en-001", L"en-150", L"es-419", L"und", L"iw-IL", L"in-ID", L"qq-QQ", L"tlh", L"eng", L"sr-SP-Latn",
+            L"en-US-x-foo", L"x-private", L"x-IV_mathan", L"X-IV_MATHAN", L"x_foo", L"en-Latn-x-foo", L"en-u-co-phonebk",
+            L"en-US-u-co-phonebk", L"en-US-1996", L"de-DE-1996", L"en-GB-oed", L"en-Latn-US", L"zh-Hant-CN", L"en-US-x",
+            L"en-US-US", L"qps-ploc", L"qps-ploca", L"qps-plocm", L"en-US_foo", L"de-DE_phoneb", L"en_US", L"zh_Hant_TW",
+            L"EN-us", L"en-123"
+        };
+        static const PCWSTR Refused[] =
+        {
+            L"Invariant", L"invariant", L"zh-CHS", L"zh-CHT", L"de_phoneb", L"en_foo", L"de_AB", L"root",
+            L"xx-invalid", L"de-1901", L"sl-rozaj", L"en-aaa", L"en-Latn-foo", L"en-Latn-x", L"en-c", L"a", L"x", L"1-foo",
+            L"aaaa", L"en-US-", L"-en-US", L"en--US", L"en-US ", L" en-US", L"en.US", L"en_US.UTF-8", L"C", L"POSIX",
+            L"en-US-abcdefghi", L"en-1234", L"en-1a",
+            /* 85 characters */
+            L"x-aaaaaaa-aaaaaaa-aaaaaaa-aaaaaaa-aaaaaaa-aaaaaaa-aaaaaaa-aaaaaaa-aaaaaaa-aaaaaaa-aaa"
+        };
+        ULONG n;
+
+        for (n = 0; n < ARRAYSIZE(Taken); n++)
+        {
+            CheckCompare(Taken[n], 0, CSTR_GREATER_THAN, NOERR, __LINE__);
+            CheckEx(Taken[n], FIND_FROMSTART, 12, NOERR, __LINE__);
+        }
+        for (n = 0; n < ARRAYSIZE(Refused); n++)
+        {
+            CheckCompare(Refused[n], 0, 0, ERROR_INVALID_PARAMETER, __LINE__);
+            CheckEx(Refused[n], FIND_FROMSTART, -1, ERROR_INVALID_PARAMETER, __LINE__);
+        }
+        /* The name is looked at first by the search: a short source, bad flags, two directions and empty strings do
+           not change the error of a name that is refused */
+        {
+            INT Found = PENDING_FOUND;
+
+#define CHECK_NAME_FIRST(Flags, Src, SrcLen, Val, ValLen) \
+    SetLastError(NOERR); \
+    ok(pFindNLSStringEx(L"xx-invalid", Flags, Src, SrcLen, Val, ValLen, &Found, NULL, NULL, 0) == -1, "line %d\n", __LINE__); \
+    ok(GetLastError() == ERROR_INVALID_PARAMETER, "line %d: error %lu\n", __LINE__, GetLastError()); \
+    ok(Found == PENDING_FOUND, "line %d: found was written\n", __LINE__)
+            CHECK_NAME_FIRST(FIND_FROMSTART, L"ab", -1, L"abc", -1);
+            CHECK_NAME_FIRST(FIND_FROMSTART | SORT_STRINGSORT, L"abc", -1, L"ab", -1);
+            CHECK_NAME_FIRST(FIND_FROMSTART | FIND_FROMEND, L"abc", -1, L"ab", -1);
+            CHECK_NAME_FIRST(FIND_FROMSTART, NULL, -1, L"ab", -1);
+            CHECK_NAME_FIRST(FIND_FROMSTART, L"", -1, L"", -1);
+            CHECK_NAME_FIRST(FIND_FROMSTART, L"", -1, L"a", -1);
+            CHECK_NAME_FIRST(FIND_FROMSTART, L"a", -1, L"", -1);
+            CHECK_NAME_FIRST(FIND_FROMSTART, L"abc", 0, L"ab", 0);
+#undef CHECK_NAME_FIRST
+        }
+        /* 84 characters */
+        CheckCompare(L"x-aaaaaaa-aaaaaaa-aaaaaaa-aaaaaaa-aaaaaaa-aaaaaaa-aaaaaaa-aaaaaaa-aaaaaaa-aaaaaaa-aa", 0,
+                     CSTR_GREATER_THAN, NOERR, __LINE__);
+    }
     /* LINGUISTIC_IGNOREDIACRITIC is a comparison flag */
     CheckCompare(L"en-US", LINGUISTIC_IGNOREDIACRITIC, CSTR_GREATER_THAN, NOERR, __LINE__);
     CheckCompare(L"en-US", LINGUISTIC_IGNOREDIACRITIC | LINGUISTIC_IGNORECASE, CSTR_GREATER_THAN, NOERR, __LINE__);
@@ -302,4 +358,5 @@ START_TEST(FindNLSString)
     CheckDefined(COMPARE_STRING, L"a\xd800", 2, FALSE, NOERR, __LINE__);
     CheckDefined(COMPARE_STRING, L"a\xdc00", 2, FALSE, NOERR, __LINE__);
     CheckDefined(COMPARE_STRING, L"a\xd800\xdc00", 3, TRUE, NOERR, __LINE__);
+
 }
