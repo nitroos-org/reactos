@@ -13,6 +13,106 @@
 #include <advapi32.h>
 WINE_DEFAULT_DEBUG_CHANNEL(advapi);
 
+/* PRIVATE FUNCTIONS ********************************************************/
+
+/* The three names of the ANSI access check and audit alarm functions in Unicode; a NULL name stays NULL */
+static BOOL
+AuditAlarmNamesFromAnsi(LPCSTR SubsystemName,
+                        LPCSTR ObjectTypeName,
+                        LPCSTR ObjectName,
+                        PUNICODE_STRING Names)
+{
+    LPCSTR Source[3] = {SubsystemName, ObjectTypeName, ObjectName};
+    ULONG i;
+
+    RtlZeroMemory(Names, 3 * sizeof(UNICODE_STRING));
+    for (i = 0; i < 3; i++)
+    {
+        if (Source[i] != NULL && !RtlCreateUnicodeStringFromAsciiz(&Names[i], (PCSZ)Source[i]))
+        {
+            while (i-- > 0)
+                RtlFreeUnicodeString(&Names[i]);
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+static VOID
+AuditAlarmFreeNames(PUNICODE_STRING Names)
+{
+    ULONG i;
+
+    for (i = 0; i < 3; i++)
+        RtlFreeUnicodeString(&Names[i]);
+}
+
+/*
+ * The result of the access check and audit alarm functions with one result.
+ * When the check could not run the function fails and leaves the outputs
+ * alone. When it ran, AccessStatus says whether access is granted; a denial
+ * also fails the function with the reason of the denial as the last error
+ * (a caller that looks only at the return value does not take a denial for
+ * a grant).
+ */
+static BOOL
+AuditAlarmResult(NTSTATUS Status,
+                 NTSTATUS LocalAccessStatus,
+                 BOOLEAN GenerateOnClose,
+                 LPBOOL AccessStatus,
+                 LPBOOL pfGenerateOnClose)
+{
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastError(RtlNtStatusToDosError(Status));
+        return FALSE;
+    }
+
+    *pfGenerateOnClose = (BOOL)GenerateOnClose;
+
+    if (!NT_SUCCESS(LocalAccessStatus))
+    {
+        *AccessStatus = FALSE;
+        SetLastError(RtlNtStatusToDosError(LocalAccessStatus));
+        return FALSE;
+    }
+
+    *AccessStatus = TRUE;
+    return TRUE;
+}
+
+/*
+ * The result of the result list forms: as AccessCheckByTypeResultList, every
+ * entry of AccessStatusList receives a Win32 error code (0 for granted).
+ */
+static BOOL
+AuditAlarmResultList(NTSTATUS Status,
+                     DWORD ObjectTypeListLength,
+                     BOOLEAN GenerateOnClose,
+                     LPDWORD AccessStatusList,
+                     LPBOOL pfGenerateOnClose)
+{
+    PNTSTATUS NtAccessStatusList = (PNTSTATUS)AccessStatusList;
+    DWORD i;
+
+    C_ASSERT(sizeof(*AccessStatusList) == sizeof(NTSTATUS));
+
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastError(RtlNtStatusToDosError(Status));
+        return FALSE;
+    }
+
+    /* The kernel has written ObjectTypeListLength entries */
+    for (i = 0; i < ObjectTypeListLength; i++)
+        AccessStatusList[i] = RtlNtStatusToDosError(NtAccessStatusList[i]);
+
+    *pfGenerateOnClose = (BOOL)GenerateOnClose;
+    return TRUE;
+}
+
 /* FUNCTIONS ****************************************************************/
 
 /*
@@ -31,53 +131,26 @@ AccessCheckAndAuditAlarmA(LPCSTR SubsystemName,
                           LPBOOL AccessStatus,
                           LPBOOL pfGenerateOnClose)
 {
-    UNICODE_STRING SubsystemNameU;
-    UNICODE_STRING ObjectTypeNameU;
-    UNICODE_STRING ObjectNameU;
-    NTSTATUS LocalAccessStatus;
-    BOOLEAN GenerateOnClose;
-    NTSTATUS Status;
+    UNICODE_STRING Names[3];
+    BOOL Result;
 
-    RtlCreateUnicodeStringFromAsciiz(&SubsystemNameU,
-                                     (PCHAR)SubsystemName);
-    RtlCreateUnicodeStringFromAsciiz(&ObjectTypeNameU,
-                                     (PCHAR)ObjectTypeName);
-    RtlCreateUnicodeStringFromAsciiz(&ObjectNameU,
-                                     (PCHAR)ObjectName);
-
-    Status = NtAccessCheckAndAuditAlarm(&SubsystemNameU,
-                                        HandleId,
-                                        &ObjectTypeNameU,
-                                        &ObjectNameU,
-                                        SecurityDescriptor,
-                                        DesiredAccess,
-                                        GenericMapping,
-                                        ObjectCreation,
-                                        GrantedAccess,
-                                        &LocalAccessStatus,
-                                        &GenerateOnClose);
-    RtlFreeUnicodeString(&SubsystemNameU);
-    RtlFreeUnicodeString(&ObjectTypeNameU);
-    RtlFreeUnicodeString(&ObjectNameU);
-
-    *pfGenerateOnClose = (BOOL)GenerateOnClose;
-
-    if (!NT_SUCCESS(Status))
-    {
-        SetLastError(RtlNtStatusToDosError(Status));
+    if (!AuditAlarmNamesFromAnsi(SubsystemName, ObjectTypeName, ObjectName, Names))
         return FALSE;
-    }
 
-    if (!NT_SUCCESS (LocalAccessStatus))
-    {
-        *AccessStatus = FALSE;
-        SetLastError(RtlNtStatusToDosError(Status));
-        return FALSE;
-    }
+    Result = AccessCheckAndAuditAlarmW(Names[0].Buffer,
+                                       HandleId,
+                                       Names[1].Buffer,
+                                       Names[2].Buffer,
+                                       SecurityDescriptor,
+                                       DesiredAccess,
+                                       GenericMapping,
+                                       ObjectCreation,
+                                       GrantedAccess,
+                                       AccessStatus,
+                                       pfGenerateOnClose);
 
-    *AccessStatus = TRUE;
-
-    return TRUE;
+    AuditAlarmFreeNames(Names);
+    return Result;
 }
 
 
@@ -118,29 +191,16 @@ AccessCheckAndAuditAlarmW(LPCWSTR SubsystemName,
                                         SecurityDescriptor,
                                         DesiredAccess,
                                         GenericMapping,
-                                        ObjectCreation,
+                                        (BOOLEAN)(ObjectCreation != FALSE),
                                         GrantedAccess,
                                         &LocalAccessStatus,
                                         &GenerateOnClose);
 
-    *pfGenerateOnClose = (BOOL)GenerateOnClose;
-
-    if (!NT_SUCCESS(Status))
-    {
-        SetLastError(RtlNtStatusToDosError(Status));
-        return FALSE;
-    }
-
-    if (!NT_SUCCESS(LocalAccessStatus))
-    {
-        *AccessStatus = FALSE;
-        SetLastError(RtlNtStatusToDosError(Status));
-        return FALSE;
-    }
-
-    *AccessStatus = TRUE;
-
-    return TRUE;
+    return AuditAlarmResult(Status,
+                            LocalAccessStatus,
+                            GenerateOnClose,
+                            AccessStatus,
+                            pfGenerateOnClose);
 }
 
 
@@ -503,7 +563,7 @@ PrivilegedServiceAuditAlarmW(LPCWSTR SubsystemName,
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL WINAPI
 AccessCheckByTypeResultListAndAuditAlarmByHandleW(IN LPCWSTR SubsystemName,
@@ -524,14 +584,42 @@ AccessCheckByTypeResultListAndAuditAlarmByHandleW(IN LPCWSTR SubsystemName,
                                                   OUT LPDWORD AccessStatusList,
                                                   OUT LPBOOL pfGenerateOnClose)
 {
-    FIXME("%s() not implemented!\n", __FUNCTION__);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    UNICODE_STRING SubsystemNameU, ObjectTypeNameU, ObjectNameU;
+    BOOLEAN GenerateOnClose;
+    NTSTATUS Status;
+
+    RtlInitUnicodeString(&SubsystemNameU, SubsystemName);
+    RtlInitUnicodeString(&ObjectTypeNameU, ObjectTypeName);
+    RtlInitUnicodeString(&ObjectNameU, ObjectName);
+
+    Status = NtAccessCheckByTypeResultListAndAuditAlarmByHandle(&SubsystemNameU,
+                                                                HandleId,
+                                                                ClientToken,
+                                                                &ObjectTypeNameU,
+                                                                &ObjectNameU,
+                                                                pSecurityDescriptor,
+                                                                PrincipalSelfSid,
+                                                                DesiredAccess,
+                                                                AuditType,
+                                                                Flags,
+                                                                ObjectTypeList,
+                                                                ObjectTypeListLength,
+                                                                GenericMapping,
+                                                                (BOOLEAN)(ObjectCreation != FALSE),
+                                                                GrantedAccess,
+                                                                (PNTSTATUS)AccessStatusList,
+                                                                &GenerateOnClose);
+
+    return AuditAlarmResultList(Status,
+                                ObjectTypeListLength,
+                                GenerateOnClose,
+                                AccessStatusList,
+                                pfGenerateOnClose);
 }
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL WINAPI
 AccessCheckByTypeResultListAndAuditAlarmByHandleA(IN LPCSTR SubsystemName,
@@ -552,14 +640,37 @@ AccessCheckByTypeResultListAndAuditAlarmByHandleA(IN LPCSTR SubsystemName,
                                                   OUT LPDWORD AccessStatusList,
                                                   OUT LPBOOL pfGenerateOnClose)
 {
-    FIXME("%s() not implemented!\n", __FUNCTION__);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    UNICODE_STRING Names[3];
+    BOOL Result;
+
+    if (!AuditAlarmNamesFromAnsi(SubsystemName, ObjectTypeName, ObjectName, Names))
+        return FALSE;
+
+    Result = AccessCheckByTypeResultListAndAuditAlarmByHandleW(Names[0].Buffer,
+                                                               HandleId,
+                                                               ClientToken,
+                                                               Names[1].Buffer,
+                                                               Names[2].Buffer,
+                                                               pSecurityDescriptor,
+                                                               PrincipalSelfSid,
+                                                               DesiredAccess,
+                                                               AuditType,
+                                                               Flags,
+                                                               ObjectTypeList,
+                                                               ObjectTypeListLength,
+                                                               GenericMapping,
+                                                               ObjectCreation,
+                                                               GrantedAccess,
+                                                               AccessStatusList,
+                                                               pfGenerateOnClose);
+
+    AuditAlarmFreeNames(Names);
+    return Result;
 }
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL WINAPI
 AccessCheckByTypeResultListAndAuditAlarmW(IN LPCWSTR SubsystemName,
@@ -579,14 +690,41 @@ AccessCheckByTypeResultListAndAuditAlarmW(IN LPCWSTR SubsystemName,
                                           OUT LPDWORD AccessStatusList,
                                           OUT LPBOOL pfGenerateOnClose)
 {
-    FIXME("%s() not implemented!\n", __FUNCTION__);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    UNICODE_STRING SubsystemNameU, ObjectTypeNameU, ObjectNameU;
+    BOOLEAN GenerateOnClose;
+    NTSTATUS Status;
+
+    RtlInitUnicodeString(&SubsystemNameU, SubsystemName);
+    RtlInitUnicodeString(&ObjectTypeNameU, ObjectTypeName);
+    RtlInitUnicodeString(&ObjectNameU, ObjectName);
+
+    Status = NtAccessCheckByTypeResultListAndAuditAlarm(&SubsystemNameU,
+                                                        HandleId,
+                                                        &ObjectTypeNameU,
+                                                        &ObjectNameU,
+                                                        pSecurityDescriptor,
+                                                        PrincipalSelfSid,
+                                                        DesiredAccess,
+                                                        AuditType,
+                                                        Flags,
+                                                        ObjectTypeList,
+                                                        ObjectTypeListLength,
+                                                        GenericMapping,
+                                                        (BOOLEAN)(ObjectCreation != FALSE),
+                                                        GrantedAccess,
+                                                        (PNTSTATUS)AccessStatusList,
+                                                        &GenerateOnClose);
+
+    return AuditAlarmResultList(Status,
+                                ObjectTypeListLength,
+                                GenerateOnClose,
+                                AccessStatusList,
+                                pfGenerateOnClose);
 }
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL WINAPI
 AccessCheckByTypeResultListAndAuditAlarmA(IN LPCSTR SubsystemName,
@@ -606,14 +744,36 @@ AccessCheckByTypeResultListAndAuditAlarmA(IN LPCSTR SubsystemName,
                                           OUT LPDWORD AccessStatusList,
                                           OUT LPBOOL pfGenerateOnClose)
 {
-    FIXME("%s() not implemented!\n", __FUNCTION__);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    UNICODE_STRING Names[3];
+    BOOL Result;
+
+    if (!AuditAlarmNamesFromAnsi(SubsystemName, ObjectTypeName, ObjectName, Names))
+        return FALSE;
+
+    Result = AccessCheckByTypeResultListAndAuditAlarmW(Names[0].Buffer,
+                                                       HandleId,
+                                                       Names[1].Buffer,
+                                                       Names[2].Buffer,
+                                                       pSecurityDescriptor,
+                                                       PrincipalSelfSid,
+                                                       DesiredAccess,
+                                                       AuditType,
+                                                       Flags,
+                                                       ObjectTypeList,
+                                                       ObjectTypeListLength,
+                                                       GenericMapping,
+                                                       ObjectCreation,
+                                                       GrantedAccess,
+                                                       AccessStatusList,
+                                                       pfGenerateOnClose);
+
+    AuditAlarmFreeNames(Names);
+    return Result;
 }
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL WINAPI
 AccessCheckByTypeAndAuditAlarmW(IN LPCWSTR SubsystemName,
@@ -633,14 +793,42 @@ AccessCheckByTypeAndAuditAlarmW(IN LPCWSTR SubsystemName,
                                 OUT LPBOOL AccessStatus,
                                 OUT LPBOOL pfGenerateOnClose)
 {
-    FIXME("%s() not implemented!\n", __FUNCTION__);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    UNICODE_STRING SubsystemNameU, ObjectTypeNameU, ObjectNameU;
+    NTSTATUS LocalAccessStatus;
+    BOOLEAN GenerateOnClose;
+    NTSTATUS Status;
+
+    RtlInitUnicodeString(&SubsystemNameU, SubsystemName);
+    RtlInitUnicodeString(&ObjectTypeNameU, ObjectTypeName);
+    RtlInitUnicodeString(&ObjectNameU, ObjectName);
+
+    Status = NtAccessCheckByTypeAndAuditAlarm(&SubsystemNameU,
+                                              HandleId,
+                                              &ObjectTypeNameU,
+                                              &ObjectNameU,
+                                              pSecurityDescriptor,
+                                              PrincipalSelfSid,
+                                              DesiredAccess,
+                                              AuditType,
+                                              Flags,
+                                              ObjectTypeList,
+                                              ObjectTypeListLength,
+                                              GenericMapping,
+                                              (BOOLEAN)(ObjectCreation != FALSE),
+                                              GrantedAccess,
+                                              &LocalAccessStatus,
+                                              &GenerateOnClose);
+
+    return AuditAlarmResult(Status,
+                            LocalAccessStatus,
+                            GenerateOnClose,
+                            AccessStatus,
+                            pfGenerateOnClose);
 }
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL WINAPI
 AccessCheckByTypeAndAuditAlarmA(IN LPCSTR SubsystemName,
@@ -660,9 +848,31 @@ AccessCheckByTypeAndAuditAlarmA(IN LPCSTR SubsystemName,
                                 OUT LPBOOL AccessStatus,
                                 OUT LPBOOL pfGenerateOnClose)
 {
-    FIXME("%s() not implemented!\n", __FUNCTION__);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    UNICODE_STRING Names[3];
+    BOOL Result;
+
+    if (!AuditAlarmNamesFromAnsi(SubsystemName, ObjectTypeName, ObjectName, Names))
+        return FALSE;
+
+    Result = AccessCheckByTypeAndAuditAlarmW(Names[0].Buffer,
+                                             HandleId,
+                                             Names[1].Buffer,
+                                             Names[2].Buffer,
+                                             pSecurityDescriptor,
+                                             PrincipalSelfSid,
+                                             DesiredAccess,
+                                             AuditType,
+                                             Flags,
+                                             ObjectTypeList,
+                                             ObjectTypeListLength,
+                                             GenericMapping,
+                                             ObjectCreation,
+                                             GrantedAccess,
+                                             AccessStatus,
+                                             pfGenerateOnClose);
+
+    AuditAlarmFreeNames(Names);
+    return Result;
 }
 
 /* EOF */
