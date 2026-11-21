@@ -4166,18 +4166,61 @@ INT WINAPI CompareStringW(LCID lcid, DWORD flags,
 BOOL BasepIsLocaleNameAccepted(LPCWSTR name); /* kernel32_vista/LocaleNameToLCID.c */
 #endif
 
+/*
+ * The comparison flags of CompareStringEx and FindNLSStringEx, checked, and mapped to the flags wine_compare_string
+ * knows. FALSE with the last error set when a flag is not taken. FindNLSStringEx checks them once, not in every window.
+ */
+BOOL
+BasepPrepareCompareFlags(DWORD flags, int *wine_flags)
+{
+    DWORD supported_flags = NORM_IGNORECASE|NORM_IGNORENONSPACE|NORM_IGNORESYMBOLS|SORT_STRINGSORT
+                           |NORM_IGNOREKANATYPE|NORM_IGNOREWIDTH|LOCALE_USE_CP_ACP;
+    DWORD semistub_flags = NORM_LINGUISTIC_CASING|LINGUISTIC_IGNORECASE|LINGUISTIC_IGNOREDIACRITIC|0x10000000;
+    /* 0x10000000 is related to diacritics in Arabic, Japanese, and Hebrew */
+    static int once;
+
+    if (flags & ~(supported_flags|semistub_flags))
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return FALSE;
+    }
+
+#ifdef __REACTOS__
+    /* The linguistic flag and the flag it stands for are not combined (measured on Windows Server 2022:
+       ERROR_INVALID_FLAGS for 0x11 and 0x22) */
+    if ((flags & (NORM_IGNORECASE | LINGUISTIC_IGNORECASE)) == (NORM_IGNORECASE | LINGUISTIC_IGNORECASE) ||
+        (flags & (NORM_IGNORENONSPACE | LINGUISTIC_IGNOREDIACRITIC)) == (NORM_IGNORENONSPACE | LINGUISTIC_IGNOREDIACRITIC))
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return FALSE;
+    }
+#endif
+
+    if (flags & semistub_flags)
+    {
+        if (!once++)
+            FIXME("semi-stub behavior for flag(s) 0x%x\n", flags & semistub_flags);
+    }
+
+#ifdef __REACTOS__
+    /* The comparison only knows NORM_IGNORECASE; linguistic case folding is the closest it has */
+    if (flags & LINGUISTIC_IGNORECASE)
+        flags |= NORM_IGNORECASE;
+    if (flags & LINGUISTIC_IGNOREDIACRITIC)
+        flags |= NORM_IGNORENONSPACE;
+#endif
+    *wine_flags = flags;
+    return TRUE;
+}
+
 /******************************************************************************
  *           CompareStringEx    (KERNEL32.@)
  */
 INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
                            LPCWSTR str2, INT len2, LPNLSVERSIONINFO version, LPVOID reserved, LPARAM lParam)
 {
-    DWORD supported_flags = NORM_IGNORECASE|NORM_IGNORENONSPACE|NORM_IGNORESYMBOLS|SORT_STRINGSORT
-                           |NORM_IGNOREKANATYPE|NORM_IGNOREWIDTH|LOCALE_USE_CP_ACP;
-    DWORD semistub_flags = NORM_LINGUISTIC_CASING|LINGUISTIC_IGNORECASE|LINGUISTIC_IGNOREDIACRITIC|0x10000000;
-    /* 0x10000000 is related to diacritics in Arabic, Japanese, and Hebrew */
+    int wine_flags;
     INT ret;
-    static int once;
 
     if (version) FIXME("unexpected version parameter\n");
     if (reserved) FIXME("unexpected reserved value\n");
@@ -4199,40 +4242,13 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
     }
 #endif
 
-    if (flags & ~(supported_flags|semistub_flags))
-    {
-        SetLastError(ERROR_INVALID_FLAGS);
+    if (!BasepPrepareCompareFlags(flags, &wine_flags))
         return 0;
-    }
-
-#ifdef __REACTOS__
-    /* The linguistic flag and the flag it stands for are not combined (measured on Windows Server 2022:
-       ERROR_INVALID_FLAGS for 0x11 and 0x22) */
-    if ((flags & (NORM_IGNORECASE | LINGUISTIC_IGNORECASE)) == (NORM_IGNORECASE | LINGUISTIC_IGNORECASE) ||
-        (flags & (NORM_IGNORENONSPACE | LINGUISTIC_IGNOREDIACRITIC)) == (NORM_IGNORENONSPACE | LINGUISTIC_IGNOREDIACRITIC))
-    {
-        SetLastError(ERROR_INVALID_FLAGS);
-        return 0;
-    }
-#endif
-
-    if (flags & semistub_flags)
-    {
-        if (!once++)
-            FIXME("semi-stub behavior for flag(s) 0x%x\n", flags & semistub_flags);
-    }
 
     if (len1 < 0) len1 = strlenW(str1);
     if (len2 < 0) len2 = strlenW(str2);
 
-#ifdef __REACTOS__
-    /* The comparison only knows NORM_IGNORECASE; linguistic case folding is the closest it has */
-    if (flags & LINGUISTIC_IGNORECASE)
-        flags |= NORM_IGNORECASE;
-    if (flags & LINGUISTIC_IGNOREDIACRITIC)
-        flags |= NORM_IGNORENONSPACE;
-#endif
-    ret = wine_compare_string(flags, str1, len1, str2, len2);
+    ret = wine_compare_string(wine_flags, str1, len1, str2, len2);
 
     if (ret) /* need to translate result */
         return (ret < 0) ? CSTR_LESS_THAN : CSTR_GREATER_THAN;
