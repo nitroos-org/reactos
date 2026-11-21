@@ -296,15 +296,37 @@ co_IntNotifyClipboardChange(PWINSTATION_OBJECT pWinSta)
     EngSetLastError(dwLastError);
 }
 
-static VOID NTAPI
-IntSynthesizeDib(
-    PWINSTATION_OBJECT pWinStaObj,
-    HBITMAP hbm)
+/* Creates the clipboard data object that holds a packed image of cbData bytes; the caller
+   fills Data and, when it gives the handle up, deletes it with UserDeleteObject */
+static PCLIPBOARDDATA FASTCALL
+IntCreateClipData(ULONG cbData, HANDLE *phMem)
+{
+    ULONG cbObject;
+    PCLIPBOARDDATA pClipData;
+
+    if (!NT_SUCCESS(RtlULongAdd(cbData, sizeof(CLIPBOARDDATA), &cbObject)))
+        return NULL;
+
+    pClipData = (PCLIPBOARDDATA)UserCreateObject(gHandleTable, NULL, NULL, phMem, TYPE_CLIPDATA, cbObject);
+    if (!pClipData)
+        return NULL;
+
+    /* Release the extra reference (UserCreateObject added 2 references) */
+    UserDereferenceObject(pClipData);
+    pClipData->cbData = cbData;
+    RtlZeroMemory(pClipData->Data, cbData);
+    return pClipData;
+}
+
+/* The packed image of a bitmap (CF_DIB). Windows gives the header no colour count when the
+   table is the full table of the depth. */
+static HANDLE FASTCALL
+IntSynthesizeDib(HBITMAP hbm)
 {
     HDC hdc;
-    ULONG cjInfoSize, cjDataSize, cjObjectSize;
+    ULONG cjInfoSize, cjDataSize;
     PCLIPBOARDDATA pClipboardData;
-    HANDLE hMem;
+    HANDLE hMem = NULL;
     INT iResult;
     struct
     {
@@ -316,52 +338,25 @@ IntSynthesizeDib(
     /* Get the display DC */
     hdc = UserGetDCEx(NULL, NULL, DCX_USESTYLE);
     if (!hdc)
-    {
-        return;
-    }
+        return NULL;
 
     /* Get information about the bitmap format */
     memset(&bmiBuffer, 0, sizeof(bmiBuffer));
     pbmi->bmiHeader.biSize = sizeof(bmiBuffer.bmih);
-    iResult = GreGetDIBitsInternal(hdc,
-                                   hbm,
-                                   0,
-                                   0,
-                                   NULL,
-                                   pbmi,
-                                   DIB_RGB_COLORS,
-                                   0,
-                                   sizeof(bmiBuffer));
+    iResult = GreGetDIBitsInternal(hdc, hbm, 0, 0, NULL, pbmi, DIB_RGB_COLORS, 0, sizeof(bmiBuffer));
     if (iResult == 0)
-    {
-       goto cleanup;
-    }
+        goto cleanup;
 
     /* Get the size for a full BITMAPINFO */
     cjInfoSize = DIB_BitmapInfoSize(pbmi, DIB_RGB_COLORS);
 
-    /* Calculate the size of the clipboard data, which is a packed DIB.
-       Both sums must be overflow-checked before they size the allocation. */
-    if (!NT_SUCCESS(RtlULongAdd(cjInfoSize, pbmi->bmiHeader.biSizeImage, &cjDataSize)) ||
-        !NT_SUCCESS(RtlULongAdd(cjDataSize, sizeof(CLIPBOARDDATA), &cjObjectSize)))
-    {
+    /* The packed DIB; the sum must be overflow-checked before it sizes the allocation */
+    if (!NT_SUCCESS(RtlULongAdd(cjInfoSize, pbmi->bmiHeader.biSizeImage, &cjDataSize)))
         goto cleanup;
-    }
 
-    /* Create the clipboard data */
-    pClipboardData = (PCLIPBOARDDATA)UserCreateObject(gHandleTable,
-                                                      NULL,
-                                                      NULL,
-                                                      &hMem,
-                                                      TYPE_CLIPDATA,
-                                                      cjObjectSize);
+    pClipboardData = IntCreateClipData(cjDataSize, &hMem);
     if (!pClipboardData)
-    {
         goto cleanup;
-    }
-
-    /* Set the data size */
-    pClipboardData->cbData = cjDataSize;
 
     /* Copy the BITMAPINFOHEADER */
     memcpy(pClipboardData->Data, pbmi, sizeof(BITMAPINFOHEADER));
@@ -376,45 +371,131 @@ IntSynthesizeDib(
                                    DIB_RGB_COLORS,
                                    pbmi->bmiHeader.biSizeImage,
                                    cjInfoSize);
-
-    /* Add the clipboard data */
-    IntAddFormatedData(pWinStaObj, CF_DIB, hMem, TRUE, TRUE);
-
-    /* Release the extra reference (UserCreateObject added 2 references) */
-    UserDereferenceObject(pClipboardData);
+    {
+        PBITMAPINFOHEADER pbih = (PBITMAPINFOHEADER)pClipboardData->Data;
+        if (pbih->biBitCount <= 8 && pbih->biClrUsed == (1UL << pbih->biBitCount))
+            pbih->biClrUsed = 0;
+    }
 
 cleanup:
     UserReleaseDC(NULL, hdc, FALSE);
+    return hMem;
 }
 
-static VOID WINAPI
-IntSynthesizeBitmap(PWINSTATION_OBJECT pWinStaObj, PCLIP pBmEl)
+/* The header of a packed image taken from the clipboard is application data. Windows
+   converts it (measured on Windows Server 2022) only when:
+   - the header is the size the format has: 12 (core) or 40 for CF_DIB, 108 or 124 for CF_DIBV5,
+     and the block holds all of it;
+   - the block holds the colour table and the bits the header describes (for the uncompressed
+     layouts; biSizeImage is not trusted);
+   - the width is not negative and the height is not the most negative number;
+   - for a bitmap (GDI has to make one): width above 0, height not 0, planes not 0, and a depth
+     and layout GDI has: 1, 4, 8, 16, 24, 32 bits uncompressed (bit fields only at 16 and 32), run
+     length at 8 or 4 bits, JPEG or PNG at depth 0.
+   Everything else is refused here and GDI never sees it. */
+static BOOL FASTCALL
+IntClipDibValidate(PCLIPBOARDDATA pMemObj, BOOL bV5Source, BOOL bForBitmap)
+{
+    ULONG cb = pMemObj->cbData;
+    PBITMAPINFOHEADER pbih = (PBITMAPINFOHEADER)pMemObj->Data;
+    ULONG biSize, cbInfo;
+    ULONGLONG cbImage = 0, cbNeeded;
+    LONG lHeight, lWidth;
+    WORD wBpp;
+
+    if (cb < sizeof(DWORD))
+        return FALSE;
+
+    biSize = pbih->biSize;
+    if (bV5Source)
+    {
+        if (biSize != sizeof(BITMAPV4HEADER) && biSize != sizeof(BITMAPV5HEADER))
+            return FALSE;
+    }
+    else if (biSize != sizeof(BITMAPCOREHEADER) && biSize != sizeof(BITMAPINFOHEADER))
+        return FALSE;
+
+    /* the whole header it announces */
+    if (cb < biSize)
+        return FALSE;
+
+    if (biSize == sizeof(BITMAPCOREHEADER))
+    {
+        PBITMAPCOREHEADER pch = (PBITMAPCOREHEADER)pMemObj->Data;
+
+        if (pch->bcWidth == 0 || pch->bcHeight == 0 || pch->bcPlanes != 1 ||
+            (pch->bcBitCount != 1 && pch->bcBitCount != 4 && pch->bcBitCount != 8 && pch->bcBitCount != 24))
+            return FALSE;
+        cbInfo = sizeof(BITMAPCOREHEADER) + ((pch->bcBitCount <= 8) ? (3UL << pch->bcBitCount) : 0);
+        cbImage = (((ULONGLONG)pch->bcWidth * pch->bcBitCount + 31) / 32) * 4 * pch->bcHeight;
+        return (ULONGLONG)cbInfo + cbImage <= cb;
+    }
+
+    lWidth = pbih->biWidth;
+    lHeight = pbih->biHeight;
+    wBpp = pbih->biBitCount;
+    if (lWidth < 0 || lHeight == (-2147483647L - 1))
+        return FALSE;
+
+    if (bForBitmap)
+    {
+        if (lWidth == 0 || lHeight == 0 || pbih->biPlanes == 0)
+            return FALSE;
+
+        switch (pbih->biCompression)
+        {
+            case BI_RGB:
+                if (wBpp != 1 && wBpp != 4 && wBpp != 8 && wBpp != 16 && wBpp != 24 && wBpp != 32)
+                    return FALSE;
+                break;
+            case BI_BITFIELDS:
+                if (wBpp != 16 && wBpp != 32)
+                    return FALSE;
+                break;
+            case BI_RLE8:
+                if (wBpp != 8)
+                    return FALSE;
+                break;
+            case BI_RLE4:
+                if (wBpp != 4)
+                    return FALSE;
+                break;
+            case BI_JPEG:
+            case BI_PNG:
+                if (wBpp != 0)
+                    return FALSE;
+                break;
+            default:
+                return FALSE;
+        }
+    }
+
+    /* the colour table, the masks and the bits of an uncompressed image must be in the block */
+    cbInfo = DIB_BitmapInfoSize((PBITMAPINFO)pbih, DIB_RGB_COLORS);
+    if (cbInfo > cb)
+        return FALSE;
+    if ((pbih->biCompression == BI_RGB || pbih->biCompression == BI_BITFIELDS) && wBpp != 0)
+    {
+        cbImage = (((ULONGLONG)lWidth * wBpp + 31) / 32) * 4;
+        cbImage *= (ULONGLONG)(lHeight < 0 ? -(LONGLONG)lHeight : (LONGLONG)lHeight);
+    }
+    cbNeeded = (ULONGLONG)cbInfo + cbImage;
+    return cbNeeded <= cb;
+}
+
+/* The bitmap of a packed image (CF_DIB or CF_DIBV5 data); NULL when it is not one GDI can make */
+static HBITMAP FASTCALL
+IntSynthesizeBitmap(PCLIPBOARDDATA pMemObj, BOOL bV5Source)
 {
     HDC hdc = NULL;
     PBITMAPINFO pBmi, pConvertedBmi = NULL;
     HBITMAP hBm = NULL;
-    PCLIPBOARDDATA pMemObj;
-    PCLIP pDibEl;
     ULONG Offset;
 
-    TRACE("IntSynthesizeBitmap(%p, %p)\n", pWinStaObj, pBmEl);
-
-    /* CF_BITMAP is synthesized from CF_DIB, but the clipboard is application-controlled:
-       there may be no CF_DIB (any more), or none with data of its own */
-    pDibEl = IntGetFormatElement(pWinStaObj, CF_DIB);
-    if (!pDibEl || IS_DATA_DELAYED(pDibEl) || IS_DATA_SYNTHESIZED(pDibEl) || !pDibEl->fGlobalHandle)
-        return;
-
-    pMemObj = (PCLIPBOARDDATA)UserGetObject(gHandleTable, pDibEl->hData, TYPE_CLIPDATA);
-    if (!pMemObj)
-        return;
+    if (!IntClipDibValidate(pMemObj, bV5Source, TRUE))
+        return NULL;
 
     pBmi = (BITMAPINFO*)pMemObj->Data;
-
-    /* The data is user-controlled: it must hold the size field AND the whole header
-       it announces (reject if EITHER check fails). */
-    if (pMemObj->cbData < sizeof(DWORD) || pMemObj->cbData < pBmi->bmiHeader.biSize)
-        goto cleanup;
 
     pConvertedBmi = DIB_ConvertBitmapInfo(pBmi, DIB_RGB_COLORS);
     if (!pConvertedBmi)
@@ -440,11 +521,7 @@ IntSynthesizeBitmap(PWINSTATION_OBJECT pWinStaObj, PCLIP pBmEl)
                                     0);
 
     if (hBm)
-    {
         GreSetObjectOwner(hBm, GDI_OBJ_HMGR_PUBLIC);
-        pBmEl->hData = hBm;
-        pBmEl->fOwned = TRUE;
-    }
 
 cleanup:
     if (hdc)
@@ -452,12 +529,115 @@ cleanup:
 
     if (pConvertedBmi)
         DIB_FreeConvertedBitmapInfo(pConvertedBmi, pBmi, -1);
+
+    return hBm;
+}
+
+/* The CF_DIBV5 of a CF_DIB: a version 5 header made from the 40 byte one (sRGB colour space,
+   intent "images", masks copied into the header when the layout has them), then everything
+   that followed the old header (bit field masks, colour table, bits), as Windows does */
+static HANDLE FASTCALL
+IntSynthesizeDibV5(PCLIPBOARDDATA pDib)
+{
+    PBITMAPINFOHEADER pbih = (PBITMAPINFOHEADER)pDib->Data;
+    PBITMAPV5HEADER pv5;
+    PCLIPBOARDDATA pNew;
+    HANDLE hMem;
+    ULONG cbTail, cbNew;
+
+    if (pDib->cbData < sizeof(BITMAPINFOHEADER) || pbih->biSize != sizeof(BITMAPINFOHEADER) ||
+        !IntClipDibValidate(pDib, FALSE, FALSE))
+        return NULL;
+
+    cbTail = pDib->cbData - sizeof(BITMAPINFOHEADER);
+    if (!NT_SUCCESS(RtlULongAdd(sizeof(BITMAPV5HEADER), cbTail, &cbNew)))
+        return NULL;
+
+    pNew = IntCreateClipData(cbNew, &hMem);
+    if (!pNew)
+        return NULL;
+
+    pv5 = (PBITMAPV5HEADER)pNew->Data;
+    pv5->bV5Size = sizeof(BITMAPV5HEADER);
+    pv5->bV5Width = pbih->biWidth;
+    pv5->bV5Height = pbih->biHeight;
+    pv5->bV5Planes = pbih->biPlanes;
+    pv5->bV5BitCount = pbih->biBitCount;
+    pv5->bV5Compression = pbih->biCompression;
+    pv5->bV5SizeImage = pbih->biSizeImage;
+    pv5->bV5XPelsPerMeter = pbih->biXPelsPerMeter;
+    pv5->bV5YPelsPerMeter = pbih->biYPelsPerMeter;
+    pv5->bV5ClrUsed = pbih->biClrUsed;
+    pv5->bV5ClrImportant = pbih->biClrImportant;
+    if (pbih->biCompression == BI_BITFIELDS && cbTail >= 3 * sizeof(DWORD))
+    {
+        DWORD *pdwMask = (DWORD *)(pDib->Data + sizeof(BITMAPINFOHEADER));
+        pv5->bV5RedMask = pdwMask[0];
+        pv5->bV5GreenMask = pdwMask[1];
+        pv5->bV5BlueMask = pdwMask[2];
+    }
+    pv5->bV5CSType = LCS_sRGB;
+    pv5->bV5Intent = LCS_GM_IMAGES;
+    RtlCopyMemory(pNew->Data + sizeof(BITMAPV5HEADER), pDib->Data + sizeof(BITMAPINFOHEADER), cbTail);
+    return hMem;
+}
+
+/* The CF_DIB of a CF_DIBV5. Windows refuses a header with the "calibrated RGB" colour space
+   (nothing says how to calibrate it): ERROR_TAG_NOT_FOUND there, no data here. */
+static HANDLE FASTCALL
+IntSynthesizeDibFromV5(PCLIPBOARDDATA pV5)
+{
+    PBITMAPV5HEADER pv5 = (PBITMAPV5HEADER)pV5->Data;
+    PBITMAPINFOHEADER pbih;
+    PCLIPBOARDDATA pNew;
+    HANDLE hMem;
+    ULONG cbTail, cbMasks, cbNew;
+
+    if (pV5->cbData < sizeof(BITMAPV5HEADER) || pv5->bV5Size != sizeof(BITMAPV5HEADER) ||
+        !IntClipDibValidate(pV5, TRUE, FALSE))
+        return NULL;
+    if (pv5->bV5CSType == LCS_CALIBRATED_RGB)
+    {
+        EngSetLastError(ERROR_TAG_NOT_FOUND);
+        return NULL;
+    }
+
+    cbMasks = (pv5->bV5Compression == BI_BITFIELDS) ? 3 * sizeof(DWORD) : 0;
+    cbTail = pV5->cbData - sizeof(BITMAPV5HEADER);
+    if (!NT_SUCCESS(RtlULongAdd(sizeof(BITMAPINFOHEADER) + cbMasks, cbTail, &cbNew)))
+        return NULL;
+
+    pNew = IntCreateClipData(cbNew, &hMem);
+    if (!pNew)
+        return NULL;
+
+    pbih = (PBITMAPINFOHEADER)pNew->Data;
+    pbih->biSize = sizeof(BITMAPINFOHEADER);
+    pbih->biWidth = pv5->bV5Width;
+    pbih->biHeight = pv5->bV5Height;
+    pbih->biPlanes = pv5->bV5Planes;
+    pbih->biBitCount = pv5->bV5BitCount;
+    pbih->biCompression = pv5->bV5Compression;
+    pbih->biSizeImage = pv5->bV5SizeImage;
+    pbih->biXPelsPerMeter = pv5->bV5XPelsPerMeter;
+    pbih->biYPelsPerMeter = pv5->bV5YPelsPerMeter;
+    pbih->biClrUsed = pv5->bV5ClrUsed;
+    pbih->biClrImportant = pv5->bV5ClrImportant;
+    if (cbMasks)
+    {
+        DWORD *pdwMask = (DWORD *)(pNew->Data + sizeof(BITMAPINFOHEADER));
+        pdwMask[0] = pv5->bV5RedMask;
+        pdwMask[1] = pv5->bV5GreenMask;
+        pdwMask[2] = pv5->bV5BlueMask;
+    }
+    RtlCopyMemory(pNew->Data + sizeof(BITMAPINFOHEADER) + cbMasks, pV5->Data + sizeof(BITMAPV5HEADER), cbTail);
+    return hMem;
 }
 
 static VOID NTAPI
 IntAddSynthesizedFormats(PWINSTATION_OBJECT pWinStaObj)
 {
-    BOOL bHaveText, bHaveUniText, bHaveOemText, bHaveLocale, bHaveBm, bHaveDib, bHaveMFP, bHaveEMF;
+    BOOL bHaveText, bHaveUniText, bHaveOemText, bHaveLocale, bHaveBm, bHaveDib, bHaveDibV5, bHaveMFP, bHaveEMF;
 
     bHaveText = IntIsFormatAvailable(pWinStaObj, CF_TEXT);
     bHaveOemText = IntIsFormatAvailable(pWinStaObj, CF_OEMTEXT);
@@ -465,6 +645,7 @@ IntAddSynthesizedFormats(PWINSTATION_OBJECT pWinStaObj)
     bHaveLocale = IntIsFormatAvailable(pWinStaObj, CF_LOCALE);
     bHaveBm = IntIsFormatAvailable(pWinStaObj, CF_BITMAP);
     bHaveDib = IntIsFormatAvailable(pWinStaObj, CF_DIB);
+    bHaveDibV5 = IntIsFormatAvailable(pWinStaObj, CF_DIBV5);
     bHaveMFP = IntIsFormatAvailable(pWinStaObj, CF_METAFILEPICT);
     bHaveEMF = IntIsFormatAvailable(pWinStaObj, CF_ENHMETAFILE);
 
@@ -499,9 +680,18 @@ IntAddSynthesizedFormats(PWINSTATION_OBJECT pWinStaObj)
     if (!bHaveUniText && (bHaveText || bHaveOemText))
         IntAddFormatedData(pWinStaObj, CF_UNICODETEXT, DATA_SYNTH_USER, FALSE, TRUE);
 
-    /* Add CF_BITMAP. Note: it is synthesized on demand */
-    if (!bHaveBm && bHaveDib)
-        IntAddFormatedData(pWinStaObj, CF_BITMAP, DATA_SYNTH_KRNL, FALSE, TRUE);
+    /* The three image formats stand for each other: whichever of CF_BITMAP, CF_DIB and
+       CF_DIBV5 the clipboard holds (delayed or not), the missing ones are listed, in that
+       order. They are made on demand, whether or not that will succeed (measured). */
+    if (bHaveBm || bHaveDib || bHaveDibV5)
+    {
+        if (!bHaveBm)
+            IntAddFormatedData(pWinStaObj, CF_BITMAP, DATA_SYNTH_KRNL, FALSE, TRUE);
+        if (!bHaveDib)
+            IntAddFormatedData(pWinStaObj, CF_DIB, DATA_SYNTH_KRNL, FALSE, TRUE);
+        if (!bHaveDibV5)
+            IntAddFormatedData(pWinStaObj, CF_DIBV5, DATA_SYNTH_KRNL, FALSE, TRUE);
+    }
 
     /* Add CF_ENHMETAFILE. Note: it is synthesized in gdi32.dll */
     if (bHaveMFP && !bHaveEMF)
@@ -510,11 +700,6 @@ IntAddSynthesizedFormats(PWINSTATION_OBJECT pWinStaObj)
     /* Add CF_METAFILEPICT. Note: it is synthesized in gdi32.dll */
     if (bHaveEMF && !bHaveMFP)
         IntAddFormatedData(pWinStaObj, CF_METAFILEPICT, DATA_SYNTH_USER, FALSE, TRUE);
-
-    /* Note: We need to render the DIB or DIBV5 format as soon as possible
-       because palette information may change */
-    if (!bHaveDib && bHaveBm)
-        IntSynthesizeDib(pWinStaObj, IntGetFormatElement(pWinStaObj, CF_BITMAP)->hData);
 }
 
 /* The clipboard was changed and is released: add the synthesized formats (each one
@@ -531,6 +716,174 @@ co_IntClipboardChangeDone(PWINSTATION_OBJECT pWinStaObj)
 
     pWinStaObj->fClipboardChanged = FALSE;
     co_IntNotifyClipboardChange(pWinStaObj);
+}
+
+/* Asks the clipboard owner to render a delayed format; returns the element afterwards, which
+   is NULL when the format is gone. The owner's handler enters win32k again; the array may
+   have moved, so the caller must not keep a pointer into it across this call. */
+static PCLIP FASTCALL
+co_IntRenderDelayedFormat(PWINSTATION_OBJECT pWinSta, UINT fmt)
+{
+    if (pWinSta->spwndClipOwner)
+    {
+        pWinSta->fInDelayedRendering = TRUE;
+        co_IntSendMessage(UserHMGetHandle(pWinSta->spwndClipOwner), WM_RENDERFORMAT, (WPARAM)fmt, 0);
+        pWinSta->fInDelayedRendering = FALSE;
+    }
+
+    return IntGetFormatElement(pWinSta, fmt);
+}
+
+/* Makes the data of CF_BITMAP, CF_DIB or CF_DIBV5 when the clipboard lists it as made from
+   another of the three. Fails (nothing stored) when there is no source with data, the source
+   renders to nothing, or the data cannot be converted: the format stays listed, as on Windows. */
+static BOOL FASTCALL
+co_IntResolveImageFormat(PWINSTATION_OBJECT pWinSta, UINT target)
+{
+    static const UINT Sources[3][2] =
+    {
+        { CF_DIB, CF_DIBV5 },       /* CF_BITMAP */
+        { CF_BITMAP, CF_DIBV5 },    /* CF_DIB */
+        { CF_DIB, CF_BITMAP },      /* CF_DIBV5 */
+    };
+    const UINT *pSources = Sources[target == CF_BITMAP ? 0 : (target == CF_DIB ? 1 : 2)];
+    UINT src = 0;
+    PCLIP pSrc, pTarget;
+    PCLIPBOARDDATA pData;
+    HANDLE hNew = NULL, hTemp = NULL;
+    HBITMAP hbm = NULL;
+    int i;
+
+    for (i = 0; i < 2; i++)
+    {
+        pSrc = IntGetFormatElement(pWinSta, pSources[i]);
+        if (pSrc && !IS_DATA_SYNTHESIZED(pSrc))
+        {
+            src = pSources[i];
+            break;
+        }
+    }
+    if (!src)
+        return FALSE;
+
+    if (IS_DATA_DELAYED(pSrc))
+    {
+        if (!pWinSta->spwndClipOwner)
+            return FALSE;
+        pSrc = co_IntRenderDelayedFormat(pWinSta, src);
+        if (!pSrc || IS_DATA_DELAYED(pSrc) || IS_DATA_SYNTHESIZED(pSrc))
+            return FALSE;
+    }
+
+    if (src == CF_BITMAP)
+    {
+        if (pSrc->fGlobalHandle || (ULONG_PTR)pSrc->hData <= 2)
+            return FALSE;
+        hNew = IntSynthesizeDib((HBITMAP)pSrc->hData);
+        if (hNew && target == CF_DIBV5)
+        {
+            /* made from the packed image of the bitmap */
+            hTemp = hNew;
+            pData = (PCLIPBOARDDATA)UserGetObject(gHandleTable, hTemp, TYPE_CLIPDATA);
+            hNew = pData ? IntSynthesizeDibV5(pData) : NULL;
+            UserDeleteObject(hTemp, TYPE_CLIPDATA);
+        }
+    }
+    else
+    {
+        if (!pSrc->fGlobalHandle)
+            return FALSE;
+        pData = (PCLIPBOARDDATA)UserGetObject(gHandleTable, pSrc->hData, TYPE_CLIPDATA);
+        if (!pData)
+            return FALSE;
+
+        if (target == CF_BITMAP)
+            hbm = IntSynthesizeBitmap(pData, src == CF_DIBV5);
+        else if (target == CF_DIB)
+            hNew = IntSynthesizeDibFromV5(pData);   /* src is CF_DIBV5 here */
+        else
+            hNew = IntSynthesizeDibV5(pData);       /* src is CF_DIB here */
+    }
+
+    /* the source may have been rendered just now: look the target up again */
+    pTarget = IntGetFormatElement(pWinSta, target);
+    if (!pTarget || !IS_DATA_SYNTHESIZED(pTarget))
+    {
+        /* the owner changed the clipboard while it rendered: nothing to store into */
+        if (hNew)
+            UserDeleteObject(hNew, TYPE_CLIPDATA);
+        if (hbm)
+            GreDeleteObject(hbm);
+        return FALSE;
+    }
+
+    if (target == CF_BITMAP)
+    {
+        if (!hbm)
+            return FALSE;
+        pTarget->hData = hbm;
+        pTarget->fGlobalHandle = FALSE;
+        pTarget->fOwned = TRUE;
+        return TRUE;
+    }
+
+    if (!hNew)
+        return FALSE;
+    pTarget->hData = hNew;
+    pTarget->fGlobalHandle = TRUE;
+    pTarget->fOwned = FALSE;
+    return TRUE;
+}
+
+/* Drops the formats of a window that owned the clipboard and died: those still waiting for the
+   owner (nobody can render them now) and, when no text format with data is left, the text
+   formats that were made from them. The image and metafile formats made from a dropped one
+   stay listed (measured on Windows Server 2022). Returns TRUE when something was dropped;
+   that is a change: sequence number, viewers and listeners (the caller notifies). */
+static BOOL FASTCALL
+IntDropDelayedFormats(PWINSTATION_OBJECT pWinSta)
+{
+    DWORD i, j, cNew = 0;
+    BOOL bAny = FALSE, bRealText = FALSE;
+    PCLIP pBase = pWinSta->pClipBase;
+
+    for (i = 0; i < pWinSta->cNumClipFormats; i++)
+    {
+        if (IS_DATA_DELAYED(&pBase[i]))
+            bAny = TRUE;
+    }
+    if (!bAny)
+        return FALSE;
+
+    for (i = 0; i < pWinSta->cNumClipFormats; i++)
+    {
+        if ((pBase[i].fmt == CF_TEXT || pBase[i].fmt == CF_OEMTEXT || pBase[i].fmt == CF_UNICODETEXT) &&
+            !IS_DATA_DELAYED(&pBase[i]) && !IS_DATA_SYNTHESIZED(&pBase[i]))
+            bRealText = TRUE;
+    }
+
+    for (i = 0, j = 0; i < pWinSta->cNumClipFormats; i++)
+    {
+        if (IS_DATA_DELAYED(&pBase[i]))
+            continue;
+        if (!bRealText && IS_DATA_SYNTHESIZED(&pBase[i]) &&
+            (pBase[i].fmt == CF_TEXT || pBase[i].fmt == CF_OEMTEXT || pBase[i].fmt == CF_UNICODETEXT))
+            continue;
+        if (i != j)
+            pBase[j] = pBase[i];
+        j++;
+        cNew++;
+    }
+
+    pWinSta->cNumClipFormats = cNew;
+    if (cNew == 0)
+    {
+        ExFreePoolWithTag(pWinSta->pClipBase, USERTAG_CLIPBOARD);
+        pWinSta->pClipBase = NULL;
+    }
+    pWinSta->iClipSerialNumber++;
+    pWinSta->iClipSequenceNumber++;
+    return TRUE;
 }
 
 VOID NTAPI
@@ -557,6 +910,7 @@ VOID FASTCALL
 UserClipboardRelease(PWND pWindow)
 {
     PWINSTATION_OBJECT pWinStaObj;
+    BOOL bDropped;
 
     if (!pWindow)
         return;
@@ -565,13 +919,19 @@ UserClipboardRelease(PWND pWindow)
     if (!pWinStaObj)
         return;
 
-    co_IntSendMessage(UserHMGetHandle(pWinStaObj->spwndClipOwner), WM_RENDERALLFORMATS, 0, 0);
+    if (pWinStaObj->spwndClipOwner)
+        co_IntSendMessage(UserHMGetHandle(pWinStaObj->spwndClipOwner), WM_RENDERALLFORMATS, 0, 0);
 
     /* If the window being destroyed is the current clipboard owner... */
     if (pWindow == pWinStaObj->spwndClipOwner)
     {
         /* ... make it release the clipboard */
         pWinStaObj->spwndClipOwner = NULL;
+
+        /* What it did not render now is gone with it, and that is a change */
+        bDropped = IntDropDelayedFormats(pWinStaObj);
+        if (bDropped && !pWinStaObj->fClipboardChanged)
+            co_IntNotifyClipboardChange(pWinStaObj);
     }
 
     if (pWinStaObj->fClipboardChanged)
@@ -586,8 +946,10 @@ IntClipboardForgetWindow(PWINSTATION_OBJECT pWinSta, PWND pWindow)
 {
     if (pWindow == pWinSta->spwndClipOwner)
     {
-        /* The owner window was destroyed */
+        /* The owner window was destroyed without UserClipboardRelease (its thread or process
+           is being cleaned up): the formats still waiting for it are gone */
         pWinSta->spwndClipOwner = NULL;
+        IntDropDelayedFormats(pWinSta);
     }
 
     /* Check if clipboard is not locked by this window, if yes, unlock it */
@@ -661,7 +1023,7 @@ UserEnumClipboardFormats(UINT fmt)
     if (fmt == 0)
     {
         /* Return first format */
-        if (pWinStaObj->pClipBase)
+        if (pWinStaObj->pClipBase && pWinStaObj->cNumClipFormats != 0)
             Ret = pWinStaObj->pClipBase[0].fmt;
     }
     else
@@ -838,10 +1200,18 @@ NtUserChangeClipboardChain(HWND hWndRemove, HWND hWndNewNext)
     if (pWindowRemove && pWinStaObj->spwndClipViewer)
     {
         if (pWindowRemove == pWinStaObj->spwndClipViewer)
+        {
+            /* The head of the chain leaves: the new next window becomes the head, nobody is
+               told and the call succeeds (measured on Windows Server 2022) */
             pWinStaObj->spwndClipViewer = pWindowNewNext;
-
-        if (pWinStaObj->spwndClipViewer)
+            bRet = TRUE;
+        }
+        else
+        {
+            /* Any other window: the head passes the message down the chain, and the result
+               is whatever the chain answers */
             bRet = (BOOL)co_IntSendMessage(UserHMGetHandle(pWinStaObj->spwndClipViewer), WM_CHANGECBCHAIN, (WPARAM)hWndRemove, (LPARAM)hWndNewNext);
+        }
     }
 
     ObDereferenceObject(pWinStaObj);
@@ -942,6 +1312,14 @@ NtUserGetClipboardFormatName(UINT fmt, LPWSTR lpszFormatName, INT cchMaxCount)
     if (fmt < 0xc000 || fmt > 0xffff)
     {
         /* Registetrated formats are >= 0xc000 */
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        goto cleanup;
+    }
+
+    /* No room at all is "buffer too small" (measured); a negative size or no buffer is a bad parameter */
+    if (cchMaxCount == 0)
+    {
+        EngSetLastError(ERROR_INSUFFICIENT_BUFFER);
         goto cleanup;
     }
 
@@ -1156,10 +1534,13 @@ NtUserGetClipboardData(UINT fmt, PGETCLIPBDATA pgcd)
                 break;
 
             case CF_BITMAP:
-                IntSynthesizeBitmap(pWinStaObj, pElement);
-                /* No bitmap could be made: the marker is not a handle */
-                if (IS_DATA_SYNTHESIZED(pElement))
+            case CF_DIB:
+            case CF_DIBV5:
+                /* Made here from one of the other two (rendering the owner's, if it is
+                   delayed); a format that cannot be made stays listed and has no data */
+                if (!co_IntResolveImageFormat(pWinStaObj, fmt))
                     goto cleanup;
+                pElement = IntGetFormatElement(pWinStaObj, fmt);
                 break;
 
             case CF_METAFILEPICT:
@@ -1203,7 +1584,7 @@ NtUserGetClipboardData(UINT fmt, PGETCLIPBDATA pgcd)
         pgcd->fGlobalHandle = pElement->fGlobalHandle;
 
         /* Text and bitmap needs more data */
-        if (fmt == CF_TEXT)
+        if (fmt == CF_TEXT || fmt == CF_OEMTEXT || fmt == CF_UNICODETEXT)
         {
             PCLIP pLocaleEl;
 
@@ -1353,6 +1734,16 @@ NtUserSetClipboardViewer(HWND hWndNewViewer)
     pWinStaObj = IntGetWinStaForCbAccess();
     if (!pWinStaObj)
         goto cleanup;
+
+    /* No window ends the chain: the previous head is returned and nobody is notified
+       (measured: no error either) */
+    if (!hWndNewViewer)
+    {
+        if (pWinStaObj->spwndClipViewer)
+            hWndNext = UserHMGetHandle(pWinStaObj->spwndClipViewer);
+        pWinStaObj->spwndClipViewer = NULL;
+        goto cleanup;
+    }
 
     pWindow = UserGetWindowObject(hWndNewViewer);
     if (!pWindow)

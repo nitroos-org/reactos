@@ -208,7 +208,7 @@
 @ stdcall DrawTextExW(long wstr long ptr long ptr)
 @ stdcall DrawTextW(long wstr long ptr long)
 @ stdcall EditWndProc(long long long long) EditWndProcA
-@ stdcall EmptyClipboard() NtUserEmptyClipboard
+@ stdcall EmptyClipboard()
 @ stdcall EnableMenuItem(long long long)
 @ stdcall -version=0x601+ EnableMouseInPointer(long)
 @ stdcall EnableNonClientDpiScaling(long)
