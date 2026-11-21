@@ -2885,70 +2885,77 @@ static void CRYPT_CheckPropertyUsages(HCERTSTORE hRoot,
     }
 }
 
+/* Whether the enhanced key usage extension of a certificate, if it has one,
+ * allows the requested usage.  A certificate without the extension allows
+ * every usage; one with an empty extension none.  For a CA certificate the
+ * anyExtendedKeyUsage OID allows every usage (measured on Windows Server
+ * 2022); for the end certificate it stays ignored as before. */
+static BOOL CRYPT_CertAllowsUsage(PCCERT_CONTEXT cert,
+ const CERT_USAGE_MATCH *requested, BOOL isCA)
+{
+    PCERT_EXTENSION ext;
+    CERT_ENHKEY_USAGE *usage;
+    DWORD size;
+    BOOL ret;
+
+    if (!(ext = CertFindExtension(szOID_ENHANCED_KEY_USAGE,
+     cert->pCertInfo->cExtension, cert->pCertInfo->rgExtension)))
+        return TRUE;
+    if (!CryptDecodeObjectEx(X509_ASN_ENCODING, X509_ENHANCED_KEY_USAGE,
+     ext->Value.pbData, ext->Value.cbData, CRYPT_DECODE_ALLOC_FLAG, NULL,
+     &usage, &size))
+        return FALSE;
+    ret = CRYPT_UsageMatches(requested, usage);
+    if (!ret && isCA)
+    {
+        DWORD i;
+
+        for (i = 0; i < usage->cUsageIdentifier; i++)
+            if (!lstrcmpA(usage->rgpszUsageIdentifier[i], "2.5.29.37.0"))
+                ret = TRUE;
+    }
+    LocalFree(usage);
+    return ret;
+}
+
+/* The extended key usage extension specifies how a certificate's public key
+ * may be used (RFC 5280, 4.2.1.12).  Windows applies it to every certificate
+ * of the chain, the CA certificates and the root included, and a certificate
+ * that does not allow the requested usage makes every certificate below it
+ * (down to the end certificate) not valid for the usage (measured on Windows
+ * Server 2022: a CA with a code signing only EKU flags itself and the end
+ * certificate, an end certificate only itself, a root all three).  A
+ * certificate with no extension allows any usage, as before. */
 static void CRYPT_CheckUsages(PCERT_CHAIN_CONTEXT chain,
  const CERT_CHAIN_PARA *pChainPara)
 {
     if (CRYPT_HasRequestedUsage(pChainPara))
     {
-        PCCERT_CONTEXT endCert;
-        PCERT_EXTENSION ext;
-        BOOL validForUsage;
+        DWORD i;
+        LONG j;
 
-        /* A chain, if created, always includes the end certificate */
-        endCert = chain->rgpChain[0]->rgpElement[0]->pCertContext;
-        /* The extended key usage extension specifies how a certificate's
-         * public key may be used.  From RFC 5280, section 4.2.1.12:
-         * "This extension indicates one or more purposes for which the
-         *  certified public key may be used, in addition to or in place of the
-         *  basic purposes indicated in the key usage extension."
-         * If the extension is present, it only satisfies the requested usage
-         * if that usage is included in the extension:
-         * "If the extension is present, then the certificate MUST only be used
-         *  for one of the purposes indicated."
-         * There is also the special anyExtendedKeyUsage OID, but it doesn't
-         * have to be respected:
-         * "Applications that require the presence of a particular purpose
-         *  MAY reject certificates that include the anyExtendedKeyUsage OID
-         *  but not the particular OID expected for the application."
-         * For now, I'm being more conservative and ignoring the presence of
-         * the anyExtendedKeyUsage OID.
-         */
-        if ((ext = CertFindExtension(szOID_ENHANCED_KEY_USAGE,
-         endCert->pCertInfo->cExtension, endCert->pCertInfo->rgExtension)))
+        for (i = 0; i < chain->cChain; i++)
         {
-            CERT_ENHKEY_USAGE *usage;
-            DWORD size;
+            PCERT_SIMPLE_CHAIN simpleChain = chain->rgpChain[i];
+            BOOL failed = FALSE;
 
-            if (CryptDecodeObjectEx(X509_ASN_ENCODING,
-             X509_ENHANCED_KEY_USAGE, ext->Value.pbData, ext->Value.cbData,
-             CRYPT_DECODE_ALLOC_FLAG, NULL, &usage, &size))
+            for (j = simpleChain->cElement - 1; j >= 0; j--)
             {
-                validForUsage = CRYPT_UsageMatches(&pChainPara->RequestedUsage,
-                 usage);
-                LocalFree(usage);
+                PCERT_CHAIN_ELEMENT element = simpleChain->rgpElement[j];
+
+                if (!failed && !CRYPT_CertAllowsUsage(element->pCertContext,
+                 &pChainPara->RequestedUsage, j > 0))
+                    failed = TRUE;
+                if (failed)
+                {
+                    element->TrustStatus.dwErrorStatus |=
+                     CERT_TRUST_IS_NOT_VALID_FOR_USAGE;
+                    simpleChain->TrustStatus.dwErrorStatus |=
+                     CERT_TRUST_IS_NOT_VALID_FOR_USAGE;
+                    chain->TrustStatus.dwErrorStatus |=
+                     CERT_TRUST_IS_NOT_VALID_FOR_USAGE;
+                }
             }
-            else
-                validForUsage = FALSE;
-        }
-        else
-        {
-            /* If the extension isn't present, any interpretation is valid:
-             * "Certificate using applications MAY require that the extended
-             *  key usage extension be present and that a particular purpose
-             *  be indicated in order for the certificate to be acceptable to
-             *  that application."
-             * Not all web sites include the extended key usage extension, so
-             * accept chains without it.
-             */
-            TRACE_(chain)("requested usage from certificate with no usages\n");
-            validForUsage = TRUE;
-        }
-        if (!validForUsage)
-        {
-            chain->TrustStatus.dwErrorStatus |=
-             CERT_TRUST_IS_NOT_VALID_FOR_USAGE;
-            chain->rgpChain[0]->rgpElement[0]->TrustStatus.dwErrorStatus |=
-             CERT_TRUST_IS_NOT_VALID_FOR_USAGE;
         }
     }
     if (pChainPara->cbSize >= sizeof(CERT_CHAIN_PARA) &&
