@@ -195,7 +195,6 @@ ListPartition(
     PPARTENTRY PartEntry;
     ULONGLONG PartSize;
     ULONGLONG PartOffset;
-    ULONG PartNumber = 1;
     BOOL bPartitionFound = FALSE;
     WCHAR szPartitionTypeBuffer[40];
     WCHAR szSizeBuffer[8];
@@ -246,8 +245,11 @@ ListPartition(
     ConResPuts(StdOut, IDS_LIST_PARTITION_HEAD);
     ConResPuts(StdOut, IDS_LIST_PARTITION_LINE);
 
+    AssignPartitionNumbers(CurrentDisk);
+
     if (CurrentDisk->PartitionStyle == PARTITION_STYLE_MBR)
     {
+        /* In the order of the offsets: the logical drives follow their extended partition */
         Entry = CurrentDisk->PrimaryPartListHead.Flink;
         while (Entry != &CurrentDisk->PrimaryPartListHead)
         {
@@ -267,37 +269,41 @@ ListPartition(
 
                 ConResPrintf(StdOut, IDS_LIST_PARTITION_FORMAT,
                              (CurrentPartition == PartEntry) ? L'*' : L' ',
-                             PartNumber++,
+                             PartEntry->DisplayNumber,
                              szPartitionTypeBuffer,
                              szSizeBuffer,
                              szOffsetBuffer);
-            }
 
-            Entry = Entry->Flink;
-        }
+                if (IsContainerPartition(PartEntry->Mbr.PartitionType))
+                {
+                    PLIST_ENTRY LogicalEntry;
 
-        Entry = CurrentDisk->LogicalPartListHead.Flink;
-        while (Entry != &CurrentDisk->LogicalPartListHead)
-        {
-            PartEntry = CONTAINING_RECORD(Entry, PARTENTRY, ListEntry);
+                    for (LogicalEntry = CurrentDisk->LogicalPartListHead.Flink;
+                         LogicalEntry != &CurrentDisk->LogicalPartListHead;
+                         LogicalEntry = LogicalEntry->Flink)
+                    {
+                        PPARTENTRY Logical = CONTAINING_RECORD(LogicalEntry, PARTENTRY, ListEntry);
 
-            if (PartEntry->Mbr.PartitionType != PARTITION_ENTRY_UNUSED)
-            {
-                PartSize = PartEntry->SectorCount.QuadPart * CurrentDisk->BytesPerSector;
-                PrintSize(PartSize, szSizeBuffer, ARRAYSIZE(szSizeBuffer));
+                        if (Logical->Mbr.PartitionType == PARTITION_ENTRY_UNUSED)
+                            continue;
 
-                PartOffset = PartEntry->StartSector.QuadPart * CurrentDisk->BytesPerSector;
-                PrintSize(PartOffset, szOffsetBuffer, ARRAYSIZE(szOffsetBuffer));
+                        PartSize = Logical->SectorCount.QuadPart * CurrentDisk->BytesPerSector;
+                        PrintSize(PartSize, szSizeBuffer, ARRAYSIZE(szSizeBuffer));
 
-                LoadStringW(GetModuleHandle(NULL),
-                            IDS_PARTITION_TYPE_LOGICAL,
-                            szPartitionTypeBuffer, ARRAYSIZE(szPartitionTypeBuffer));
-                ConResPrintf(StdOut, IDS_LIST_PARTITION_FORMAT,
-                             (CurrentPartition == PartEntry) ? L'*' : L' ',
-                             PartNumber++,
-                             szPartitionTypeBuffer,
-                             szSizeBuffer,
-                             szOffsetBuffer);
+                        PartOffset = Logical->StartSector.QuadPart * CurrentDisk->BytesPerSector;
+                        PrintSize(PartOffset, szOffsetBuffer, ARRAYSIZE(szOffsetBuffer));
+
+                        LoadStringW(GetModuleHandle(NULL),
+                                    IDS_PARTITION_TYPE_LOGICAL,
+                                    szPartitionTypeBuffer, ARRAYSIZE(szPartitionTypeBuffer));
+                        ConResPrintf(StdOut, IDS_LIST_PARTITION_FORMAT,
+                                     (CurrentPartition == Logical) ? L'*' : L' ',
+                                     Logical->DisplayNumber,
+                                     szPartitionTypeBuffer,
+                                     szSizeBuffer,
+                                     szOffsetBuffer);
+                    }
+                }
             }
 
             Entry = Entry->Flink;
@@ -345,7 +351,7 @@ ListPartition(
 
                 ConResPrintf(StdOut, IDS_LIST_PARTITION_FORMAT,
                              (CurrentPartition == PartEntry) ? L'*' : L' ',
-                             PartNumber++,
+                             PartEntry->DisplayNumber,
                              szPartitionTypeBuffer,
                              szSizeBuffer,
                              szOffsetBuffer);

@@ -133,6 +133,7 @@ DeleteMbrPartition(
         CurrentPartition->IsPartitioned = FALSE;
         CurrentPartition->OnDiskPartitionNumber = 0;
         CurrentPartition->PartitionNumber = 0;
+        CurrentPartition->DisplayNumber = 0;
         // CurrentPartition->PartitionIndex = 0;
         CurrentPartition->Mbr.BootIndicator = FALSE;
         CurrentPartition->Mbr.PartitionType = PARTITION_ENTRY_UNUSED;
@@ -237,6 +238,7 @@ DeleteGptPartition(
         CurrentPartition->IsPartitioned = FALSE;
         CurrentPartition->OnDiskPartitionNumber = 0;
         CurrentPartition->PartitionNumber = 0;
+        CurrentPartition->DisplayNumber = 0;
         // CurrentPartition->PartitionIndex = 0;
 
         ZeroMemory(&CurrentPartition->Gpt.PartitionType, sizeof(GUID));
@@ -329,7 +331,7 @@ DeletePartition(
     }
 
     if (!CheckPartitionLayoutForChange(CurrentDisk))
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
 
     if (CurrentDisk->PartitionStyle == PARTITION_STYLE_MBR)
     {

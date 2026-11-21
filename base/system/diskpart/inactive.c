@@ -42,7 +42,7 @@ inactive_main(
         }
 
         if (!CheckPartitionLayoutForChange(CurrentDisk))
-            return EXIT_SUCCESS;
+            return EXIT_CMD_FAILED;
 
         CurrentPartition->Mbr.BootIndicator = FALSE;
         CurrentDisk->Dirty = TRUE;

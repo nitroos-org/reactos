@@ -62,7 +62,7 @@ gpt_main(
     }
 
     if (!CheckPartitionLayoutForChange(CurrentDisk))
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
 
     DPRINT("Attributes: 0x%I64x\n", ullAttributes);
     CurrentPartition->Gpt.Attributes = ullAttributes;

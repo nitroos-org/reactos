@@ -177,7 +177,7 @@ DetailPartition(
 
     /* TODO: Print more partition details */
     ConPuts(StdOut, L"\n");
-    ConResPrintf(StdOut, IDS_DETAIL_PARTITION_NUMBER, PartEntry->PartitionNumber);
+    ConResPrintf(StdOut, IDS_DETAIL_PARTITION_NUMBER, GetPartitionDisplayNumber(PartEntry));
     if (CurrentDisk->PartitionStyle == PARTITION_STYLE_GPT)
     {
         PrintGUID(szBuffer, &PartEntry->Gpt.PartitionType);

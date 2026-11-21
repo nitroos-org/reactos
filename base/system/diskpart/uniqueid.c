@@ -79,7 +79,7 @@ UniqueIdDisk(
     }
 
     if (!CheckPartitionLayoutForChange(CurrentDisk))
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
 
     if (CurrentDisk->PartitionStyle == PARTITION_STYLE_GPT)
     {
