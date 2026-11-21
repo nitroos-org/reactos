@@ -905,6 +905,11 @@ IopCreateDefaultDeviceSecurityDescriptor(IN DEVICE_TYPE DeviceType,
             AdminsSet = TRUE;
         }
 
+        /* Restricted code gets execute access only on these devices, not the read access of
+           the public default (Windows Server 2022: (A;;FX;;;RC) on \Device\Mup, the volumes, \Device\Tcp) */
+        if (RtlEqualSid(SeRestrictedCodeSid, &Ace->SidStart))
+            Ace->Mask = GENERIC_EXECUTE;
+
         /* World can read a CD_ROM device */
         if (DeviceType == FILE_DEVICE_CD_ROM && RtlEqualSid(SeWorldSid, &Ace->SidStart))
         {

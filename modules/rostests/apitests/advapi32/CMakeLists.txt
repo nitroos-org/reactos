@@ -6,6 +6,7 @@ list(APPEND SOURCE
     AccessCheckDifferential.c
     AccessCheckObjectTypeList.c
     AddMandatoryAce.c
+    SddlNullAcl.c
     AuditCategories.c
     CveEventWrite.c
     DynamicTimeZone.c
