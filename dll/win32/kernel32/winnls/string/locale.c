@@ -4166,18 +4166,32 @@ INT WINAPI CompareStringW(LCID lcid, DWORD flags,
 BOOL BasepIsLocaleNameAccepted(LPCWSTR name); /* kernel32_vista/LocaleNameToLCID.c */
 #endif
 
+/* The function below is inline in CompareStringEx (it is called in every comparison) and has an out-of-line copy for FindNLSStringEx */
+#if defined(__GNUC__)
+#define BASEP_INLINE static __inline __attribute__((always_inline))
+#else
+#define BASEP_INLINE static __forceinline
+#endif
+
 /*
  * The comparison flags of CompareStringEx and FindNLSStringEx, checked, and mapped to the flags wine_compare_string
  * knows. FALSE with the last error set when a flag is not taken. FindNLSStringEx checks them once, not in every window.
  */
-BOOL
-BasepPrepareCompareFlags(DWORD flags, int *wine_flags)
+BASEP_INLINE BOOL
+PrepareCompareFlags(DWORD flags, int *wine_flags)
 {
     DWORD supported_flags = NORM_IGNORECASE|NORM_IGNORENONSPACE|NORM_IGNORESYMBOLS|SORT_STRINGSORT
                            |NORM_IGNOREKANATYPE|NORM_IGNOREWIDTH|LOCALE_USE_CP_ACP;
     DWORD semistub_flags = NORM_LINGUISTIC_CASING|LINGUISTIC_IGNORECASE|LINGUISTIC_IGNOREDIACRITIC|0x10000000;
     /* 0x10000000 is related to diacritics in Arabic, Japanese, and Hebrew */
     static int once;
+
+    /* The flags nearly every call has (none of them is linguistic or half implemented): nothing to check or to map */
+    if (!(flags & ~supported_flags))
+    {
+        *wine_flags = flags;
+        return TRUE;
+    }
 
     if (flags & ~(supported_flags|semistub_flags))
     {
@@ -4213,6 +4227,12 @@ BasepPrepareCompareFlags(DWORD flags, int *wine_flags)
     return TRUE;
 }
 
+BOOL
+BasepPrepareCompareFlags(DWORD flags, int *wine_flags)
+{
+    return PrepareCompareFlags(flags, wine_flags);
+}
+
 /******************************************************************************
  *           CompareStringEx    (KERNEL32.@)
  */
@@ -4242,7 +4262,7 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
     }
 #endif
 
-    if (!BasepPrepareCompareFlags(flags, &wine_flags))
+    if (!PrepareCompareFlags(flags, &wine_flags))
         return 0;
 
     if (len1 < 0) len1 = strlenW(str1);
