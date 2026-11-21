@@ -335,11 +335,75 @@ SimpleTimerCallbackDpcRoutine(
     UNREFERENCED_PARAMETER(SystemArgument2);
 
     PFDO_DEVICE_EXTENSION FdoExtension = (PFDO_DEVICE_EXTENSION)DeferredContext;
+    KLOCK_QUEUE_HANDLE LockHandle;
 
     NT_ASSERT(FdoExtension);
     NT_ASSERT(FdoExtension->Miniport.MiniportExtension);
 
+    /* HwStorTimer runs with the StartIo lock held */
+    PortAcquireStartIoLock(FdoExtension, &LockHandle);
     FdoExtension->TimerCallback(&FdoExtension->Miniport.MiniportExtension->HwDeviceExtension);
+    PortReleaseStartIoLock(FdoExtension, &LockHandle);
+}
+
+
+/**
+ * @brief Acquires the adapter's StartIo lock, raising to DISPATCH_LEVEL.
+ *
+ * Storport takes it around the miniport routines the StorPortAcquireSpinLock documentation
+ * lists as called "with the StartIo lock held", and a miniport takes it through
+ * StorPortAcquireSpinLock(StartIoLock). Checked builds catch the two mistakes that would hang
+ * the machine instead: taking it again on the processor that holds it (a miniport acquiring
+ * StartIoLock inside HwStartIo, which the documentation does not allow), and taking it above
+ * DISPATCH_LEVEL, i.e. with the interrupt lock held (the documented order is StartIo, then
+ * interrupt).
+ */
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_IRQL_raises_(DISPATCH_LEVEL)
+VOID
+PortAcquireStartIoLock(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _Out_ PKLOCK_QUEUE_HANDLE LockHandle)
+{
+    KIRQL OldIrql;
+
+    NT_ASSERTMSG("StartIo lock taken above DISPATCH_LEVEL (with the interrupt lock held?)",
+                 KeGetCurrentIrql() <= DISPATCH_LEVEL);
+
+    /* Raise first: from here until the release this thread cannot leave the processor */
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+
+#if DBG
+    NT_ASSERTMSG("StartIo lock taken again on the processor that holds it",
+                 FdoExtension->StartIoLockOwner != KeGetCurrentThread());
+#endif
+
+    KeAcquireInStackQueuedSpinLockAtDpcLevel(&FdoExtension->StartIoLock, LockHandle);
+    LockHandle->OldIrql = OldIrql;
+
+#if DBG
+    FdoExtension->StartIoLockOwner = KeGetCurrentThread();
+#endif
+}
+
+
+_IRQL_requires_(DISPATCH_LEVEL)
+VOID
+PortReleaseStartIoLock(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PKLOCK_QUEUE_HANDLE LockHandle)
+{
+    KIRQL OldIrql = LockHandle->OldIrql;
+
+#if DBG
+    NT_ASSERT(FdoExtension->StartIoLockOwner == KeGetCurrentThread());
+    FdoExtension->StartIoLockOwner = NULL;
+#else
+    UNREFERENCED_PARAMETER(FdoExtension);
+#endif
+
+    KeReleaseInStackQueuedSpinLockFromDpcLevel(LockHandle);
+    KeLowerIrql(OldIrql);
 }
 
 
@@ -363,6 +427,8 @@ TimerCallbackDpcRoutine(
      */
     TimerEntry->TimerAlreadySet = 0;
 
+    /* No lock: the StorPortAcquireSpinLock documentation lists the StartIo lock for HwStorTimer
+       (RequestTimerCall), not for StorPortRequestTimer callbacks */
     TimerEntry->TimerCallback(TimerEntry->HwDeviceExtension,
                               TimerEntry->Context);
 }

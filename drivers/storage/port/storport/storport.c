@@ -125,11 +125,20 @@ PortAcquireSpinLock(
     switch (SpinLock)
     {
         case DpcLock: /* 1, */
+            /* The lock of the STOR_DPC passed as LockContext (StorPortAcquireSpinLock). It is what
+               a miniport serializes its DPC routine with, e.g. against HwStartIo on another
+               processor; DISPATCH_LEVEL, below the interrupt lock in the documented order */
             DPRINT("DpcLock\n");
+            NT_ASSERTMSG("DpcLock without a STOR_DPC", LockContext != NULL);
+            NT_ASSERTMSG("DpcLock taken above DISPATCH_LEVEL (with the interrupt lock held?)",
+                         KeGetCurrentIrql() <= DISPATCH_LEVEL);
+            KeAcquireInStackQueuedSpinLock((PKSPIN_LOCK)&((PSTOR_DPC)LockContext)->Lock,
+                                           (PKLOCK_QUEUE_HANDLE)&LockHandle->Context);
             break;
 
         case StartIoLock: /* 2 */
             DPRINT("StartIoLock\n");
+            PortAcquireStartIoLock(DeviceExtension, (PKLOCK_QUEUE_HANDLE)&LockHandle->Context);
             break;
 
         case InterruptLock: /* 3 */
@@ -166,10 +175,12 @@ PortReleaseSpinLock(
     {
         case DpcLock: /* 1, */
             DPRINT("DpcLock\n");
+            KeReleaseInStackQueuedSpinLock((PKLOCK_QUEUE_HANDLE)&LockHandle->Context);
             break;
 
         case StartIoLock: /* 2 */
             DPRINT("StartIoLock\n");
+            PortReleaseStartIoLock(DeviceExtension, (PKLOCK_QUEUE_HANDLE)&LockHandle->Context);
             break;
 
         case InterruptLock: /* 3 */
@@ -289,6 +300,12 @@ PortAddDevice(
     DeviceExtension->FlowControl.KickNeeded = 0;
     InitializeListHead(&DeviceExtension->FlowControl.FdoBlockedRequestsListHead);
     KeInitializeDpc(&DeviceExtension->FlowKickDpc, PortFdoFlowKickDpc, DeviceExtension);
+
+    /* The adapter's StartIo lock (PortAcquireStartIoLock) */
+    KeInitializeSpinLock(&DeviceExtension->StartIoLock);
+
+    /* Physically contiguous SRB extensions, sized once the miniport is up */
+    InitializeSListHead(&DeviceExtension->SrbExtensionFreeList);
 
     /* Attach the FDO to the device stack */
     Status = IoAttachDeviceToDeviceStackSafe(Fdo,
@@ -1066,8 +1083,33 @@ StorPortExtendedFunction(
 
         case ExtFunctionInitializePerformanceOptimizations:
         {
-            /* Completions are not spread over processors yet, accept and ignore */
-            Status = STOR_STATUS_SUCCESS;
+            BOOLEAN Query = (BOOLEAN)va_arg(va, int);
+            PPERF_CONFIGURATION_DATA PerfData = va_arg(va, PPERF_CONFIGURATION_DATA);
+
+            if (HwDeviceExtension == NULL || PerfData == NULL ||
+                PerfData->Size < RTL_SIZEOF_THROUGH_FIELD(PERF_CONFIGURATION_DATA, ConcurrentChannels))
+            {
+                Status = STOR_STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            /*
+             * None of the optional behaviours is implemented: completions are not redirected,
+             * and HwStartIo is never called concurrently (one channel), so it always runs with
+             * the StartIo lock held. A query says so, rather than leave the caller's flags as
+             * they were; a request for any of them is refused, so a miniport never believes it
+             * runs with concurrent channels (and without the StartIo lock) when it does not.
+             */
+            if (Query)
+            {
+                PerfData->Flags = 0;
+                PerfData->ConcurrentChannels = 1;
+                Status = STOR_STATUS_SUCCESS;
+            }
+            else
+            {
+                Status = (PerfData->Flags == 0) ? STOR_STATUS_SUCCESS : STOR_STATUS_INVALID_PARAMETER;
+            }
             break;
         }
 

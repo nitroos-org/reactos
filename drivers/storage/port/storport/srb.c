@@ -183,6 +183,7 @@ PortHandRequestToMiniport(
     PHW_INITIALIZATION_DATA HwInitData = FdoExtension->HwInitData;
     PSCSI_REQUEST_BLOCK Srb = RequestReference->Srb;
     PSCSI_REQUEST_BLOCK MiniportSrb = StorpMiniportSrb(RequestReference);
+    KLOCK_QUEUE_HANDLE StartIoLockHandle;
     ULONG Generation;
 
     /*
@@ -217,7 +218,25 @@ PortHandRequestToMiniport(
     }
 #endif
 
-    HwInitData->HwStartIo(MiniportExtension, MiniportSrb);
+    /*
+     * HwStartIo runs with the adapter's StartIo lock held (StorPortAcquireSpinLock: "HwStorStartIo:
+     * StartIo", there being one channel, see ExtFunctionInitializePerformanceOptimizations), so
+     * calls on several processors are serialized, and a miniport's DPC routine can exclude them
+     * by taking the same lock. HwBuildIo above runs without it, as documented. The caller may
+     * hold the flow control lock, which comes first in the lock order.
+     * Physical miniports only: a virtual miniport's HwStartIo runs without it and may take it
+     * itself (StorPortAcquireSpinLock: "StartIo can be acquired in a virtual miniport driver").
+     */
+    if (FdoExtension->Miniport.IsVirtual)
+    {
+        HwInitData->HwStartIo(MiniportExtension, MiniportSrb);
+    }
+    else
+    {
+        PortAcquireStartIoLock(FdoExtension, &StartIoLockHandle);
+        HwInitData->HwStartIo(MiniportExtension, MiniportSrb);
+        PortReleaseStartIoLock(FdoExtension, &StartIoLockHandle);
+    }
 
     PortTimeoutStartIoReturned(FdoExtension, Generation);
 }
@@ -403,16 +422,13 @@ PortPdoSrbAllocatePrivateContexts(
         return STATUS_SUCCESS;
     }
 
-    Srb->SrbExtension = ExAllocatePoolWithTag(NonPagedPool,
-                                              SrbExtensionSize,
-                                              TAG_SRB_EXTENSION);
+    /* Physically contiguous and zeroed (PortAllocateSrbExtension) */
+    Srb->SrbExtension = PortAllocateSrbExtension(FdoExtension);
     if (Srb->SrbExtension == NULL)
     {
         StorpSrbFreeRequestReference(Srb);
         return PortPdoStarveRequest(FdoExtension, Srb, Irp);
     }
-
-    RtlZeroMemory(Srb->SrbExtension, SrbExtensionSize);
 
     return STATUS_SUCCESS;
 }
@@ -1253,7 +1269,7 @@ PortCompleteRequest(
         /* The reserved one is handed back along with its packet, not freed */
         if (!FromReserve)
         {
-            ExFreePoolWithTag(Srb->SrbExtension, TAG_SRB_EXTENSION);
+            PortFreeSrbExtension(FdoExtension, Srb->SrbExtension);
         }
         Srb->SrbExtension = NULL;
     }
