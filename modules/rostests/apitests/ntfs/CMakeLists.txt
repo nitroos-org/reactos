@@ -5,6 +5,7 @@ list(APPEND SOURCE
     delete.c
     flushhome.c
     inherit.c
+    normname.c
     notify.c
     pagingwrite.c
     recreuse.c
