@@ -2305,14 +2305,19 @@ CmpAclDefaultKeySd(
  * Look at the stored descriptor of the key behind Key (a kernel handle opened
  * with WRITE_DAC, WRITE_OWNER and ACCESS_SYSTEM_SECURITY) and replace it when
  * it is planted (above), or whatever it is with Force (the boot self-check's
- * repair). A key without a stored descriptor is left alone (it inherits).
- * Returns the reasons found (0: nothing done).
+ * repair). With OwnerOnly, only a descriptor whose owner is not trusted counts
+ * as planted (a key a non-administrator created): a descriptor that an
+ * administrator's installer stored, owner Administrators, is kept even when it
+ * lets users write (some programs grant that on their own keys on purpose). A
+ * key without a stored descriptor is left alone (it inherits). Returns the
+ * reasons found (0: nothing done).
  */
 static
 ULONG
 CmpAclCheckStoredKey(
     _In_ HANDLE Key,
-    _In_ BOOLEAN Force)
+    _In_ BOOLEAN Force,
+    _In_ BOOLEAN OwnerOnly)
 {
     ULONG Buffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
     ULONG OwnerBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
@@ -2339,6 +2344,8 @@ CmpAclCheckStoredKey(
         if (Sd)
         {
             Reasons = CmpAclSdPlanted(Sd, &Owner);
+            if (OwnerOnly && !(Reasons & CMP_ACL_PLANTED_OWNER))
+                Reasons = 0;
             /* The boot self-check's repair: this descriptor is what shuts SYSTEM out of a boot key */
             if (Force && !Reasons)
                 Reasons = CMP_ACL_PLANTED_SYSTEM | CMP_ACL_PLANTED_INHERIT;
@@ -2416,13 +2423,15 @@ CmpAclCheckStoredKey(
  * descriptors that are planted are replaced, top-down, so that a key's
  * replacement inherits from an already repaired parent. Links are looked at
  * (their own descriptor) but not followed; one a non-administrator owns is
- * deleted (CmpAclCheckStoredKey). Boot only; kernel handles.
+ * deleted (CmpAclCheckStoredKey). OwnerOnly: only keys a non-administrator
+ * owns count (see CmpAclCheckStoredKey). Boot only; kernel handles.
  */
 static
 VOID
 CmpAclWalk(
     _In_ PCWSTR Path,
-    _In_ BOOLEAN Subtree)
+    _In_ BOOLEAN Subtree,
+    _In_ BOOLEAN OwnerOnly)
 {
     typedef struct _CMP_ACL_WALK_LEVEL
     {
@@ -2453,7 +2462,7 @@ CmpAclWalk(
         ExFreePoolWithTag(Stack, TAG_CM_ACL);
         return;
     }
-    CmpAclCheckStoredKey(Stack[0].Key, FALSE);
+    CmpAclCheckStoredKey(Stack[0].Key, FALSE, OwnerOnly);
     Stack[0].Index = 0;
     if (!Subtree)
     {
@@ -2484,7 +2493,7 @@ CmpAclWalk(
         Status = ZwOpenKey(&Child, CMP_ACL_RESET_ACCESS, &Attributes);
         if (!NT_SUCCESS(Status))
             continue;
-        if (CmpAclCheckStoredKey(Child, FALSE) & CMP_ACL_LINK_DELETED)
+        if (CmpAclCheckStoredKey(Child, FALSE, OwnerOnly) & CMP_ACL_LINK_DELETED)
         {
             /* A deleted link: the next subkey now has its index */
             ZwClose(Child);
@@ -2617,7 +2626,7 @@ CmpAclForceDefault(
     InitializeObjectAttributes(&Attributes, Name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_OPENLINK, NULL, NULL);
     if (!NT_SUCCESS(ZwOpenKey(&Key, CMP_ACL_RESET_ACCESS, &Attributes)))
         return FALSE;
-    Reasons = CmpAclCheckStoredKey(Key, TRUE);
+    Reasons = CmpAclCheckStoredKey(Key, TRUE, FALSE);
     ZwClose(Key);
     return Reasons != 0;
 }
@@ -2866,9 +2875,13 @@ CmpAclMarkerWrite(VOID)
  * descriptors of the machine hives' security-relevant keys and replaces the
  * planted ones (see above). The whole SYSTEM, SAM, SECURITY and DEFAULT hives;
  * of SOFTWARE the keys whose contents decide what runs, with what rights, or
- * how security is configured (programs' own keys elsewhere in SOFTWARE may
- * carry grants their installers made, as on Windows, and are left alone).
- * Every key replaced is logged (op "restamp", the old owner as "user").
+ * how security is configured. Programs' own keys elsewhere in SOFTWARE may
+ * carry grants their installers made, as on Windows: there only keys that a
+ * non-administrator owns are replaced (created while nothing was enforced,
+ * for example HKLM\SOFTWARE\<vendor> before an administrator installed that
+ * vendor's program, which then reads its settings from a key the user still
+ * writes). Every key replaced is logged (op "restamp", the old owner as
+ * "user").
  */
 static
 VOID
@@ -2933,7 +2946,10 @@ CmpAclTransition(VOID)
     ULONG i;
 
     for (i = 0; i < RTL_NUMBER_OF(Keys); i++)
-        CmpAclWalk(Keys[i].Path, Keys[i].Subtree);
+        CmpAclWalk(Keys[i].Path, Keys[i].Subtree, FALSE);
+
+    /* The rest of SOFTWARE (and again the parts above, which have nothing left to find): keys a non-administrator owns */
+    CmpAclWalk(L"\\Registry\\Machine\\SOFTWARE", TRUE, TRUE);
 }
 
 /*
