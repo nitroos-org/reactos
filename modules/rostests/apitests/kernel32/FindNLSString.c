@@ -269,6 +269,20 @@ START_TEST(FindNLSString)
             CheckCompare(Refused[n], 0, 0, ERROR_INVALID_PARAMETER, __LINE__);
             CheckEx(Refused[n], FIND_FROMSTART, -1, ERROR_INVALID_PARAMETER, __LINE__);
         }
+        /* A name taken once is taken again, and a refused name that shares its start with a taken one stays refused */
+        for (n = 0; n < 4; n++)
+        {
+            CheckCompare(L"en-US", 0, CSTR_GREATER_THAN, NOERR, __LINE__);
+            CheckCompare(L"en-US-", 0, 0, ERROR_INVALID_PARAMETER, __LINE__);
+            CheckCompare(L"en-US-x", 0, CSTR_GREATER_THAN, NOERR, __LINE__);
+            CheckCompare(L"en-US-xxxxxxxxx", 0, 0, ERROR_INVALID_PARAMETER, __LINE__);
+            CheckCompare(L"en-USx", 0, 0, ERROR_INVALID_PARAMETER, __LINE__);
+            CheckCompare(L"en-AT", 0, CSTR_GREATER_THAN, NOERR, __LINE__);
+            CheckCompare(L"en-A", 0, 0, ERROR_INVALID_PARAMETER, __LINE__);
+            CheckCompare(L"en-ATX", 0, 0, ERROR_INVALID_PARAMETER, __LINE__);
+            CheckEx(L"en-US", FIND_FROMSTART, 12, NOERR, __LINE__);
+            CheckEx(L"en-US-", FIND_FROMSTART, -1, ERROR_INVALID_PARAMETER, __LINE__);
+        }
         /* The name is looked at first by the search: a short source, bad flags, two directions and empty strings do
            not change the error of a name that is refused */
         {
