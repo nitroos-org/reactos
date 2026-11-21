@@ -2,7 +2,7 @@
  * PROJECT:         ReactOS msgina.dll
  * FILE:            dll/win32/msgina/tui.c
  * PURPOSE:         ReactOS Logon GINA DLL
- * PROGRAMMER:      Hervé Poussineau (hpoussin@reactos.org)
+ * PROGRAMMER:      HervÃ© Poussineau (hpoussin@reactos.org)
  */
 
 #include "msgina.h"
@@ -131,7 +131,7 @@ ReadString(
     IN BOOL ShowString)
 {
     DWORD count, i;
-    BOOL TooLong = FALSE;
+    DWORD Extra = 0;    /* characters typed that did not fit (the input is refused while there are any) */
     WCHAR charToDisplay[] = { 0, UNICODE_NULL };
 
     if (!SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), 0))
@@ -164,6 +164,28 @@ ReadString(
                 NULL);
             break;
         }
+        if (readChar == L'\b')
+        {
+            /* Take the last typed character back (first one that did not fit, then the stored ones) */
+            if (Extra > 0)
+                Extra--;
+            else if (i > 0)
+                i--;
+            else
+                continue;
+
+            if (ShowString)
+            {
+                /* Wipe it from the screen: back, blank, back */
+                WriteConsoleW(
+                    GetStdHandle(STD_OUTPUT_HANDLE),
+                    L"\b \b",
+                    3,
+                    &count,
+                    NULL);
+            }
+            continue;
+        }
         if (ShowString)
         {
             /* Display the char */
@@ -179,12 +201,11 @@ ReadString(
         if (i + 1 < BufferLength)
             Buffer[i++] = readChar;
         else
-            TooLong = TRUE;
-        /* FIXME: handle backspace */
+            Extra++;
     }
     Buffer[i] = UNICODE_NULL;
 
-    if (TooLong)
+    if (Extra > 0)
     {
         SecureZeroMemory(Buffer, BufferLength * sizeof(WCHAR));
         return FALSE;
