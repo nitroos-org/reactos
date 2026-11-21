@@ -459,10 +459,13 @@ function(create_iso_lists)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${REACTOS_BINARY_DIR}/boot/bootdata/packages/reactos.inf ${CMAKE_CURRENT_BINARY_DIR}/reactos.inf
         DEPENDS ${REACTOS_BINARY_DIR}/boot/bootdata/packages/reactos.inf reactos_cab_inf)
 
-    # Now build reactos.cab itself
+    # Now build reactos.cab itself. The file list (reactos.inf) is NOT stored in the cabinet header: its per-cabinet
+    # reserved area holds 60000 bytes at most and the list is close to that. Setup and the Features tool read the plain
+    # file reactos.inf next to the cabinet, and the update tooling reads reactos.inf in the build directory. The copy
+    # above stays as a dependency, so that the cabinet is rebuilt whenever the list changes.
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/reactos.cab
-        COMMAND native-cabman -C ${REACTOS_BINARY_DIR}/boot/bootdata/packages/reactos.dff -RC ${CMAKE_CURRENT_BINARY_DIR}/reactos.inf -N -P ${REACTOS_SOURCE_DIR}
+        COMMAND native-cabman -C ${REACTOS_BINARY_DIR}/boot/bootdata/packages/reactos.dff -N -P ${REACTOS_SOURCE_DIR}
         DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/reactos.inf native-cabman ${_filelist})
 
     add_custom_target(reactos_cab DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/reactos.cab)

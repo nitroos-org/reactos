@@ -92,8 +92,8 @@ CDFParser::~CDFParser()
  * The inf is written twice: as named ("reactos.inf") and as "reactos.sizes", where the line of a file also
  * carries the uncompressed size of the file as its last field ("name=7,,1234", "name=201,target.dll,1234").
  * Setup (the page that asks which components to install) adds the sizes up per component from the second
- * one. It is a separate file because the first is also stored in the cabinet header, whose per-cabinet
- * reserved area holds 64 KB at most (reactos.inf is close to that).
+ * one. It is a separate file so that the first keeps the format every reader of the inf expects.
+ * Neither is stored in the cabinet header: the per-cabinet reserved area (-RC) holds 60000 bytes at most.
  */
 void CDFParser::WriteInfLine(char* InfLine, const char* SizedLine)
 {
