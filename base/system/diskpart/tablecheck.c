@@ -151,9 +151,9 @@ done:
 /*
  * Can the partition table that is on the disk be relied on? Not when the disk is RAW (the kernel
  * found no table), when the MBR has a protective (0xEE) entry beside other entries, when a disk
- * with a protective MBR has no GPT header and entry array that pass the kernel's checks in BOTH
- * copies (a good primary beside a damaged backup is refused too), or when the header claims an
- * entry size or count that is not supported. Nothing is repaired. The state is read from the disk
+ * with a protective MBR has no GPT header and entry array that pass the kernel's checks in either
+ * copy (one good copy is enough: the command rewrites both), or when a header claims an entry
+ * size or count that is not supported. Nothing is repaired. The state is read from the disk
  * each time (a table that was just written by CONVERT is judged by what is on the disk).
  */
 BOOLEAN
@@ -261,13 +261,13 @@ IsPartitionTableUsable(
     {
         *Reason = L"both copies of the GPT (header or entry array) are damaged";
     }
-    else if (Primary != GptCopyOk)
-    {
-        *Reason = L"the primary copy of the GPT (header or entry array) is damaged, only the backup is good";
-    }
     else
     {
-        *Reason = L"the backup copy of the GPT (header or entry array) is damaged, only the primary is good";
+        /*
+         * One good copy: the system reads that copy and the command rewrites both, as the Windows DiskPart does (measured: a
+         * disk with a damaged primary or a damaged backup header or entry array gets its partition made, both copies good after).
+         */
+        Usable = TRUE;
     }
 
 done:
