@@ -1112,6 +1112,93 @@ Arguments:
 }
 
 
+#ifdef __REACTOS__
+static
+VOID
+FatFlushPagingFileChain (
+    IN PIRP_CONTEXT IrpContext,
+    IN PFCB Fcb
+    )
+
+/*++
+
+Routine Description:
+
+    Writes the FAT entries of every run of the paging file to the disk, and
+    then flushes the device cache.  The paging file is never closed or
+    flushed by its users, so its chain would otherwise reach the disk
+    whenever the lazy writer gets to it, while the directory entry that
+    gives it a start cluster and a size can be written earlier.  A power
+    cut in that window leaves a file of 512 MB whose chain is free (FAT has
+    no journal).  With the chain on the disk first, the worst cut leaves
+    allocated clusters that no file owns, which chkdsk reclaims.
+
+Arguments:
+
+    Fcb - Supplies the paging file, with its Mcb up to date.
+
+--*/
+
+{
+    PVCB Vcb = Fcb->Vcb;
+    ULONG McbIndex = 0;
+    VBO Vbo;
+    LBO Lbo;
+    ULONG ByteCount;
+    LARGE_INTEGER FileOffset;
+    IO_STATUS_BLOCK Iosb;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    PAGED_CODE();
+
+    while (FatGetNextMcbEntry( Vcb, &Fcb->Mcb, McbIndex++, &Vbo, &Lbo, &ByteCount )) {
+
+        ULONG Cluster = FatGetIndexFromLbo( Vcb, Lbo );
+        ULONG Count = ByteCount >> Vcb->AllocationSupport.LogOfBytesPerCluster;
+        ULONG Length;
+
+        FileOffset.QuadPart = FatReservedBytes( &Vcb->Bpb );
+
+        if (Vcb->AllocationSupport.FatIndexBitSize == 12) {
+
+            FileOffset.QuadPart += Cluster * 3 / 2;
+            Length = (Count * 3 / 2) + 1;
+
+        } else if (Vcb->AllocationSupport.FatIndexBitSize == 32) {
+
+            FileOffset.QuadPart += (ULONGLONG)Cluster * sizeof(ULONG);
+            Length = Count * sizeof(ULONG);
+
+        } else {
+
+            FileOffset.QuadPart += (ULONGLONG)Cluster * sizeof(USHORT);
+            Length = Count * sizeof(USHORT);
+        }
+
+        CcFlushCache( &Vcb->SectionObjectPointers, &FileOffset, Length, &Iosb );
+
+        if (!NT_SUCCESS(Iosb.Status)) {
+
+            Status = Iosb.Status;
+            break;
+        }
+    }
+
+    if (NT_SUCCESS(Status) && IrpContext->OriginatingIrp != NULL) {
+
+        Status = FatHijackIrpAndFlushDevice( IrpContext,
+                                             IrpContext->OriginatingIrp,
+                                             Vcb->TargetDeviceObject );
+    }
+
+    if (!NT_SUCCESS(Status)) {
+
+        FatNormalizeAndRaiseStatus( IrpContext, Status );
+    }
+}
+#endif
+
+
 _Requires_lock_held_(_Global_critical_region_)
 VOID
 FatAddFileAllocation (
@@ -1457,6 +1544,18 @@ Arguments:
 
         FsRtlUninitializeLargeMcb( &NewMcb );
     }
+
+#ifdef __REACTOS__
+    //
+    //  The paging file's chain goes to the disk before anything that refers
+    //  to it (its dirent start cluster and size), see FatFlushPagingFileChain.
+    //
+
+    if (FlagOn( FcbOrDcb->FcbState, FCB_STATE_PAGING_FILE )) {
+
+        FatFlushPagingFileChain( IrpContext, FcbOrDcb );
+    }
+#endif
 }
 
 _Requires_lock_held_(_Global_critical_region_)

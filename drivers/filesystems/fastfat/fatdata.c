@@ -1542,6 +1542,31 @@ Return Value:
         return;
     }
 
+#ifdef __REACTOS__
+    //
+    //  Callers that return the error themselves ask for no popup, and the
+    //  system paging file in the root is recreated at every boot: a power
+    //  cut can leave its size or chain inconsistent, and that is handled by
+    //  the create of the paging file (FatOpenExistingFile) and by chkdsk,
+    //  not by a hard error (the kernel treats this one as a bug).
+    //
+
+    if (FlagOn( IrpContext->Flags, IRP_CONTEXT_FLAG_DISABLE_POPUPS )) {
+
+        return;
+    }
+
+    if (NodeType(Fcb) == FAT_NTC_FCB &&
+        Fcb->ParentDcb != NULL &&
+        NodeType(Fcb->ParentDcb) == FAT_NTC_ROOT_DCB &&
+        Fcb->ShortName.Name.Oem.Length == 12 &&
+        Fcb->ShortName.Name.Oem.Buffer != NULL &&
+        RtlCompareMemory( Fcb->ShortName.Name.Oem.Buffer, "PAGEFILE.SYS", 12 ) == 12) {
+
+        return;
+    }
+#endif
+
     //
     //  Got to grab the full filename now.
     //
