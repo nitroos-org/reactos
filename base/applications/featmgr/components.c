@@ -101,7 +101,7 @@ static BOOL LoadSection(LPCWSTR file, LPCWSTR id, FM_COMPONENT *c)
     if (!c->Uninstall[0]) ReadKey(file, id, L"Uninstall", c->Uninstall, ARRAYSIZE(c->Uninstall));
     ReadKeyArch(file, id, L"SizeBytes", tmp, ARRAYSIZE(tmp));
     c->Size = tmp[0] ? _wcstoui64(tmp, NULL, 10) : 0;
-    ReadKey(file, id, L"Default", tmp, ARRAYSIZE(tmp));
+    ReadKeyArch(file, id, L"Default", tmp, ARRAYSIZE(tmp));
     c->Default = _wtoi(tmp) != 0;
     ReadKey(file, id, L"Arch", tmp, ARRAYSIZE(tmp));
     c->ArchOk = FmArchListed(tmp);
