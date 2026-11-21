@@ -227,16 +227,26 @@ BasepIsLocaleNameAccepted(
     _In_opt_ LPCWSTR name)
 {
     WCHAR buffer[LOCALE_NAME_MAX_LENGTH];
+    DWORD error = GetLastError();
     ULONG i;
 
     /* NULL is the user default locale, "" the invariant locale, and the system default has its own name */
     if (!name || !name[0] || _wcsicmp(name, L"!x-sys-default-locale") == 0) return TRUE;
-    if (LocaleNameToLCID(name, LOCALE_ALLOW_NEUTRAL_NAMES)) return TRUE;
-    if (BasepIsLocaleNameWellFormed(name)) return TRUE;
+
+    /* A name that is taken leaves the last error alone (the lookups below set it when they find no locale) */
+    if (LocaleNameToLCID(name, LOCALE_ALLOW_NEUTRAL_NAMES)) goto done;
+    if (BasepIsLocaleNameWellFormed(name)) goto done;
     /* the pseudo-locales and the names a locale has when '_' is read as '-' ("zh_Hant_TW") */
-    if (_wcsicmp(name, L"qps-ploca") == 0 || _wcsicmp(name, L"qps-plocm") == 0) return TRUE;
+    if (_wcsicmp(name, L"qps-ploca") == 0 || _wcsicmp(name, L"qps-plocm") == 0) goto done;
     for (i = 0; name[i] && i < RTL_NUMBER_OF(buffer) - 1; i++) buffer[i] = name[i] == L'_' ? L'-' : name[i];
-    if (name[i]) return FALSE;
-    buffer[i] = 0;
-    return LocaleNameToLCID(buffer, LOCALE_ALLOW_NEUTRAL_NAMES) != 0;
+    if (!name[i])
+    {
+        buffer[i] = 0;
+        if (LocaleNameToLCID(buffer, LOCALE_ALLOW_NEUTRAL_NAMES)) goto done;
+    }
+    return FALSE;
+
+done:
+    SetLastError(error);
+    return TRUE;
 }

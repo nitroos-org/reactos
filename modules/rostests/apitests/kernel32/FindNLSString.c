@@ -78,7 +78,7 @@ static void CheckCompare(LPCWSTR Locale, DWORD Flags, INT Expected, DWORD Expect
     Result = pCompareStringEx(Locale, Flags, Source, -1, Value, -1, NULL, NULL, 0);
     ok(Result == Expected, "line %d: locale '%ls' flags 0x%lx: got %d, expected %d\n", Line, Locale ? Locale : L"(null)",
        Flags, Result, Expected);
-    if (!Expected)
+    if (!Expected || ExpectedError == NOERR)
         ok(GetLastError() == ExpectedError, "line %d: locale '%ls' flags 0x%lx: error %lu, expected %lu\n", Line,
            Locale ? Locale : L"(null)", Flags, GetLastError(), ExpectedError);
 }
