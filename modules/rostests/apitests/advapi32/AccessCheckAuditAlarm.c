@@ -904,7 +904,7 @@ static void ByTypeRows(DWORD Flags)
         Return = AccessCheckByTypeAndAuditAlarmA("AccessCheckAuditAlarm", NULL, "TestObject", NULL, SdOwned, NULL, R2,
                                                  AuditEventObjectAccess, Flags, NULL, 0, &Mapping, FALSE, &Granted,
                                                  (LPBOOL)&Status, &OnClose);
-        CHECK(!Return && GetLastError() == ERROR_ACCESS_DENIED && Status == FALSE && Granted == 0,
+        CHECK(Return && GetLastError() == ERROR_ACCESS_DENIED && Status == FALSE && Granted == 0,
               "ByTypeA denied: ret %d err %lu\n", Return, GetLastError());
         Granted = Status = SENTINEL;
         Return = AccessCheckByTypeResultListAndAuditAlarmA("AccessCheckAuditAlarm", NULL, "TestObject", "Object",

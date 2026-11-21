@@ -246,16 +246,22 @@ static void OutputPointers(void)
         Args.Status = (PNTSTATUS)((PUCHAR)Status + 1);
         EXPECT_FAILURE(Form, &Args, 0, "misaligned AccessStatus");
 
+        /*
+         * GenerateOnClose is probed after the audit privilege check (as on Windows Server 2022): this
+         * process has no SeAuditPrivilege, so the form without Flags reports that first.
+         */
         Defaults(&Args);
         Args.OnClose = NULL;
-        EXPECT_FAILURE(Form, &Args, STATUS_ACCESS_VIOLATION, "NULL GenerateOnClose");
+        EXPECT_FAILURE(Form, &Args, Form == FORM_AND ? STATUS_PRIVILEGE_NOT_HELD : STATUS_ACCESS_VIOLATION,
+                       "NULL GenerateOnClose");
 
         /* GenerateOnClose outside user memory: refused by the probe, nothing is written there */
         if (Boundary)
         {
             Defaults(&Args);
             Args.OnClose = (PBOOLEAN)Boundary;
-            EXPECT_FAILURE(Form, &Args, STATUS_ACCESS_VIOLATION, "GenerateOnClose at the end of user memory");
+            EXPECT_FAILURE(Form, &Args, Form == FORM_AND ? STATUS_PRIVILEGE_NOT_HELD : STATUS_ACCESS_VIOLATION,
+                           "GenerateOnClose at the end of user memory");
         }
 
         /* A list result that does not fit: the last entry lies in the inaccessible page */
