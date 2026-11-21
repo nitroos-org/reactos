@@ -1283,7 +1283,10 @@ UserReleaseDC(PWND Window, HDC hDc, BOOL EndPaint)
         user attribute and the region it gave GetDCEx. A late ReleaseDC of a
         handle whose window went (and whose DC is now some other process's)
         released that process's DC from here, and its region was lost. */
-     if ((dce->DCXFlags & DCX_CACHE) && GreGetObjectOwner(hDc) == GDI_OBJ_HMGR_RESTRICTED)
+     /* The same for EndPaint on a CS_OWNDC / CS_CLASSDC DC: it deletes the clip
+        region of the owner's paint, which this process cannot delete, so the
+        handle was dropped (one region of the owner lost per call). */
+     if (((dce->DCXFlags & DCX_CACHE) || EndPaint) && GreGetObjectOwner(hDc) == GDI_OBJ_HMGR_RESTRICTED)
         return 0;
 
      nRet = DceReleaseDC(dce, EndPaint);
