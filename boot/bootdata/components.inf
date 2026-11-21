@@ -138,7 +138,10 @@ Description  = %net-legacy.desc%
 Compat       = %net-legacy.compat%
 Profiles     = standard
 Files        = system32\finger.exe, system32\ftp.exe, system32\telnet.exe, system32\telnet.ini, system32\telnet.cfg, system32\whois.exe, system32\telnetd.exe, system32\tftpd.exe, system32\tcpsvcs.exe, system32\drivers\etc\quotes, SysWOW64\ftp.exe
+Registry     = "HKLM\SYSTEM\CurrentControlSet\Services\tcpsvcs|Start", "HKLM\SYSTEM\CurrentControlSet\Services\telnetd|Start"
 
+; The Start values of the two services are the component's own lines of hivesys.inf (Start = 3): not added at setup without
+; the component, added by "featmgr /enable net-legacy" (to every control set, as setup's copy has them).
 ; The two services of this block are registered as disabled (Start = 4): they stay registered and cannot be started.
 [net-legacy.Off]
 HKLM,"SYSTEM\CurrentControlSet\Services\tcpsvcs","Start",0x00010001,4
