@@ -3400,6 +3400,18 @@ InitInstallDir:
     }
 
     /*
+     * An update or repair of a system that was installed with components left out: keep them out. What the
+     * installation recorded (Panther\components.txt) is applied to the files of this medium, so that the
+     * update does not put back what the person had chosen not to install, and the record stays true.
+     * A system without a record gets everything, as always.
+     */
+    if (RepairUpdateFlag && !USetupData.Components)
+    {
+        USetupData.Components = ComponentsLoadRecorded(USetupData.SourcePath.Buffer, USetupData.LanguageId,
+                                                       USetupData.DestinationPath.Buffer);
+    }
+
+    /*
      * Check whether the user attempts to install ReactOS within the
      * installation source directory, or in a subdirectory thereof.
      * If so, fail with an error.

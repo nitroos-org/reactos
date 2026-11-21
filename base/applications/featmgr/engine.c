@@ -1003,6 +1003,59 @@ BOOL FmBlockedByLeftOutComponent(LPCWSTR featureId, BOOL includeOwn, LPWSTR comp
     return found;
 }
 
+/* Is the 32-bit side of the system there (SysWOW64 and the 32-bit registry view)? Setup records a left-out "wow64"
+ * component (Installed=0); without a record it is there when the 64-bit edition has its 32-bit kernel32. A 32-bit
+ * build has no such side and no feature of it. */
+BOOL FmWow64SidePresent(void)
+{
+#ifdef _WIN64
+    HKEY hKey;
+    DWORD installed = 1, cb = sizeof(installed), type;
+    WCHAR path[MAX_PATH];
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ReactOS\\Nitro\\Components\\wow64", 0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS)
+    {
+        if (RegQueryValueExW(hKey, L"Installed", NULL, &type, (LPBYTE)&installed, &cb) != ERROR_SUCCESS || type != REG_DWORD) installed = 1;
+        RegCloseKey(hKey);
+        return installed != 0;
+    }
+    if (!ExpandEnvironmentStringsW(L"%SystemRoot%\\SysWOW64\\kernel32.dll", path, MAX_PATH)) return TRUE;
+    return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+#else
+    return TRUE;
+#endif
+}
+
+/* A payload destination in the 32-bit system folder */
+static BOOL DestIsWow64(LPCWSTR dest)
+{
+    return StrStrIW(dest, L"\\SysWOW64\\") != NULL;
+}
+
+/* A registry line (the part after "Reg<N>=") in the 32-bit view of HKLM\SOFTWARE */
+static BOOL RegLineIsWow64(LPCWSTR line)
+{
+    return StrStrIW(line, L"\\Wow6432Node") != NULL;
+}
+
+/* Is every use of the [Payload] source file `name` in the 32-bit system folder? (nothing to download without that side) */
+static BOOL SourceOnlyForWow64(LPCWSTR manifest, LPCWSTR name)
+{
+    WCHAR *pay = ReadSection(manifest, L"Payload"), *q;
+    BOOL used = FALSE, only = TRUE;
+
+    for (q = pay; q && *q; q += wcslen(q) + 1)
+    {
+        WCHAR *eq = wcschr(q, L'='), *bar;
+        if (!eq || q[0] == L';' || !(bar = wcschr(eq + 1, L'|'))) continue;
+        if (wcslen(name) != (size_t)(bar - eq - 1) || _wcsnicmp(eq + 1, name, bar - eq - 1)) continue;
+        used = TRUE;
+        if (!DestIsWow64(bar + 1)) only = FALSE;
+    }
+    if (pay) HeapFree(GetProcessHeap(), 0, pay);
+    return used && only;
+}
+
 BOOL FmFindFeature(LPCWSTR id, FM_FEATURE *out)
 {
     FM_FEATURE *arr;
@@ -3029,6 +3082,7 @@ static HRESULT ApplyRegistrySection(const FM_FEATURE *f, HKEY state, FILE *log)
     {
         WCHAR *eq = wcschr(p, L'=');
         if (!eq) continue;
+        if (RegLineIsWow64(eq + 1) && !FmWow64SidePresent()) continue;   /* the 32-bit view: no 32-bit side */
         hr = ApplyRegAction(eq + 1, state, log);
         if (FAILED(hr)) break;
     }
@@ -3171,6 +3225,11 @@ static HRESULT StageHostedPayload(const FM_FEATURE *f, WCHAR **fetched, FILE *lo
         if (!eq || line[0] == L';') continue;
         StringCchCopyW(spec, ARRAYSIZE(spec), eq + 1);
         name = wcstok_s(spec, L"|", &ctx);
+        if (name && SourceOnlyForWow64(f->ManifestPath, name) && !FmWow64SidePresent())
+        {
+            LOGF(log, L"  not downloaded (only for the 32-bit system folder, which this system does not have): %s\n", name);
+            continue;
+        }
         sha = wcstok_s(NULL, L"|", &ctx);
         size = wcstok_s(NULL, L"|", &ctx);
         for (i = 0; sha && sha[i]; i++)
@@ -3553,6 +3612,13 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
                 *sep = L'|';
                 hr = E_INVALIDARG;
                 goto done;
+            }
+            if (DestIsWow64(sep + 1) && !FmWow64SidePresent())
+            {
+                /* the 32-bit side was left out at setup: no 32-bit file (it would recreate SysWOW64) */
+                LOGF(log, L"  skipped (no 32-bit system folder): %s\n", sep + 1);
+                *sep = L'|';
+                continue;
             }
             hr = ApplyPayloadFile(payloadDir, eq + 1, sep + 1, hosted ? want : NULL, state, log);
             *sep = L'|';

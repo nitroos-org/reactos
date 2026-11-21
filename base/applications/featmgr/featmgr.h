@@ -93,6 +93,10 @@ FM_STATE FmGetState(LPCWSTR id);
  * setup left out; comp gets the component id. Always FALSE on a system installed without a [Components] section. */
 BOOL   FmBlockedByLeftOutComponent(LPCWSTR featureId, BOOL includeOwn, LPWSTR comp, DWORD cchComp);
 
+/* TRUE when the 32-bit side (SysWOW64, the 32-bit registry view) is installed: payload files for SysWOW64 and registry
+ * lines in Wow6432Node of a catalog entry are skipped when it is not (setup left out wow64). */
+BOOL   FmWow64SidePresent(void);
+
 /* Reversible operations. log may be NULL; progress is written there. */
 HRESULT FmEnable(LPCWSTR id, FILE *log);
 HRESULT FmDisable(LPCWSTR id, FILE *log);   /* refuses while enabled dependents exist */

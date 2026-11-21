@@ -691,6 +691,15 @@ PrepareCopyInfFile(
              * because it has been already created above.
              */
         }
+        else if (pSetupData->Components &&
+                 ComponentsIsDirectoryOmitted((PCOMPONENTS_STATE)pSetupData->Components, DirKeyValue))
+        {
+            /*
+             * Only files of components that are left out go into this directory:
+             * it would stay empty (SysWOW64\wbem on a system without the 32-bit
+             * side, for one). The copy queue creates a directory when a file needs it.
+             */
+        }
         else
         {
             /* Arbitrary path -- Create it */
