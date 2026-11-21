@@ -2309,9 +2309,10 @@ SpiIsSetAction(UINT uiAction, PVOID pvParam)
         case SPI_SETWHEELSCROLLLINES:
         case SPI_SETWINARRANGING:
         case SPI_SETWORKAREA:
+        /* Handled whatever the version is (see SpiGetSet) */
+        case SPI_SETSCREENSAVESECURE:
 #if (WINVER >= 0x0600)
         case SPI_SETAUDIODESCRIPTION:
-        case SPI_SETSCREENSAVESECURE:
 #endif
 #if (_WIN32_WINNT >= 0x0600)
         case SPI_SETDISABLEOVERLAPPEDCONTENT:
