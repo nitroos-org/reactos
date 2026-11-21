@@ -79,6 +79,12 @@ PVOLENTRY  CurrentVolume = NULL;
 
 /* FUNCTIONS ******************************************************************/
 
+static
+BOOLEAN
+IsUsedLayoutEntry(
+    _In_ PPARTENTRY PartEntry,
+    _In_ BOOLEAN Gpt);
+
 #ifdef DUMP_PARTITION_TABLE
 VOID
 DumpPartitionTable(
@@ -538,6 +544,7 @@ AddMbrPartitionToDisk(
     PartEntry->IsPartitioned = TRUE;
     PartEntry->PartitionNumber = PartitionInfo->PartitionNumber;
     PartEntry->PartitionIndex = PartitionIndex;
+    PartEntry->InLayout = TRUE;
 
     if (IsContainerPartition(PartEntry->Mbr.PartitionType))
     {
@@ -642,11 +649,13 @@ AddGptPartitionToDisk(
     CopyMemory(&PartEntry->Gpt.PartitionType, &PartitionInfo->Gpt.PartitionType, sizeof(GUID));
     CopyMemory(&PartEntry->Gpt.PartitionId, &PartitionInfo->Gpt.PartitionId, sizeof(GUID));
     PartEntry->Gpt.Attributes = PartitionInfo->Gpt.Attributes;
+    CopyMemory(PartEntry->Gpt.Name, PartitionInfo->Gpt.Name, sizeof(PartEntry->Gpt.Name));
 
     PartEntry->LogicalPartition = FALSE;
     PartEntry->IsPartitioned = TRUE;
     PartEntry->PartitionNumber = PartitionInfo->PartitionNumber;
     PartEntry->PartitionIndex = PartitionIndex;
+    PartEntry->InLayout = TRUE;
 
     /* TODO: Determine the format state */
     PartEntry->FormatState = Unformatted;
@@ -688,6 +697,57 @@ AddEmptyLogicalSpace(
 }
 
 
+/*
+ * The free-space entries are derived data: drop the ones a former scan made (for example the
+ * whole-disk entry of an MBR disk that is converted to GPT) and sort the partitioned entries by
+ * their first sector. The partition tables do not promise any order of their entries, but the
+ * scans below, the merging of neighbours in DELETE and the search for the space behind a
+ * partition (EXTEND) all take the list order for the order on the disk.
+ * The layout slot of an entry (PartitionIndex) is not touched, so the table order is kept
+ * for the entries that are already in the table (see UpdateGptDiskLayout).
+ */
+static
+VOID
+PrepareListForScan(
+    _In_ PLIST_ENTRY ListHead)
+{
+    LIST_ENTRY SortedHead;
+    PLIST_ENTRY Entry, Pos;
+    PPARTENTRY PartEntry, PosEntry;
+
+    InitializeListHead(&SortedHead);
+
+    while (!IsListEmpty(ListHead))
+    {
+        Entry = RemoveHeadList(ListHead);
+        PartEntry = CONTAINING_RECORD(Entry, PARTENTRY, ListEntry);
+
+        if (!PartEntry->IsPartitioned)
+        {
+            if (CurrentPartition == PartEntry)
+                CurrentPartition = NULL;
+            RtlFreeHeap(RtlGetProcessHeap(), 0, PartEntry);
+            continue;
+        }
+
+        /* Stable insertion: after every entry that does not start later */
+        for (Pos = SortedHead.Blink; Pos != &SortedHead; Pos = Pos->Blink)
+        {
+            PosEntry = CONTAINING_RECORD(Pos, PARTENTRY, ListEntry);
+            if (PosEntry->StartSector.QuadPart <= PartEntry->StartSector.QuadPart)
+                break;
+        }
+        InsertHeadList(Pos, &PartEntry->ListEntry);
+    }
+
+    while (!IsListEmpty(&SortedHead))
+    {
+        Entry = RemoveHeadList(&SortedHead);
+        InsertTailList(ListHead, Entry);
+    }
+}
+
+
 VOID
 ScanForUnpartitionedMbrDiskSpace(
     PDISKENTRY DiskEntry)
@@ -701,6 +761,9 @@ ScanForUnpartitionedMbrDiskSpace(
     PLIST_ENTRY Entry;
 
     DPRINT("ScanForUnpartitionedMbrDiskSpace()\n");
+
+    PrepareListForScan(&DiskEntry->PrimaryPartListHead);
+    PrepareListForScan(&DiskEntry->LogicalPartListHead);
 
     /* Calculate the disk sector limits */
     /* Limit the SectorCount to 2^32 sectors for MBR disks */
@@ -782,8 +845,12 @@ ScanForUnpartitionedMbrDiskSpace(
                                &NewPartEntry->ListEntry);
             }
 
-            LastStartSector = PartEntry->StartSector.QuadPart;
-            LastSectorCount = PartEntry->SectorCount.QuadPart;
+            /* The covered area only grows: an entry inside an earlier one must not move it back */
+            if (PartEntry->StartSector.QuadPart + PartEntry->SectorCount.QuadPart > LastStartSector + LastSectorCount)
+            {
+                LastStartSector = PartEntry->StartSector.QuadPart;
+                LastSectorCount = PartEntry->SectorCount.QuadPart;
+            }
         }
 
         Entry = Entry->Flink;
@@ -879,8 +946,12 @@ ScanForUnpartitionedMbrDiskSpace(
                                    &NewPartEntry->ListEntry);
                 }
 
-                LastStartSector = PartEntry->StartSector.QuadPart;
-                LastSectorCount = PartEntry->SectorCount.QuadPart;
+                /* The covered area only grows: an entry inside an earlier one must not move it back */
+                if (PartEntry->StartSector.QuadPart + PartEntry->SectorCount.QuadPart > LastStartSector + LastSectorCount)
+                {
+                    LastStartSector = PartEntry->StartSector.QuadPart;
+                    LastSectorCount = PartEntry->SectorCount.QuadPart;
+                }
             }
 
             Entry = Entry->Flink;
@@ -939,6 +1010,8 @@ ScanForUnpartitionedGptDiskSpace(
     PLIST_ENTRY Entry;
 
     DPRINT("ScanForUnpartitionedGptDiskSpace()\n");
+
+    PrepareListForScan(&DiskEntry->PrimaryPartListHead);
 
 #ifdef DUMP_PARTITION_LIST
     DumpPartitionList(DiskEntry);
@@ -1022,8 +1095,12 @@ ScanForUnpartitionedGptDiskSpace(
                                &NewPartEntry->ListEntry);
             }
 
-            LastStartSector = PartEntry->StartSector.QuadPart;
-            LastSectorCount = PartEntry->SectorCount.QuadPart;
+            /* The covered area only grows: an entry inside an earlier one must not move it back */
+            if (PartEntry->StartSector.QuadPart + PartEntry->SectorCount.QuadPart > LastStartSector + LastSectorCount)
+            {
+                LastStartSector = PartEntry->StartSector.QuadPart;
+                LastSectorCount = PartEntry->SectorCount.QuadPart;
+            }
         }
 
         Entry = Entry->Flink;
@@ -2520,6 +2597,137 @@ UpdateVolumeInfo(
 }
 
 
+/*
+ * Do the partitioned entries of the list lie inside [First, End) and apart from each other?
+ * The check does not depend on the order of the list (a table has no order of its entries).
+ */
+static
+BOOLEAN
+AreEntriesInsideAndApart(
+    _In_ PLIST_ENTRY ListHead,
+    _In_ ULONGLONG First,
+    _In_ ULONGLONG End)
+{
+    PLIST_ENTRY ListEntry, OtherEntry;
+    PPARTENTRY PartEntry, Other;
+
+    for (ListEntry = ListHead->Flink; ListEntry != ListHead; ListEntry = ListEntry->Flink)
+    {
+        PartEntry = CONTAINING_RECORD(ListEntry, PARTENTRY, ListEntry);
+        if (!PartEntry->IsPartitioned)
+            continue;
+
+        if (PartEntry->SectorCount.QuadPart == 0 ||
+            PartEntry->StartSector.QuadPart < First ||
+            PartEntry->StartSector.QuadPart >= End ||
+            PartEntry->SectorCount.QuadPart > End - PartEntry->StartSector.QuadPart)
+        {
+            return FALSE;
+        }
+
+        for (OtherEntry = ListEntry->Flink; OtherEntry != ListHead; OtherEntry = OtherEntry->Flink)
+        {
+            Other = CONTAINING_RECORD(OtherEntry, PARTENTRY, ListEntry);
+            if (!Other->IsPartitioned || Other->SectorCount.QuadPart == 0)
+                continue;
+
+            if (PartEntry->StartSector.QuadPart < Other->StartSector.QuadPart + Other->SectorCount.QuadPart &&
+                Other->StartSector.QuadPart < PartEntry->StartSector.QuadPart + PartEntry->SectorCount.QuadPart)
+            {
+                return FALSE;
+            }
+        }
+    }
+
+    return TRUE;
+}
+
+/*
+ * Is the partition table of the disk free of overlaps and entries outside the usable area?
+ * GPT: FirstUsableLBA..LastUsableLBA of the table header. MBR: the primary entries behind the
+ * MBR and below 2^32 sectors, the logical drives inside the extended partition (the size of
+ * the disk comes from its CHS geometry and is not used as a limit for entries that exist).
+ */
+BOOLEAN
+IsPartitionLayoutConsistent(
+    _In_ PDISKENTRY DiskEntry)
+{
+    ULONGLONG First, End;
+    PLIST_ENTRY ListEntry;
+    PPARTENTRY PartEntry;
+
+    if (DiskEntry->PartitionStyle == PARTITION_STYLE_GPT)
+    {
+        First = (ULONGLONG)DiskEntry->LayoutBuffer->Gpt.StartingUsableOffset.QuadPart / DiskEntry->BytesPerSector;
+        End = ((ULONGLONG)DiskEntry->LayoutBuffer->Gpt.StartingUsableOffset.QuadPart +
+               (ULONGLONG)DiskEntry->LayoutBuffer->Gpt.UsableLength.QuadPart) / DiskEntry->BytesPerSector;
+
+        return AreEntriesInsideAndApart(&DiskEntry->PrimaryPartListHead, First, End);
+    }
+    else if (DiskEntry->PartitionStyle == PARTITION_STYLE_MBR)
+    {
+        if (!AreEntriesInsideAndApart(&DiskEntry->PrimaryPartListHead, 1, 0x100000000ULL))
+            return FALSE;
+
+        for (ListEntry = DiskEntry->LogicalPartListHead.Flink;
+             ListEntry != &DiskEntry->LogicalPartListHead;
+             ListEntry = ListEntry->Flink)
+        {
+            PartEntry = CONTAINING_RECORD(ListEntry, PARTENTRY, ListEntry);
+            if (PartEntry->IsPartitioned && DiskEntry->ExtendedPartition == NULL)
+                return FALSE;
+        }
+
+        if (DiskEntry->ExtendedPartition != NULL)
+        {
+            First = DiskEntry->ExtendedPartition->StartSector.QuadPart;
+            End = First + DiskEntry->ExtendedPartition->SectorCount.QuadPart;
+            return AreEntriesInsideAndApart(&DiskEntry->LogicalPartListHead, First, End);
+        }
+    }
+
+    return TRUE;
+}
+
+/* Checked before a command changes the partitions: says why nothing is done. */
+BOOLEAN
+CheckPartitionLayoutForChange(
+    _In_ PDISKENTRY DiskEntry)
+{
+    if (!IsPartitionLayoutConsistent(DiskEntry))
+    {
+        ConResPuts(StdOut, IDS_PARTITION_LAYOUT_INVALID);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/* Does a GPT with this many entries have a slot for one more partition? */
+BOOLEAN
+HasFreeGptSlot(
+    _In_ PDISKENTRY DiskEntry)
+{
+    PLIST_ENTRY ListEntry;
+    PPARTENTRY PartEntry;
+    ULONG Used = 0;
+
+    if (DiskEntry->PartitionStyle != PARTITION_STYLE_GPT || DiskEntry->LayoutBuffer->Gpt.MaxPartitionCount == 0)
+        return TRUE;
+
+    for (ListEntry = DiskEntry->PrimaryPartListHead.Flink;
+         ListEntry != &DiskEntry->PrimaryPartListHead;
+         ListEntry = ListEntry->Flink)
+    {
+        PartEntry = CONTAINING_RECORD(ListEntry, PARTENTRY, ListEntry);
+        if (IsUsedLayoutEntry(PartEntry, TRUE))
+            Used++;
+    }
+
+    return (Used < DiskEntry->LayoutBuffer->Gpt.MaxPartitionCount);
+}
+
+
 NTSTATUS
 WriteMbrPartitions(
     _In_ PDISKENTRY DiskEntry)
@@ -2541,6 +2749,13 @@ WriteMbrPartitions(
     /* If the disk is not dirty, there is nothing to do */
     if (!DiskEntry->Dirty)
         return STATUS_SUCCESS;
+
+    /* Never write a table with overlapping partitions or partitions outside the usable area */
+    if (!IsPartitionLayoutConsistent(DiskEntry))
+    {
+        DPRINT1("The partition layout is not consistent, nothing is written\n");
+        return STATUS_INVALID_PARAMETER;
+    }
 
     StringCchPrintfW(DstPath, ARRAYSIZE(DstPath),
                      L"\\Device\\Harddisk%lu\\Partition0",
@@ -2661,6 +2876,13 @@ WriteGptPartitions(
     /* If the disk is not dirty, there is nothing to do */
     if (!DiskEntry->Dirty)
         return STATUS_SUCCESS;
+
+    /* Never write a table with overlapping partitions or partitions outside the usable area */
+    if (!IsPartitionLayoutConsistent(DiskEntry))
+    {
+        DPRINT1("The partition layout is not consistent, nothing is written\n");
+        return STATUS_INVALID_PARAMETER;
+    }
 
     StringCchPrintfW(DstPath, ARRAYSIZE(DstPath),
                      L"\\Device\\Harddisk%lu\\Partition0",
@@ -2795,6 +3017,107 @@ GetLogicalPartitionCount(
 }
 
 
+/*
+ * Slots of the layout buffer. The entries that are already in the table keep their order (their
+ * PartitionIndex): the position of a partition in the table is its partition number, and the
+ * entries of a table are not in the order of their offsets. A new entry takes the slot behind
+ * the last one in use; new entries among each other are ordered by their first sector.
+ * (Where the order of the new entry is chosen, it is our choice, not a measured Windows behaviour.)
+ */
+static
+BOOLEAN
+IsUsedLayoutEntry(
+    _In_ PPARTENTRY PartEntry,
+    _In_ BOOLEAN Gpt)
+{
+    if (Gpt)
+        return !IsEqualGUID(&PartEntry->Gpt.PartitionType, &PARTITION_ENTRY_UNUSED_GUID);
+
+    return PartEntry->IsPartitioned;
+}
+
+static
+BOOLEAN
+IsLayoutEntryBefore(
+    _In_ PPARTENTRY A,
+    _In_ PPARTENTRY B)
+{
+    if (A->InLayout != B->InLayout)
+        return A->InLayout;
+
+    if (A->InLayout)
+    {
+        if (A->PartitionIndex != B->PartitionIndex)
+            return (A->PartitionIndex < B->PartitionIndex);
+    }
+    else if (A->StartSector.QuadPart != B->StartSector.QuadPart)
+    {
+        return (A->StartSector.QuadPart < B->StartSector.QuadPart);
+    }
+
+    return ((ULONG_PTR)A < (ULONG_PTR)B);
+}
+
+/* Sets LayoutRank of every used entry of the list (0 = first slot); returns the number of used entries */
+static
+ULONG
+RankLayoutEntries(
+    _In_ PLIST_ENTRY ListHead,
+    _In_ BOOLEAN Gpt)
+{
+    PLIST_ENTRY ListEntry, OtherEntry;
+    PPARTENTRY PartEntry, Other;
+    ULONG Count = 0, Rank;
+
+    for (ListEntry = ListHead->Flink; ListEntry != ListHead; ListEntry = ListEntry->Flink)
+    {
+        PartEntry = CONTAINING_RECORD(ListEntry, PARTENTRY, ListEntry);
+
+        if (!IsUsedLayoutEntry(PartEntry, Gpt))
+        {
+            /* Free space (or an entry that was deleted) has no slot */
+            PartEntry->InLayout = FALSE;
+            continue;
+        }
+
+        Rank = 0;
+        for (OtherEntry = ListHead->Flink; OtherEntry != ListHead; OtherEntry = OtherEntry->Flink)
+        {
+            Other = CONTAINING_RECORD(OtherEntry, PARTENTRY, ListEntry);
+
+            if (Other != PartEntry && IsUsedLayoutEntry(Other, Gpt) && IsLayoutEntryBefore(Other, PartEntry))
+                Rank++;
+        }
+
+        PartEntry->LayoutRank = Rank;
+        Count++;
+    }
+
+    return Count;
+}
+
+static
+PPARTENTRY
+FindLayoutEntry(
+    _In_ PLIST_ENTRY ListHead,
+    _In_ BOOLEAN Gpt,
+    _In_ ULONG Rank)
+{
+    PLIST_ENTRY ListEntry;
+    PPARTENTRY PartEntry;
+
+    for (ListEntry = ListHead->Flink; ListEntry != ListHead; ListEntry = ListEntry->Flink)
+    {
+        PartEntry = CONTAINING_RECORD(ListEntry, PARTENTRY, ListEntry);
+
+        if (IsUsedLayoutEntry(PartEntry, Gpt) && PartEntry->LayoutRank == Rank)
+            return PartEntry;
+    }
+
+    return NULL;
+}
+
+
 static
 BOOLEAN
 ReAllocateLayoutBuffer(
@@ -2857,7 +3180,7 @@ UpdateMbrDiskLayout(
     PLIST_ENTRY ListEntry;
     PPARTENTRY PartEntry;
     LARGE_INTEGER HiddenSectors64;
-    ULONG Index;
+    ULONG Index, Used;
     ULONG PartitionNumber = 1;
 
     DPRINT("UpdateMbrDiskLayout()\n");
@@ -2871,20 +3194,19 @@ UpdateMbrDiskLayout(
 
     DiskEntry->LayoutBuffer->PartitionStyle = PARTITION_STYLE_MBR;
 
-    /* Update the primary partition table */
-    Index = 0;
-    for (ListEntry = DiskEntry->PrimaryPartListHead.Flink;
-         ListEntry != &DiskEntry->PrimaryPartListHead;
-         ListEntry = ListEntry->Flink)
+    /* Update the primary partition table: the entries of the table keep their slots, new entries follow */
+    Used = RankLayoutEntries(&DiskEntry->PrimaryPartListHead, FALSE);
+    for (Index = 0; Index < Used && Index < 4; Index++)
     {
-        PartEntry = CONTAINING_RECORD(ListEntry, PARTENTRY, ListEntry);
+        PartEntry = FindLayoutEntry(&DiskEntry->PrimaryPartListHead, FALSE, Index);
 
-        if (PartEntry->IsPartitioned)
+        if (PartEntry != NULL)
         {
             ASSERT(PartEntry->Mbr.PartitionType != PARTITION_ENTRY_UNUSED);
 
             PartitionInfo = &DiskEntry->LayoutBuffer->PartitionEntry[Index];
             PartEntry->PartitionIndex = Index;
+            PartEntry->InLayout = TRUE;
 
             /* Reset the current partition number only for newly-created (unmounted) partitions */
             if (PartEntry->New)
@@ -2909,14 +3231,16 @@ UpdateMbrDiskLayout(
 
             if (!IsContainerPartition(PartEntry->Mbr.PartitionType))
                 PartitionNumber++;
-
-            Index++;
         }
     }
 
-    ASSERT(Index <= 4);
+    ASSERT(Used <= 4);
 
-    /* Update the logical partition table */
+    /*
+     * Update the logical partition table. The chain of the logical drives is in the order of their
+     * offsets (the first EBR is at the start of the extended partition, so the drive nearest to it
+     * comes first), which is the order of the list.
+     */
     Index = 4;
     for (ListEntry = DiskEntry->LogicalPartListHead.Flink;
          ListEntry != &DiskEntry->LogicalPartListHead;
@@ -2930,6 +3254,7 @@ UpdateMbrDiskLayout(
 
             PartitionInfo = &DiskEntry->LayoutBuffer->PartitionEntry[Index];
             PartEntry->PartitionIndex = Index;
+            PartEntry->InLayout = TRUE;
 
             /* Reset the current partition number only for newly-created (unmounted) partitions */
             if (PartEntry->New)
@@ -3030,26 +3355,17 @@ UpdateGptDiskLayout(
     _In_ PDISKENTRY DiskEntry,
     _In_ BOOL DeleteEntry)
 {
-    PLIST_ENTRY ListEntry;
     PPARTENTRY PartEntry;
     PPARTITION_INFORMATION_EX PartitionInfo;
-    ULONG Count, Index;
+    ULONG Count, Used, Index;
 
     DPRINT("UpdateGptDiskLayout()\n");
 
-    /* Count used partition entries */
-    Count = 0;
-    for (ListEntry = DiskEntry->PrimaryPartListHead.Flink;
-         ListEntry != &DiskEntry->PrimaryPartListHead;
-         ListEntry = ListEntry->Flink)
-    {
-        PartEntry = CONTAINING_RECORD(ListEntry, PARTENTRY, ListEntry);
+    /* Count used partition entries and rank them in table order: see RankLayoutEntries */
+    Used = RankLayoutEntries(&DiskEntry->PrimaryPartListHead, TRUE);
+    Count = Used;
 
-        if (!IsEqualGUID(&PartEntry->Gpt.PartitionType, &PARTITION_ENTRY_UNUSED_GUID))
-            Count++;
-    }
-
-    DPRINT("Used partition entries: %lu\n", Count);
+    DPRINT("Used partition entries: %lu\n", Used);
 
     if (DeleteEntry)
         Count++;
@@ -3076,18 +3392,15 @@ UpdateGptDiskLayout(
         DiskEntry->LayoutBuffer = NewLayoutBuffer;
     }
 
-    /* Fill the new layout buffer */
-    Index = 0;
-    for (ListEntry = DiskEntry->PrimaryPartListHead.Flink;
-         ListEntry != &DiskEntry->PrimaryPartListHead;
-         ListEntry = ListEntry->Flink)
+    /* Fill the new layout buffer: the entries of the table keep their order, new entries follow */
+    for (Index = 0; Index < Used; Index++)
     {
-        PartEntry = CONTAINING_RECORD(ListEntry, PARTENTRY, ListEntry);
-
-        if (!IsEqualGUID(&PartEntry->Gpt.PartitionType, &PARTITION_ENTRY_UNUSED_GUID))
+        PartEntry = FindLayoutEntry(&DiskEntry->PrimaryPartListHead, TRUE, Index);
+        if (PartEntry != NULL)
         {
             PartitionInfo = &DiskEntry->LayoutBuffer->PartitionEntry[Index];
             PartEntry->PartitionIndex = Index;
+            PartEntry->InLayout = TRUE;
 
             DPRINT("Updating primary partition entry %lu\n", Index);
             PartitionInfo->PartitionStyle = PARTITION_STYLE_GPT;
@@ -3098,11 +3411,9 @@ UpdateGptDiskLayout(
             CopyMemory(&PartitionInfo->Gpt.PartitionType, &PartEntry->Gpt.PartitionType, sizeof(GUID));
             CopyMemory(&PartitionInfo->Gpt.PartitionId, &PartEntry->Gpt.PartitionId, sizeof(GUID));
             PartitionInfo->Gpt.Attributes = PartEntry->Gpt.Attributes;
-            ZeroMemory(&PartitionInfo->Gpt.Name, 36 * sizeof(WCHAR)); /* ??? */
+            CopyMemory(&PartitionInfo->Gpt.Name, PartEntry->Gpt.Name, sizeof(PartEntry->Gpt.Name));
 
             PartEntry->PartitionNumber = PartitionInfo->PartitionNumber;
-
-            Index++;
         }
     }
 

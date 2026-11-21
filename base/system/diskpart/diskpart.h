@@ -134,6 +134,7 @@ typedef struct _GPT_PARTITION_DATA
     GUID PartitionType;
     GUID PartitionId;
     DWORD64 Attributes;
+    WCHAR Name[36];
 } GPT_PARTITION_DATA, *PGPT_PARTITION_DATA;
 
 typedef struct _PARTENTRY
@@ -154,6 +155,10 @@ typedef struct _PARTENTRY
     ULONG OnDiskPartitionNumber;
     ULONG PartitionNumber;
     ULONG PartitionIndex;
+
+    /* The entry has a slot (PartitionIndex) in the layout buffer; new entries get theirs when the layout is updated */
+    BOOLEAN InLayout;
+    ULONG LayoutRank;
 
     CHAR DriveLetter;
     CHAR VolumeLabel[17];
@@ -724,6 +729,18 @@ WriteMbrPartitions(
 
 NTSTATUS
 WriteGptPartitions(
+    _In_ PDISKENTRY DiskEntry);
+
+BOOLEAN
+IsPartitionLayoutConsistent(
+    _In_ PDISKENTRY DiskEntry);
+
+BOOLEAN
+CheckPartitionLayoutForChange(
+    _In_ PDISKENTRY DiskEntry);
+
+BOOLEAN
+HasFreeGptSlot(
     _In_ PDISKENTRY DiskEntry);
 
 VOID

@@ -434,8 +434,13 @@ GetFreeSpaceAfter(
     PDISKENTRY DiskEntry = PartEntry->DiskEntry;
     PPARTENTRY Next = GetNextUnpartitionedEntry(PartEntry);
 
+    /* The space is "after" the partition only if it starts where the partition ends */
     if (Next != NULL)
-        return Next;
+    {
+        if (Next->StartSector.QuadPart == PartEntry->StartSector.QuadPart + PartEntry->SectorCount.QuadPart)
+            return Next;
+        return NULL;
+    }
 
     /* The last logical partition grows past its container, which grows with it. */
     if (PartEntry->LogicalPartition && DiskEntry->ExtendedPartition != NULL &&
@@ -443,7 +448,10 @@ GetFreeSpaceAfter(
         PartEntry->StartSector.QuadPart + PartEntry->SectorCount.QuadPart ==
         DiskEntry->ExtendedPartition->StartSector.QuadPart + DiskEntry->ExtendedPartition->SectorCount.QuadPart)
     {
-        return GetNextUnpartitionedEntry(DiskEntry->ExtendedPartition);
+        Next = GetNextUnpartitionedEntry(DiskEntry->ExtendedPartition);
+        if (Next != NULL &&
+            Next->StartSector.QuadPart == DiskEntry->ExtendedPartition->StartSector.QuadPart + DiskEntry->ExtendedPartition->SectorCount.QuadPart)
+            return Next;
     }
 
     return NULL;
@@ -648,6 +656,9 @@ extend_main(
     }
     else
     {
+        if (!CheckPartitionLayoutForChange(PartEntry->DiskEntry))
+            goto done;
+
         FreeEntry = GetFreeSpaceAfter(PartEntry);
         ullFree = FreeEntry ? FreeEntry->SectorCount.QuadPart * ulBytesPerSector : 0;
         ullBytes = ullSize ? ullSize * SIZE_1MB : ullFree;
