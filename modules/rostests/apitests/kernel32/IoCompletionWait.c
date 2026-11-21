@@ -375,7 +375,13 @@ START_TEST(IoCompletionWait)
         return;
     }
 
-    Port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+    /*
+     * Above the processor count: this thread takes packets with GetQueuedCompletionStatus, which makes it a running thread of the
+     * port. With the default limit (the processor count) a single processor is then full when this thread posts, the packet is
+     * queued instead of handed to the waiting GetQueuedCompletionStatus thread, and the handle waiters are released. The rows here
+     * are about the order between the two kinds of waiter, not about the limit (TestHandles has a port with a limit of one).
+     */
+    Port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 64);
     ok(Port != NULL, "CreateIoCompletionPort failed: %lu\n", GetLastError());
     if (!Port)
         return;
