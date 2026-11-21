@@ -477,6 +477,10 @@ IntClipDibValidate(PCLIPBOARDDATA pMemObj, BOOL bV5Source, BOOL bForBitmap)
     if ((pbih->biCompression == BI_RGB || pbih->biCompression == BI_BITFIELDS) && wBpp != 0)
     {
         cbImage = (((ULONGLONG)lWidth * wBpp + 31) / 32) * 4;
+        /* one row must fit the block; this also keeps the product below from wrapping
+           (a row of up to 2^47 bytes times a height of up to 2^31 would) */
+        if (lHeight != 0 && cbImage > cb)
+            return FALSE;
         cbImage *= (ULONGLONG)(lHeight < 0 ? -(LONGLONG)lHeight : (LONGLONG)lHeight);
     }
     cbNeeded = (ULONGLONG)cbInfo + cbImage;
