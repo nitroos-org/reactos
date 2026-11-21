@@ -797,9 +797,11 @@ ComponentsMeasure(
                 {
                     PCWSTR p;
 
-                    for (p = SizeText; *p >= L'0' && *p <= L'9'; ++p)
+                    /* a size over 4 GB (the cabinet inf writes the size of one file of the medium) is not a size:
+                     * it also keeps the sum below from wrapping. The page then shows no sizes at all. */
+                    for (p = SizeText; *p >= L'0' && *p <= L'9' && Bytes <= 0xFFFFFFFFULL; ++p)
                         Bytes = Bytes * 10 + (*p - L'0');
-                    if (p != SizeText && !*p)
+                    if (p != SizeText && !*p && Bytes <= 0xFFFFFFFFULL)
                     {
                         ++Sized;
                         ComponentsAddFile(Components, RelPath, Bytes);
