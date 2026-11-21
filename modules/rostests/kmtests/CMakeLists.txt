@@ -185,6 +185,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_se/SeTokenFiltering.c
     rtl/RtlIsValidOemCharacter.c
     rtl/RtlRangeList.c
+    rtl/RtlUnicodePrefix.c
     ${COMMON_SOURCE}
 
     kmtest_drv/kmtest_drv.rc)
