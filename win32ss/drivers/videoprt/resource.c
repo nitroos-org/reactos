@@ -1211,8 +1211,105 @@ VideoPortVerifyAccessRanges(
     }
 }
 
+typedef struct _VP_DEVICE_DATA_QUERY
+{
+    PVOID HwDeviceExtension;
+    PVOID Context;
+    VIDEO_DEVICE_DATA_TYPE DeviceDataType;
+    PMINIPORT_QUERY_DEVICE_ROUTINE CallbackRoutine;
+    VP_STATUS LastStatus;
+} VP_DEVICE_DATA_QUERY, *PVP_DEVICE_DATA_QUERY;
+
+/* Data and length of one value returned by IoQueryDeviceDescription, or NULL and 0 */
+static PVOID
+IntVideoPortValueData(
+    _In_opt_ PKEY_VALUE_FULL_INFORMATION Value,
+    _Out_ PULONG Length)
+{
+    if (!Value || (Value->DataLength == 0))
+    {
+        *Length = 0;
+        return NULL;
+    }
+
+    *Length = Value->DataLength;
+    return (PUCHAR)Value + Value->DataOffset;
+}
+
 /*
- * @unimplemented
+ * IoQueryDeviceDescription callout of VideoPortGetDeviceData: passes the entry
+ * (identifier, configuration data, component information) to the miniport.
+ * Returning an error status stops the enumeration, so the first entry the
+ * miniport accepts (NO_ERROR) ends the query.
+ */
+static NTSTATUS
+NTAPI
+IntVideoPortDeviceDataCallout(
+    _In_ PVOID Context,
+    _In_ PUNICODE_STRING PathName,
+    _In_ INTERFACE_TYPE BusType,
+    _In_ ULONG BusNumber,
+    _In_ PKEY_VALUE_FULL_INFORMATION *BusInformation,
+    _In_ CONFIGURATION_TYPE ControllerType,
+    _In_ ULONG ControllerNumber,
+    _In_ PKEY_VALUE_FULL_INFORMATION *ControllerInformation,
+    _In_ CONFIGURATION_TYPE PeripheralType,
+    _In_ ULONG PeripheralNumber,
+    _In_ PKEY_VALUE_FULL_INFORMATION *PeripheralInformation)
+{
+    PVP_DEVICE_DATA_QUERY Query = Context;
+    PKEY_VALUE_FULL_INFORMATION *Information;
+    PVOID Identifier, ConfigurationData, ComponentInformation;
+    ULONG IdentifierLength, ConfigurationDataLength, ComponentInformationLength;
+
+    UNREFERENCED_PARAMETER(PathName);
+    UNREFERENCED_PARAMETER(BusInformation);
+    UNREFERENCED_PARAMETER(ControllerType);
+    UNREFERENCED_PARAMETER(ControllerNumber);
+    UNREFERENCED_PARAMETER(PeripheralType);
+    UNREFERENCED_PARAMETER(PeripheralNumber);
+
+    Information = (Query->DeviceDataType == VpMonitorData) ? PeripheralInformation
+                                                           : ControllerInformation;
+    if (!Information)
+        return STATUS_SUCCESS;
+
+    Identifier = IntVideoPortValueData(Information[IoQueryDeviceIdentifier], &IdentifierLength);
+    ConfigurationData = IntVideoPortValueData(Information[IoQueryDeviceConfigurationData],
+                                              &ConfigurationDataLength);
+    ComponentInformation = IntVideoPortValueData(Information[IoQueryDeviceComponentInformation],
+                                                 &ComponentInformationLength);
+
+    INFO_(VIDEOPRT, "Device data type %d on bus %d/%lu: '%S'\n",
+          Query->DeviceDataType, BusType, BusNumber, Identifier ? (PWSTR)Identifier : L"");
+
+    Query->LastStatus = Query->CallbackRoutine(Query->HwDeviceExtension,
+                                               Query->Context,
+                                               Query->DeviceDataType,
+                                               Identifier,
+                                               IdentifierLength,
+                                               ConfigurationData,
+                                               ConfigurationDataLength,
+                                               ComponentInformation,
+                                               ComponentInformationLength);
+
+    /* An error status ends the enumeration: stop at the first accepted entry */
+    return (Query->LastStatus == NO_ERROR) ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
+}
+
+/*
+ * @implemented (VpControllerData and VpMonitorData)
+ *
+ * Gives the miniport the display controllers (VpControllerData) or the
+ * monitors attached to them (VpMonitorData) that the firmware or the boot
+ * loader described in \Registry\Machine\HARDWARE\DESCRIPTION, one call of
+ * CallbackRoutine per entry with its "Identifier", "Configuration Data"
+ * (a CM_FULL_RESOURCE_DESCRIPTOR) and "Component Information" values, until
+ * the callback returns NO_ERROR. The adapter's own bus is searched first, then
+ * every other bus: a device enumerated by the PnP manager (PNPBus) can use the
+ * data of the controller the loader put on its internal bus.
+ * Returns NO_ERROR if the callback accepted an entry, else the status the
+ * callback returned last, or ERROR_DEV_NOT_EXIST if there was no entry.
  */
 
 VP_STATUS NTAPI
@@ -1222,9 +1319,54 @@ VideoPortGetDeviceData(
    IN PMINIPORT_QUERY_DEVICE_ROUTINE CallbackRoutine,
    IN PVOID Context)
 {
+   PVIDEO_PORT_DEVICE_EXTENSION DeviceExtension;
+   VP_DEVICE_DATA_QUERY Query;
+   CONFIGURATION_TYPE ControllerType = DisplayController;
+   CONFIGURATION_TYPE PeripheralType = MonitorPeripheral;
+   INTERFACE_TYPE BusType;
+   ULONG Pass;
+
    TRACE_(VIDEOPRT, "VideoPortGetDeviceData\n");
-   UNIMPLEMENTED;
-   return ERROR_INVALID_FUNCTION;
+
+   if ((DeviceDataType != VpControllerData) && (DeviceDataType != VpMonitorData))
+   {
+      UNIMPLEMENTED;
+      return ERROR_INVALID_FUNCTION;
+   }
+
+   if (!CallbackRoutine)
+      return ERROR_INVALID_PARAMETER;
+
+   DeviceExtension = VIDEO_PORT_GET_DEVICE_EXTENSION(HwDeviceExtension);
+
+   Query.HwDeviceExtension = HwDeviceExtension;
+   Query.Context = Context;
+   Query.DeviceDataType = DeviceDataType;
+   Query.CallbackRoutine = CallbackRoutine;
+   Query.LastStatus = ERROR_DEV_NOT_EXIST;
+
+   /* Pass 0: the adapter's own bus type; pass 1: every other bus type */
+   for (Pass = 0; Pass < 2; Pass++)
+   {
+      for (BusType = Internal; BusType < MaximumInterfaceType; BusType++)
+      {
+         if ((Pass == 0) != (BusType == DeviceExtension->AdapterInterfaceType))
+            continue;
+
+         IoQueryDeviceDescription(&BusType,
+                                  NULL,
+                                  &ControllerType,
+                                  NULL,
+                                  (DeviceDataType == VpMonitorData) ? &PeripheralType : NULL,
+                                  NULL,
+                                  IntVideoPortDeviceDataCallout,
+                                  &Query);
+         if (Query.LastStatus == NO_ERROR)
+            return NO_ERROR;
+      }
+   }
+
+   return Query.LastStatus;
 }
 
 /*
