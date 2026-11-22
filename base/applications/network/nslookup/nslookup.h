@@ -98,6 +98,9 @@ typedef struct _STATE
 extern STATE    State;
 extern HANDLE   ProcessHeap;
 
+/* The port the DNS server is asked on. "set port=" and -port= are kept and shown (State.port) but, as on Windows, not used. */
+#define DNS_SERVER_PORT 53
+
 /* utility.c */
 
 BOOL SendRequest( PCHAR pInBuffer,

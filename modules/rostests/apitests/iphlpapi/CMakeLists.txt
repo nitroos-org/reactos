@@ -36,6 +36,7 @@ list(APPEND SOURCE
     NeighborEntry2.c
     NetstatOutput.c
     NslookupOutput.c
+    NslookupPort.c
     NotifyAddrChange.c
     NotifyChanges.c
     NotifyIpInterfaceChange.c
