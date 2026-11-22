@@ -362,27 +362,30 @@ static SECURITY_STATUS schan_CheckCreds(const SCHANNEL_CRED *schanCred)
         return SEC_E_UNKNOWN_CREDENTIALS;
     }
 
-    if (schanCred->cCreds == 0)
-        st = SEC_E_NO_CREDENTIALS;
-    else if (schanCred->cCreds > 1)
-        st = SEC_E_UNKNOWN_CREDENTIALS;
-    else
+    /* Windows Server 2022: a count without an array, or no certificate at all, is a credential without a
+     * certificate (SEC_E_OK, in either direction). Every certificate that is given needs its private key
+     * (SEC_E_NO_CREDENTIALS); the same certificate twice is accepted. */
+    st = SEC_E_OK;
+    if (schanCred->cCreds && schanCred->paCred)
     {
-        DWORD keySpec;
-        HCRYPTPROV csp;
-        BOOL ret, freeCSP;
-
-        ret = CryptAcquireCertificatePrivateKey(schanCred->paCred[0],
-         0, /* FIXME: what flags to use? */ NULL,
-         &csp, &keySpec, &freeCSP);
-        if (ret)
+        for (i = 0; i < schanCred->cCreds; i++)
         {
-            st = SEC_E_OK;
+            DWORD keySpec;
+            HCRYPTPROV csp;
+            BOOL freeCSP;
+
+            if (!schanCred->paCred[i])
+                continue;
+            if (!CryptAcquireCertificatePrivateKey(schanCred->paCred[i],
+             0, /* FIXME: what flags to use? */ NULL,
+             &csp, &keySpec, &freeCSP))
+            {
+                st = SEC_E_NO_CREDENTIALS;
+                break;
+            }
             if (freeCSP)
                 CryptReleaseContext(csp, 0);
         }
-        else
-            st = SEC_E_UNKNOWN_CREDENTIALS;
     }
     return st;
 }
@@ -401,7 +404,7 @@ static SECURITY_STATUS schan_AcquireClientCredentials(const SCHANNEL_CRED *schan
     if (schanCred)
     {
         st = schan_CheckCreds(schanCred);
-        if (st != SEC_E_OK && st != SEC_E_NO_CREDENTIALS)
+        if (st != SEC_E_OK)
             return st;
     }
 
@@ -460,44 +463,37 @@ fail:
     return SEC_E_INTERNAL_ERROR;
 }
 
+#define SCHAN_SERVER_PROTOCOLS (SP_PROT_PCT1_SERVER | SP_PROT_SSL2_SERVER | SP_PROT_SSL3_SERVER | SP_PROT_TLS1_0_SERVER | \
+                                SP_PROT_TLS1_1_SERVER | SP_PROT_TLS1_2_SERVER | SP_PROT_TLS1_3_SERVER)
+
+static SECURITY_STATUS schan_NewServerCredentials(DWORD flags, DWORD enabled_protocols, PCredHandle phCredential);
+
 static SECURITY_STATUS schan_AcquireServerCredentials(const SCHANNEL_CRED *schanCred,
  PCredHandle phCredential, PTimeStamp ptsExpiry)
 {
     SECURITY_STATUS st;
+    DWORD enabled;
 
     TRACE("schanCred %p, phCredential %p, ptsExpiry %p\n", schanCred, phCredential, ptsExpiry);
 
     if (!schanCred) return SEC_E_NO_CREDENTIALS;
 
     st = schan_CheckCreds(schanCred);
-    if (st == SEC_E_OK)
-    {
-        ULONG_PTR handle;
-        struct schan_credentials *creds;
+    if (st != SEC_E_OK)
+        return st;
 
-        creds = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*creds));
-        if (!creds) return SEC_E_INSUFFICIENT_MEMORY;
-        creds->credential_use = SECPKG_CRED_INBOUND;
-
-        handle = schan_alloc_handle(creds, SCHAN_HANDLE_CRED);
-        if (handle == SCHAN_INVALID_HANDLE)
-        {
-            HeapFree(GetProcessHeap(), 0, creds);
-            return SEC_E_INTERNAL_ERROR;
-        }
-
-        phCredential->dwLower = handle;
-        phCredential->dwUpper = 0;
-
-        /* FIXME: get expiry from cert */
-    }
-    return st;
+    /* Windows Server 2022: an inbound credential without a certificate is accepted too, and reports the server
+     * protocols (the ones that grbitEnabledProtocols asks for, else all that are enabled). */
+    read_config();
+    enabled = schan_imp_enabled_protocols() & SCHAN_SERVER_PROTOCOLS;
+    if (schanCred->grbitEnabledProtocols)
+        enabled &= schanCred->grbitEnabledProtocols;
+    if (!enabled)
+        return SEC_E_ALGORITHM_MISMATCH;
+    return schan_NewServerCredentials(schanCred->dwFlags, enabled, phCredential);
 }
 
 /* SCH_CREDENTIALS (version 5) support */
-
-#define SCHAN_SERVER_PROTOCOLS (SP_PROT_PCT1_SERVER | SP_PROT_SSL2_SERVER | SP_PROT_SSL3_SERVER | SP_PROT_TLS1_0_SERVER | \
-                                SP_PROT_TLS1_1_SERVER | SP_PROT_TLS1_2_SERVER | SP_PROT_TLS1_3_SERVER)
 
 static BOOL schan_IsValidUnicodeString(const UNICODE_STRING *str)
 {
@@ -1325,13 +1321,20 @@ SECURITY_STATUS SEC_ENTRY schan_QueryContextAttributesW(
 
     if (!context_handle) return SEC_E_INVALID_HANDLE;
     ctx = schan_get_object(context_handle->dwLower, SCHAN_HANDLE_CTX);
+    if (!ctx) return SEC_E_INVALID_HANDLE;
 
     switch(attribute)
     {
         case SECPKG_ATTR_STREAM_SIZES:
         {
             SecPkgContext_ConnectionInfo info;
-            SECURITY_STATUS status = schan_imp_get_connection_info(ctx->session, &info);
+            SECURITY_STATUS status;
+
+            /* Before the handshake is done there is nothing to report: SEC_E_INVALID_HANDLE on Windows Server 2022
+             * (the context of a first InitializeSecurityContext call); mbedTLS has no transform yet */
+            if (!schan_imp_handshake_done(ctx->session))
+                return SEC_E_INVALID_HANDLE;
+            status = schan_imp_get_connection_info(ctx->session, &info);
             if (status == SEC_E_OK)
             {
                 SecPkgContext_StreamSizes *stream_sizes = buffer;
@@ -1366,6 +1369,9 @@ SECURITY_STATUS SEC_ENTRY schan_QueryContextAttributesW(
         case SECPKG_ATTR_CONNECTION_INFO:
         {
             SecPkgContext_ConnectionInfo *info = buffer;
+
+            if (!schan_imp_handshake_done(ctx->session))
+                return SEC_E_INVALID_HANDLE;
             return schan_imp_get_connection_info(ctx->session, info);
         }
         case SECPKG_ATTR_UNIQUE_BINDINGS:
@@ -1607,6 +1613,7 @@ static SECURITY_STATUS SEC_ENTRY schan_DecryptMessage(PCtxtHandle context_handle
 
     if (!context_handle) return SEC_E_INVALID_HANDLE;
     ctx = schan_get_object(context_handle->dwLower, SCHAN_HANDLE_CTX);
+    if (!ctx) return SEC_E_INVALID_HANDLE;
 
     dump_buffer_desc(message);
 
