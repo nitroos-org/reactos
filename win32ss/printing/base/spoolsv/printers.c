@@ -132,6 +132,12 @@ _RpcEnumPrinters(DWORD Flags, WINSPOOL_HANDLE Name, DWORD Level, BYTE* pPrinterE
         return dwErrorCode;
     }
 
+    if (SplCallerIsAnonymous())
+    {
+        RpcRevertToSelf();
+        return 16385;
+    }
+
     pPrinterEnumAligned = AlignRpcPtr(pPrinterEnum, &cbBuf);
 
     if (EnumPrintersW(Flags, Name, Level, pPrinterEnumAligned, cbBuf, pcbNeeded, pcReturned))
@@ -201,6 +207,12 @@ _RpcOpenPrinter(WINSPOOL_HANDLE pPrinterName, WINSPOOL_PRINTER_HANDLE* phPrinter
     {
         ERR("RpcImpersonateClient failed with error %lu!\n", dwErrorCode);
         return dwErrorCode;
+    }
+
+    if (SplCallerIsAnonymous())
+    {
+        RpcRevertToSelf();
+        return ERROR_ACCESS_DENIED;
     }
 
     Default.DesiredAccess = AccessRequired;

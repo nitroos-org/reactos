@@ -499,6 +499,38 @@ ElfCallerMayOpenSecurityLog(VOID)
 }
 
 
+/*
+ * Is the RPC client the anonymous logon (the token of a caller that impersonates NtImpersonateAnonymousToken)?
+ * Windows refuses that caller every event log (measured: OpenEventLog of Application, System and Security gives
+ * ERROR_ACCESS_DENIED), and with it ClearEventLog, which needs an open log.
+ */
+static BOOL
+ElfCallerIsAnonymous(VOID)
+{
+    HANDLE hToken = NULL;
+    BYTE Buffer[SECURITY_MAX_SID_SIZE + sizeof(TOKEN_USER)];
+    BYTE Anonymous[SECURITY_MAX_SID_SIZE];
+    DWORD dwSize;
+    BOOL bAnonymous = FALSE;
+
+    if (RpcImpersonateClient(NULL) != RPC_S_OK)
+        return FALSE;
+
+    if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &hToken))
+    {
+        dwSize = sizeof(Anonymous);
+        if (GetTokenInformation(hToken, TokenUser, Buffer, sizeof(Buffer), &dwSize) &&
+            (dwSize = sizeof(Anonymous), CreateWellKnownSid(WinAnonymousSid, NULL, Anonymous, &dwSize)) &&
+            EqualSid(((PTOKEN_USER)Buffer)->User.Sid, Anonymous))
+            bAnonymous = TRUE;
+        CloseHandle(hToken);
+    }
+
+    RpcRevertToSelf();
+    return bAnonymous;
+}
+
+
 /* Function 7 */
 NTSTATUS
 WINAPI
@@ -522,6 +554,10 @@ ElfrOpenELW(
     /* FIXME: UNCServerName must specify the server */
 
     /* FIXME: Must verify that caller has read access */
+
+    /* The anonymous logon has no access to any log */
+    if (ElfCallerIsAnonymous())
+        return STATUS_ACCESS_DENIED;
 
     Status = ElfCreateEventLogHandle((PLOGHANDLE*)LogHandle,
                                      (PUNICODE_STRING)ModuleName,
