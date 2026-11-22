@@ -1133,9 +1133,9 @@ NtUserSetCursor(
 
     pcurOld = UserSetCursor(pcurNew, FALSE);
 
-    // If returning an old cursor than validate it, Justin Case!
-    if ( pcurOld &&
-        (pcurOld = UserGetObjectNoErr(gHandleTable, UserHMGetHandle(pcurOld), TYPE_CURSOR)))
+    /* The old cursor is the one that the queue held a reference to: that reference is released even when the
+     * object was destroyed meanwhile (its handle is not given back then); it used to be kept for good */
+    if (pcurOld)
     {
         hOldCursor = UserHMGetHandle(pcurOld);
     /*

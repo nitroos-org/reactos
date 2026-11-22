@@ -200,6 +200,18 @@ static void DestroyAfterReplaced(PCALL1 pCall)
     }
     after = GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS);
     ok(after == before, "%lu USER objects before, %lu after\n", before, after);
+
+    /* A cursor destroyed while the pointer, then replaced: the object is freed (its reference was kept) */
+    for (i = 0; i < 20; i++)
+    {
+        hcur = (HCURSOR)pCall(FALSE, ROUTINE_CREATEEMPTYCUROBJECT);
+        SetCursor(hcur);
+        SetCursor(hcur);
+        DestroyCursor(hcur);
+        MoveInto(hwnd, i);
+    }
+    after = GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS);
+    ok(after == before, "destroyed while current: %lu USER objects before, %lu after\n", before, after);
     DestroyWindow(hwnd);
 }
 
