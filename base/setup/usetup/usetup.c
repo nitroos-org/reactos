@@ -4892,6 +4892,17 @@ SuccessPage(PINPUT_RECORD Ir)
 {
     MUIDisplayPage(SUCCESS_PAGE);
 
+    if (USetupData.ArchType == ARCH_Efi)
+    {
+        /* The disc sets BootNext to itself and starts the installed system by itself: removing it is not
+         * needed, and with another system first in the firmware boot order it is the way to finish the
+         * installation. Replaces the two lines about the floppy disk and CD-ROMs (English only). */
+        CONSOLE_ClearTextXY(10, 8, 66);
+        CONSOLE_ClearTextXY(10, 9, 66);
+        CONSOLE_SetTextXY(10, 8, "You can leave the installation disc in the drive:");
+        CONSOLE_SetTextXY(10, 9, "it starts the installed system by itself.");
+    }
+
     if (IsUnattendedSetup)
         return FLUSH_PAGE;
 
