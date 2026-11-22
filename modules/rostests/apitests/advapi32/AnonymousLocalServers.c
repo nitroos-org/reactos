@@ -50,6 +50,48 @@ START_TEST(AnonymousLocalServers)
             CloseEventLog(hLog);
     }
 
+    SetLastError(0xDEADBEEF);
+    hLog = RegisterEventSourceW(NULL, L"Application");
+    Error = GetLastError();
+    ok(hLog == NULL, "RegisterEventSource as anonymous succeeded\n");
+    ok(Error == ERROR_ACCESS_DENIED, "RegisterEventSource as anonymous: error %lu, expected 5\n", Error);
+    if (hLog)
+        DeregisterEventSource(hLog);
+
+    /* The file does not exist: the anonymous caller is refused before it is looked at */
+    SetLastError(0xDEADBEEF);
+    hLog = OpenBackupEventLogW(NULL, L"C:\\nonexistent-anonymous-test.evt");
+    Error = GetLastError();
+    ok(hLog == NULL, "OpenBackupEventLog as anonymous succeeded\n");
+    ok(Error == ERROR_ACCESS_DENIED, "OpenBackupEventLog as anonymous: error %lu, expected 5\n", Error);
+    if (hLog)
+        CloseEventLog(hLog);
+
+    /* The ANSI entry points take the ANSI RPC calls of the server */
+    SetLastError(0xDEADBEEF);
+    hLog = OpenEventLogA(NULL, "Application");
+    Error = GetLastError();
+    ok(hLog == NULL, "OpenEventLogA as anonymous succeeded\n");
+    ok(Error == ERROR_ACCESS_DENIED, "OpenEventLogA as anonymous: error %lu, expected 5\n", Error);
+    if (hLog)
+        CloseEventLog(hLog);
+
+    SetLastError(0xDEADBEEF);
+    hLog = RegisterEventSourceA(NULL, "Application");
+    Error = GetLastError();
+    ok(hLog == NULL, "RegisterEventSourceA as anonymous succeeded\n");
+    ok(Error == ERROR_ACCESS_DENIED, "RegisterEventSourceA as anonymous: error %lu, expected 5\n", Error);
+    if (hLog)
+        DeregisterEventSource(hLog);
+
+    SetLastError(0xDEADBEEF);
+    hLog = OpenBackupEventLogA(NULL, "C:\\nonexistent-anonymous-test.evt");
+    Error = GetLastError();
+    ok(hLog == NULL, "OpenBackupEventLogA as anonymous succeeded\n");
+    ok(Error == ERROR_ACCESS_DENIED, "OpenBackupEventLogA as anonymous: error %lu, expected 5\n", Error);
+    if (hLog)
+        CloseEventLog(hLog);
+
     if (pEnumPrintersW)
     {
         Needed = Returned = 0;
