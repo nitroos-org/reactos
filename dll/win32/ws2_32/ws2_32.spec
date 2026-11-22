@@ -73,7 +73,7 @@
 @ stdcall -stub -version=0x600+ WSAAdvertiseProvider(ptr ptr)
 @ stdcall WSACloseEvent(long)
 @ stdcall WSAConnect(long ptr long ptr ptr ptr ptr)
-@ stdcall -stub -version=0x600+ WSAConnectByList(long ptr ptr ptr ptr ptr ptr ptr)
+@ stdcall -version=0x600+ WSAConnectByList(long ptr ptr ptr ptr ptr ptr ptr)
 @ stdcall -version=0x600+ WSAConnectByNameA(long str str ptr ptr ptr ptr ptr ptr)
 @ stdcall -version=0x600+ WSAConnectByNameW(long wstr wstr ptr ptr ptr ptr ptr ptr)
 @ stdcall WSACreateEvent()
