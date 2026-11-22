@@ -2134,6 +2134,33 @@ done:
 }
 
 
+/*
+ * Writes the whole reply of an LsaLogonUser request. The reply overlays the request: every field the caller
+ * gets back is set here, none is left holding bytes of the request (LogonId NULL: zero; failures pass
+ * NULL / 0 for everything but the substatus).
+ */
+static
+VOID
+LsapSetLogonUserReply(
+    _Inout_ PLSA_API_MSG RequestMsg,
+    _In_opt_ PVOID ProfileBuffer,
+    _In_ ULONG ProfileBufferLength,
+    _In_opt_ PLUID LogonId,
+    _In_opt_ HANDLE Token,
+    _In_ NTSTATUS SubStatus)
+{
+    RequestMsg->LogonUser.Reply.ProfileBuffer = ProfileBuffer;
+    RequestMsg->LogonUser.Reply.ProfileBufferLength = ProfileBufferLength;
+    if (LogonId != NULL)
+        RequestMsg->LogonUser.Reply.LogonId = *LogonId;
+    else
+        RtlZeroMemory(&RequestMsg->LogonUser.Reply.LogonId, sizeof(LUID));
+    RequestMsg->LogonUser.Reply.Token = Token;
+    RtlZeroMemory(&RequestMsg->LogonUser.Reply.Quotas, sizeof(RequestMsg->LogonUser.Reply.Quotas));
+    RequestMsg->LogonUser.Reply.SubStatus = SubStatus;
+}
+
+
 NTSTATUS
 LsapLogonUser(PLSA_API_MSG RequestMsg,
               PLSAP_LOGON_CONTEXT LogonContext)
@@ -2141,7 +2168,7 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
     PAUTH_PACKAGE Package;
     OBJECT_ATTRIBUTES ObjectAttributes;
     SECURITY_QUALITY_OF_SERVICE Qos;
-    LSA_TOKEN_INFORMATION_TYPE TokenInformationType;
+    LSA_TOKEN_INFORMATION_TYPE TokenInformationType = LsaTokenInformationNull;
     PVOID TokenInformation = NULL;
     PLSA_TOKEN_INFORMATION_NULL TokenInfo0 = NULL;
     PLSA_TOKEN_INFORMATION_V1 TokenInfo1 = NULL;
@@ -2161,6 +2188,23 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
     BOOLEAN IsS4ULogon = FALSE;
 //    UNICODE_STRING LogonServer;
 
+    /* The reply overlays the request (LogonId lies over LogonType and its neighbours): the fields of the
+     * request are read once, here, and the package writes into these, never into the message. The reply
+     * is written from them at the end (LsapSetLogonUserReply) */
+    PVOID ClientAuthInfo;
+    ULONG AuthInfoLength;
+    PTOKEN_GROUPS ClientLocalGroups;
+    ULONG LocalGroupsCount;
+    TOKEN_SOURCE SourceContext;
+    PVOID ProfileBuffer = NULL;
+    ULONG ProfileBufferLength = 0;
+    LUID LogonId = {0, 0};
+    NTSTATUS SubStatus = STATUS_SUCCESS;
+    HANDLE ClientToken = NULL;
+    /* TRUE once the package has logged the user on: from then on the logon session of LogonId is this
+     * request's own, and a failure ends it. Before, the package has cleaned up its own failure */
+    BOOLEAN PackageLoggedOn = FALSE;
+
 
     TRACE("LsapLogonUser(%p %p)\n", RequestMsg, LogonContext);
 
@@ -2169,44 +2213,50 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
 
     PackageId = RequestMsg->LogonUser.Request.AuthenticationPackage;
     LogonType = RequestMsg->LogonUser.Request.LogonType;
+    ClientAuthInfo = RequestMsg->LogonUser.Request.AuthenticationInformation;
+    AuthInfoLength = RequestMsg->LogonUser.Request.AuthenticationInformationLength;
+    ClientLocalGroups = RequestMsg->LogonUser.Request.LocalGroups;
+    LocalGroupsCount = RequestMsg->LogonUser.Request.LocalGroupsCount;
+    SourceContext = RequestMsg->LogonUser.Request.SourceContext;
 
     /* Get the right authentication package */
     Package = LsapGetAuthenticationPackage(PackageId);
     if (Package == NULL)
     {
         ERR("LsapGetAuthenticationPackage() failed to find a package\n");
-        return STATUS_NO_SUCH_PACKAGE;
+        Status = STATUS_NO_SUCH_PACKAGE;
+        goto done;
     }
 
-    if (RequestMsg->LogonUser.Request.AuthenticationInformationLength > 0)
+    if (AuthInfoLength > 0)
     {
         /* Allocate the local authentication info buffer */
         LocalAuthInfo = RtlAllocateHeap(RtlGetProcessHeap(),
                                         HEAP_ZERO_MEMORY,
-                                        RequestMsg->LogonUser.Request.AuthenticationInformationLength);
+                                        AuthInfoLength);
         if (LocalAuthInfo == NULL)
         {
             ERR("RtlAllocateHeap() failed\n");
-            return STATUS_INSUFFICIENT_RESOURCES;
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto done;
         }
 
         /* Read the authentication info from the callers address space */
         Status = NtReadVirtualMemory(LogonContext->ClientProcessHandle,
-                                     RequestMsg->LogonUser.Request.AuthenticationInformation,
+                                     ClientAuthInfo,
                                      LocalAuthInfo,
-                                     RequestMsg->LogonUser.Request.AuthenticationInformationLength,
+                                     AuthInfoLength,
                                      NULL);
         if (!NT_SUCCESS(Status))
         {
             ERR("NtReadVirtualMemory() failed (Status 0x%08lx)\n", Status);
-            RtlFreeHeap(RtlGetProcessHeap(), 0, LocalAuthInfo);
-            return Status;
+            goto done;
         }
     }
 
     /* Is it an S4U logon of the MSV1_0 package (a logon without credentials)? */
     if (LocalAuthInfo != NULL &&
-        RequestMsg->LogonUser.Request.AuthenticationInformationLength >= sizeof(ULONG) &&
+        AuthInfoLength >= sizeof(ULONG) &&
         *(PULONG)LocalAuthInfo == MsV1_0S4ULogon &&
         Package->Name != NULL &&
         Package->Name->Length == sizeof(MSV1_0_PACKAGE_NAME) - sizeof(CHAR) &&
@@ -2219,30 +2269,32 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
      * this type is the package's to refuse) */
     if (LogonType == NewCredentials && !IsS4ULogon)
     {
-        TOKEN_SOURCE NewCredSource = RequestMsg->LogonUser.Request.SourceContext;
-        ULONG NewCredLength = RequestMsg->LogonUser.Request.AuthenticationInformationLength;
-        PVOID NewCredClient = RequestMsg->LogonUser.Request.AuthenticationInformation;
-
         if (LocalAuthInfo == NULL)
-            return STATUS_INVALID_PARAMETER;
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto done;
+        }
 
         Status = LsapNewCredentialsLogon(RequestMsg,
                                          LogonContext,
                                          LocalAuthInfo,
-                                         NewCredLength,
-                                         NewCredClient,
-                                         NewCredSource);
+                                         AuthInfoLength,
+                                         ClientAuthInfo,
+                                         SourceContext);
         /* The request holds the plain password, which this logon does not use: never leave it in freed memory */
-        RtlSecureZeroMemory(LocalAuthInfo, NewCredLength);
+        RtlSecureZeroMemory(LocalAuthInfo, AuthInfoLength);
         RtlFreeHeap(RtlGetProcessHeap(), 0, LocalAuthInfo);
+        /* it wrote the reply on success; a failure leaves nothing of the request in it */
+        if (!NT_SUCCESS(Status))
+            LsapSetLogonUserReply(RequestMsg, NULL, 0, &LogonId, NULL, STATUS_SUCCESS);
         return Status;
     }
 
-    if (RequestMsg->LogonUser.Request.LocalGroupsCount > 0)
+    if (LocalGroupsCount > 0)
     {
         Status = LsapCopyLocalGroups(LogonContext,
-                                     RequestMsg->LogonUser.Request.LocalGroups,
-                                     RequestMsg->LogonUser.Request.LocalGroupsCount,
+                                     ClientLocalGroups,
+                                     LocalGroupsCount,
                                      &LocalGroups);
         if (!NT_SUCCESS(Status))
         {
@@ -2260,18 +2312,9 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
             Status = LsapCheckUntrustedLocalGroups(LocalGroups);
             if (!NT_SUCCESS(Status))
             {
+                /* Nothing was logged on yet: done: deletes no logon session */
                 ERR("LsapLogonUser: LocalGroups refused for a caller without SeTcbPrivilege\n");
-                /* Nothing was logged on yet: no logon session to delete (done: would use the reply's
-                 * LogonId, which the request still overlays) */
-                for (i = 0; i < LocalGroups->GroupCount; i++)
-                {
-                    if (LocalGroups->Groups[i].Sid != NULL)
-                        RtlFreeHeap(RtlGetProcessHeap(), 0, LocalGroups->Groups[i].Sid);
-                }
-                RtlFreeHeap(RtlGetProcessHeap(), 0, LocalGroups);
-                if (LocalAuthInfo != NULL)
-                    RtlFreeHeap(RtlGetProcessHeap(), 0, LocalAuthInfo);
-                return Status;
+                goto done;
             }
         }
     }
@@ -2279,14 +2322,14 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
     if (Package->LsaApLogonUserEx2 != NULL)
     {
         Status = Package->LsaApLogonUserEx2((PLSA_CLIENT_REQUEST)LogonContext,
-                                            RequestMsg->LogonUser.Request.LogonType,
+                                            LogonType,
                                             LocalAuthInfo,
-                                            RequestMsg->LogonUser.Request.AuthenticationInformation,
-                                            RequestMsg->LogonUser.Request.AuthenticationInformationLength,
-                                            &RequestMsg->LogonUser.Reply.ProfileBuffer,
-                                            &RequestMsg->LogonUser.Reply.ProfileBufferLength,
-                                            &RequestMsg->LogonUser.Reply.LogonId,
-                                            &RequestMsg->LogonUser.Reply.SubStatus,
+                                            ClientAuthInfo,
+                                            AuthInfoLength,
+                                            &ProfileBuffer,
+                                            &ProfileBufferLength,
+                                            &LogonId,
+                                            &SubStatus,
                                             &TokenInformationType,
                                             &TokenInformation,
                                             &AccountName,
@@ -2298,14 +2341,14 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
     else if (Package->LsaApLogonUserEx != NULL)
     {
         Status = Package->LsaApLogonUserEx((PLSA_CLIENT_REQUEST)LogonContext,
-                                           RequestMsg->LogonUser.Request.LogonType,
+                                           LogonType,
                                            LocalAuthInfo,
-                                           RequestMsg->LogonUser.Request.AuthenticationInformation,
-                                           RequestMsg->LogonUser.Request.AuthenticationInformationLength,
-                                           &RequestMsg->LogonUser.Reply.ProfileBuffer,
-                                           &RequestMsg->LogonUser.Reply.ProfileBufferLength,
-                                           &RequestMsg->LogonUser.Reply.LogonId,
-                                           &RequestMsg->LogonUser.Reply.SubStatus,
+                                           ClientAuthInfo,
+                                           AuthInfoLength,
+                                           &ProfileBuffer,
+                                           &ProfileBufferLength,
+                                           &LogonId,
+                                           &SubStatus,
                                            &TokenInformationType,
                                            &TokenInformation,
                                            &AccountName,
@@ -2315,14 +2358,14 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
     else
     {
         Status = Package->LsaApLogonUser((PLSA_CLIENT_REQUEST)LogonContext,
-                                         RequestMsg->LogonUser.Request.LogonType,
+                                         LogonType,
                                          LocalAuthInfo,
-                                         RequestMsg->LogonUser.Request.AuthenticationInformation,
-                                         RequestMsg->LogonUser.Request.AuthenticationInformationLength,
-                                         &RequestMsg->LogonUser.Reply.ProfileBuffer,
-                                         &RequestMsg->LogonUser.Reply.ProfileBufferLength,
-                                         &RequestMsg->LogonUser.Reply.LogonId,
-                                         &RequestMsg->LogonUser.Reply.SubStatus,
+                                         ClientAuthInfo,
+                                         AuthInfoLength,
+                                         &ProfileBuffer,
+                                         &ProfileBufferLength,
+                                         &LogonId,
+                                         &SubStatus,
                                          &TokenInformationType,
                                          &TokenInformation,
                                          &AccountName,
@@ -2334,6 +2377,7 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
         ERR("LsaApLogonUser/Ex/2 failed (Status 0x%08lx)\n", Status);
         goto done;
     }
+    PackageLoggedOn = TRUE;
 
     if (LocalGroups != NULL && LocalGroups->GroupCount > 0)
     {
@@ -2429,7 +2473,7 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
                                TOKEN_ALL_ACCESS,
                                &ObjectAttributes,
                                TokenImpersonation,
-                               &RequestMsg->LogonUser.Reply.LogonId,
+                               &LogonId,
                                &TokenInfo0->ExpirationTime,
                                &TokenUser,
                                &NoGroups,
@@ -2437,7 +2481,7 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
                                NULL,
                                &TokenPrimaryGroup,
                                NULL,
-                               &RequestMsg->LogonUser.Request.SourceContext);
+                               &SourceContext);
     }
     else if (TokenInformationType == LsaTokenInformationV1)
     {
@@ -2473,7 +2517,7 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
                                TOKEN_ALL_ACCESS,
                                &ObjectAttributes,
                                (LogonType == Network || LogonType == NetworkCleartext) ? TokenImpersonation : TokenPrimary,
-                               &RequestMsg->LogonUser.Reply.LogonId,
+                               &LogonId,
                                &TokenInfo1->ExpirationTime,
                                &TokenInfo1->User,
                                TokenInfo1->Groups,
@@ -2481,7 +2525,7 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
                                &TokenInfo1->Owner,
                                &TokenInfo1->PrimaryGroup,
                                &TokenInfo1->DefaultDacl,
-                               &RequestMsg->LogonUser.Request.SourceContext);
+                               &SourceContext);
 
         /* Free the allocated security descriptor */
         RtlFreeHeap(RtlGetProcessHeap(), 0, TokenSd);
@@ -2519,7 +2563,7 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
         FIXME("LogonType %lu is not supported yet!\n", LogonType);
     }
 
-    Status = LsapSetLogonSessionData(&RequestMsg->LogonUser.Reply.LogonId,
+    Status = LsapSetLogonSessionData(&LogonId,
                                      LogonType,
                                      UserName,
                                      LogonDomainName,
@@ -2538,29 +2582,43 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
     Status = NtDuplicateObject(NtCurrentProcess(),
                                TokenHandle,
                                LogonContext->ClientProcessHandle,
-                               &RequestMsg->LogonUser.Reply.Token,
+                               &ClientToken,
                                0,
                                0,
                                DUPLICATE_SAME_ACCESS | DUPLICATE_SAME_ATTRIBUTES | DUPLICATE_CLOSE_SOURCE);
+    /* DUPLICATE_CLOSE_SOURCE closed our handle, also when the duplication failed: closing it again below
+     * would close whatever handle another thread of this process has got under that value since */
+    TokenHandle = NULL;
     if (!NT_SUCCESS(Status))
     {
         ERR("NtDuplicateObject failed (Status 0x%08lx)\n", Status);
+        ClientToken = NULL;
         goto done;
     }
 
 done:
     if (!NT_SUCCESS(Status))
     {
-        /* Notify the authentification package of the failure */
-        Package->LsaApLogonTerminated(&RequestMsg->LogonUser.Reply.LogonId);
+        /* End the logon session only if this request's package logon made it; a package that fails has
+         * cleaned up its own logon, and before it no LogonId exists */
+        if (PackageLoggedOn)
+        {
+            /* Notify the authentification package of the failure */
+            Package->LsaApLogonTerminated(&LogonId);
 
-        /* Delete the logon session */
-        LsapDeleteLogonSession(&RequestMsg->LogonUser.Reply.LogonId);
+            /* Delete the logon session */
+            LsapDeleteLogonSession(&LogonId);
+        }
 
-        /* Release the profile buffer */
-        LsapFreeClientBuffer((PLSA_CLIENT_REQUEST)LogonContext,
-                             RequestMsg->LogonUser.Reply.ProfileBuffer);
-        RequestMsg->LogonUser.Reply.ProfileBuffer = NULL;
+        /* Release the profile buffer (in the client's memory, where the package put it) */
+        if (ProfileBuffer != NULL)
+            LsapFreeClientBuffer((PLSA_CLIENT_REQUEST)LogonContext, ProfileBuffer);
+
+        LsapSetLogonUserReply(RequestMsg, NULL, 0, NULL, NULL, SubStatus);
+    }
+    else
+    {
+        LsapSetLogonUserReply(RequestMsg, ProfileBuffer, ProfileBufferLength, &LogonId, ClientToken, SubStatus);
     }
 
     if (TokenHandle != NULL)
