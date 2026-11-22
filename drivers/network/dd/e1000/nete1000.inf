@@ -55,6 +55,8 @@ DefaultDestDir = 12
 %IntelE1000_108A.DeviceDesc% = E1000_Inst.ndi,PCI\VEN_8086&DEV_108A
 %IntelE1000_1099.DeviceDesc% = E1000_Inst.ndi,PCI\VEN_8086&DEV_1099
 %IntelE1000_10B5.DeviceDesc% = E1000_Inst.ndi,PCI\VEN_8086&DEV_10B5
+%IntelE1000_10D3.DeviceDesc% = E1000_Inst.ndi,PCI\VEN_8086&DEV_10D3
+%IntelE1000_10F6.DeviceDesc% = E1000_Inst.ndi,PCI\VEN_8086&DEV_10F6
 
 ;----------------------------- E1000 DRIVER -----------------------------
 
@@ -128,6 +130,8 @@ IntelE1000_107C.DeviceDesc = "Intel 82541PI PCI Ethernet Adapter"
 IntelE1000_108A.DeviceDesc = "Intel 82546GB PCI-E Ethernet Adapter"
 IntelE1000_1099.DeviceDesc = "Intel 82546GB Quad Copper PCI Ethernet Adapter"
 IntelE1000_10B5.DeviceDesc = "Intel 82546GB Quad Copper KSP3 PCI-X Ethernet Adapter"
+IntelE1000_10D3.DeviceDesc = "Intel 82574L Gigabit Network Connection"
+IntelE1000_10F6.DeviceDesc = "Intel 82574LA Gigabit Network Connection"
 
 [Strings.0415]
 IntelE1000_1000.DeviceDesc = "Karta Intel 82542-based PCI Ethernet Adapter"

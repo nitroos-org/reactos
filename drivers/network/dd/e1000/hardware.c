@@ -51,7 +51,16 @@ static USHORT SupportedDevices[] =
     0x108A,     // Intel 82546GB PCI-E
     0x1099,     // Intel 82546GB Quad Copper
     0x10B5,     // Intel 82546GB Quad Copper KSP3
+
+    /* 82574 family (PCI Express): the register set is the same, the EEPROM read register differs */
+    0x10D3,     // Intel 82574L
+    0x10F6,     // Intel 82574LA
 };
+
+static BOOLEAN IsFamily82574(IN PE1000_ADAPTER Adapter)
+{
+    return Adapter->DeviceID == 0x10D3 || Adapter->DeviceID == 0x10F6;
+}
 
 static ULONG PacketFilterToMask(ULONG PacketFilter)
 {
@@ -164,7 +173,18 @@ static BOOLEAN E1000ReadEeprom(IN PE1000_ADAPTER Adapter, IN UCHAR Address, USHO
     ULONG Value;
     UINT n;
 
-    E1000WriteUlong(Adapter, E1000_REG_EERD, E1000_EERD_START | ((UINT)Address << E1000_EERD_ADDR_SHIFT));
+    ULONG DoneBit = E1000_EERD_DONE;
+
+    if (IsFamily82574(Adapter))
+    {
+        DoneBit = E1000_EERD_DONE_82574;
+        E1000WriteUlong(Adapter, E1000_REG_EERD,
+                        E1000_EERD_START_82574 | ((UINT)Address << E1000_EERD_ADDR_SHIFT_82574));
+    }
+    else
+    {
+        E1000WriteUlong(Adapter, E1000_REG_EERD, E1000_EERD_START | ((UINT)Address << E1000_EERD_ADDR_SHIFT));
+    }
 
     for (n = 0; n < MAX_EEPROM_READ_ATTEMPTS; ++n)
     {
@@ -172,10 +192,10 @@ static BOOLEAN E1000ReadEeprom(IN PE1000_ADAPTER Adapter, IN UCHAR Address, USHO
 
         E1000ReadUlong(Adapter, E1000_REG_EERD, &Value);
 
-        if (Value & E1000_EERD_DONE)
+        if (Value & DoneBit)
             break;
     }
-    if (!(Value & E1000_EERD_DONE))
+    if (!(Value & DoneBit))
     {
         NDIS_DbgPrint(MIN_TRACE, ("EEPROM Read incomplete\n"));
         return FALSE;
@@ -274,10 +294,9 @@ NICInitializeAdapterResources(
             NDIS_DbgPrint(MID_TRACE, ("IRQ vector is %d\n", Adapter->InterruptVector));
             break;
         case CmResourceTypeMemory:
-            /* Internal registers and memories (including PHY) */
-            if (ResourceDescriptor->u.Memory.Length ==  (128 * 1024))
+            /* Internal registers and memories (including PHY). The 82574 family has a second range of the same size (the flash): the registers are the first one */
+            if (ResourceDescriptor->u.Memory.Length ==  (128 * 1024) && Adapter->IoAddress.QuadPart == 0)
             {
-                ASSERT(Adapter->IoAddress.LowPart == 0);
                 ASSERT(ResourceDescriptor->u.Port.Start.HighPart == 0);
 
 
