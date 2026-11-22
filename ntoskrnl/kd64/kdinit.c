@@ -296,6 +296,13 @@ KdInitSystem(
             {
                 /* Don't enable KD now, but allow it to be enabled later */
                 KdPitchDebugger = FALSE;
+#ifdef _WINKD_
+                /*
+                 * The transport takes its port and settings now: a bug check
+                 * enables KD later without a loader block to read them from.
+                 */
+                KdDebuggerInitialize0(LoaderBlock);
+#endif
             }
             else if (strstr(CommandLine, "NODEBUG"))
             {
