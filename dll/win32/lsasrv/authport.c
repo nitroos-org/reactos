@@ -338,6 +338,7 @@ AuthPortThreadRoutine(PVOID Param)
     PVOID PortContext = NULL;
     PLSA_API_MSG ReplyMsg = NULL;
     LSA_API_MSG RequestMsg;
+    ULONG FailureCount = 0;
     NTSTATUS Status;
 
     TRACE("AuthPortThreadRoutine() called\n");
@@ -353,19 +354,28 @@ AuthPortThreadRoutine(PVOID Param)
                                         (PPORT_MESSAGE)&RequestMsg);
         if (!NT_SUCCESS(Status))
         {
-            /* The reply could not be delivered: its client thread or process ended while the request was
-             * served (the kernel fails the call before it receives). That is the client's business: drop
-             * the reply and go on serving the port, which ending this thread would leave without a server */
+            /*
+             * This thread is the only server of the port and must not end: lsass does not survive it, and
+             * no logon would be served. Failures here come from clients that end while they are served:
+             * a reply that cannot be delivered (its client thread or process is gone; the call fails before
+             * it receives) is dropped, and a receive that finds the request withdrawn by its dying client
+             * (STATUS_UNSUCCESSFUL) is retried. A failure that persists is retried after a short pause.
+             */
             if (ReplyMsg != NULL)
-            {
                 ERR("The reply to a client could not be sent (Status 0x%lx), it is dropped\n", Status);
-                ReplyMsg = NULL;
-                continue;
-            }
+            else
+                ERR("NtReplyWaitReceivePort() failed (Status 0x%lx)\n", Status);
 
-            ERR("NtReplyWaitReceivePort() failed (Status 0x%lx)\n", Status);
-            break;
+            ReplyMsg = NULL;
+            if (++FailureCount > 16)
+            {
+                LARGE_INTEGER Delay;
+                Delay.QuadPart = -10 * 1000 * 10; /* 10 ms */
+                NtDelayExecution(FALSE, &Delay);
+            }
+            continue;
         }
+        FailureCount = 0;
 
         /* The message buffer is reused: what the caller did not send must not be read as its request (it was the
          * previous caller's message or its reply) */
