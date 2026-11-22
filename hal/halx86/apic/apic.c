@@ -818,6 +818,51 @@ ApicInitializeIOApic(VOID)
     ApicWriteIORedirectionEntry(APIC_CLOCK_INDEX, ReDirReg);
 }
 
+/*!
+    \brief Moves the clock vector to another I/O APIC input.
+
+    \param Index
+        The input of the clock source; the clock stays masked until it is
+        enabled, as on the RTC input before.
+
+    Called while the boot processor initializes the clock, with interrupts
+    disabled and the clock input still masked.
+*/
+CODE_SEG("INIT")
+VOID
+NTAPI
+HalpSetClockInput(
+    _In_ UCHAR Index)
+{
+    IOAPIC_REDIRECTION_REGISTER ReDirReg;
+    UCHAR OldIndex = HalpVectorToIndex[APIC_CLOCK_VECTOR];
+
+    ASSERT(Index < APIC_MAX_IRQ);
+
+    /* Free the old input, as ApicInitializeIOApic leaves an unused one */
+    ReDirReg = ApicReadIORedirectionEntry(OldIndex);
+    ReDirReg.Vector = APIC_FREE_VECTOR;
+    ReDirReg.TriggerMode = APIC_TGM_Edge;
+    ReDirReg.Mask = 1;
+    ApicWriteIORedirectionEntry(OldIndex, ReDirReg);
+
+    /* The new input carries the clock vector, edge triggered and active high
+       like any ISA interrupt without an override of its mode */
+    ReDirReg.Vector = APIC_CLOCK_VECTOR;
+    ReDirReg.MessageType = APIC_MT_Fixed;
+    ReDirReg.DestinationMode = APIC_DM_Physical;
+    ReDirReg.DeliveryStatus = 0;
+    ReDirReg.Polarity = 0;
+    ReDirReg.RemoteIRR = 0;
+    ReDirReg.TriggerMode = APIC_TGM_Edge;
+    ReDirReg.Mask = 1;
+    ReDirReg.Reserved = 0;
+    ReDirReg.Destination = ApicGetLocalId();
+    ApicWriteIORedirectionEntry(Index, ReDirReg);
+
+    HalpVectorToIndex[APIC_CLOCK_VECTOR] = Index;
+}
+
 VOID
 NTAPI
 HalpInitializePICs(IN BOOLEAN EnableInterrupts)

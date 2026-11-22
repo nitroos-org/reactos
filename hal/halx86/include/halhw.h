@@ -16,6 +16,7 @@
 #define   RTC_REG_B_PI          0x40
 #define RTC_REGISTER_C          0x0C
 #define   RTC_REG_C_IRQ         0x80
+#define   RTC_REG_C_PF          0x40
 #define RTC_REGISTER_D          0x0D
 #define RTC_REGISTER_CENTURY    0x32
 

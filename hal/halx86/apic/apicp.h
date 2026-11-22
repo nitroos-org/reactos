@@ -364,6 +364,10 @@ ApicInitializeTimer(ULONG Cpu);
 
 VOID
 NTAPI
+HalpSetClockInput(_In_ UCHAR Index);
+
+VOID
+NTAPI
 HalInitializeProfiling(VOID);
 
 VOID
