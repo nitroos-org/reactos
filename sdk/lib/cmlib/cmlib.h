@@ -458,6 +458,13 @@ extern ULONG CmlibTraceLevel;
 // than the data is a 'db' cell (CmpIsBigValueData). The check (cmcheck.c)
 // keeps a value only if its data is one of the two.
 //
+//
+// The longest value data one cell holds in a hive without big data (format older than 1.4): the cell
+// is 1 MiB with its 4-byte size field (measured on Windows Server 2022: 1048572 bytes are stored in a
+// 1.3 hive, 1048573 are refused with STATUS_INSUFFICIENT_RESOURCES).
+//
+#define CM_MAX_ONE_CELL_DATA 0xFFFFC
+
 #define CMP_BIG_DATA_SEGMENTS(Length) \
     (((Length) + CM_KEY_VALUE_BIG - 1) / CM_KEY_VALUE_BIG)
 
