@@ -14,6 +14,7 @@ list(APPEND SOURCE
     ClipExtremeCoords.c
     CombineRgn.c
     CombineTransform.c
+    Dib4bppOddLeft.c
     CreateBitmap.c
     CreateBitmapIndirect.c
     CreateCompatibleBitmap.c
@@ -101,6 +102,7 @@ list(APPEND SOURCE
     SetDCPenColor.c
     SetDIBits.c
     SetDIBitsToDevice.c
+    SetDIBitsToDeviceRle.c
     SetLayout.c
     SetMapMode.c
     SetPixel.c

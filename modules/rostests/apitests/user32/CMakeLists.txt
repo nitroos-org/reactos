@@ -5,6 +5,7 @@ add_subdirectory(wevhook)
 list(APPEND SOURCE
     AttachThreadInput.c
     AttachThreadInputQueue.c
+    AniMalformed.c
     AutoRotation.c
     BroadcastHung.c
     ../include/msgtrace.c
@@ -87,6 +88,7 @@ list(APPEND SOURCE
     MouseWheel.c
     WmCharAnsi.c
     KeyboardLLHook.c
+    WallpaperAccess.c
     LayeredCompose.c
     LoadImage.c
     LoadImageGCC.c
@@ -106,6 +108,7 @@ list(APPEND SOURCE
     PaintDesktopSwitch.c
     PrivateExtractIcons.c
     ProcessConnectTerminate.c
+    PngIconRows.c
     RawInput.c
     RealGetWindowClass.c
     RedirGlassKeep.c

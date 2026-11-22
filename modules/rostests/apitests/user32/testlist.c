@@ -4,6 +4,7 @@
 
 extern void func_AttachThreadInput(void);
 extern void func_AttachThreadInputQueue(void);
+extern void func_AniMalformed(void);
 extern void func_AutoRotation(void);
 extern void func_BroadcastHung(void);
 extern void func_CharFuncs(void);
@@ -85,6 +86,7 @@ extern void func_MouseHookTransport(void);
 extern void func_MouseWheel(void);
 extern void func_WmCharAnsi(void);
 extern void func_KeyboardLLHook(void);
+extern void func_WallpaperAccess(void);
 extern void func_LoadImage(void);
 extern void func_LoadImageGCC(void);
 extern void func_LoadImagePngIcon(void);
@@ -104,6 +106,7 @@ extern void func_OwnDcDestroy(void);
 extern void func_PaintDesktopSwitch(void);
 extern void func_PrintWindow(void);
 extern void func_PrivateExtractIcons(void);
+extern void func_PngIconRows(void);
 extern void func_ProcessConnectTerminate(void);
 extern void func_RawInput(void);
 extern void func_RealGetWindowClass(void);
@@ -178,6 +181,7 @@ const struct test winetest_testlist[] =
     { "AttachThreadInputQueue", func_AttachThreadInputQueue },
     { "AutoRotation", func_AutoRotation },
     { "BroadcastHung", func_BroadcastHung },
+    { "AniMalformed", func_AniMalformed },
     { "CharFuncs", func_CharFuncs },
     { "CloseWindow", func_CloseWindow },
     { "CopyImage", func_CopyImage },
@@ -259,6 +263,7 @@ const struct test winetest_testlist[] =
     { "KeyboardLLHook", func_KeyboardLLHook },
     { "LoadImage", func_LoadImage },
     { "LoadImageGCC", func_LoadImageGCC },
+    { "WallpaperAccess", func_WallpaperAccess },
     { "LoadImagePngIcon", func_LoadImagePngIcon },
     { "LookupIconIdFromDirectoryEx", func_LookupIconIdFromDirectoryEx },
     { "MenuItemData", func_MenuItemData },
@@ -278,6 +283,7 @@ const struct test winetest_testlist[] =
     { "PrivateExtractIcons", func_PrivateExtractIcons },
     { "ProcessConnectTerminate", func_ProcessConnectTerminate },
     { "RawInput", func_RawInput },
+    { "PngIconRows", func_PngIconRows },
     { "RealGetWindowClass", func_RealGetWindowClass },
     { "RedirGlassKeep", func_RedirGlassKeep },
     { "RedirPresent", func_RedirPresent },

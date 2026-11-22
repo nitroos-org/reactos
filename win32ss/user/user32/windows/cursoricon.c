@@ -86,7 +86,7 @@ LibPngExists(VOID)
     return bLibPngFound;
 }
 
-static int get_dib_image_size(int width, int height, int depth);
+static ULONGLONG get_dib_image_size64( LONG cx, LONG cLines, WORD cBitCount );
 
 /* Convert PNG raw data to BMP icon data */
 static PBYTE
@@ -147,7 +147,20 @@ CURSORICON_ConvertPngToBmpIcon(
 
     int channels = png_get_channels(png_ptr, info_ptr);
     int rowbytes = png_get_rowbytes(png_ptr, info_ptr);
-    int imageSize = height * rowbytes;
+
+    /* The DIB rows are DWORD aligned; the sizes are made in 64 bits, and an image that does not fit
+       in 31 bits (with its mask and headers) is not converted */
+    ULONGLONG cjStride = ((ULONGLONG)rowbytes + 3) & ~3ULL;
+    ULONGLONG cjImage = cjStride * height;
+    ULONGLONG cjMask = get_dib_image_size64((LONG)width, (LONG)height, 1);
+    if ((width == 0) || (height == 0) || (width > MAXLONG) || (height > MAXLONG / 2) ||
+        (rowbytes <= 0) || (cjImage + cjMask > MAXLONG - 0x1000))
+    {
+        ERR("PNG image of %u x %u is not usable\n", width, height);
+        png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+        return NULL;
+    }
+    int imageSize = (int)cjImage;
     TRACE("rowbytes %d, channels %d, imageSize %d\n", rowbytes, channels, imageSize);
 
     /* Allocate rows data */
@@ -197,7 +210,7 @@ CURSORICON_ConvertPngToBmpIcon(
                 if (channels == 4)
                     *pb++ = row[j + 3]; /* Alpha */
             }
-            pb += (channels * width) % 4;
+            pb += cjStride - (ULONGLONG)channels * width;
         }
     }
 
@@ -217,7 +230,7 @@ CURSORICON_ConvertPngToBmpIcon(
     WORD bpp = (WORD)(bitDepth * channels);
 
     /* The byte size of mask bits */
-    DWORD maskSize = get_dib_image_size(width, height, 1);
+    DWORD maskSize = (DWORD)cjMask;
 
     /* Build BITMAPINFOHEADER */
     BITMAPINFOHEADER info = { sizeof(info) };
@@ -355,11 +368,6 @@ static void *map_fileW( LPCWSTR name, LPDWORD filesize )
         CloseHandle( hFile );
     }
     return ptr;
-}
-
-static int get_dib_image_size( int width, int height, int depth )
-{
-    return (((width * depth + 31) / 8) & ~3) * abs( height );
 }
 
 static BOOL is_dib_monochrome( const BITMAPINFO* info )
@@ -513,6 +521,7 @@ static void stretch_blt_icon(HDC hdc_dst, int dst_width, int dst_height, HBITMAP
     {
         BITMAPINFO *info;
         void *bits;
+        ULONGLONG cjImage;
 
         if (!(info = HeapAlloc( GetProcessHeap(), 0, FIELD_OFFSET( BITMAPINFO, bmiColors[256] )))) return;
         info->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -521,7 +530,14 @@ static void stretch_blt_icon(HDC hdc_dst, int dst_width, int dst_height, HBITMAP
         info->bmiHeader.biPlanes = GetDeviceCaps( hdc_dst, PLANES );
         info->bmiHeader.biBitCount = GetDeviceCaps( hdc_dst, BITSPIXEL );
         info->bmiHeader.biCompression = BI_RGB;
-        info->bmiHeader.biSizeImage = get_dib_image_size( bm.bmWidth, bm.bmHeight, info->bmiHeader.biBitCount );
+        /* A size that does not fit in 31 bits is not made */
+        cjImage = get_dib_image_size64( bm.bmWidth, bm.bmHeight, info->bmiHeader.biBitCount );
+        if (cjImage > MAXLONG)
+        {
+            HeapFree( GetProcessHeap(), 0, info );
+            return;
+        }
+        info->bmiHeader.biSizeImage = (DWORD)cjImage;
         info->bmiHeader.biXPelsPerMeter = 0;
         info->bmiHeader.biYPelsPerMeter = 0;
         info->bmiHeader.biClrUsed = 0;
@@ -577,6 +593,7 @@ create_alpha_bitmap(
     unsigned char *ptr;
     void *bits = NULL;
     ULONG size;
+    ULONGLONG cjSize;
 
     hdcScreen = CreateDCW(DISPLAYW, NULL, NULL, NULL);
     if (!hdcScreen)
@@ -600,7 +617,11 @@ create_alpha_bitmap(
         if (bm.bmBitsPixel != 32)
             goto done;
 
-        size = get_dib_image_size(bm.bmWidth, bm.bmHeight, 32);
+        /* A size that does not fit in 31 bits is not made */
+        cjSize = get_dib_image_size64(bm.bmWidth, bm.bmHeight, 32);
+        if (cjSize > MAXLONG)
+            goto done;
+        size = (ULONG)cjSize;
 
         info = HeapAlloc(GetProcessHeap(), 0, FIELD_OFFSET(BITMAPINFO, bmiColors[256]));
         if(!info)
@@ -664,7 +685,10 @@ create_alpha_bitmap(
         if(bpp != 32)
             goto done;
 
-        size = get_dib_image_size(orig_width, orig_height, bpp);
+        cjSize = get_dib_image_size64(orig_width, orig_height, bpp);
+        if (cjSize > MAXLONG)
+            goto done;
+        size = (ULONG)cjSize;
         bits = HeapAlloc(GetProcessHeap(), 0, size);
         if(!bits)
             goto done;
@@ -1049,6 +1073,7 @@ done:
         if(pdata->hbmMask) DeleteObject(pdata->hbmMask);
         if(pdata->hbmColor) DeleteObject(pdata->hbmColor);
         if(pdata->hbmAlpha) DeleteObject(pdata->hbmAlpha);
+        pdata->hbmMask = pdata->hbmColor = pdata->hbmAlpha = NULL;
     }
     return bResult;
 }
@@ -1147,6 +1172,8 @@ static BOOL CURSORICON_GetCursorDataFromIconInfo(
 #define ANI_fram_ID RIFF_FOURCC('f', 'r', 'a', 'm')
 #define ANI_rate_ID RIFF_FOURCC('r', 'a', 't', 'e')
 
+#define ANI_MAX_FRAMES      1000    /* the most NtUserSetCursorIconData takes */
+
 #define ANI_FLAG_ICON       0x1
 #define ANI_FLAG_SEQUENCE   0x2
 
@@ -1186,27 +1213,51 @@ static void dump_ani_header( const ani_header *header )
 static void riff_find_chunk( DWORD chunk_id, DWORD chunk_type, const riff_chunk_t *parent_chunk, riff_chunk_t *chunk )
 {
     const unsigned char *ptr = parent_chunk->data;
-    const unsigned char *end = parent_chunk->data + (parent_chunk->data_size - (2 * sizeof(DWORD)));
+    SIZE_T cbLeft = parent_chunk->data_size;
+    DWORD id, size, form;
+    SIZE_T cbData;
+    ULONGLONG cbSkip;
 
-    if (chunk_type == ANI_LIST_ID || chunk_type == ANI_RIFF_ID) end -= sizeof(DWORD);
+    chunk->data = NULL;
+    chunk->data_size = 0;
 
-    while (ptr < end)
+    /* Every size comes from the file: a chunk is never taken to reach beyond what is left of its
+       parent, whatever its size field says */
+    while (cbLeft >= 2 * sizeof(DWORD))
     {
-        if ((!chunk_type && *(const DWORD *)ptr == chunk_id )
-                || (chunk_type && *(const DWORD *)ptr == chunk_type && *((const DWORD *)ptr + 2) == chunk_id ))
-        {
-            ptr += sizeof(DWORD);
-            chunk->data_size = (*(const DWORD *)ptr + 1) & ~1;
-            ptr += sizeof(DWORD);
-            if (chunk_type == ANI_LIST_ID || chunk_type == ANI_RIFF_ID) ptr += sizeof(DWORD);
-            chunk->data = ptr;
+        RtlCopyMemory(&id, ptr, sizeof(DWORD));
+        RtlCopyMemory(&size, ptr + sizeof(DWORD), sizeof(DWORD));
+        ptr += 2 * sizeof(DWORD);
+        cbLeft -= 2 * sizeof(DWORD);
+        cbData = min((SIZE_T)size, cbLeft);
 
-            return;
+        if (!chunk_type)
+        {
+            if (id == chunk_id)
+            {
+                chunk->data = ptr;
+                chunk->data_size = cbData;
+                return;
+            }
+        }
+        else if ((id == chunk_type) && (cbData >= sizeof(DWORD)))
+        {
+            /* A RIFF or LIST chunk starts with its form type */
+            RtlCopyMemory(&form, ptr, sizeof(DWORD));
+            if (form == chunk_id)
+            {
+                chunk->data = ptr + sizeof(DWORD);
+                chunk->data_size = cbData - sizeof(DWORD);
+                return;
+            }
         }
 
-        ptr += sizeof(DWORD);
-        ptr += (*(const DWORD *)ptr + 1) & ~1;
-        ptr += sizeof(DWORD);
+        /* The next chunk follows after the padding to an even size */
+        cbSkip = ((ULONGLONG)size + 1) & ~1ULL;
+        if (cbSkip > cbLeft)
+            break;
+        ptr += (SIZE_T)cbSkip;
+        cbLeft -= (SIZE_T)cbSkip;
     }
 }
 
@@ -1227,6 +1278,7 @@ static BOOL CURSORICON_GetCursorDataFromANI(
     riff_chunk_t seq_chunk = {0};
     const unsigned char *icon_chunk;
     const unsigned char *icon_data;
+    SIZE_T cbFrames;
 
     /* Find the root chunk */
     riff_find_chunk( ANI_ACON_ID, ANI_RIFF_ID, &root_chunk, &ACON_chunk );
@@ -1238,13 +1290,31 @@ static BOOL CURSORICON_GetCursorDataFromANI(
 
     /* Find the header chunk */
     riff_find_chunk( ANI_anih_ID, 0, &ACON_chunk, &anih_chunk );
-    if (!ACON_chunk.data)
+    if (!anih_chunk.data)
     {
         ERR("Failed to get header chunk.\n");
         return FALSE;
     }
+    if (anih_chunk.data_size < sizeof(ani_header))
+    {
+        ERR("The header chunk is too short.\n");
+        return FALSE;
+    }
     pHeader = (ani_header*)anih_chunk.data;
     dump_ani_header(pHeader);
+
+    /* win32k takes no more than this many frames or steps */
+    if ((pHeader->num_frames == 0) || (pHeader->num_frames > ANI_MAX_FRAMES))
+    {
+        ERR("Bad number of frames %lu.\n", pHeader->num_frames);
+        return FALSE;
+    }
+    if ((pHeader->num_frames > 1) &&
+        ((pHeader->num_steps == 0) || (pHeader->num_steps > ANI_MAX_FRAMES)))
+    {
+        ERR("Bad number of steps %lu.\n", pHeader->num_steps);
+        return FALSE;
+    }
 
     /* Set up the master data */
     pCurData->CURSORF_flags |= CURSORF_ACON;
@@ -1265,18 +1335,29 @@ static BOOL CURSORICON_GetCursorDataFromANI(
 
     /* Get the frame rates */
     riff_find_chunk( ANI_rate_ID, 0, &ACON_chunk, &rate_chunk );
-    if (rate_chunk.data)
-        pCurData->ajifRate = (INT*)rate_chunk.data;
 
     /* Get the frames chunk */
     riff_find_chunk( ANI_fram_ID, ANI_LIST_ID, &ACON_chunk, &fram_chunk );
     if (!fram_chunk.data)
     {
         ERR("Failed to get icon list.\n");
-        return 0;
+        return FALSE;
     }
+
+    /* The rates and the sequence hold one entry for each step (only an animation uses them) */
+    if (pHeader->num_frames > 1)
+    {
+        if ((rate_chunk.data && (rate_chunk.data_size / sizeof(INT) < pHeader->num_steps)) ||
+            (seq_chunk.data && (seq_chunk.data_size / sizeof(DWORD) < pHeader->num_steps)))
+        {
+            ERR("The rate or sequence chunk is too short for %lu steps.\n", pHeader->num_steps);
+            return FALSE;
+        }
+    }
+
+    /* The frames are the chunks of the list; the walk stays inside it */
     icon_chunk = fram_chunk.data;
-    icon_data = fram_chunk.data + (2 * sizeof(DWORD));
+    cbFrames = fram_chunk.data_size;
 
     if(pHeader->num_frames > 1)
     {
@@ -1297,18 +1378,20 @@ static BOOL CURSORICON_GetCursorDataFromANI(
         CURSORDATA* pFrameData;
         DWORD chunk_size;
         const BITMAPINFO* pbmi;
-        const BYTE *pEnd = pData + dwDataSize;
         SIZE_T cbFrame, cbAvail;
+        ULONGLONG cbStep;
 
-        /* The frame chunk header and its data are read from the caller's buffer: stay inside it
-           whatever the chunk sizes say */
-        if ((icon_chunk < pData) || (icon_chunk > pEnd) || ((SIZE_T)(pEnd - icon_chunk) < 2 * sizeof(DWORD)))
+        /* The frame chunk header and its data are read from the caller's buffer: stay inside the
+           frame list whatever the chunk sizes say */
+        if (cbFrames < 2 * sizeof(DWORD))
         {
             ERR("Frame %d is outside of the data.\n", i);
             goto error;
         }
-        chunk_size = *(const DWORD *)(icon_chunk + sizeof(DWORD));
-        cbFrame = min((SIZE_T)chunk_size, (SIZE_T)(pEnd - icon_data));
+        RtlCopyMemory(&chunk_size, icon_chunk + sizeof(DWORD), sizeof(DWORD));
+        icon_data = icon_chunk + 2 * sizeof(DWORD);
+        cbFrames -= 2 * sizeof(DWORD);
+        cbFrame = min((SIZE_T)chunk_size, cbFrames);
 
         if(pHeader->num_frames > 1)
             pFrameData = &pCurData->aspcur[i];
@@ -1357,7 +1440,11 @@ static BOOL CURSORICON_GetCursorDataFromANI(
         }
 
         /* Do the real work */
-        CURSORICON_GetCursorDataFromBMI(pFrameData, pbmi, cbAvail);
+        if (!CURSORICON_GetCursorDataFromBMI(pFrameData, pbmi, cbAvail))
+        {
+            ERR("Unable to read the image of frame %d.\n", i);
+            goto error;
+        }
 
         if(pHeader->num_frames > 1)
             pFrameData->CURSORF_flags |= CURSORF_ACONFRAME;
@@ -1365,9 +1452,19 @@ static BOOL CURSORICON_GetCursorDataFromANI(
             pFrameData->CURSORF_flags &= ~CURSORF_ACON;
 
 
-        /* Next frame */
-        icon_chunk += chunk_size + (2 * sizeof(DWORD));
-        icon_data = icon_chunk + (2 * sizeof(DWORD));
+        /* Next frame, if there is one */
+        cbStep = (ULONGLONG)chunk_size;
+        if (cbStep > cbFrames)
+        {
+            if (i + 1 < pHeader->num_frames)
+            {
+                ERR("Frame %d runs past the frame list.\n", i);
+                goto error;
+            }
+            cbStep = cbFrames;
+        }
+        icon_chunk += 2 * sizeof(DWORD) + (SIZE_T)cbStep;
+        cbFrames -= (SIZE_T)cbStep;
     }
 
     if(pHeader->num_frames <= 1)
@@ -1384,6 +1481,16 @@ static BOOL CURSORICON_GetCursorDataFromANI(
     if (pHeader->flags & ANI_FLAG_SEQUENCE)
     {
         CopyMemory(pCurData->aicur, seq_chunk.data, pHeader->num_steps * sizeof(DWORD));
+
+        /* Every step shows a frame that exists */
+        for (i = 0; i < pHeader->num_steps; i++)
+        {
+            if (pCurData->aicur[i] >= pHeader->num_frames)
+            {
+                ERR("Step %u shows frame %lu of %lu.\n", i, pCurData->aicur[i], pHeader->num_frames);
+                goto error;
+            }
+        }
     }
     else
     {
@@ -1394,6 +1501,22 @@ static BOOL CURSORICON_GetCursorDataFromANI(
     return TRUE;
 
 error:
+    /* The bitmaps of the frames read so far are ours */
+    if (pCurData->aspcur)
+    {
+        for (i = 0; i < pHeader->num_frames; i++)
+        {
+            if (pCurData->aspcur[i].hbmMask) DeleteObject(pCurData->aspcur[i].hbmMask);
+            if (pCurData->aspcur[i].hbmColor) DeleteObject(pCurData->aspcur[i].hbmColor);
+            if (pCurData->aspcur[i].hbmAlpha) DeleteObject(pCurData->aspcur[i].hbmAlpha);
+        }
+    }
+    else
+    {
+        if (pCurData->hbmMask) DeleteObject(pCurData->hbmMask);
+        if (pCurData->hbmColor) DeleteObject(pCurData->hbmColor);
+        if (pCurData->hbmAlpha) DeleteObject(pCurData->hbmAlpha);
+    }
     HeapFree(GetProcessHeap(), 0, pCurData->aspcur);
     ZeroMemory(pCurData, sizeof(CURSORDATA));
     return FALSE;
@@ -1716,7 +1839,9 @@ CURSORICON_LoadFromFileW(
     /* Check for .ani. */
     if (memcmp( bits, "RIFF", 4 ) == 0)
     {
-        UNIMPLEMENTED;
+        /* The parser reads no further than the size of the file */
+        hCurIcon = CreateIconFromResourceEx(bits, filesize, bIcon, 0x00030000, cxDesired, cyDesired,
+                                            fuLoad & LR_DEFAULTSIZE);
         goto end;
     }
 
