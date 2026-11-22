@@ -777,7 +777,7 @@ SetDIBitsToDevice(
     BOOL Hit = FALSE;
     PVOID pvSafeBits = (PVOID) Bits;
     UINT bmiHeight, ScanLinesOrig = ScanLines, ImageSizeOrig;
-    BOOL top_down;
+    BOOL top_down, bRle;
     INT src_y = 0;
     ULONG iFormat, cBitsPixel, cjBits, cjWidth;
 
@@ -808,6 +808,14 @@ SetDIBitsToDevice(
     if (ColorUse && ColorUse != DIB_PAL_COLORS && ColorUse != DIB_PAL_COLORS + 1)
         return 0;
 
+    /* Run length data is only valid bottom-up */
+    if ((lpbmi->bmiHeader.biSize >= sizeof(BITMAPINFOHEADER)) && (lpbmi->bmiHeader.biHeight < 0) &&
+        ((lpbmi->bmiHeader.biCompression == BI_RLE8) || (lpbmi->bmiHeader.biCompression == BI_RLE4)))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
     pConvertedInfo = ConvertBitmapInfo(lpbmi, ColorUse, &ConvertedInfoSize, FALSE);
     if (!pConvertedInfo)
         return 0;
@@ -822,6 +830,9 @@ SetDIBitsToDevice(
 
     bmiHeight = abs(pConvertedInfo->bmiHeader.biHeight);
     top_down = (pConvertedInfo->bmiHeader.biHeight < 0);
+    bRle = (pConvertedInfo->bmiHeader.biCompression == BI_RLE8) ||
+           (pConvertedInfo->bmiHeader.biCompression == BI_RLE4);
+
     if ((StartScan > bmiHeight) && (ScanLines > bmiHeight))
     {
         DPRINT("Returning ScanLines of '%d'\n", ScanLines);
@@ -991,8 +1002,13 @@ SetDIBitsToDevice(
         goto Exit;
     }
 
-    /* Calculation of ScanLines for NtGdiSetDIBitsToDeviceInternal */
-    if (YDest >= 0)
+    /* Calculation of ScanLines for NtGdiSetDIBitsToDeviceInternal. Run length data is decoded as a
+       whole image: win32k takes its line count from the header and places the source rectangle itself */
+    if (bRle)
+    {
+        /* ScanLines is the height of the image */
+    }
+    else if (YDest >= 0)
     {
         ScanLines = min(abs(Height), ScanLines);
         if (YSrc > 0)
@@ -1004,7 +1020,7 @@ SetDIBitsToDevice(
                          abs(pConvertedInfo->bmiHeader.biHeight) - StartScan);
     }
 
-    if (YDest >= 0 && YSrc > 0 && bmiHeight <= MaxHeight)
+    if (!bRle && YDest >= 0 && YSrc > 0 && bmiHeight <= MaxHeight)
     {
         ScanLines += YSrc;
     }
@@ -1037,7 +1053,7 @@ SetDIBitsToDevice(
         }
     }
 
-    if (YDest >= 0)
+    if (!bRle && YDest >= 0)
     {
         ScanLines = min(abs(Height), ScanLines);
         if (YSrc > 0)

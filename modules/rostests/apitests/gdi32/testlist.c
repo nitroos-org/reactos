@@ -102,6 +102,7 @@ extern void func_SetBrushOrgEx(void);
 extern void func_SetDCPenColor(void);
 extern void func_SetDIBits(void);
 extern void func_SetDIBitsToDevice(void);
+extern void func_SetDIBitsToDeviceRle(void);
 extern void func_SetLayout(void);
 extern void func_SetMapMode(void);
 extern void func_SetPixel(void);
@@ -223,6 +224,7 @@ const struct test winetest_testlist[] =
     { "SetDCPenColor", func_SetDCPenColor },
     { "SetDIBits", func_SetDIBits },
     { "SetDIBitsToDevice", func_SetDIBitsToDevice },
+    { "SetDIBitsToDeviceRle", func_SetDIBitsToDeviceRle },
     { "SetLayout", func_SetLayout },
     { "SetMapMode", func_SetMapMode },
     { "SetPixel", func_SetPixel },

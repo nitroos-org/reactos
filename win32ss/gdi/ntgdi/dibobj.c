@@ -707,6 +707,34 @@ NtGdiSetDIBitsToDeviceInternal(
     ptSource.x = XSrc;
     ptSource.y = YSrc;
 
+    /* Run length data is decoded as a whole image of ScanLines lines, bottom-up. The source rectangle
+       counts its lines from the bottom of the image and the destination rectangle from its top: the
+       line YSrc + Height - 1 lines above the bottom of the image is drawn on the first line of the
+       destination rectangle. Lines the rectangle asks for beyond the image are not drawn. */
+    if ((bmi->bmiHeader.biCompression == BI_RLE8) || (bmi->bmiHeader.biCompression == BI_RLE4))
+    {
+        LONGLONG llTop, llSkip, llFirst, llRows;
+
+        if (bmi->bmiHeader.biHeight < 0)
+        {
+            ret = 0;
+            goto Exit;
+        }
+
+        llTop = (LONGLONG)ScanLines - YSrc - (LONGLONG)Height;
+        llSkip = (llTop < 0) ? -llTop : 0;
+        llFirst = (llTop < 0) ? 0 : llTop;
+        llRows = min((LONGLONG)Height - llSkip, (LONGLONG)ScanLines - llFirst);
+        if (llRows < 0 || llSkip > Height)
+        {
+            llSkip = 0;
+            llRows = 0;
+        }
+        ptSource.y = (LONG)llFirst;
+        rcDest.top += (LONG)llSkip;
+        rcDest.bottom = rcDest.top + (LONG)llRows;
+    }
+
     SourceSize.cx = bmi->bmiHeader.biWidth;
     SourceSize.cy = ScanLines;
 
