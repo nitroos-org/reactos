@@ -3595,8 +3595,18 @@ CmpAclCheckUserHive(
         return;
     }
 
+    /*
+     * A record only says that the file loaded at that name was checked and is
+     * not older: it cannot tell another file with a later time stamp (a copy
+     * from another machine, a file the account never used). The profile
+     * service loads the account's own file, the one recorded. A load by
+     * anyone else (an administrator's reg load HKU\<SID> <file>, which does
+     * not get the root stamp either) is checked whatever the record says.
+     */
     HiveTime = CmHive->Hive.BaseBlock->TimeStamp;
-    if (CmpRegistryAclEffectiveMode == CM_REGACL_MODE_ENFORCE && CmpAclUserRecordValid(&Name, HiveTime))
+    if (CmpRegistryAclEffectiveMode == CM_REGACL_MODE_ENFORCE &&
+        !(CmHive->Flags & CMHIVE_FLAG_NO_ROOT_STAMP) &&
+        CmpAclUserRecordValid(&Name, HiveTime))
     {
         InterlockedIncrement(&CmpAclUserHivesSkipped);
         return;
