@@ -493,6 +493,18 @@ leave:
     return ret;
 }
 
+/* Whether the six floats are exactly the identity matrix, tested on the bits (no floating point in the kernel here) */
+static
+BOOLEAN
+IsIdentityXformL(
+    const XFORML *pxform)
+{
+    const ULONG *pul = (const ULONG *)pxform;
+
+    return (pul[0] == 0x3F800000) && ((pul[1] << 1) == 0) && ((pul[2] << 1) == 0) &&
+           (pul[3] == 0x3F800000) && ((pul[4] << 1) == 0) && ((pul[5] << 1) == 0);
+}
+
 BOOL
 NTAPI
 GreModifyWorldTransform(
@@ -534,6 +546,11 @@ GreModifyWorldTransform(
         default:
             return FALSE;
     }
+
+    /* PAGE_TO_DEVICE_IDENTITY (the DC is as untouched as it was made) survives MWT_IDENTITY and MWT_SET with the
+       identity matrix, not a multiplication, not even by the identity (measured on Windows Server 2022) */
+    if (dwMode != MWT_IDENTITY && !(dwMode == MWT_SET && IsIdentityXformL(pxform)))
+        pdc->pdcattr->flXform &= ~PAGE_TO_DEVICE_IDENTITY;
 
     /*Set invalidation flags */
     pdc->pdcattr->flXform |= WORLD_XFORM_CHANGED|DEVICE_TO_WORLD_INVALID;
@@ -640,6 +657,8 @@ NtGdiOffsetViewportOrgEx(
     }
     pdcattr->ptlViewportOrg.x += XOffset;
     pdcattr->ptlViewportOrg.y += YOffset;
+    if (XOffset || YOffset)
+        pdcattr->flXform &= ~PAGE_TO_DEVICE_IDENTITY;
     pdcattr->flXform |= PAGE_XLATE_CHANGED | WORLD_XFORM_CHANGED | DEVICE_TO_WORLD_INVALID;
 
     DC_UnlockDc(dc);
@@ -692,6 +711,8 @@ NtGdiOffsetWindowOrgEx(
 
     pdcattr->ptlWindowOrg.x += XOffset;
     pdcattr->ptlWindowOrg.y += YOffset;
+    if (XOffset || YOffset)
+        pdcattr->flXform &= ~PAGE_TO_DEVICE_IDENTITY;
     pdcattr->flXform |= PAGE_XLATE_CHANGED | WORLD_XFORM_CHANGED | DEVICE_TO_WORLD_INVALID;
 
     DC_UnlockDc(dc);
@@ -736,6 +757,7 @@ NtGdiScaleViewportExtEx(
                     pdcattr->szlViewportExt.cx = X;
                     pdcattr->szlViewportExt.cy = Y;
                     pdcattr->flXform |= PAGE_XLATE_CHANGED;
+                    pdcattr->flXform &= ~PAGE_TO_DEVICE_IDENTITY;
 
                     IntMirrorWindowOrg(pDC);
 
@@ -840,6 +862,7 @@ NtGdiScaleWindowExtEx(
                 {
                     pdcattr->szlWindowExt.cx = X;
                     pdcattr->szlWindowExt.cy = Y;
+                    pdcattr->flXform &= ~PAGE_TO_DEVICE_IDENTITY;
 
                     IntMirrorWindowOrg(pDC);
 
@@ -867,11 +890,17 @@ IntGdiSetMapMode(
     int MapMode)
 {
     INT iPrevMapMode;
-    FLONG flXform;
+    FLONG flXform, flKeep;
     PDC_ATTR pdcattr = dc->pdcattr;
 
     if (MapMode == pdcattr->iMapMode)
         return MapMode;
+
+    /* PAGE_TO_DEVICE_IDENTITY: the DC's transform has never been touched since it was made (measured on Windows
+       Server 2022; gdi32 answers LPtoDP/DPtoLP for such a DC itself). Changing the map mode clears it, the one
+       exception is the switch from MM_TEXT to MM_ANISOTROPIC. */
+    flKeep = (pdcattr->iMapMode == MM_TEXT && MapMode == MM_ANISOTROPIC) ?
+             (pdcattr->flXform & PAGE_TO_DEVICE_IDENTITY) : 0;
 
     flXform = pdcattr->flXform & ~(ISO_OR_ANISO_MAP_MODE|PTOD_EFM22_NEGATIVE|
         PTOD_EFM11_NEGATIVE|POSITIVE_Y_IS_UP|PAGE_TO_DEVICE_SCALE_IDENTITY|
@@ -927,8 +956,8 @@ IntGdiSetMapMode(
             break;
 
         case MM_ANISOTROPIC:
-            flXform &= ~(PAGE_TO_DEVICE_IDENTITY|POSITIVE_Y_IS_UP);
-            flXform |= ISO_OR_ANISO_MAP_MODE;
+            flXform &= ~POSITIVE_Y_IS_UP;
+            flXform |= ISO_OR_ANISO_MAP_MODE | flKeep;
             break;
 
         default:
@@ -972,6 +1001,8 @@ GreSetViewportOrgEx(
        Point->y = pdcattr->ptlViewportOrg.y;
     }
 
+    if (pdcattr->ptlViewportOrg.x != X || pdcattr->ptlViewportOrg.y != Y)
+        pdcattr->flXform &= ~PAGE_TO_DEVICE_IDENTITY;
     pdcattr->ptlViewportOrg.x = X;
     pdcattr->ptlViewportOrg.y = Y;
     pdcattr->flXform |= PAGE_XLATE_CHANGED | WORLD_XFORM_CHANGED | DEVICE_TO_WORLD_INVALID;
@@ -1023,6 +1054,8 @@ NtGdiSetViewportOrgEx(
         }
     }
 
+    if (pdcattr->ptlViewportOrg.x != X || pdcattr->ptlViewportOrg.y != Y)
+        pdcattr->flXform &= ~PAGE_TO_DEVICE_IDENTITY;
     pdcattr->ptlViewportOrg.x = X;
     pdcattr->ptlViewportOrg.y = Y;
     pdcattr->flXform |= PAGE_XLATE_CHANGED | WORLD_XFORM_CHANGED | DEVICE_TO_WORLD_INVALID;
@@ -1075,6 +1108,8 @@ NtGdiSetWindowOrgEx(
         }
     }
 
+    if (pdcattr->ptlWindowOrg.x != X || pdcattr->ptlWindowOrg.y != Y)
+        pdcattr->flXform &= ~PAGE_TO_DEVICE_IDENTITY;
     pdcattr->ptlWindowOrg.x = X;
     pdcattr->ptlWindowOrg.y = Y;
     pdcattr->flXform |= PAGE_XLATE_CHANGED | WORLD_XFORM_CHANGED | DEVICE_TO_WORLD_INVALID;
@@ -1134,6 +1169,7 @@ DC_vSetLayout(
     if (dwLayout & LAYOUT_RTL)
     {
         pdcattr->iMapMode = MM_ANISOTROPIC;
+        pdcattr->flXform &= ~PAGE_TO_DEVICE_IDENTITY;
     }
 
     //pdcattr->szlWindowExt.cy = -pdcattr->szlWindowExt.cy;

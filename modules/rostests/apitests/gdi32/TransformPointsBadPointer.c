@@ -37,11 +37,13 @@ static HDC MakeDC(int State)
         case 10: SetGraphicsMode(hDC, GM_ADVANCED); break;
         case 11: SetMapMode(hDC, MM_ANISOTROPIC); SetWindowExtEx(hDC, 1, 1, NULL); SetViewportExtEx(hDC, 1, 1, NULL); break;
         case 12: SetViewportOrgEx(hDC, 0, 0, NULL); break;
+        case 13: SetMapMode(hDC, MM_ANISOTROPIC); SetMapMode(hDC, MM_TEXT); break;
         case 14: SetGraphicsMode(hDC, GM_ADVANCED); SetWorldTransform(hDC, &Identity); break;
         case 15: SetWindowOrgEx(hDC, 0, 0, NULL); break;
         case 16: SetMapMode(hDC, MM_ANISOTROPIC); SetWindowExtEx(hDC, 1, 1, NULL); break;
         case 17: SetMapMode(hDC, MM_ISOTROPIC); SetWindowExtEx(hDC, 1, 1, NULL); SetViewportExtEx(hDC, 1, 1, NULL); break;
         case 18: SetWindowExtEx(hDC, 1, 1, NULL); SetViewportExtEx(hDC, 1, 1, NULL); break;
+        case 19: SetMapMode(hDC, MM_ANISOTROPIC); SetWindowExtEx(hDC, 1, 1, NULL); SetViewportExtEx(hDC, 1, 1, NULL); SetMapMode(hDC, MM_TEXT); break;
     }
     return hDC;
 }
@@ -49,12 +51,12 @@ static HDC MakeDC(int State)
 START_TEST(TransformPointsBadPointer)
 {
     /* States 13 (MM_ANISOTROPIC, then MM_TEXT again) and 19 (as 11, then MM_TEXT) are FALSE on Windows although the
-     * transform is the identity again: they depend on history that is not modelled here and are left out. */
+     * transform is the identity again: the answer depends on the history of the DC (see TransformPointsIdentityHistory). */
     static const ROW Rows[] =
     {
         { 0, TRUE }, { 1, FALSE }, { 2, FALSE }, { 3, FALSE }, { 4, FALSE }, { 5, TRUE }, { 6, FALSE }, { 7, FALSE },
-        { 8, FALSE }, { 9, TRUE }, { 10, TRUE }, { 11, TRUE }, { 12, TRUE }, { 14, TRUE }, { 15, TRUE }, { 16, TRUE },
-        { 17, FALSE }, { 18, TRUE },
+        { 8, FALSE }, { 9, TRUE }, { 10, TRUE }, { 11, TRUE }, { 12, TRUE }, { 13, FALSE }, { 14, TRUE }, { 15, TRUE },
+        { 16, TRUE }, { 17, FALSE }, { 18, TRUE }, { 19, FALSE },
     };
     SYSTEM_INFO si;
     POINT *Page;
