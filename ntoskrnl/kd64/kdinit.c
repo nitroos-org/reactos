@@ -388,6 +388,17 @@ KdInitSystem(
                     }
                 }
             }
+#ifdef _WINKD_
+            else
+            {
+                /*
+                 * No debug option: the debugger is not loaded and cannot be
+                 * enabled later, not even by a bug check (only CRASHDEBUG
+                 * keeps it for that).
+                 */
+                KdPitchDebugger = TRUE;
+            }
+#endif
         }
         else
         {

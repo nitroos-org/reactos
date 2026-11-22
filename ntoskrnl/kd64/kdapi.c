@@ -2016,6 +2016,10 @@ KdEnableDebuggerWithLock(IN BOOLEAN NeedLock)
         return STATUS_ACCESS_DENIED;
     }
 
+    /* A debugger that was not loaded at boot (NODEBUG) cannot be enabled */
+    if (KdPitchDebugger)
+        return STATUS_DEBUGGER_INACTIVE;
+
     /* Check if we need to acquire the lock */
     if (NeedLock)
     {
@@ -2095,6 +2099,14 @@ KdDisableDebuggerWithLock(IN BOOLEAN NeedLock)
         /* Fail */
         return STATUS_ACCESS_DENIED;
     }
+
+    /*
+     * Nor is there anything to disable when the debugger was not loaded at
+     * boot; disabling it would mark it as "previously enabled" and the next
+     * enable would then start it.
+     */
+    if (KdPitchDebugger)
+        return STATUS_DEBUGGER_INACTIVE;
 
     /* Check if we need to acquire the lock */
     if (NeedLock)
