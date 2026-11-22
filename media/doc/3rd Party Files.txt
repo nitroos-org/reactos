@@ -198,6 +198,12 @@ Used Version: tag mm326, git commit 47e330f
 License: BSD-3-Clause (https://spdx.org/licenses/BSD-3-Clause.html)
 URL: https://github.com/virtio-win/kvm-guest-drivers-windows/tree/mm326/vioscsi
 
+Title: VMware PVSCSI device interface (register and ring layouts)
+Path: drivers/storage/port/pvscsi
+Used Version: OpenBSD sys/dev/pci/vmwpvs.c revision 1.31 (definitions only, the driver code is new)
+License: ISC (https://spdx.org/licenses/ISC.html)
+URL: https://github.com/openbsd/src/blob/master/sys/dev/pci/vmwpvs.c
+
 Title: VirtIO NetKVM Windows guest driver
 Path: drivers/network/dd/netkvm
 Used Version: git commit 5e01b36

@@ -1,0 +1,21 @@
+VMware paravirtual SCSI (PVSCSI) miniport, PCI 15AD:07C0 (also emulated by QEMU: -device pvscsi)
+
+The driver (pvscsi.c) is new code, GPL-2.0-or-later, written against the legacy SCSI port
+interface (scsiport) like the BusLogic miniport.
+
+Origin of the device interface
+  Project:  OpenBSD
+  File:     sys/dev/pci/vmwpvs.c, revision 1.31 (2025/08/12)
+  URL:      https://github.com/openbsd/src/blob/master/sys/dev/pci/vmwpvs.c
+  License:  ISC, notice kept in the header of pvscsi.c
+  Used:     the register offsets, the command numbers, the layouts of the request ring entry, the
+            completion ring entry, the scatter/gather entry, the shared ring state and the
+            SETUP_RINGS command. No code was copied: the OpenBSD driver is written for its own
+            SCSI midlayer and DMA API.
+
+Not used: the Linux driver vmw_pvscsi (GPL-2.0-only, not compatible with this tree), and any VMware
+or Microsoft binary driver.
+
+What it does not do: message ring (no hot plug of disks), MSI/MSI-X (INTx only), more than one
+logical unit per target, CDBs longer than 16 bytes. Every index and context value that the device
+writes (ring producer index, completion context) is range checked before it is used.

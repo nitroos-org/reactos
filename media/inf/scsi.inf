@@ -28,6 +28,7 @@ DefaultDestDir = 12
 [GenericMfg]
 %GEN_SCSIADAPTER.DeviceDesc% = NO_DRV,,GEN_SCSIADAPTER
 %PCI\VEN_104B&CC_0100.DeviceDesc% = BusLogic_Inst,PCI\VEN_104B&CC_0100
+%PCI\VEN_15AD&DEV_07C0.DeviceDesc% = Pvscsi_Inst,PCI\VEN_15AD&DEV_07C0
 
 ;--------------------------- SCSIPORT DRIVER ----------------------------
 
@@ -67,6 +68,25 @@ ErrorControl  = 0
 ServiceBinary = %12%\buslogic.sys
 LoadOrderGroup = SCSI Miniport
 
+;--------------------------- PVSCSI DRIVER ------------------------------
+
+[Pvscsi_Inst.NT]
+CopyFiles = Pvscsi_CopyFiles.NT, Scsiport_CopyFiles.NT
+
+[Pvscsi_CopyFiles.NT]
+pvscsi.sys
+
+[Pvscsi_Inst.NT.Services]
+AddService = pvscsi, 0x00000002, Pvscsi_Service_Inst
+AddService = Scsiport, , Scsiport_Service_Inst
+
+[Pvscsi_Service_Inst]
+ServiceType   = 1
+StartType     = 0
+ErrorControl  = 1
+ServiceBinary = %12%\pvscsi.sys
+LoadOrderGroup = SCSI Miniport
+
 ;-------------------------------- STRINGS -------------------------------
 
 [Strings]
@@ -80,6 +100,7 @@ GenericMfg = "(Standard SCSI and RAID controllers)"
 GEN_SCSIADAPTER.DeviceDesc = "SCSI/RAID Host Controller"
 
 PCI\VEN_104B&CC_0100.DeviceDesc = "BusLogic SCSI Controller"
+PCI\VEN_15AD&DEV_07C0.DeviceDesc = "VMware PVSCSI SCSI Controller"
 
 [Strings.0404]
 SCSIClassName = "SCSI / RAID 控制器"
