@@ -19,6 +19,7 @@ list(APPEND SOURCE
     interface_access.c
     ntlm_auth.c
     primitive_handle.c
+    SetAuthInfoRows.c
     ${CMAKE_CURRENT_BINARY_DIR}/generic_handle_c.c
     ${CMAKE_CURRENT_BINARY_DIR}/generic_handle_s.c
     ${CMAKE_CURRENT_BINARY_DIR}/interface_access_c.c
