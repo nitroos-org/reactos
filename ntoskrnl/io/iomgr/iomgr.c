@@ -531,6 +531,13 @@ IopMarkBootPartition(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
 
     if (!NT_SUCCESS(Status))
     {
+        /* Say which device, for the debug log: on a machine whose disk controller has
+           no driver (Hyper-V generation 2: VMBus SCSI) no disk or CD appears at all */
+        DbgPrint("The boot device %wZ cannot be opened (status 0x%lx): %lu disks, %lu CD-ROM drives "
+                 "found; does its disk controller have a driver?\n",
+                 &DeviceName, Status,
+                 IoGetConfigurationInformation()->DiskCount,
+                 IoGetConfigurationInformation()->CdRomCount);
         KeBugCheckEx(INACCESSIBLE_BOOT_DEVICE,
                      (ULONG_PTR)&DeviceName,
                      Status,
