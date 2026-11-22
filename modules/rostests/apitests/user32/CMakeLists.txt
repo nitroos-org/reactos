@@ -62,6 +62,7 @@ list(APPEND SOURCE
     WindowPosChanged.c
     WindowRgnHandles.c
     PowerSettingNotification.c
+    ScreenSaverSecurePolicy.c
     OwnerZOrderNotice.c
     NcPaintLayered.c
     SetWindowPosFlags.c

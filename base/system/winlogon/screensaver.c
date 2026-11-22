@@ -673,7 +673,29 @@ StartScreenSaver(
             break;
         }
     }
-    if (Status == WAIT_OBJECT_0 + 1)
+    if (Status == WAIT_OBJECT_0)
+    {
+        DWORD ExitCode = 0;
+
+        /*
+         * A saver that crashes (an exception code as its exit code) is kept by Windows for about 12 seconds for the
+         * error report, and the Screen-Saver desktop stays up for that time: with a password protected setting the
+         * workstation is locked afterwards, as the saver has run for more than the grace period then (measured on
+         * Windows Server 2022: a saver that crashed 2 s after its start ended 14.3 s after it, then the lock; one
+         * that exits with a code, also 1, within the grace period does not lock). Input ends the wait.
+         */
+        if (GetExitCodeProcess(ProcessInformation.hProcess, &ExitCode) && (ExitCode & 0xF0000000) == 0xC0000000)
+        {
+            DWORD CrashTick = GetTickCount();
+
+            while (GetTickCount() - CrashTick < 12000)
+            {
+                if (WaitForSingleObject(Session->hUserActivity, 100) == WAIT_OBJECT_0 || IsSasRequestPending(Session))
+                    break;
+            }
+        }
+    }
+    else if (Status == WAIT_OBJECT_0 + 1)
     {
         /* Kill the screen saver */
         TerminateProcess(ProcessInformation.hProcess, 0);
