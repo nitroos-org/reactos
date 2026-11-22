@@ -12,6 +12,7 @@
 #include <intsafe.h>
 #define NTOS_MODE_USER
 #include <ndk/cmfuncs.h>
+#include <ndk/iofuncs.h>
 #include <ndk/kefuncs.h>
 #include <ndk/lpctypes.h>
 #include <ndk/lpcfuncs.h>
