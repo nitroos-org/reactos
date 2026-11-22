@@ -2125,6 +2125,14 @@ FatCheckDirtyBit (
     IN PVCB Vcb
     );
 
+#ifdef __REACTOS__
+VOID
+FatCheckDirtyBitOnDisk (
+    IN PIRP_CONTEXT IrpContext,
+    IN PVCB Vcb
+    );
+#endif
+
 VOID
 FatQuickVerifyVcb (
     IN PIRP_CONTEXT IrpContext,

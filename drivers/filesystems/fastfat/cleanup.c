@@ -473,8 +473,23 @@ Return Value:
             //  just to be safe (in case there is no dismount).
             //
 
+#ifdef __REACTOS__
+            //
+            //  autochk repairs the mounted boot volume through its own handle,
+            //  which has FO_FILE_MODIFIED but not WriteAccess, so the test of
+            //  the original code never fired for it and the verify that
+            //  rebuilds what the file system keeps in memory (the FAT cache,
+            //  the free cluster bitmap, the Mcbs, the dirty state) did not
+            //  run: a file whose chain autochk shortened was still extended
+            //  into the cluster it had freed.  A handle that modified the
+            //  volume is what counts, not the access it asked for.
+            //
+
+            } else if (FlagOn(FileObject->Flags, FO_FILE_MODIFIED)) {
+#else
             } else if (FileObject->WriteAccess &&
                        FlagOn(FileObject->Flags, FO_FILE_MODIFIED)) {
+#endif
 
                 (VOID)FatHijackIrpAndFlushDevice( IrpContext,
                                                   Irp,
@@ -482,6 +497,21 @@ Return Value:
 
                 SetFlag(Vcb->Vpb->RealDevice->Flags, DO_VERIFY_VOLUME);
             }
+
+#ifdef __REACTOS__
+            //
+            //  chkdsk may have cleared the dirty bit of a volume that is
+            //  mounted dirty (it cannot lock the boot volume).  Its handle
+            //  has FO_FILE_MODIFIED but not WriteAccess (that is what the
+            //  test above misses): see FatCheckDirtyBitOnDisk.
+            //
+
+            if (!FlagOn( Ccb->Flags, CCB_FLAG_COMPLETE_DISMOUNT ) &&
+                FlagOn(FileObject->Flags, FO_FILE_MODIFIED)) {
+
+                FatCheckDirtyBitOnDisk( IrpContext, Vcb );
+            }
+#endif
 
             //
             //  If the volume is locked by this file object then release

@@ -72,6 +72,9 @@ FatMarkVolumeCompletionRoutine(
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(PAGE, FatCheckDirtyBit)
+#ifdef __REACTOS__
+#pragma alloc_text(PAGE, FatCheckDirtyBitOnDisk)
+#endif
 #pragma alloc_text(PAGE, FatVerifyOperationIsLegal)
 #pragma alloc_text(PAGE, FatDeferredCleanVolume)
 #pragma alloc_text(PAGE, FatMatchFileSize)
@@ -1277,6 +1280,149 @@ Return Value:
 
     DebugTrace(-1, Dbg, "FatFspMarkVolumeDirtyWithRecover -> VOID\n", 0);
 }
+
+
+#ifdef __REACTOS__
+VOID
+FatCheckDirtyBitOnDisk (
+    IN PIRP_CONTEXT IrpContext,
+    IN PVCB Vcb
+    )
+
+/*++
+
+Routine Description:
+
+    Called when a handle that wrote to the volume (chkdsk, autochk) is
+    cleaned up.  A volume that was mounted dirty is not marked dirty on the
+    disk again by the file system: it takes the bit on the disk to be set
+    still.  A check that repairs the volume while it is mounted (the boot
+    volume cannot be locked or dismounted) clears the bit behind our back, so
+    everything written after that, the lazily written directories and FAT
+    included, goes to a volume that says it is clean.  A power cut then
+    leaves a damaged volume that no check looks at (the pagefile and
+    setupapi.dev.log of the boot after the repair).  Read the boot sector from
+    the device (not through the cache); when the bit is clear, forget that the
+    volume was mounted dirty, so that the next modification marks it dirty on
+    the disk again, and the volume is marked clean when it has been idle.
+
+Arguments:
+
+    Vcb - Supplies the Vcb whose volume handle is being cleaned up.
+
+--*/
+
+{
+    PPACKED_BOOT_SECTOR BootSector;
+    PIRP Irp;
+    KEVENT Event;
+    IO_STATUS_BLOCK Iosb;
+    LARGE_INTEGER Offset;
+    NTSTATUS Status;
+    BOOLEAN Dirty;
+    ULONG Length;
+
+    PAGED_CODE();
+
+    if (!FlagOn( Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY ) ||
+        FlagOn( Vcb->VcbState, VCB_STATE_FLAG_WRITE_PROTECTED ) ||
+        FatIsFat12( Vcb ) ||
+        Vcb->VcbCondition != VcbGood) {
+
+        return;
+    }
+
+    Length = Vcb->Bpb.BytesPerSector;
+
+    if (Length < sizeof(PACKED_BOOT_SECTOR_EX)) {
+
+        return;
+    }
+
+    BootSector = ExAllocatePoolWithTag( NonPagedPoolNx, Length, ' taF' );
+
+    if (BootSector == NULL) {
+
+        return;
+    }
+
+    Offset.QuadPart = 0;
+
+    KeInitializeEvent( &Event, NotificationEvent, FALSE );
+
+    Irp = IoBuildSynchronousFsdRequest( IRP_MJ_READ,
+                                        Vcb->TargetDeviceObject,
+                                        BootSector,
+                                        Length,
+                                        &Offset,
+                                        &Event,
+                                        &Iosb );
+
+    if (Irp == NULL) {
+
+        ExFreePool( BootSector );
+        return;
+    }
+
+    Status = IoCallDriver( Vcb->TargetDeviceObject, Irp );
+
+    if (Status == STATUS_PENDING) {
+
+        KeWaitForSingleObject( &Event, Executive, KernelMode, FALSE, NULL );
+        Status = Iosb.Status;
+    }
+
+    if (NT_SUCCESS( Status ) && FatIsBootSectorFat( BootSector )) {
+
+        if (IsBpbFat32(&BootSector->PackedBpb)) {
+
+            Dirty = BooleanFlagOn( ((PPACKED_BOOT_SECTOR_EX)BootSector)->CurrentHead,
+                                   FAT_BOOT_SECTOR_DIRTY );
+        } else {
+
+            Dirty = BooleanFlagOn( BootSector->CurrentHead, FAT_BOOT_SECTOR_DIRTY );
+        }
+
+        if (!Dirty) {
+
+            DbgPrint( "FASTFAT: the dirty bit was cleared on the disk behind the file system, marking the volume dirty again on its next change\n" );
+
+            FatClearVcbFlag( Vcb, VCB_STATE_FLAG_MOUNTED_DIRTY );
+            FatClearVcbFlag( Vcb, VCB_STATE_FLAG_VOLUME_DIRTY );
+
+            //
+            //  Whatever is dirty in the cache already (or changes before the
+            //  next FatSetDirtyBcb) goes to a volume that is marked dirty
+            //  now; the clean timer marks it clean after 8 idle seconds.
+            //
+
+            _SEH2_TRY {
+
+                LARGE_INTEGER CleanVolumeTimer;
+
+                FatMarkVolume( IrpContext, Vcb, VolumeDirty );
+                FatSetVcbFlag( Vcb, VCB_STATE_FLAG_VOLUME_DIRTY );
+
+                CleanVolumeTimer.QuadPart = (LONG)-8*1000*1000*10;
+
+                (VOID)KeCancelTimer( &Vcb->CleanVolumeTimer );
+                (VOID)KeRemoveQueueDpc( &Vcb->CleanVolumeDpc );
+                KeSetTimer( &Vcb->CleanVolumeTimer,
+                            CleanVolumeTimer,
+                            &Vcb->CleanVolumeDpc );
+
+            } _SEH2_EXCEPT( FsRtlIsNtstatusExpected(_SEH2_GetExceptionCode()) ?
+                            EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH ) {
+
+                FatResetExceptionState( IrpContext );
+
+            } _SEH2_END;
+        }
+    }
+
+    ExFreePool( BootSector );
+}
+#endif
 
 
 VOID

@@ -236,6 +236,15 @@ FatSupersedeOrOverwriteFile (
     _In_ BOOLEAN NoEaKnowledge
     );
 
+#ifdef __REACTOS__
+VOID
+FatLookupPagingFileAllocationSize (
+    _In_ PIRP_CONTEXT IrpContext,
+    _In_ PFCB Fcb,
+    _In_ ULONG CreateDisposition
+    );
+#endif
+
 NTSTATUS
 FatCheckSystemSecurityAccess (
     _In_ PIRP_CONTEXT IrpContext
@@ -271,6 +280,9 @@ FatCheckShareAccess (
 #pragma alloc_text(PAGE, FatOpenTargetDirectory)
 #pragma alloc_text(PAGE, FatOpenVolume)
 #pragma alloc_text(PAGE, FatSupersedeOrOverwriteFile)
+#ifdef __REACTOS__
+#pragma alloc_text(PAGE, FatLookupPagingFileAllocationSize)
+#endif
 #pragma alloc_text(PAGE, FatSetFullNameInFcb)
 #endif
 
@@ -4671,7 +4683,11 @@ Return Value:
 
         if (IsPagingFile) {
 
+#ifdef __REACTOS__
+            FatLookupPagingFileAllocationSize( IrpContext, *Fcb, CreateDisposition );
+#else
             FatLookupFileAllocationSize( IrpContext, *Fcb );
+#endif
         }
 
 #if (NTDDI_VERSION >= NTDDI_WIN7)
@@ -6376,6 +6392,123 @@ Return Value:
 //  Internal support routine
 //
 
+#ifdef __REACTOS__
+_Requires_lock_held_(_Global_critical_region_)
+VOID
+FatLookupPagingFileAllocationSize (
+    _In_ PIRP_CONTEXT IrpContext,
+    _In_ PFCB Fcb,
+    _In_ ULONG CreateDisposition
+    )
+
+/*++
+
+Routine Description:
+
+    Reads the allocation chain of an existing paging file that is being
+    opened, so that its Mcb is complete before any paging I/O.  A paging
+    file must never be used with a chain that does not cover its size.
+
+    A power cut can leave the directory entry of the paging file with a size
+    (or a start cluster) that the chain on the disk does not match, and
+    chkdsk does not run when the dirty bit was not set at the cut.  If the
+    paging file is superseded or overwritten (what the system does at every
+    boot) the old contents are worth nothing, so the file is reset to an
+    empty file with no popup, and the caller then allocates it again.  Its
+    old clusters are not freed: the chain cannot be trusted (it may lead into
+    the clusters of another file), so they stay allocated until chkdsk
+    reclaims them.  Any other open of a damaged paging file is refused with
+    STATUS_FILE_CORRUPT_ERROR, also without a popup.
+
+Arguments:
+
+    Fcb - Supplies the Fcb just created from the dirent of the paging file.
+
+    CreateDisposition - Supplies the create disposition of the open.
+
+--*/
+
+{
+    BOOLEAN Corrupt = FALSE;
+    BOOLEAN PopupsWereOn = !FlagOn( IrpContext->Flags, IRP_CONTEXT_FLAG_DISABLE_POPUPS );
+    PDIRENT Dirent = NULL;
+    PBCB DirentBcb = NULL;
+
+    PAGED_CODE();
+
+    SetFlag( IrpContext->Flags, IRP_CONTEXT_FLAG_DISABLE_POPUPS );
+
+    _SEH2_TRY {
+
+        FatLookupFileAllocationSize( IrpContext, Fcb );
+
+    } _SEH2_EXCEPT( (_SEH2_GetExceptionCode() == STATUS_FILE_CORRUPT_ERROR) ?
+                    EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH ) {
+
+        FatResetExceptionState( IrpContext );
+        Corrupt = TRUE;
+
+    } _SEH2_END;
+
+    if (PopupsWereOn) {
+
+        ClearFlag( IrpContext->Flags, IRP_CONTEXT_FLAG_DISABLE_POPUPS );
+    }
+
+    if (!Corrupt) {
+
+        return;
+    }
+
+    if ((CreateDisposition != FILE_SUPERSEDE) &&
+        (CreateDisposition != FILE_OVERWRITE) &&
+        (CreateDisposition != FILE_OVERWRITE_IF)) {
+
+        DbgPrint( "FASTFAT: paging file chain does not match its size, refusing to open it\n" );
+
+        FatRaiseStatus( IrpContext, STATUS_FILE_CORRUPT_ERROR );
+    }
+
+    DbgPrint( "FASTFAT: paging file chain does not match its size, starting it again from zero\n" );
+
+    //
+    //  Empty file: no start cluster, no size, no allocation.  The partial
+    //  Mcb that the failed lookup built goes away.
+    //
+
+    _SEH2_TRY {
+
+        FatGetDirentFromFcbOrDcb( IrpContext, Fcb, FALSE, &Dirent, &DirentBcb );
+
+        Dirent->FirstClusterOfFile = 0;
+
+        if (FatIsFat32( Fcb->Vcb )) {
+
+            Dirent->FirstClusterOfFileHi = 0;
+        }
+
+        Dirent->FileSize = 0;
+
+        FatSetDirtyBcb( IrpContext, DirentBcb, Fcb->Vcb, TRUE );
+
+    } _SEH2_FINALLY {
+
+        FatUnpinBcb( IrpContext, DirentBcb );
+
+    } _SEH2_END;
+
+    FatRemoveMcbEntry( Fcb->Vcb, &Fcb->Mcb, 0, 0xFFFFFFFF );
+
+    Fcb->FirstClusterOfFile = 0;
+    Fcb->Header.AllocationSize.QuadPart = 0;
+    Fcb->Header.FileSize.QuadPart = 0;
+    Fcb->Header.ValidDataLength.QuadPart = 0;
+    Fcb->ValidDataToDisk = 0;
+
+    FatFlushDirentForFile( IrpContext, Fcb );
+}
+#endif
+
 _Requires_lock_held_(_Global_critical_region_)
 IO_STATUS_BLOCK
 FatSupersedeOrOverwriteFile (
@@ -6571,6 +6704,32 @@ Return Value:
 
         CcSetFileSizes( FileObject,
                         (PCC_FILE_SIZES)&Fcb->Header.AllocationSize );
+
+#ifdef __REACTOS__
+        //
+        //  The paging file is replaced at every boot.  Its new size (zero)
+        //  goes to the disk before the truncation frees any cluster of the
+        //  old chain, so that a power cut cannot leave a size on the disk
+        //  that the (shorter) chain does not cover.
+        //
+
+        if (FlagOn( Fcb->FcbState, FCB_STATE_PAGING_FILE )) {
+
+            FatGetDirentFromFcbOrDcb( IrpContext,
+                                      Fcb,
+                                      FALSE,
+                                      &Dirent,
+                                      &DirentBcb );
+
+            Dirent->FileSize = 0;
+
+            FatSetDirtyBcb( IrpContext, DirentBcb, Fcb->Vcb, TRUE );
+
+            FatUnpinBcb( IrpContext, DirentBcb );
+
+            FatFlushDirentForFile( IrpContext, Fcb );
+        }
+#endif
 
         FatTruncateFileAllocation( IrpContext, Fcb, AllocationSize+HeaderSize );
 
