@@ -964,7 +964,19 @@ ElfrOpenELA(
 
     RtlFreeUnicodeString(&ModuleNameW);
 
-    return Status;
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* The Security log is opened by callers that hold SeSecurityPrivilege only (as in ElfrOpenELW) */
+    if (!_wcsicmp(((PLOGHANDLE)*LogHandle)->LogFile->LogName, L"Security") &&
+        !ElfCallerMayOpenSecurityLog())
+    {
+        ElfDeleteEventLogHandle(LogHandle);
+        *LogHandle = NULL;
+        return STATUS_PRIVILEGE_NOT_HELD;
+    }
+
+    return STATUS_SUCCESS;
 }
 
 
