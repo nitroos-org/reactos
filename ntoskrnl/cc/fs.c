@@ -341,7 +341,7 @@ CcPurgeCacheSection (
     /* Now make sure that Mm doesn't hold some pages here. */
 purgeMm:
     if (Success)
-        Success = MmPurgeSegment(SectionObjectPointer, FileOffset, Length);
+        Success = MmPurgeSegment(SectionObjectPointer, FileOffset, Length, FALSE);
 
     /* A map that nobody has open and that the purge left clean is deleted by this (in a worker) */
     if (SharedCacheMap)
