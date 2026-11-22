@@ -73,6 +73,30 @@ static DWORD OpenAsA(HANDLE Token, PCSTR LogName)
     return Error;
 }
 
+/* RegisterEventSource of the name "Security" (Windows Server 2022: error 5 for everybody, both entry points) */
+static void TestRegisterSecurity(HANDLE Token)
+{
+    HANDLE hLog;
+    DWORD Error;
+
+    if (Token && !ImpersonateLoggedOnUser(Token))
+        return;
+    SetLastError(ERROR_SUCCESS);
+    hLog = RegisterEventSourceW(NULL, L"Security");
+    Error = GetLastError();
+    ok(hLog == NULL && Error == ERROR_ACCESS_DENIED, "RegisterEventSourceW(Security): %p, error %lu, expected 5\n", hLog, Error);
+    if (hLog)
+        DeregisterEventSource(hLog);
+    SetLastError(ERROR_SUCCESS);
+    hLog = RegisterEventSourceA(NULL, "security");
+    Error = GetLastError();
+    ok(hLog == NULL && Error == ERROR_ACCESS_DENIED, "RegisterEventSourceA(security): %p, error %lu, expected 5\n", hLog, Error);
+    if (hLog)
+        DeregisterEventSource(hLog);
+    if (Token)
+        RevertToSelf();
+}
+
 START_TEST(EventLogSecurityAccess)
 {
     WCHAR User[32];
@@ -95,6 +119,7 @@ START_TEST(EventLogSecurityAccess)
             ok(Error == ERROR_SUCCESS, "administrator: OpenEventLog(Security) failed: %lu\n", Error);
             Error = OpenAsA(NULL, "Security");
             ok(Error == ERROR_SUCCESS, "administrator: OpenEventLogA(Security) failed: %lu\n", Error);
+            TestRegisterSecurity(NULL);
         }
         else
             skip("the test is not run by an account that holds SeSecurityPrivilege\n");
@@ -141,6 +166,7 @@ START_TEST(EventLogSecurityAccess)
            Error, ERROR_PRIVILEGE_NOT_HELD);
         Error = OpenAsA(Token, "Application");
         ok(Error == ERROR_SUCCESS, "standard user: OpenEventLogA(Application) failed: %lu\n", Error);
+        TestRegisterSecurity(Token);
         CloseHandle(Token);
         Token = NULL;
     }
