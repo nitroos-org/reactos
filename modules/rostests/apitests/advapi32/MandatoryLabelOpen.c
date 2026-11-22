@@ -9,6 +9,7 @@
 #include <ndk/obfuncs.h>
 #include <ndk/psfuncs.h>
 #include <aclapi.h>
+#include <sddl.h>
 
 static BOOL (WINAPI *pAddMandatoryAce)(PACL, DWORD, DWORD, DWORD, PSID);
 
@@ -485,6 +486,96 @@ static VOID ChildCreateRows(DWORD Level)
     }
 }
 
+/*
+ * Opens and creates beside the object grid: the null device (labelled Untrusted), an explicit label above the
+ * creator's level ("Windows Integrity Mechanism Design": no higher than the creating subject), the parent's token
+ * (it may be duplicated, but impersonated at most at identification level: no impersonation of a higher-level
+ * token), a handle duplicated with more access (an open of the object) and the interactive window station
+ * (labelled Low: the clipboard for Low processes).
+ */
+static VOID ChildReviewRows(DWORD Level)
+{
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    SECURITY_ATTRIBUTES Sa = {sizeof(Sa), NULL, FALSE};
+    SECURITY_IMPERSONATION_LEVEL ImpLevel = SecurityAnonymous;
+    WCHAR Name[MAX_PATH];
+    HANDLE Handle, Process, Token, Dup, Again;
+    DWORD Written, Length, WinStaLevel;
+    BOOL Ok;
+
+    /* NUL for write, as cmd's "> nul" */
+    Handle = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(Handle != INVALID_HANDLE_VALUE, "level %lx: NUL for write: %lu\n", Level, GetLastError());
+    if (Handle != INVALID_HANDLE_VALUE)
+    {
+        ok(WriteFile(Handle, "x", 1, &Written, NULL), "level %lx: write to NUL: %lu\n", Level, GetLastError());
+        CloseHandle(Handle);
+    }
+
+    /* A new pipe with an explicit High label */
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"S:(ML;;NW;;;HI)", SDDL_REVISION_1, &Sd, NULL))
+    {
+        Sa.lpSecurityDescriptor = Sd;
+        StringCchPrintfW(Name, _countof(Name), L"\\\\.\\pipe\\mlo%lu-hi-%lx", ParentPid, Level);
+        Handle = CreateNamedPipeW(Name, PIPE_ACCESS_DUPLEX, 0, 1, 64, 64, 0, &Sa);
+        ok(Handle == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PRIVILEGE_NOT_HELD,
+           "level %lx: pipe labelled High by its creator: %p, %lu\n", Level, Handle, GetLastError());
+        if (Handle != INVALID_HANDLE_VALUE)
+            CloseHandle(Handle);
+        LocalFree(Sd);
+    }
+
+    /* The parent's token: duplicated, impersonated at identification level only */
+    Process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, ParentPid);
+    Token = NULL;
+    if (Process && OpenProcessToken(Process, TOKEN_QUERY | TOKEN_DUPLICATE, &Token))
+    {
+        Dup = NULL;
+        ok(DuplicateTokenEx(Token, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenImpersonation, &Dup),
+           "level %lx: DuplicateTokenEx of the parent's token: %lu\n", Level, GetLastError());
+        if (Dup && SetThreadToken(NULL, Dup))
+        {
+            Again = NULL;
+            if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &Again))
+            {
+                GetTokenInformation(Again, TokenImpersonationLevel, &ImpLevel, sizeof(ImpLevel), &Length);
+                CloseHandle(Again);
+            }
+            ok(ImpLevel == SecurityIdentification, "level %lx: the parent's token impersonated at level %d\n",
+               Level, ImpLevel);
+            RevertToSelf();
+        }
+        if (Dup)
+            CloseHandle(Dup);
+        CloseHandle(Token);
+    }
+    if (Process)
+        CloseHandle(Process);
+
+    /* A handle to the parent's unlabelled event duplicated with a write right: refused */
+    StringCchPrintfW(Name, _countof(Name), L"Local\\mlo%lu-e-none", ParentPid);
+    Handle = OpenEventW(SYNCHRONIZE, FALSE, Name);
+    ok(Handle != NULL, "level %lx: event for SYNCHRONIZE: %lu\n", Level, GetLastError());
+    if (Handle)
+    {
+        Dup = NULL;
+        Ok = DuplicateHandle(GetCurrentProcess(), Handle, GetCurrentProcess(), &Dup, EVENT_MODIFY_STATE, FALSE, 0);
+        ok(!Ok && GetLastError() == ERROR_ACCESS_DENIED, "level %lx: duplicated for EVENT_MODIFY_STATE: %d, %lu\n",
+           Level, Ok, GetLastError());
+        if (Ok)
+            CloseHandle(Dup);
+        CloseHandle(Handle);
+    }
+
+    /* The interactive window station is labelled Low: a Low process uses the clipboard, an Untrusted one does not */
+    WinStaLevel = LabelOf(GetProcessWindowStation(), SE_WINDOW_OBJECT, NULL, NULL);
+    ok(WinStaLevel == SECURITY_MANDATORY_LOW_RID, "level %lx: window station labelled %lx\n", Level, WinStaLevel);
+    Ok = OpenClipboard(NULL);
+    ok(Ok == (Level >= SECURITY_MANDATORY_LOW_RID), "level %lx: OpenClipboard %d (%lu)\n", Level, Ok, GetLastError());
+    if (Ok)
+        CloseClipboard();
+}
+
 static VOID Child(DWORD ExpectedLevel, DWORD Tid)
 {
     HANDLE Token, Handle;
@@ -521,6 +612,7 @@ static VOID Child(DWORD ExpectedLevel, DWORD Tid)
     ChildObjectRows(Level);
     ChildParentRows(Level, Tid);
     ChildCreateRows(Level);
+    ChildReviewRows(Level);
 }
 
 /* ---------------------------------------------------------------- parent */
