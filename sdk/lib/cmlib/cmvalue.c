@@ -155,7 +155,8 @@ CmpFreeBigData(
 
 /*
  * Store DataSize bytes (more than CM_KEY_VALUE_BIG) as big data: the
- * segments, the list, the 'db' cell. On failure nothing is left allocated.
+ * segments (each a cell of CM_KEY_VALUE_BIG bytes), the list, the 'db' cell.
+ * On failure nothing is left allocated.
  */
 static
 NTSTATUS
@@ -168,6 +169,7 @@ CmpSetBigData(
 {
     PCM_BIG_DATA BigData;
     PHCELL_INDEX List;
+    PUCHAR SegmentData;
     HCELL_INDEX BigCell, ListCell, Segment;
     ULONG Count, i, Chunk;
 
@@ -190,11 +192,21 @@ CmpSetBigData(
 
     for (i = 0; i < Count; i++)
     {
+        /*
+         * Every segment cell, the last one too, is allocated at the full
+         * CM_KEY_VALUE_BIG bytes, as a Windows-written hive holds them
+         * (measured on a Windows Server 2022 reference: a chain whose last
+         * segment cell is smaller than that is dropped when the hive is
+         * loaded there). The bytes after the data of the last segment are 0.
+         */
         Chunk = min(DataSize - i * CM_KEY_VALUE_BIG, CM_KEY_VALUE_BIG);
-        Segment = HvAllocateCell(Hive, Chunk, StorageType, ListCell);
+        Segment = HvAllocateCell(Hive, CM_KEY_VALUE_BIG, StorageType, ListCell);
         if (Segment == HCELL_NIL)
             break;
-        RtlCopyMemory(HvGetCell(Hive, Segment), (PUCHAR)Data + i * CM_KEY_VALUE_BIG, Chunk);
+        SegmentData = (PUCHAR)HvGetCell(Hive, Segment);
+        RtlCopyMemory(SegmentData, (PUCHAR)Data + i * CM_KEY_VALUE_BIG, Chunk);
+        if (Chunk < CM_KEY_VALUE_BIG)
+            RtlZeroMemory(SegmentData + Chunk, CM_KEY_VALUE_BIG - Chunk);
         HvReleaseCell(Hive, Segment);
 
         /* Each get of a cell is paired with its release, none is held across an allocation */

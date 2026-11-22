@@ -12,8 +12,11 @@
  * with a signed size; 'nk' key nodes, an 'lh' leaf (hash: name in upper case,
  * hash = hash * 37 + character), 'vk' values, an 'sk' cell, and for data
  * longer than 16344 bytes in a 1.4+ hive the 'db' record with its list of
- * segments (16344 bytes each, the last one the rest). No byte of it comes
- * from a hive file made by anyone else.
+ * segments (16344 bytes each, the last one the rest). The last cell is sized
+ * to the rest here, as builds of this kernel before the writer was changed
+ * wrote it (a Windows reader drops such a chain; the kernel's own writer now
+ * makes full cells): kept so that the reader stays tolerant of it. No byte of
+ * it comes from a hive file made by anyone else.
  */
 
 #ifndef HIVEGEN_H

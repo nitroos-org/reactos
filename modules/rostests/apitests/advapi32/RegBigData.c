@@ -296,6 +296,57 @@ static void CountCells(PBYTE File, DWORD Size, PULONG BigDataCells, PULONG LongC
     }
 }
 
+/*
+ * The layout a Windows reader accepts (measured: a chain with a segment cell smaller than a whole segment is dropped
+ * by Windows Server 2022 when it loads the hive): for every 'db' cell the list holds Count entries and every listed
+ * segment cell, the last too, holds HG_SEGMENT bytes or more. Returns the number of 'db' cells looked at; *Bad counts
+ * the chains that break the rule.
+ */
+static ULONG CheckSegmentCells(const BYTE *File, DWORD Size, PULONG Bad)
+{
+    DWORD Off = HG_BLOCK, End, BinEnd, C, A, i, Count, List, Seg;
+    ULONG Chains = 0;
+    LONG S;
+
+    *Bad = 0;
+    End = (Size >= HG_BLOCK) ? min(Size, HG_BLOCK + *(const DWORD *)(File + 0x28)) : 0;
+    while (Off + 32 <= End && *(const DWORD *)(File + Off) == 0x6E696268)
+    {
+        BinEnd = Off + *(const DWORD *)(File + Off + 8);
+        if (BinEnd > End || BinEnd <= Off)
+            break;
+        for (C = Off + 32; C + 8 <= BinEnd; C += A)
+        {
+            S = *(const LONG *)(File + C);
+            A = S < 0 ? (DWORD)-S : (DWORD)S;
+            if (A < 8 || C + A > BinEnd)
+                break;
+            if (S < 0 && A == 16 && *(const USHORT *)(File + C + 4) == 0x6264)
+            {
+                BOOL Ok = TRUE;
+
+                Chains++;
+                Count = *(const USHORT *)(File + C + 6);
+                List = HG_BLOCK + *(const DWORD *)(File + C + 8);
+                if (List + 4 + Count * 4 > End || *(const LONG *)(File + List) >= 0 ||
+                    (DWORD)-*(const LONG *)(File + List) - 4 < Count * 4)
+                    Ok = FALSE;
+                for (i = 0; Ok && i < Count; i++)
+                {
+                    Seg = HG_BLOCK + *(const DWORD *)(File + List + 4 + i * 4);
+                    if (Seg + 4 > End || *(const LONG *)(File + Seg) >= 0 ||
+                        (DWORD)-*(const LONG *)(File + Seg) - 4 < HG_SEGMENT)
+                        Ok = FALSE;
+                }
+                if (!Ok)
+                    (*Bad)++;
+            }
+        }
+        Off = BinEnd;
+    }
+    return Chains;
+}
+
 /* Is offset Off of the hive file inside the data of a free cell (positive size) of File */
 static BOOL InFreeCell(const BYTE *File, DWORD Size, DWORD Off)
 {
@@ -608,6 +659,105 @@ START_TEST(RegBigData)
                 RegCloseKey(Key);
             }
             RegUnLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT2);
+        }
+    }
+
+    /* 5. the layout of what the kernel writes (Windows drops a chain whose last segment cell is short): the eight
+          sizes of the peer probe, an overwritten value, and the resizes across the 16344 boundary */
+    Error = Load(MOUNT, File);
+    ok(Error == ERROR_SUCCESS, "RegLoadKeyW for the layout rows: %ld\n", Error);
+    if (Error == ERROR_SUCCESS)
+    {
+        static const DWORD Sizes[] = { 16344, 16345, 32688, 32689, 100000, 1048576 };
+        WCHAR Name[32], *Text;
+        ULONG Bad, Chains;
+
+        Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, MOUNT L"\\BigData", 0, KEY_ALL_ACCESS, &Key);
+        ok(Error == ERROR_SUCCESS, "open BigData for the layout rows: %ld\n", Error);
+        if (Error == ERROR_SUCCESS)
+        {
+            for (i = 0; i < _countof(Sizes); i++)
+            {
+                StringCchPrintfW(Name, _countof(Name), L"w%lu", Sizes[i]);
+                SetData(Key, Name, Sizes[i], 80 + i);
+            }
+            Text = HeapAlloc(GetProcessHeap(), 0, 40001 * sizeof(WCHAR));
+            for (i = 0; i < 40000; i++)
+                Text[i] = L'A' + (i * 7 + 7) % 26;
+            Text[40000] = 0;
+            ok(RegSetValueExW(Key, L"sz40000", 0, REG_SZ, (PBYTE)Text, 40001 * sizeof(WCHAR)) == ERROR_SUCCESS,
+               "set the 40000 character string\n");
+            HeapFree(GetProcessHeap(), 0, Text);
+            SetData(Key, L"over", 20000, 90);           /* written at one size, overwritten at another */
+            SetData(Key, L"over", 70000, 91);
+            SetData(Key, L"grow", 100, 92);             /* small -> big */
+            SetData(Key, L"grow", 40000, 93);
+            SetData(Key, L"shrinkbig", 100000, 94);     /* big -> big across segment counts */
+            SetData(Key, L"shrinkbig", 20000, 95);
+            SetData(Key, L"shrink1", 100000, 96);       /* big -> one cell of 16344 */
+            SetData(Key, L"shrink1", 16344, 97);
+            SetData(Key, L"tosmall", 50000, 98);        /* big -> in the value cell */
+            SetData(Key, L"tosmall", 3, 99);
+            SetData(Key, L"gone", 70000, 100);          /* deleted */
+            ok(RegDeleteValueW(Key, L"gone") == ERROR_SUCCESS, "delete gone\n");
+            ok(RegFlushKey(Key) == ERROR_SUCCESS, "flush the layout rows\n");
+            RegCloseKey(Key);
+        }
+        ok(RegUnLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT) == ERROR_SUCCESS, "unload after the layout rows\n");
+        Now = ReadWholeFile(File, &NowSize);
+        if (Now)
+        {
+            CountCells(Now, NowSize, &Db, &Long, &Minor);
+            Chains = CheckSegmentCells(Now, NowSize, &Bad);
+            /* 16345, 32688, 32689, 100000, 1048576, sz40000, over, grow, shrinkbig (16344 is one plain cell) */
+            ok(Db == 9 && Chains == 9, "'db' cells: %lu counted, %lu checked (want 9)\n", Db, Chains);
+            ok(Bad == 0, "%lu chains hold a segment cell smaller than %u bytes\n", Bad, HG_SEGMENT);
+            HeapFree(GetProcessHeap(), 0, Now);
+        }
+        Error = Load(MOUNT, File);
+        ok(Error == ERROR_SUCCESS, "RegLoadKeyW of the layout rows: %ld\n", Error);
+        if (Error == ERROR_SUCCESS)
+        {
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, MOUNT L"\\BigData", 0, KEY_READ, &Key) == ERROR_SUCCESS)
+            {
+                for (i = 0; i < _countof(Sizes); i++)
+                {
+                    StringCchPrintfW(Name, _countof(Name), L"w%lu", Sizes[i]);
+                    CheckData(Key, Name, Sizes[i], 80 + i);
+                }
+                CheckData(Key, L"over", 70000, 91);
+                CheckData(Key, L"grow", 40000, 93);
+                CheckData(Key, L"shrinkbig", 20000, 95);
+                CheckData(Key, L"shrink1", 16344, 97);
+                CheckData(Key, L"tosmall", 3, 99);
+                Error = RegQueryValueExW(Key, L"gone", NULL, NULL, NULL, &Size);
+                ok(Error == ERROR_FILE_NOT_FOUND, "gone still there: %ld\n", Error);
+                RegCloseKey(Key);
+            }
+            /* delete them all: no cell may stay allocated (as in 2.) */
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, MOUNT L"\\BigData", 0, KEY_ALL_ACCESS, &Key) == ERROR_SUCCESS)
+            {
+                for (i = 0; i < _countof(Sizes); i++)
+                {
+                    StringCchPrintfW(Name, _countof(Name), L"w%lu", Sizes[i]);
+                    RegDeleteValueW(Key, Name);
+                }
+                RegDeleteValueW(Key, L"sz40000");
+                RegDeleteValueW(Key, L"over");
+                RegDeleteValueW(Key, L"grow");
+                RegDeleteValueW(Key, L"shrinkbig");
+                RegDeleteValueW(Key, L"shrink1");
+                RegDeleteValueW(Key, L"tosmall");
+                RegCloseKey(Key);
+            }
+            ok(RegUnLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT) == ERROR_SUCCESS, "unload after the deletes\n");
+            Now = ReadWholeFile(File, &NowSize);
+            if (Now)
+            {
+                CountCells(Now, NowSize, &Db, &Long, &Minor);
+                ok(Db == 0 && Long == 0, "after the deletes: %lu 'db' cells and %lu long cells still allocated\n", Db, Long);
+                HeapFree(GetProcessHeap(), 0, Now);
+            }
         }
     }
 

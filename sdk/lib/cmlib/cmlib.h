@@ -446,9 +446,12 @@ extern ULONG CmlibTraceLevel;
 // a value longer than CM_KEY_VALUE_BIG (16344) bytes is stored as big data:
 // the value's Data names a 'db' cell (CM_BIG_DATA) with the number of
 // segments and a list cell of that many cell indexes; every listed cell holds
-// a segment of CM_KEY_VALUE_BIG bytes of the data, the last one the rest
-// (layout: the public "Windows registry file format specification" by Maxim
-// Suhanov, github.com/msuhanov/regf, section "Big data"). Older formats hold
+// a segment of CM_KEY_VALUE_BIG bytes of the data, the last one the rest. The
+// writer allocates every segment cell, the last one too, at CM_KEY_VALUE_BIG
+// bytes (measured: a Windows reader drops a chain with a smaller last cell);
+// the readers here still accept a smaller last cell, which earlier builds
+// wrote (layout: the public "Windows registry file format specification" by
+// Maxim Suhanov, github.com/msuhanov/regf, section "Big data"). Older formats hold
 // such data in one cell. So does a 1.4+ hive into which a ReactOS kernel
 // without big data support wrote a long value: a data cell that holds all of
 // the data is read as one cell whatever the version, only a data cell smaller
