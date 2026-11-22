@@ -69,6 +69,7 @@ public:
 
     HRESULT Init(IContextMenu &cm);
     HRESULT Init(LPCITEMIDLIST idlist);
+    int GetCount() const { return m_count; }
 
     // *** FolderItemVerbs methods ***
     STDMETHOD(get_Count)(LONG *plCount) override;
@@ -86,6 +87,37 @@ BEGIN_COM_MAP(CFolderItemVerbs)
 END_COM_MAP()
 
     static HRESULT CreateInstance(CComPtr<CFolderItemVerbs> &objref) { return ShellObjectCreator(objref); }
+};
+
+// The IEnumVARIANT behind FolderItemVerbs::_NewEnum: what for-each walks. Windows Server 2022 gives one element
+// per menu item (Count of them, the separators as verbs with an empty name), not the empty one that Item(Count) answers.
+class CFolderItemVerbsEnum:
+    public CComObjectRootEx<CComMultiThreadModelNoCS>,
+    public IEnumVARIANT
+{
+private:
+    CComPtr<IDispatch> m_Keep;      // the FolderItemVerbs this enumerates
+    CFolderItemVerbs *m_Verbs;
+    LONG m_Pos;
+
+public:
+    CFolderItemVerbsEnum();
+    ~CFolderItemVerbsEnum();
+
+    HRESULT Initialize(CFolderItemVerbs *verbs);
+
+    // *** IEnumVARIANT methods ***
+    STDMETHOD(Next)(ULONG celt, VARIANT *rgVar, ULONG *pCeltFetched) override;
+    STDMETHOD(Skip)(ULONG celt) override;
+    STDMETHOD(Reset)() override;
+    STDMETHOD(Clone)(IEnumVARIANT **ppEnum) override;
+
+DECLARE_NOT_AGGREGATABLE(CFolderItemVerbsEnum)
+DECLARE_PROTECT_FINAL_CONSTRUCT()
+
+BEGIN_COM_MAP(CFolderItemVerbsEnum)
+    COM_INTERFACE_ENTRY_IID(IID_IEnumVARIANT, IEnumVARIANT)
+END_COM_MAP()
 };
 
 #endif

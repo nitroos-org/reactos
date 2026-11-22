@@ -189,7 +189,111 @@ HRESULT STDMETHODCALLTYPE CFolderItemVerbs::Item(VARIANT indexVar, FolderItemVer
 HRESULT STDMETHODCALLTYPE CFolderItemVerbs::_NewEnum(IUnknown **ppunk)
 {
     TRACE("(%p, %p)\n", this, ppunk);
-    return E_NOTIMPL;
+    if (!ppunk)
+        return E_POINTER;
+    *ppunk = NULL;
+    return ShellObjectCreatorInit<CFolderItemVerbsEnum>(this, IID_PPV_ARG(IUnknown, ppunk));
+}
+
+
+CFolderItemVerbsEnum::CFolderItemVerbsEnum() : m_Verbs(NULL), m_Pos(0)
+{
+}
+
+CFolderItemVerbsEnum::~CFolderItemVerbsEnum()
+{
+}
+
+HRESULT CFolderItemVerbsEnum::Initialize(CFolderItemVerbs *verbs)
+{
+    m_Keep = static_cast<IDispatch*>(verbs);
+    m_Verbs = verbs;
+    m_Pos = 0;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemVerbsEnum::Next(ULONG celt, VARIANT *rgVar, ULONG *pCeltFetched)
+{
+    ULONG fetched = 0;
+    HRESULT hr = S_OK;
+
+    if (pCeltFetched)
+        *pCeltFetched = 0;
+    if (!rgVar)
+        return E_POINTER;
+    if (!pCeltFetched && celt != 1)
+        return E_INVALIDARG;
+
+    for (ULONG i = 0; i < celt; i++)
+        VariantInit(&rgVar[i]);
+
+    while (fetched < celt && m_Pos < m_Verbs->GetCount())
+    {
+        CComVariant index(m_Pos);
+        CComPtr<FolderItemVerb> verb;
+
+        hr = m_Verbs->Item(index, &verb);
+        if (hr != S_OK)
+        {
+            hr = FAILED(hr) ? hr : E_FAIL;
+            break;
+        }
+        V_VT(&rgVar[fetched]) = VT_DISPATCH;
+        hr = verb->QueryInterface(IID_PPV_ARG(IDispatch, &V_DISPATCH(&rgVar[fetched])));
+        if (FAILED(hr))
+        {
+            V_VT(&rgVar[fetched]) = VT_EMPTY;
+            break;
+        }
+        fetched++;
+        m_Pos++;
+    }
+
+    if (FAILED(hr))
+    {
+        for (ULONG i = 0; i < fetched; i++)
+            VariantClear(&rgVar[i]);
+        m_Pos -= fetched;
+        fetched = 0;
+    }
+    if (pCeltFetched)
+        *pCeltFetched = fetched;
+    return FAILED(hr) ? hr : (fetched == celt ? S_OK : S_FALSE);
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemVerbsEnum::Skip(ULONG celt)
+{
+    LONG count = m_Verbs->GetCount();
+
+    if ((ULONGLONG)m_Pos + celt > (ULONGLONG)count)
+    {
+        m_Pos = count;
+        return S_FALSE;
+    }
+    m_Pos += celt;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemVerbsEnum::Reset()
+{
+    m_Pos = 0;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemVerbsEnum::Clone(IEnumVARIANT **ppEnum)
+{
+    if (!ppEnum)
+        return E_POINTER;
+    *ppEnum = NULL;
+
+    CComPtr<IUnknown> unk;
+    HRESULT hr = ShellObjectCreatorInit<CFolderItemVerbsEnum>(m_Verbs, IID_PPV_ARG(IUnknown, &unk));
+    if (FAILED(hr))
+        return hr;
+    hr = unk->QueryInterface(IID_PPV_ARG(IEnumVARIANT, ppEnum));
+    if (SUCCEEDED(hr))
+        (*ppEnum)->Skip(m_Pos);     // the clone continues at the same position
+    return hr;
 }
 
 
