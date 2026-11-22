@@ -109,7 +109,7 @@ C_ASSERT(sizeof(E1000_TRANSMIT_DESCRIPTOR) == 16);
 /* Valid Range: 80-256 for 82542 and 82543 gigabit ethernet controllers
    Valid Range: 80-4096 for 82544 and newer */
 #define NUM_TRANSMIT_DESCRIPTORS        128
-#define NUM_RECEIVE_DESCRIPTORS         128
+#define NUM_RECEIVE_DESCRIPTORS         256
 
 
 
