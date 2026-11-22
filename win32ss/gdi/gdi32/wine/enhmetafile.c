@@ -276,6 +276,20 @@ static ULONGLONG emr_dib_info_size( const BITMAPINFO *info, DWORD usage )
 }
 
 /***********************************************************************
+ *          emr_dib_sizeimage_fits
+ *
+ * StretchDIBits and SetDIBitsToDevice on a metafile DC (playing into another metafile) copy
+ * biSizeImage bytes of bits into the new record: when the header of a played record gives that
+ * size, it must not be more than the record carries (cbBits, already checked to be inside it).
+ */
+static BOOL emr_dib_sizeimage_fits( const ENHMETARECORD *mr, DWORD offBmi, DWORD cbBits )
+{
+    const BITMAPINFOHEADER *bih = (const BITMAPINFOHEADER *)((const BYTE *)mr + offBmi);
+    if (bih->biSize == sizeof(BITMAPCOREHEADER)) return TRUE;
+    return bih->biSizeImage <= cbBits;
+}
+
+/***********************************************************************
  *          emr_dib_bits_fit
  *
  * Returns whether cbBits bytes hold the image the header describes. CreateDIBPatternBrushPt takes no
@@ -1287,7 +1301,8 @@ BOOL WINAPI PlayEnhMetaFileRecord(
 
         if (!emr_dib_in_record(mr, pStretchDIBits->offBmiSrc, pStretchDIBits->cbBmiSrc,
                                pStretchDIBits->offBitsSrc, pStretchDIBits->cbBitsSrc) ||
-            !pStretchDIBits->offBmiSrc)
+            !pStretchDIBits->offBmiSrc ||
+            !emr_dib_sizeimage_fits(mr, pStretchDIBits->offBmiSrc, pStretchDIBits->cbBitsSrc))
         {
             ERR("Invalid EMR_STRETCHDIBITS record\n");
             break;
@@ -2306,7 +2321,8 @@ BOOL WINAPI PlayEnhMetaFileRecord(
 
         if (!emr_dib_in_record(mr, pSetDIBitsToDevice->offBmiSrc, pSetDIBitsToDevice->cbBmiSrc,
                                pSetDIBitsToDevice->offBitsSrc, pSetDIBitsToDevice->cbBitsSrc) ||
-            !pSetDIBitsToDevice->offBmiSrc)
+            !pSetDIBitsToDevice->offBmiSrc ||
+            !emr_dib_sizeimage_fits(mr, pSetDIBitsToDevice->offBmiSrc, pSetDIBitsToDevice->cbBitsSrc))
         {
             ERR("Invalid EMR_SETDIBITSTODEVICE record\n");
             break;

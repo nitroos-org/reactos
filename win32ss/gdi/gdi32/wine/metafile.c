@@ -546,11 +546,20 @@ static BOOL MF_dib_in_record( const METARECORD *mr, const void *info, WORD color
     ULONGLONG cbRecord = (ULONGLONG)mr->rdSize * 2;
     ULONGLONG offInfo = (const BYTE *)info - (const BYTE *)mr;
 
+    ULONGLONG cbInfo;
+
     if (offInfo + sizeof(BITMAPCOREHEADER) > cbRecord) return FALSE;
     if (bih->biSize != sizeof(BITMAPCOREHEADER) &&
         (bih->biSize < sizeof(BITMAPINFOHEADER) || offInfo + bih->biSize > cbRecord))
         return FALSE;
-    return offInfo + (ULONGLONG)(unsigned int)bitmap_info_size( info, coloruse ) <= cbRecord;
+    cbInfo = (ULONGLONG)(unsigned int)bitmap_info_size( info, coloruse );
+    if (offInfo + cbInfo > cbRecord) return FALSE;
+    /* A metafile DC that records the played record (SetWinMetaFileBits, playing into another
+       metafile) copies biSizeImage bytes of bits: when the header gives that size, it must be
+       inside the record too */
+    if (bih->biSize != sizeof(BITMAPCOREHEADER) && offInfo + cbInfo + bih->biSizeImage > cbRecord)
+        return FALSE;
+    return TRUE;
 }
 
 /* MF_dib_in_record, and the image the header describes follows its colour table inside the record

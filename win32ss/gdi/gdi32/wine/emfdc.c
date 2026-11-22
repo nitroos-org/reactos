@@ -1702,11 +1702,16 @@ BOOL EMFDC_StretchDIBits( WINEDC *dc_attr, INT x_dst, INT y_dst, INT width_dst, 
     EMRSTRETCHDIBITS *emr;
     BOOL ret;
     UINT bmi_size, emr_size;
+    ULONGLONG emr_size64;
 
     /* calculate the size of the colour table */
     bmi_size = get_dib_info_size( info, usage );
 
-    emr_size = sizeof (EMRSTRETCHDIBITS) + bmi_size + info->bmiHeader.biSizeImage;
+    /* biSizeImage is the caller's: in 32 bits the record size wrapped and the copy of the bits
+       below ran past the record */
+    emr_size64 = (ULONGLONG)sizeof (EMRSTRETCHDIBITS) + bmi_size + info->bmiHeader.biSizeImage;
+    if (emr_size64 > MAXLONG) return 0;
+    emr_size = (UINT)emr_size64;
     if (!(emr = HeapAlloc(GetProcessHeap(), 0, emr_size ))) return 0;
 
     /* write a bitmap info header (with colours) to the record */
@@ -1754,9 +1759,12 @@ BOOL EMFDC_SetDIBitsToDevice( WINEDC *dc_attr, INT x_dst, INT y_dst, DWORD width
 {
     EMRSETDIBITSTODEVICE *emr;
     DWORD bmiSize = get_dib_info_size( info, usage );
-    DWORD size = sizeof(EMRSETDIBITSTODEVICE) + bmiSize + info->bmiHeader.biSizeImage;
+    /* as in EMFDC_StretchDIBits: the record size in 64 bits */
+    ULONGLONG size64 = (ULONGLONG)sizeof(EMRSETDIBITSTODEVICE) + bmiSize + info->bmiHeader.biSizeImage;
+    DWORD size = (DWORD)size64;
     BOOL ret;
 
+    if (size64 > MAXLONG) return FALSE;
     if (!(emr = HeapAlloc( GetProcessHeap(), 0, size ))) return FALSE;
 
     emr->emr.iType = EMR_SETDIBITSTODEVICE;
