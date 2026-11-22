@@ -36,6 +36,7 @@ list(APPEND SOURCE
     eventlog.c
     eventlog_full.c
     EventLogSecurityAccess.c
+    AnonymousTokenRows.c
     EventRegister.c
     EventProvider.c
     EventSetInformation.c
