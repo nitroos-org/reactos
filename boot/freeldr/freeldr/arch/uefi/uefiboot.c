@@ -32,7 +32,10 @@
  *    not duplicated. Options of other systems are never written. A firmware
  *    that refuses the write is logged and the boot goes on. A firmware that
  *    drops the option again at every boot gets it NV_MAX_WRITES times per
- *    partition, then no more (counted in our own variable NV_STATE_NAME).
+ *    partition and NV_MAX_WRITES_TOTAL times in all, then no more (counted in
+ *    our own variable NV_STATE_NAME, written before the option: no count, no
+ *    option). Nothing is written to a variable store that would keep less
+ *    than NV_MIN_RESERVE bytes free.
  *
  * 2. Started from an optical disc (the installation medium) while a hard
  *    disk holds an installed system, the loader offers the same choice as
@@ -74,10 +77,13 @@ extern EFI_HANDLE GlobalImageHandle;
 #define NV_HANDOFF_SECONDS  5
 #define NV_NO_LIMIT         ((UINTN)-1) /* a device path read up to its end node */
 #define NV_MAX_WRITES       3
+#define NV_MAX_WRITES_TOTAL 8   /* over all partitions: two systems booted in turn do not reset each other's count */
+#define NV_MIN_RESERVE      5120 /* bytes the variable store keeps free after our writes: some firmware cannot start with a full store */
+#define NV_HEADER_BYTES     128 /* what a firmware may add per variable written: header and name */
 
 /*
  * Our own variable (vendor GUID of this loader): how often the boot option was
- * written for which partition. Data: NV_STATE.
+ * written for which partition, and in all. Data: NV_STATE.
  */
 #define NV_STATE_NAME L"NitroOSBootEntry"
 #define NV_LOADER_VENDOR_GUID \
@@ -86,9 +92,10 @@ extern EFI_HANDLE GlobalImageHandle;
 #include <pshpack1.h>
 typedef struct _NV_STATE
 {
-    UINT32 Version;     /* 1 */
+    UINT32 Version;     /* 2 */
     UINT32 Writes;      /* times the option was written for this partition */
     UCHAR HdNode[NV_HD_NODE_LENGTH];
+    UINT32 TotalWrites; /* times it was written for any partition */
 } NV_STATE;
 #include <poppack.h>
 
@@ -618,15 +625,48 @@ NvScanAllOptions(
 }
 
 /*
- * The write budget of this partition: FALSE when the option was written
- * NV_MAX_WRITES times for it already (a firmware that drops it at every boot).
- * Otherwise counts this write (one more variable write, only when the option
- * is written: never on a normal boot).
+ * Is there room in the variable store for Needed bytes, keeping NV_MIN_RESERVE
+ * free (UEFI 2.10, 8.2 QueryVariableInfo)? A firmware older than UEFI 2.0, or
+ * one that cannot say, gets nothing written.
+ */
+static
+BOOLEAN
+NvStoreHasRoom(
+    _In_ UINTN Needed)
+{
+    EFI_RUNTIME_SERVICES *Rt = GlobalSystemTable->RuntimeServices;
+    UINT64 MaxStorage = 0, Remaining = 0, MaxVariable = 0;
+    EFI_STATUS Status;
+
+    if (Rt->Hdr.Revision < EFI_2_00_SYSTEM_TABLE_REVISION || !Rt->QueryVariableInfo)
+    {
+        ERR("UEFI boot entry: no QueryVariableInfo, nothing written\n");
+        return FALSE;
+    }
+    Status = Rt->QueryVariableInfo(NV_ATTRIBUTES, &MaxStorage, &Remaining, &MaxVariable);
+    if (EFI_ERROR(Status) || Remaining < Needed + NV_MIN_RESERVE || MaxVariable < Needed)
+    {
+        ERR("UEFI boot entry: variable store: status 0x%lx, %lu bytes free, %lu needed: nothing written\n",
+            (ULONG)Status, (ULONG)Remaining, (ULONG)(Needed + NV_MIN_RESERVE));
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/*
+ * The write budget: FALSE when the option was written NV_MAX_WRITES times for
+ * this partition already (a firmware that drops it at every boot), or
+ * NV_MAX_WRITES_TOTAL times in all, or when the store has no room for Needed
+ * bytes. Otherwise counts this write first (one more variable write, only
+ * when the option is written: never on a normal boot); a count that cannot be
+ * written stops everything, so that a firmware that refuses it is not written
+ * to at every boot.
  */
 static
 BOOLEAN
 NvTakeWriteBudget(
-    _In_ const NV_PATH_INFO *Ours)
+    _In_ const NV_PATH_INFO *Ours,
+    _In_ UINTN Needed)
 {
     NV_STATE State;
     UCHAR *Data;
@@ -639,20 +679,31 @@ NvTakeWriteBudget(
             RtlCopyMemory(&State, Data, sizeof(State));
         NvFree(Data);
     }
-    if (State.Version != 1 || !NvSamePartition((const HARDDRIVE_DEVICE_PATH *)State.HdNode, &Ours->Hd))
+    if (State.Version != 2)
     {
-        State.Version = 1;
+        RtlZeroMemory(&State, sizeof(State));
+        State.Version = 2;
+    }
+    if (!NvSamePartition((const HARDDRIVE_DEVICE_PATH *)State.HdNode, &Ours->Hd))
+    {
         State.Writes = 0;
         RtlCopyMemory(State.HdNode, &Ours->Hd, NV_HD_NODE_LENGTH);
     }
-    if (State.Writes >= NV_MAX_WRITES)
+    if (State.Writes >= NV_MAX_WRITES || State.TotalWrites >= NV_MAX_WRITES_TOTAL)
     {
-        ERR("UEFI boot entry: written %lu times for this partition already and gone again: the firmware drops it, not written again\n",
-            (ULONG)State.Writes);
+        ERR("UEFI boot entry: written %lu times for this partition (%lu in all) already and gone again: the firmware drops it, not written again\n",
+            (ULONG)State.Writes, (ULONG)State.TotalWrites);
         return FALSE;
     }
+    if (!NvStoreHasRoom(Needed + NV_HEADER_BYTES + sizeof(State)))
+        return FALSE;
     State.Writes++;
-    NvSetVariable(NV_STATE_NAME, &NvLoaderVendorGuid, "NitroOSBootEntry", &State, sizeof(State));
+    State.TotalWrites++;
+    if (EFI_ERROR(NvSetVariable(NV_STATE_NAME, &NvLoaderVendorGuid, "NitroOSBootEntry", &State, sizeof(State))))
+    {
+        ERR("UEFI boot entry: the write count cannot be kept: nothing written\n");
+        return FALSE;
+    }
     return TRUE;
 }
 
@@ -699,7 +750,15 @@ NvEnsureBootEntry(
     if (!Used || !NvScanAllOptions(Ours, OursPath, Used, &Match, &Moved, &Stale))
         goto Quit;
 
-    if (!NvTakeWriteBudget(Ours))
+    DescBytes = (wcslen(NV_DESCRIPTION) + 1) * sizeof(WCHAR);
+    FileBytes = (wcslen(NV_OWN_LOADER_PATH) + 1) * sizeof(WCHAR);
+    FileNodeLength = sizeof(EFI_DEVICE_PATH_PROTOCOL) + FileBytes;
+    /* The device path of our partition up to and including its hard drive node, the file, the end */
+    PathListLength = Ours->HdOffset + NV_HD_NODE_LENGTH + FileNodeLength + sizeof(EFI_DEVICE_PATH_PROTOCOL);
+    OptionSize = 6 + DescBytes + PathListLength;
+
+    /* The option and BootOrder, each with what the firmware adds */
+    if (!NvTakeWriteBudget(Ours, OptionSize + OrderSize + sizeof(UINT16) + 2 * NV_HEADER_BYTES))
         goto Quit;
 
     if (Match >= 0)
@@ -732,12 +791,6 @@ NvEnsureBootEntry(
             }
         }
 
-        DescBytes = (wcslen(NV_DESCRIPTION) + 1) * sizeof(WCHAR);
-        FileBytes = (wcslen(NV_OWN_LOADER_PATH) + 1) * sizeof(WCHAR);
-        FileNodeLength = sizeof(EFI_DEVICE_PATH_PROTOCOL) + FileBytes;
-        /* The device path of our partition up to and including its hard drive node, the file, the end */
-        PathListLength = Ours->HdOffset + NV_HD_NODE_LENGTH + FileNodeLength + sizeof(EFI_DEVICE_PATH_PROTOCOL);
-        OptionSize = 6 + DescBytes + PathListLength;
         Option = NvAlloc(OptionSize);
         if (!Option)
             goto Quit;
