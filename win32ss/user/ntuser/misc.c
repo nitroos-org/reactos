@@ -461,6 +461,14 @@ NtUserGetGUIThreadInfo(
    }
    else
    {  /* Get the foreground thread */
+      /* The foreground thread is the one of the desktop that has the input: a thread of another desktop
+         gets nothing (Windows Server 2022, rows W-G1 and W-G2: FALSE, ERROR_ACCESS_DENIED, the structure
+         untouched), or it would follow the focus and the caret of the unlock dialog's password box */
+      if (!IntIsThreadOnInputDesktop(PsGetCurrentThreadWin32Thread()))
+      {
+        EngSetLastError(ERROR_ACCESS_DENIED);
+        goto Exit; // Return FALSE
+      }
       /* FIXME: Handle NULL queue properly? */
       MsgQueue = IntGetFocusMessageQueue();
       if(!MsgQueue)

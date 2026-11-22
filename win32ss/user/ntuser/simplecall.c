@@ -365,8 +365,11 @@ NtUserCallOneParam(
             PPOINTL pptl;
             PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
             Result = TRUE;
-            if (pti->rpdesk != IntGetActiveDesktop())
+            /* "The input desktop must be the current desktop when you call GetCursorPos" (learn.microsoft.com):
+               Windows Server 2022 fails with ERROR_ACCESS_DENIED and leaves the point untouched (row W-C1) */
+            if (!IntIsThreadOnInputDesktop(pti))
             {
+                EngSetLastError(ERROR_ACCESS_DENIED);
                 Result = FALSE;
                 break;
             }
@@ -608,6 +611,13 @@ NtUserCallTwoParam(
             break;
 
         case TWOPARAM_ROUTINE_SETCURSORPOS:
+            /* Only from the desktop that has the input: Windows Server 2022 returns FALSE without a last
+               error and does not move the cursor (row W-C2) */
+            if (!IntIsThreadOnInputDesktop(PsGetCurrentThreadWin32Thread()))
+            {
+                Ret = FALSE;
+                break;
+            }
             Ret = (DWORD_PTR)UserSetCursorPos((int)Param1, (int)Param2, 0, 0, FALSE);
             break;
 
