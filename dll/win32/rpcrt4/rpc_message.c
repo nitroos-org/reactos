@@ -1058,11 +1058,23 @@ RPC_STATUS RPCRT4_ServerConnectionAuth(RpcConnection* conn,
             if (!strcmp(rpcrt4_conn_get_name(conn), "ncalrpc"))
             {
                 /* The transport authenticates the caller (no SSP, as LRPC on
-                 * Windows), so the service need not be registered */
+                 * Windows), so the service need not be registered; but it must
+                 * be one that a client can name: an unknown number is refused
+                 * as Windows does */
                 SecInvalidateHandle(&cred);
                 memset(&exp, 0, sizeof(exp));
                 max_token = 0;
-                status = RPC_S_OK;
+                switch (auth_data_in->auth_type)
+                {
+                case RPC_C_AUTHN_WINNT:
+                case RPC_C_AUTHN_GSS_NEGOTIATE:
+                case RPC_C_AUTHN_GSS_KERBEROS:
+                    status = RPC_S_OK;
+                    break;
+                default:
+                    status = RPC_S_UNKNOWN_AUTHN_SERVICE;
+                    break;
+                }
             }
             else
                 status = RPCRT4_ServerGetRegisteredAuthInfo(
