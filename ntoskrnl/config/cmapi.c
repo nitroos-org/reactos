@@ -2636,6 +2636,7 @@ CmUnloadKey(
     PHHIVE Hive;
     PCMHIVE CmHive;
     HCELL_INDEX Cell;
+    PVOID UnloadNote;
 
     DPRINT("CmUnloadKey(%p, %lx)\n", Kcb, Flags);
 
@@ -2700,6 +2701,9 @@ CmUnloadKey(
     /* Flush the hive */
     CmFlushKey(Kcb, TRUE);
 
+    /* A checked user hive: its record takes the time stamp the file ends with (applied below, unlocked) */
+    UnloadNote = CmpAclUserHiveUnloading(CmHive, Kcb);
+
     /* Unlink the hive from the master hive */
     if (!CmpUnlinkHiveFromMaster(CmHive, Cell))
     {
@@ -2710,6 +2714,9 @@ CmUnloadKey(
 
         /* Reset the loading flag */
         CmHive->HiveIsLoading = FALSE;
+
+        /* Not unloaded: the record stays as it is */
+        CmpAclUserHiveUnloaded(UnloadNote, FALSE);
 
         /* Return failure */
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -2731,6 +2738,9 @@ CmUnloadKey(
 
     /* Release hive lock */
     CmpUnlockRegistry();
+
+    /* The record of a checked user hive (registry operations: no registry lock held any more) */
+    CmpAclUserHiveUnloaded(UnloadNote, TRUE);
 
     /* Drop the reference that CmpLinkHiveToMaster() keeps on the root key, which frees the key body and the (deleted) KCB */
     if (CmHive->RootKeyBody)

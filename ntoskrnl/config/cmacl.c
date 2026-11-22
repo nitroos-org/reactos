@@ -3253,8 +3253,15 @@ CmpAclFlushHives(VOID)
  * only the kernel writes (SYSTEM full control, administrators read), with
  * the generation of the marker (a record of an earlier transition, or one
  * planted while nothing was enforced, never counts) and the time stamp of
- * the hive's base block when the check ended: a load of an older copy of the
- * file (a restored profile) is checked again.
+ * the hive's base block when the check ended. The unload of a recorded hive
+ * (CmUnloadKey, after its last flush) moves that time stamp to the one its
+ * file ends with (CmpAclUserHiveUnloading/Unloaded), and a later load is
+ * skipped only when the file's time stamp is exactly the recorded one: any
+ * other file at that name (an older copy, a restored profile, a newer copy
+ * from another machine, a file edited while it was not loaded) is checked
+ * again. A hive that was not unloaded (the system stopped while it was
+ * loaded) is checked again at its next load too: pass 1 alone, when it
+ * finds nothing.
  */
 #define CMP_ACL_USER_RECORDS_PATH   L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\RegAclUserHives"
 #define CMP_ACL_USER_RECORD_VERSION 1
@@ -3316,7 +3323,7 @@ CmpAclUserHiveName(
     return TRUE;
 }
 
-/* Was the hive loaded at Name checked under this transition, and is its file not older than then? */
+/* Was the hive loaded at Name checked under this transition, and is its file the one it was left as? */
 static
 BOOLEAN
 CmpAclUserRecordValid(
@@ -3345,7 +3352,7 @@ CmpAclUserRecordValid(
     RtlCopyMemory(&Record, Info->Data, sizeof(Record));
     return Record.Version == CMP_ACL_USER_RECORD_VERSION &&
            Record.Generation == CmpAclGeneration &&
-           HiveTime.QuadPart >= Record.HiveTime.QuadPart;
+           HiveTime.QuadPart == Record.HiveTime.QuadPart;
 }
 
 static
@@ -3400,6 +3407,105 @@ CmpAclUserRecordWrite(
     KeQuerySystemTime(&Record.CheckTime);
     ZwSetValueKey(Key, (PUNICODE_STRING)Name, 0, REG_BINARY, &Record, sizeof(Record));
     ZwClose(Key);
+}
+
+static
+BOOLEAN
+CmpAclUserHiveTarget(
+    _In_ PCM_KEY_CONTROL_BLOCK HiveKcb,
+    _Out_writes_bytes_(SECURITY_MAX_SID_SIZE) PSID Sid,
+    _Out_ PBOOLEAN Classes);
+
+/* What CmpAclUserHiveUnloading keeps for CmpAclUserHiveUnloaded */
+typedef struct _CMP_ACL_UNLOAD_NOTE
+{
+    LARGE_INTEGER HiveTime;
+    UNICODE_STRING Name;
+    WCHAR Buffer[CMP_ACL_USER_NAME_MAX];
+} CMP_ACL_UNLOAD_NOTE, *PCMP_ACL_UNLOAD_NOTE;
+
+/*
+ * CmUnloadKey of a hive root, after the hive's last flush, with the registry
+ * locked exclusively: if it is a user hive the check is for (and its check was
+ * completed), note its name and the time stamp its file ends with, for
+ * CmpAclUserHiveUnloaded to put into its record once the locks are released.
+ * Returns the note (pool) or NULL.
+ */
+PVOID
+NTAPI
+CmpAclUserHiveUnloading(
+    _In_ PCMHIVE CmHive,
+    _In_ PCM_KEY_CONTROL_BLOCK RootKcb)
+{
+    ULONG SidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    PCMP_ACL_UNLOAD_NOTE Note;
+    BOOLEAN Classes;
+
+    if (!CmpAclReady || CmpAclSetupRunning || !CmpAclGeneration ||
+        CmpRegistryAclEffectiveMode != CM_REGACL_MODE_ENFORCE ||
+        (CmHive->Hive.HiveFlags & HIVE_VOLATILE) || (CmHive->Flags & CMHIVE_FLAG_ACL_UNCHECKED) ||
+        !CmpAclUserHiveTarget(RootKcb, (PSID)SidBuffer, &Classes))
+    {
+        return NULL;
+    }
+    Note = ExAllocatePoolWithTag(PagedPool, sizeof(*Note), TAG_CM_ACL);
+    if (!Note)
+        return NULL;
+    if (!CmpAclUserHiveName(RootKcb, Note->Buffer, &Note->Name))
+    {
+        ExFreePoolWithTag(Note, TAG_CM_ACL);
+        return NULL;
+    }
+    Note->HiveTime = CmHive->Hive.BaseBlock->TimeStamp;
+    return Note;
+}
+
+/*
+ * The unload of a user hive is done (no registry lock held): an existing
+ * record of the hive's name under this transition takes the time stamp the
+ * file was left with, so that the next load of that same file is skipped and
+ * a load of any other is checked. No record, or one of an earlier transition:
+ * nothing (the next load checks). Not Unloaded (the unload failed after the
+ * note was taken): nothing. Frees the note.
+ */
+VOID
+NTAPI
+CmpAclUserHiveUnloaded(
+    _In_opt_ PVOID UnloadNote,
+    _In_ BOOLEAN Unloaded)
+{
+    UNICODE_STRING Path = RTL_CONSTANT_STRING(CMP_ACL_USER_RECORDS_PATH);
+    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(CMP_ACL_USER_RECORD)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    PCMP_ACL_UNLOAD_NOTE Note = UnloadNote;
+    CMP_ACL_USER_RECORD Record;
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE Key;
+    ULONG Length;
+    NTSTATUS Status;
+
+    if (!Note)
+        return;
+    if (Unloaded && CmpAclUserRecordsTrusted())
+    {
+        InitializeObjectAttributes(&Attributes, &Path, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_OPENLINK, NULL, NULL);
+        if (NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE | KEY_SET_VALUE, &Attributes)))
+        {
+            Status = ZwQueryValueKey(Key, &Note->Name, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
+            if (NT_SUCCESS(Status) && Info->Type == REG_BINARY && Info->DataLength == sizeof(Record))
+            {
+                RtlCopyMemory(&Record, Info->Data, sizeof(Record));
+                if (Record.Version == CMP_ACL_USER_RECORD_VERSION && Record.Generation == CmpAclGeneration &&
+                    Record.HiveTime.QuadPart != Note->HiveTime.QuadPart)
+                {
+                    Record.HiveTime = Note->HiveTime;
+                    ZwSetValueKey(Key, &Note->Name, 0, REG_BINARY, &Record, sizeof(Record));
+                }
+            }
+            ZwClose(Key);
+        }
+    }
+    ExFreePoolWithTag(Note, TAG_CM_ACL);
 }
 
 /*
@@ -3601,12 +3707,13 @@ CmpAclCheckUserHive(
     }
 
     /*
-     * A record only says that the file loaded at that name was checked and is
-     * not older: it cannot tell another file with a later time stamp (a copy
-     * from another machine, a file the account never used). The profile
-     * service loads the account's own file, the one recorded. A load by
-     * anyone else (an administrator's reg load HKU\<SID> <file>, which does
-     * not get the root stamp either) is checked whatever the record says.
+     * A record says that the file loaded at that name was checked and left
+     * with that time stamp (its check, or its last unload): a file with any
+     * other time stamp (an older or newer copy, one edited while it was not
+     * loaded) is checked. The profile service loads the account's own file. A
+     * load by anyone else (an administrator's reg load HKU\<SID> <file>,
+     * which does not get the root stamp either) is checked whatever the
+     * record says: a copy keeps the time stamp of the file it was made from.
      */
     HiveTime = CmHive->Hive.BaseBlock->TimeStamp;
     if (CmpRegistryAclEffectiveMode == CM_REGACL_MODE_ENFORCE &&

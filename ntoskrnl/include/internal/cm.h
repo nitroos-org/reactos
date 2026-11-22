@@ -910,6 +910,20 @@ CmpAclCheckUserHive(
     _In_ PCM_KEY_CONTROL_BLOCK RootKcb
 );
 
+PVOID
+NTAPI
+CmpAclUserHiveUnloading(
+    _In_ PCMHIVE CmHive,
+    _In_ PCM_KEY_CONTROL_BLOCK RootKcb
+);
+
+VOID
+NTAPI
+CmpAclUserHiveUnloaded(
+    _In_opt_ PVOID UnloadNote,
+    _In_ BOOLEAN Unloaded
+);
+
 NTSTATUS
 NTAPI
 CmpStampKeySecurity(
