@@ -351,12 +351,19 @@ CmpAddSecurityCellToCache(IN PCMHIVE CmHive,
         if (CONTAINING_RECORD(List, CM_KEY_SECURITY_CACHE, List)->Cell == SecurityCell)
             return TRUE;
         if (++Entries >= CMP_SECURITY_BUCKET_LIMIT)
+        {
+            /* Not cached: the cache no longer holds every cell of the hive */
+            CmHive->Flags |= CMHIVE_FLAG_SECURITY_CACHE_SHORT;
             return TRUE;
+        }
     }
 
     Entry = CmpAllocate(sizeof(*Entry), TRUE, TAG_CMSD);
     if (!Entry)
+    {
+        CmHive->Flags |= CMHIVE_FLAG_SECURITY_CACHE_SHORT;
         return FALSE;
+    }
     Entry->Cell = SecurityCell;
     Entry->DescriptorLength = Security->DescriptorLength;
     Entry->ConvKey = ConvKey;
