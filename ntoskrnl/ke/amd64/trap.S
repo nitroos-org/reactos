@@ -951,10 +951,8 @@ FUNC KiInterruptDispatch
     call KeReleaseSpinLockFromDpcLevel
 #endif
 
-    /* Disable interrupts and go back to old irql */
+    /* Disable interrupts */
     cli
-    movzx rax, byte ptr [rbp + KTRAP_FRAME_PreviousIrql]
-    mov cr8, rax
 
     /* Check for chained interrupts */
     mov rax, [rbx + KINTERRUPT_InterruptListEntry]
@@ -966,12 +964,20 @@ FUNC KiInterruptDispatch
     jmp .DoDispatchInterrupt
 
 .Done:
+    /* End the interrupt first, then go back to the old IRQL (interrupts stay
+       disabled until iretq). Lowering the TPR below the class of a vector that is
+       still in service is legal, but KVM on Intel hosts without virtual-interrupt
+       delivery then keeps a stale TPR threshold and the next VM entry fails */
+    SendApicEoi
+    movzx rax, byte ptr [rbp + KTRAP_FRAME_PreviousIrql]
+    mov cr8, rax
+
     /* Restore rbx and rsi */
     mov rbx, [rbp + KTRAP_FRAME_Rbx]
     mov rsi, [rbp + KTRAP_FRAME_Rsi]
 
     /* Return */
-    ExitTrap (TF_SAVE_ALL or TF_SEND_EOI)
+    ExitTrap TF_SAVE_ALL
 ENDFUNC
 
 EXTERN KiSystemCallHandler:PROC
