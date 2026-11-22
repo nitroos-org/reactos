@@ -1,0 +1,7 @@
+; VMware PVSCSI miniport driver (boot start: Setup and the first boot find PVSCSI disks)
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\pvscsi","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\pvscsi","Group",0x00000000,"SCSI Miniport"
+HKLM,"SYSTEM\CurrentControlSet\Services\pvscsi","ImagePath",0x00020000,"system32\drivers\pvscsi.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\pvscsi","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\pvscsi","Type",0x00010001,0x00000001
