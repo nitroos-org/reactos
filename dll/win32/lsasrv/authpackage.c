@@ -2563,11 +2563,12 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
         FIXME("LogonType %lu is not supported yet!\n", LogonType);
     }
 
+    /* the user of a token of type "null" is Everyone (TokenInfo1 is NULL then) */
     Status = LsapSetLogonSessionData(&LogonId,
                                      LogonType,
                                      UserName,
                                      LogonDomainName,
-                                     TokenInfo1->User.User.Sid);
+                                     (TokenInfo1 != NULL) ? TokenInfo1->User.User.Sid : LsapWorldSid);
     if (!NT_SUCCESS(Status))
     {
         ERR("LsapSetLogonSessionData failed (Status 0x%08lx)\n", Status);
