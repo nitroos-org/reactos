@@ -1268,6 +1268,15 @@ co_IntSetActiveWindow(
       return FALSE;
    }
 
+   /* AttachThreadInput during a callback (from the hook, from another thread, or the end of an attached
+      thread) gives this thread another queue and can free the old one (MsqDestroyMessageQueue, or the
+      THREADINFO it stayed with): ThreadQueue is used only while it is still the thread's queue */
+   if (ThreadQueue != pti->MessageQueue)
+   {
+      ERR("SetActiveWindow: the queue of the thread changed in the CBT hook\n");
+      return FALSE;
+   }
+
    ThreadQueue->QF_flags &= ~QF_EVENTDEACTIVATEREMOVED;
 
    if ( ThreadQueue->spwndActive && ThreadQueue->spwndActive->state & WNDS_DESTROYED )
@@ -1283,6 +1292,12 @@ co_IntSetActiveWindow(
       if (!co_IntSendDeactivateMessages(UserHMGetHandle(WndPrev), hWnd, TRUE)) return FALSE;
    }
 
+   if (ThreadQueue != pti->MessageQueue)
+   {
+      ERR("SetActiveWindow: the queue of the thread changed in the deactivation messages\n");
+      return FALSE;
+   }
+
    WndPrev = ThreadQueue->spwndActive; // Again keep to save changing active.
 
    // While in calling message proc or hook:
@@ -1290,8 +1305,7 @@ co_IntSetActiveWindow(
    // focus window is dead or no longer the same thread queue.
    if ( ThreadQueue->spwndActivePrev != ThreadQueue->spwndActive ||
         pWndChg != WndPrev ||
-        (Wnd && !VerifyWnd(Wnd)) ||
-        ThreadQueue != pti->MessageQueue )
+        (Wnd && !VerifyWnd(Wnd)) )
    {
       ERR("SetActiveWindow: Summary ERROR, active state changed!\n");
       return FALSE;
@@ -1314,6 +1328,14 @@ co_IntSetActiveWindow(
 
    InAAPM = co_IntSendActivateMessages(WndPrev, Wnd, bMouse, Async);
 
+   if (ThreadQueue != pti->MessageQueue)
+   {
+      ERR("SetActiveWindow: the queue of the thread changed in the activation messages\n");
+      if (InAAPM) pti->TIF_flags &= ~TIF_INACTIVATEAPPMSG;
+      Wnd->state &= ~WNDS_BEINGACTIVATED;
+      return FALSE;
+   }
+
    /* now change focus if necessary */
    //// Fixes CORE-6452 allows setting focus on window.
    if (bFocus && !(ThreadQueue->QF_flags & QF_FOCUSNULLSINCEACTIVE))
@@ -1334,12 +1356,13 @@ co_IntSetActiveWindow(
       pti->TIF_flags &= ~TIF_INACTIVATEAPPMSG;
    }
 
-   // Checked in MENU_TrackMenu
-   ThreadQueue->QF_flags |= QF_ACTIVATIONCHANGE;
+   // Checked in MENU_TrackMenu (the focus messages above can have changed the queue as well)
+   if (ThreadQueue == pti->MessageQueue)
+      ThreadQueue->QF_flags |= QF_ACTIVATIONCHANGE;
 
    //ERR("co_IntSetActiveWindow Exit\n");
    Wnd->state &= ~WNDS_BEINGACTIVATED;
-   return (ThreadQueue->spwndActive == Wnd);
+   return (pti->MessageQueue->spwndActive == Wnd);
 }
 
 //
@@ -1718,7 +1741,9 @@ co_UserSetCapture(HWND hWnd)
 
       co_IntSendMessage(hWndPrev, WM_CAPTURECHANGED, 0, (LPARAM)hWnd);
 
-      ThreadQueue->QF_flags &= ~QF_CAPTURELOCKED;
+      /* The queue can have been replaced (and freed) by AttachThreadInput during the message */
+      if (ThreadQueue == pti->MessageQueue)
+         ThreadQueue->QF_flags &= ~QF_CAPTURELOCKED;
    }
 
    if (hWnd == NULL) // Release mode.
