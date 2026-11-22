@@ -98,6 +98,8 @@ typedef struct
     BOOL                     cert_checked;
     DWORD                    enabled_protocols;
     BOOL                     version_checked;
+    char                    *alpn_names;        /* the offered ALPN protocol names, NUL separated */
+    const char              *alpn_protocols[17];
 } MBEDTLS_SESSION, *PMBEDTLS_SESSION;
 
 /* custom `net_recv` callback adapter, mbedTLS uses it in mbedtls_ssl_read for
@@ -313,6 +315,51 @@ BOOL schan_imp_create_session(schan_imp_session *session, schan_credentials *cre
     return TRUE;
 }
 
+/*
+ * The ALPN protocol names a client offers (SECBUFFER_APPLICATION_PROTOCOLS: the wire format of the extension, each name
+ * with a length byte in front). Before the handshake starts. FALSE for a list that is empty or malformed.
+ */
+BOOL schan_imp_set_session_alpn(schan_imp_session session, const unsigned char *list, unsigned int size)
+{
+    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
+    unsigned int pos = 0, count = 0;
+    char *names, *out;
+
+    if (size == 0)
+        return FALSE;
+    names = HeapAlloc(GetProcessHeap(), 0, size + 1);
+    if (!names)
+        return FALSE;
+    out = names;
+    while (pos < size)
+    {
+        unsigned int len = list[pos++];
+
+        if (len == 0 || pos + len > size || count >= 16)
+        {
+            HeapFree(GetProcessHeap(), 0, names);
+            return FALSE;
+        }
+        s->alpn_protocols[count++] = out;
+        memcpy(out, list + pos, len);
+        out += len;
+        *out++ = 0;
+        pos += len;
+    }
+    s->alpn_protocols[count] = NULL;
+    HeapFree(GetProcessHeap(), 0, s->alpn_names);
+    s->alpn_names = names;
+    return mbedtls_ssl_conf_alpn_protocols(&s->conf, s->alpn_protocols) == 0;
+}
+
+/* The protocol that the server chose, NULL when there is none (or the handshake is not over) */
+const char *schan_imp_get_session_alpn(schan_imp_session session)
+{
+    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
+
+    return mbedtls_ssl_get_alpn_protocol(&s->ssl);
+}
+
 void schan_imp_dispose_session(schan_imp_session session)
 {
     MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
@@ -322,6 +369,7 @@ void schan_imp_dispose_session(schan_imp_session session)
     //ssl_close_notify(&s->ssl);
 
     HeapFree(GetProcessHeap(), 0, s->target);
+    HeapFree(GetProcessHeap(), 0, s->alpn_names);
     mbedtls_ssl_free(&s->ssl);
     mbedtls_ctr_drbg_free(&s->ctr_drbg);
     mbedtls_entropy_free(&s->entropy);

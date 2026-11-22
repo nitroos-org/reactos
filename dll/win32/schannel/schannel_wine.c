@@ -1115,6 +1115,38 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
         }
         schan_imp_set_session_validation(ctx->session, pszTargetName, cred->flags,
                                          (fContextReq & ISC_REQ_MANUAL_CRED_VALIDATION) != 0);
+
+        /* The protocols the caller offers in the ALPN extension (Windows Server 2022: a list for ProtoNegoExt ALPN
+         * goes into the ClientHello, one for NPN is ignored, an empty list is SEC_E_ILLEGAL_MESSAGE) */
+        if (pInput)
+        {
+            int alpn_idx = schan_find_sec_buffer_idx(pInput, 0, SECBUFFER_APPLICATION_PROTOCOLS);
+
+            if (alpn_idx != -1)
+            {
+                const SecBuffer *alpn_buffer = &pInput->pBuffers[alpn_idx];
+                const BYTE *data = alpn_buffer->pvBuffer;
+
+                /* ULONG ProtocolListsSize; then per list: ULONG ProtoNegoExt, USHORT ProtocolListSize, the list */
+                if (data && alpn_buffer->cbBuffer >= 10)
+                {
+                    ULONG ext = *(const ULONG *)(data + 4);
+                    USHORT size = *(const USHORT *)(data + 8);
+
+                    if (ext == SecApplicationProtocolNegotiationExt_ALPN)
+                    {
+                        if (size > alpn_buffer->cbBuffer - 10 ||
+                            !schan_imp_set_session_alpn(ctx->session, data + 10, size))
+                        {
+                            schan_imp_dispose_session(ctx->session);
+                            schan_free_handle(handle, SCHAN_HANDLE_CTX);
+                            HeapFree(GetProcessHeap(), 0, ctx);
+                            return SEC_E_ILLEGAL_MESSAGE;
+                        }
+                    }
+                }
+            }
+        }
         phNewContext->dwLower = handle;
         phNewContext->dwUpper = 0;
     }
@@ -1381,13 +1413,30 @@ SECURITY_STATUS SEC_ENTRY schan_QueryContextAttributesW(
         case SECPKG_ATTR_APPLICATION_PROTOCOL:
         {
             SecPkgContext_ApplicationProtocol *protocol = buffer;
+            const char *chosen;
+            size_t length;
 
             if (!ctx) return SEC_E_INVALID_HANDLE;
-            /* This provider does not offer ALPN, so nothing is ever negotiated; Windows answers the same
-             * way when the server declines ALPN (curl, i.e. git, fails the connection on an error here) */
+            /* Before the handshake is done: SEC_E_INVALID_HANDLE on Windows Server 2022 */
+            if (!schan_imp_handshake_done(ctx->session))
+                return SEC_E_INVALID_HANDLE;
+            /* What the server chose; nothing when it declined or none was offered: Windows answers that with
+             * status and extension none (curl, i.e. git, fails the connection on an error here) */
             memset(protocol, 0, sizeof(*protocol));
-            protocol->ProtoNegoStatus = SecApplicationProtocolNegotiationStatus_None;
-            protocol->ProtoNegoExt = SecApplicationProtocolNegotiationExt_None;
+            chosen = schan_imp_get_session_alpn(ctx->session);
+            length = chosen ? strlen(chosen) : 0;
+            if (chosen && length > 0 && length <= sizeof(protocol->ProtocolId))
+            {
+                protocol->ProtoNegoStatus = SecApplicationProtocolNegotiationStatus_Success;
+                protocol->ProtoNegoExt = SecApplicationProtocolNegotiationExt_ALPN;
+                protocol->ProtocolIdSize = (unsigned char)length;
+                memcpy(protocol->ProtocolId, chosen, length);
+            }
+            else
+            {
+                protocol->ProtoNegoStatus = SecApplicationProtocolNegotiationStatus_None;
+                protocol->ProtoNegoExt = SecApplicationProtocolNegotiationExt_None;
+            }
             return SEC_E_OK;
         }
 
