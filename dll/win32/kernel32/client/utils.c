@@ -177,6 +177,25 @@ BaseGetNamedObjectDirectory(
         }
     }
 
+    /*
+     * A process below the directory's integrity level is refused the create
+     * rights (write rights of the directory) by its mandatory label, and has
+     * no Restricted directory to fall back on: it still opens the named
+     * objects it may open (traverse and query are read and execute rights).
+     * Whether it may create objects there is decided when it creates one.
+     */
+    if (!NT_SUCCESS(Status))
+    {
+        InitializeObjectAttributes(&ObjectAttributes,
+                                   &BaseStaticServerData->NamedObjectDirectory,
+                                   OBJ_CASE_INSENSITIVE,
+                                   NULL,
+                                   NULL);
+        Status = NtOpenDirectoryObject(&BnoHandle,
+                                       DIRECTORY_QUERY | DIRECTORY_TRAVERSE,
+                                       &ObjectAttributes);
+    }
+
     if (NT_SUCCESS(Status)) BaseNamedObjectDirectory = BnoHandle;
 
 Quickie:

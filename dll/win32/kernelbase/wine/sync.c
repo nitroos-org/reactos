@@ -77,6 +77,12 @@ NTSTATUS WINAPI BaseGetNamedObjectDirectory( HANDLE *dir )
         RtlInitUnicodeString( &str, buffer );
         InitializeObjectAttributes(&attr, &str, 0, 0, NULL);
         status = NtOpenDirectoryObject( &dir, DIRECTORY_CREATE_OBJECT|DIRECTORY_TRAVERSE, &attr );
+#ifdef __REACTOS__
+        /* Below the directory's integrity level the create right is refused by its label; opening
+         * named objects only needs traverse (whether a create is allowed is decided at the create) */
+        if (status == STATUS_ACCESS_DENIED)
+            status = NtOpenDirectoryObject( &dir, DIRECTORY_TRAVERSE, &attr );
+#endif
         if (!status && InterlockedCompareExchangePointer( &handle, dir, 0 ) != 0)
         {
             /* someone beat us here... */
