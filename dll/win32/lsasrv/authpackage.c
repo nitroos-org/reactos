@@ -860,6 +860,13 @@ LsapCopyLocalGroups(
                                      DstSid,
                                      SidLength,
                                      NULL);
+        /* The caller's memory may have changed since the header was read: the copy is used (and its sub
+         * authorities read and written) by its own SubAuthorityCount, which must still fit the buffer */
+        if (NT_SUCCESS(Status) &&
+            (!RtlValidSid(DstSid) || RtlLengthSid(DstSid) != SidLength))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+        }
         if (!NT_SUCCESS(Status))
         {
             RtlFreeHeap(RtlGetProcessHeap(), 0, DstSid);
