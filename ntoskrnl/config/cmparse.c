@@ -2844,8 +2844,20 @@ KeyCachedOpenNow:
                                                    &NextName);
                     if (!Kcb)
                     {
-                        /* Fail */
-                        Status = STATUS_INSUFFICIENT_RESOURCES;
+                        /*
+                         * A hive another thread is still loading (or unloading) makes no KCB for
+                         * this thread: its keys are not there yet (or any more), as CmpDoOpen says
+                         * for the last name. Anything else is a lack of memory.
+                         */
+                        if ((Hive->HiveFlags & HIVE_IS_UNLOADING) &&
+                            (((PCMHIVE)Hive)->CreatorOwner != KeGetCurrentThread()))
+                        {
+                            Status = STATUS_OBJECT_NAME_NOT_FOUND;
+                        }
+                        else
+                        {
+                            Status = STATUS_INSUFFICIENT_RESOURCES;
+                        }
                         break;
                     }
 
