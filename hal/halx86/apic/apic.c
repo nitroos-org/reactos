@@ -863,6 +863,34 @@ HalpSetClockInput(
     HalpVectorToIndex[APIC_CLOCK_VECTOR] = Index;
 }
 
+/*!
+    \brief Frees the I/O APIC input of the clock: the clock interrupt comes from
+           the local APIC timer of the boot processor.
+
+    Called while the boot processor initializes the clock, with interrupts
+    disabled and the clock input still masked. The clock vector is then reserved
+    like the other local vectors, so it is never enabled on an I/O APIC input.
+*/
+CODE_SEG("INIT")
+VOID
+NTAPI
+HalpReleaseClockInput(VOID)
+{
+    IOAPIC_REDIRECTION_REGISTER ReDirReg;
+    UCHAR OldIndex = HalpVectorToIndex[APIC_CLOCK_VECTOR];
+
+    if (OldIndex < APIC_MAX_IRQ)
+    {
+        ReDirReg = ApicReadIORedirectionEntry(OldIndex);
+        ReDirReg.Vector = APIC_FREE_VECTOR;
+        ReDirReg.TriggerMode = APIC_TGM_Edge;
+        ReDirReg.Mask = 1;
+        ApicWriteIORedirectionEntry(OldIndex, ReDirReg);
+    }
+
+    HalpVectorToIndex[APIC_CLOCK_VECTOR] = APIC_RESERVED_VECTOR;
+}
+
 VOID
 NTAPI
 HalpInitializePICs(IN BOOLEAN EnableInterrupts)

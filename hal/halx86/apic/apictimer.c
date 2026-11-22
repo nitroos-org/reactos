@@ -24,6 +24,14 @@ ULONGLONG HalMaxProfileInterval = 10000000;
 /* Local APIC timer ticks per millisecond at divide-by-1, measured at boot */
 static ULONG HalpProfileTimerTicksPerMs = 10000;
 
+/* The clock interrupt comes from the local APIC timer of the boot processor
+   when the machine has neither the periodic interrupt of the RTC nor a PIT:
+   Hyper-V generation 2 machines have neither ("Should I create a generation 1
+   or 2 virtual machine in Hyper-V?", device table: PIT "No longer required";
+   their RTC does not set the periodic flag). The timer is then the clock's,
+   and there are no profile interrupts. */
+BOOLEAN HalpClockUsesApicTimer;
+
 /* TIMER FUNCTIONS ************************************************************/
 
 VOID
@@ -105,22 +113,23 @@ HalpProfileInterruptHandler(_In_ PKTRAP_FRAME TrapFrame)
 #endif
 }
 
+/*!
+    \brief Measures the local APIC timer of this processor against the
+           calibrated TSC, with the timer masked; interrupts must be disabled.
+*/
+static
 VOID
-NTAPI
-HalpInitializeProfileTimer(VOID)
+HalpCalibrateApicTimer(
+    _In_ UCHAR Vector)
 {
-    ULONG_PTR Flags;
     ULONG64 T0, T1, T2, T3, Wait, Slack, TicksPerMs;
     ULONG Remaining, Attempt;
     LVT_REGISTER LvtEntry;
 
-    Flags = __readeflags();
-    _disable();
-
     /* Count down in one-shot mode with the interrupt masked */
     LvtEntry.Long = 0;
     LvtEntry.TimerMode = 0;
-    LvtEntry.Vector = APIC_PROFILE_VECTOR;
+    LvtEntry.Vector = Vector;
     LvtEntry.Mask = 1;
     ApicWrite(APIC_TMRLVTR, LvtEntry.Long);
     ApicWrite(APIC_TDCR, TIMER_DV_DivideBy1);
@@ -154,16 +163,94 @@ HalpInitializeProfileTimer(VOID)
 
     if ((Wait == 0) || (Attempt == 5))
     {
-        DPRINT1("Profile timer not calibrated, assuming %lu ticks per ms\n",
+        DPRINT1("Local APIC timer not calibrated, assuming %lu ticks per ms\n",
                 HalpProfileTimerTicksPerMs);
     }
 
-    /* Stop the timer and leave it masked and periodic */
+    /* Stop the timer */
     ApicWrite(APIC_TICR, 0);
+}
+
+VOID
+NTAPI
+HalpInitializeProfileTimer(VOID)
+{
+    ULONG_PTR Flags;
+    LVT_REGISTER LvtEntry;
+
+    /* The clock measured the timer and runs on it */
+    if (HalpClockUsesApicTimer)
+        return;
+
+    Flags = __readeflags();
+    _disable();
+
+    HalpCalibrateApicTimer(APIC_PROFILE_VECTOR);
+
+    /* Leave it masked and periodic */
+    LvtEntry.Long = 0;
     LvtEntry.TimerMode = 1;
+    LvtEntry.Vector = APIC_PROFILE_VECTOR;
+    LvtEntry.Mask = 1;
     ApicWrite(APIC_TMRLVTR, LvtEntry.Long);
 
     __writeeflags(Flags);
+}
+
+/*!
+    \brief Makes the local APIC timer of the boot processor the clock source,
+           masked and stopped until HalpApicTimerSetClockRate and
+           HalpApicTimerEnableClock. Interrupts must be disabled.
+*/
+CODE_SEG("INIT")
+VOID
+NTAPI
+HalpApicTimerStartClock(VOID)
+{
+    LVT_REGISTER LvtEntry;
+
+    HalpClockUsesApicTimer = TRUE;
+    HalpCalibrateApicTimer(APIC_CLOCK_VECTOR);
+
+    LvtEntry.Long = 0;
+    LvtEntry.TimerMode = 1;
+    LvtEntry.Vector = APIC_CLOCK_VECTOR;
+    LvtEntry.Mask = 1;
+    ApicWrite(APIC_TMRLVTR, LvtEntry.Long);
+}
+
+/*!
+    \brief Sets the period of the clock on the local APIC timer; called on the
+           boot processor (the clock interrupt runs there).
+*/
+VOID
+NTAPI
+HalpApicTimerSetClockRate(
+    _In_ ULONG Hz)
+{
+    ULONG64 Count = ((ULONG64)HalpProfileTimerTicksPerMs * 1000 + Hz / 2) / Hz;
+
+    if (Count == 0)
+        Count = 1;
+    if (Count > MAXULONG)
+        Count = MAXULONG;
+
+    /* Writing the initial count restarts the period */
+    ApicWrite(APIC_TICR, (ULONG)Count);
+}
+
+CODE_SEG("INIT")
+VOID
+NTAPI
+HalpApicTimerEnableClock(VOID)
+{
+    LVT_REGISTER LvtEntry;
+
+    LvtEntry.Long = 0;
+    LvtEntry.TimerMode = 1;
+    LvtEntry.Vector = APIC_CLOCK_VECTOR;
+    LvtEntry.Mask = 0;
+    ApicWrite(APIC_TMRLVTR, LvtEntry.Long);
 }
 
 
@@ -182,6 +269,10 @@ NTAPI
 HalStartProfileInterrupt(IN KPROFILE_SOURCE ProfileSource)
 {
     LVT_REGISTER LvtEntry;
+
+    /* The local APIC timer is the clock */
+    if (HalpClockUsesApicTimer)
+        return;
 
     /* Only handle ProfileTime */
     if (ProfileSource == ProfileTime)
@@ -206,6 +297,10 @@ NTAPI
 HalStopProfileInterrupt(IN KPROFILE_SOURCE ProfileSource)
 {
     LVT_REGISTER LvtEntry;
+
+    /* The local APIC timer is the clock */
+    if (HalpClockUsesApicTimer)
+        return;
 
     /* Only handle ProfileTime */
     if (ProfileSource == ProfileTime)
@@ -244,7 +339,7 @@ HalSetProfileInterval(IN ULONG_PTR Interval)
     HalCurProfileInterval = FixedInterval;
 
     /* A running profile timer takes the new interval at once */
-    if (HalIsProfiling)
+    if (HalIsProfiling && !HalpClockUsesApicTimer)
         ApicWrite(APIC_TICR, HalpProfileIntervalToCount(FixedInterval));
 
     return (ULONG_PTR)FixedInterval;

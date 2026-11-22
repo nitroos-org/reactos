@@ -1095,7 +1095,9 @@ from. Most often this disk is attached to a controller type that has no
 driver in this system. Supported boot disk controllers: IDE, SATA (AHCI),
 NVMe, VirtIO SCSI, VirtIO block and BusLogic SCSI. Attach the disk to one
 of these (in a virtual machine, change the disk bus type) and restart the
-computer. If the disk already is on one of these, its controller could not
+computer. Hyper-V: a generation 2 virtual machine has only VMBus SCSI
+disks, which have no driver yet; create a generation 1 machine instead.
+If the disk already is on one of these, its controller could not
 be started: in a virtual machine with CPU type "host" and more than 3 GB of
 memory, a modern-only VirtIO controller is placed at an address this system
 cannot reach yet; choose another CPU type (x86-64-v2-AES, kvm64).
