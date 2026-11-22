@@ -690,6 +690,13 @@ static BOOLEAN LanIsTcpPacket(
     return (Header[Offset] >> 4) == 4 && Header[Offset + 9] == IPPROTO_TCP;
 }
 
+/* A received frame that the stack cannot take (a full receive queue, no memory for a copy): the interface
+   counts it as a discarded packet (GetIfEntry dwInDiscards), as the drops were invisible otherwise */
+static VOID LanCountReceiveDrop(PLAN_ADAPTER Adapter) {
+    if (Adapter->Context)
+        InterlockedIncrement((PLONG)&((PIP_INTERFACE)Adapter->Context)->Stats.InDiscarded);
+}
+
 /* Returns FALSE if the packet was not queued; the caller still owns it then.
    Tcp is LanIsTcpPacket's answer for the packet */
 BOOLEAN LanSubmitReceiveWork(
@@ -706,7 +713,10 @@ BOOLEAN LanSubmitReceiveWork(
 
     TI_DbgPrint(DEBUG_DATALINK,("called\n"));
 
-    if (!WQItem) return FALSE;
+    if (!WQItem) {
+        LanCountReceiveDrop(Adapter);
+        return FALSE;
+    }
 
     WQItem->Packet = Packet;
     WQItem->Adapter = Adapter;
@@ -720,18 +730,19 @@ BOOLEAN LanSubmitReceiveWork(
        (an ARP reply, a socket's lock) can hold up TCP or each other */
     if (Tcp) {
         Queued = ChewSerialInsert(&Adapter->ReceiveQueue, &WQItem->ListEntry);
-        /* A full queue drops the segment (the receive worker is behind): the interface counts it as a
-           discarded packet (GetIfEntry dwInDiscards), as the drops were invisible otherwise */
-        if (!Queued && Adapter->Context)
-            InterlockedIncrement((PLONG)&((PIP_INTERFACE)Adapter->Context)->Stats.InDiscarded);
+        /* A full queue drops the segment (the receive worker is behind) */
+        if (!Queued)
+            LanCountReceiveDrop(Adapter);
     } else {
         if (InterlockedIncrement(&Adapter->ReceiveWorkItems) > LAN_MAX_PENDING_FRAMES) {
             Queued = FALSE;
         } else {
             Queued = ChewCreate(LanReceiveWorkItem, WQItem);
         }
-        if (!Queued)
+        if (!Queued) {
             InterlockedDecrement(&Adapter->ReceiveWorkItems);
+            LanCountReceiveDrop(Adapter);
+        }
     }
 
     if (!Queued) {
@@ -798,8 +809,10 @@ static VOID LanSubmitReceiveCopy(
         return;
 
     Length -= Adapter->HeaderSize;
-    if (AllocatePacketWithBuffer(&Copy, NULL, Length) != NDIS_STATUS_SUCCESS)
+    if (AllocatePacketWithBuffer(&Copy, NULL, Length) != NDIS_STATUS_SUCCESS) {
+        LanCountReceiveDrop(Adapter);
         return;
+    }
 
     GetDataPtr(Copy, 0, &Data, &Size);
     CopyPacketToBuffer(Data, NdisPacket, Adapter->HeaderSize, Length);
@@ -907,6 +920,7 @@ NDIS_STATUS NTAPI ProtocolReceive(
     NdisStatus = AllocatePacketWithBuffer( &NdisPacket, NULL,
                                            PacketSize );
     if( NdisStatus != NDIS_STATUS_SUCCESS ) {
+	LanCountReceiveDrop(Adapter);
 	return NDIS_STATUS_NOT_ACCEPTED;
     }
 
