@@ -23,8 +23,17 @@ UINT TransferDataCompleteCalled = 0;
 #define CCS_ROOT L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet"
 #define TCPIP_GUID L"{4D36E972-E325-11CE-BFC1-08002BE10318}"
 
-/* TCP segments that may wait in an adapter's receive queue */
-#define LAN_RECEIVE_QUEUE_LIMIT 1024
+/* What the TCP segments that wait in an adapter's receive queue may hold (LAN_RECEIVE_QUEUE_LIMIT of them, lan.h). TCP runs on the receive
+   worker under lwIP's core lock, so when the segments arrive faster than that (a sender with a window of a few
+   megabytes on a fast link, the guest of a virtual machine that shares its processors) they wait here, and a
+   frame refused here is sent again by the peer: 1024 frames (1.5 MB) were refused by every fast download
+   from a Windows peer, 0.5 % of its segments. The queue holds the window of a few connections.
+   A segment is charged with its length and LAN_RECEIVE_FRAME_OVERHEAD (its work item, its NDIS packet and
+   buffer descriptors, the pool headers), so a flood of short frames is bounded by memory as well: at most
+   LAN_RECEIVE_QUEUE_BYTES (16 MiB) of non-paged pool per adapter, whatever the sender does. The packet
+   descriptors behind them are the pool of main.c */
+#define LAN_RECEIVE_FRAME_OVERHEAD 320
+#define LAN_RECEIVE_QUEUE_BYTES (16 * 1024 * 1024)
 
 /* Miniport packets among them; later segments are copied so the miniport's
    receive buffers do not run out while the worker is busy */
@@ -52,6 +61,7 @@ typedef struct _LAN_WQ_ITEM {
     BOOLEAN LegacyReceive;
     BOOLEAN Held;
     BOOLEAN FromOwnLink;    /* Frame is one our own send path looped back (LanLoopTagged), taken at indication */
+    ULONG Charge;           /* What the frame is charged with in Adapter->ReceiveQueuedBytes (0: not charged) */
 } LAN_WQ_ITEM, *PLAN_WQ_ITEM;
 
 typedef struct _RECONFIGURE_CONTEXT {
@@ -524,6 +534,7 @@ static VOID LanReceiveItem( PLAN_WQ_ITEM WorkItem ) {
     PLAN_ADAPTER Adapter;
     UINT BytesTransferred;
     BOOLEAN LegacyReceive, Held, FromOwnLink;
+    ULONG Charge;
 
     TI_DbgPrint(DEBUG_DATALINK, ("Called.\n"));
 
@@ -533,6 +544,7 @@ static VOID LanReceiveItem( PLAN_WQ_ITEM WorkItem ) {
     LegacyReceive = WorkItem->LegacyReceive;
     Held = WorkItem->Held;
     FromOwnLink = WorkItem->FromOwnLink;
+    Charge = WorkItem->Charge;
 
     ExFreePoolWithTag(WorkItem, WQ_CONTEXT_TAG);
 
@@ -541,6 +553,9 @@ static VOID LanReceiveItem( PLAN_WQ_ITEM WorkItem ) {
     /* The miniport's packet has left the queue */
     if (Held)
         InterlockedDecrement(&Adapter->HeldPackets);
+
+    if (Charge)
+        InterlockedExchangeAdd(&Adapter->ReceiveQueuedBytes, -(LONG)Charge);
 }
 
 static VOID LanReceiveWorker( PLIST_ENTRY Entry ) {
@@ -724,15 +739,29 @@ BOOLEAN LanSubmitReceiveWork(
     WQItem->LegacyReceive = LegacyReceive;
     WQItem->Held = Tcp && !LegacyReceive;
     WQItem->FromOwnLink = FromOwnLink;
+    WQItem->Charge = 0;
 
     /* TCP segments go through one worker per adapter, so they reach TCP in the order
        they were indicated. Other frames keep a work item each: nothing they wait for
        (an ARP reply, a socket's lock) can hold up TCP or each other */
     if (Tcp) {
-        Queued = ChewSerialInsert(&Adapter->ReceiveQueue, &WQItem->ListEntry);
-        /* A full queue drops the segment (the receive worker is behind) */
-        if (!Queued)
+        UINT Length = 0;
+        ULONG Charge;
+
+        NdisQueryPacketLength(Packet, &Length);
+        Charge = Length + LAN_RECEIVE_FRAME_OVERHEAD;
+        WQItem->Charge = Charge;
+
+        /* A queue that is full by memory or by frames drops the segment (the receive worker is behind) */
+        if ((ULONG)InterlockedExchangeAdd(&Adapter->ReceiveQueuedBytes, (LONG)Charge) + Charge > LAN_RECEIVE_QUEUE_BYTES) {
+            Queued = FALSE;
+        } else {
+            Queued = ChewSerialInsert(&Adapter->ReceiveQueue, &WQItem->ListEntry);
+        }
+        if (!Queued) {
+            InterlockedExchangeAdd(&Adapter->ReceiveQueuedBytes, -(LONG)Charge);
             LanCountReceiveDrop(Adapter);
+        }
     } else {
         if (InterlockedIncrement(&Adapter->ReceiveWorkItems) > LAN_MAX_PENDING_FRAMES) {
             Queued = FALSE;
