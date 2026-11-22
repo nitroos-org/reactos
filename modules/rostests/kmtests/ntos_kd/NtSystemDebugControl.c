@@ -110,6 +110,18 @@ START_TEST(NtSystemDebugControl)
     Status = RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, TRUE, FALSE, &PrivilegeSet[1]);
     ok_eq_hex(Status, STATUS_SUCCESS);
 
+    /* The ROS-internal commands of the kernel-mode KdSystemDebugControl() take raw kernel pointers: no user-mode caller reaches them */
+    {
+        static const ULONG Internal[] = { ' soR', 'CsoR', 'DsoR', 'RbdK', 'PdbK' };
+        ULONG i;
+
+        for (i = 0; i < RTL_NUMBER_OF(Internal); i++)
+        {
+            Status = TestSystemDebugControl((SYSDBG_COMMAND)Internal[i]);
+            ok(!NT_SUCCESS(Status), "In test 0x%08lx: Status = 0x%08lx, expected a failure\n", Internal[i], Status);
+        }
+    }
+
     /* Supported commands */
     for (Command = 0; Command <= 5; ++Command)
     {
