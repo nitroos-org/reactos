@@ -33,7 +33,11 @@ MegabytesToSectors(
  * command line before anything else is checked.
  */
 static BOOLEAN g_bNoErr = FALSE;
+/* noerr given twice: invalid arguments */
+static BOOLEAN g_bNoErrTwice = FALSE;
 #define CREATE_FAILED() (g_bNoErr ? EXIT_SUCCESS : EXIT_CMD_FAILED)
+/* invalid arguments are not hidden by noerr: the script stops with 0x80070057 (Windows Server 2022, measured: size=abc noerr, an unknown word, noerr noerr) */
+#define CREATE_BADARGS() (EXIT_CMD_FAILED)
 /* offset= that cannot be had (the range overlaps a partition or leaves the free space): the Windows DiskPart says "Virtual Disk Service error: There is not enough usable space" (0x8004240F) */
 #define CREATE_NOSPACE() (g_bNoErr ? EXIT_SUCCESS : EXIT_CMD_NO_SPACE)
 
@@ -46,10 +50,15 @@ ScanNoErr(
     INT i;
 
     g_bNoErr = FALSE;
+    g_bNoErrTwice = FALSE;
     for (i = 3; i < argc; i++)
     {
         if (_wcsicmp(argv[i], L"noerr") == 0)
+        {
+            if (g_bNoErr)
+                g_bNoErrTwice = TRUE;
             g_bNoErr = TRUE;
+        }
     }
 }
 
@@ -83,7 +92,11 @@ ParseSizeMegabytes(
     return TRUE;
 }
 
-/* offset=<N> is in KB: a whole number of sectors, strictly decimal, that does not overflow */
+/*
+ * offset=<N> is in KB, more than 0, strictly decimal, no overflow. The Windows DiskPart rounds it DOWN to a granularity of the
+ * disk (measured on a VHD: 1001 gives 960 KB, 512 gives 512, 32768 gives 32 MB; 0 and abc are not valid arguments): 64 KB
+ * here, or one sector when that is larger.
+ */
 static
 BOOLEAN
 ParseOffsetKilobytes(
@@ -92,16 +105,21 @@ ParseOffsetKilobytes(
     _Out_ PULONGLONG pullSectors)
 {
     PWSTR pszEnd;
-    ULONGLONG ullKilobytes;
+    ULONGLONG ullKilobytes, ullGranularity;
 
     if (!iswdigit(*pszOffset))
         return FALSE;
 
     errno = 0;
     ullKilobytes = _wcstoui64(pszOffset, &pszEnd, 10);
-    if (*pszEnd != UNICODE_NULL || errno == ERANGE || ullKilobytes > _UI64_MAX / 1024)
+    if (*pszEnd != UNICODE_NULL || errno == ERANGE || ullKilobytes == 0 || ullKilobytes > _UI64_MAX / 1024)
         return FALSE;
 
+    ullGranularity = max(64 * 1024ULL, (ULONGLONG)ulBytesPerSector);
+    /* less than one granule rounds down to nothing: not a valid offset (not measured below 64 KB) */
+    if (ullKilobytes * 1024 < ullGranularity)
+        return FALSE;
+    ullKilobytes = (ullKilobytes * 1024 / ullGranularity) * ullGranularity / 1024;
     if (((ullKilobytes * 1024) % ulBytesPerSector) != 0)
         return FALSE;
 
@@ -413,7 +431,7 @@ CreateEfiPartition(
             if (!ParseSizeMegabytes(pszSuffix, &ullSize, &bSizeGiven))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                return CREATE_FAILED();
+                return CREATE_BADARGS();
             }
         }
         else if (HasPrefix(argv[i], L"offset=", &pszSuffix))
@@ -423,18 +441,23 @@ CreateEfiPartition(
             if (!ParseOffsetKilobytes(pszSuffix, CurrentDisk->BytesPerSector, &ullOffset))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                return CREATE_FAILED();
+                return CREATE_BADARGS();
             }
             bOffset = TRUE;
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr - Already handled above */
+            /* noerr - Already handled above; twice is an invalid argument */
+            if (g_bNoErrTwice)
+            {
+                ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+                return CREATE_BADARGS();
+            }
         }
         else
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return CREATE_FAILED();
+            return CREATE_BADARGS();
         }
     }
 
@@ -530,7 +553,7 @@ CreateExtendedPartition(
             if (!ParseSizeMegabytes(pszSuffix, &ullSize, &bSizeGiven))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                return CREATE_FAILED();
+                return CREATE_BADARGS();
             }
         }
         else if (HasPrefix(argv[i], L"offset=", &pszSuffix))
@@ -540,7 +563,7 @@ CreateExtendedPartition(
             if (!ParseOffsetKilobytes(pszSuffix, CurrentDisk->BytesPerSector, &ullOffset))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                return CREATE_FAILED();
+                return CREATE_BADARGS();
             }
             bOffset = TRUE;
         }
@@ -552,12 +575,17 @@ CreateExtendedPartition(
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr - Already handled above */
+            /* noerr - Already handled above; twice is an invalid argument */
+            if (g_bNoErrTwice)
+            {
+                ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+                return CREATE_BADARGS();
+            }
         }
         else
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return CREATE_FAILED();
+            return CREATE_BADARGS();
         }
     }
 
@@ -721,7 +749,7 @@ CreateLogicalPartition(
             if (!ParseSizeMegabytes(pszSuffix, &ullSize, &bSizeGiven))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                return CREATE_FAILED();
+                return CREATE_BADARGS();
             }
         }
         else if (HasPrefix(argv[i], L"offset=", &pszSuffix))
@@ -731,7 +759,7 @@ CreateLogicalPartition(
             if (!ParseOffsetKilobytes(pszSuffix, CurrentDisk->BytesPerSector, &ullOffset))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                return CREATE_FAILED();
+                return CREATE_BADARGS();
             }
             bOffset = TRUE;
         }
@@ -754,7 +782,7 @@ CreateLogicalPartition(
             else
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                return CREATE_FAILED();
+                return CREATE_BADARGS();
             }
         }
         else if (HasPrefix(argv[i], L"align=", &pszSuffix))
@@ -765,12 +793,17 @@ CreateLogicalPartition(
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr - Already handled above */
+            /* noerr - Already handled above; twice is an invalid argument */
+            if (g_bNoErrTwice)
+            {
+                ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+                return CREATE_BADARGS();
+            }
         }
         else
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return CREATE_FAILED();
+            return CREATE_BADARGS();
         }
     }
 
@@ -916,7 +949,7 @@ CreateMsrPartition(
             if (!ParseSizeMegabytes(pszSuffix, &ullSize, &bSizeGiven))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                return CREATE_FAILED();
+                return CREATE_BADARGS();
             }
         }
         else if (HasPrefix(argv[i], L"offset=", &pszSuffix))
@@ -926,18 +959,23 @@ CreateMsrPartition(
             if (!ParseOffsetKilobytes(pszSuffix, CurrentDisk->BytesPerSector, &ullOffset))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                return CREATE_FAILED();
+                return CREATE_BADARGS();
             }
             bOffset = TRUE;
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr - Already handled above */
+            /* noerr - Already handled above; twice is an invalid argument */
+            if (g_bNoErrTwice)
+            {
+                ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+                return CREATE_BADARGS();
+            }
         }
         else
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return CREATE_FAILED();
+            return CREATE_BADARGS();
         }
     }
 
@@ -1017,14 +1055,14 @@ CreatePrimaryMbrPartition(
         if ((length != 1) && (length != 2))
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return CREATE_FAILED();
+            return CREATE_BADARGS();
         }
 
         PartitionType = (UCHAR)wcstoul(pszPartitionType, NULL, 16);
         if ((PartitionType == 0) && (errno == ERANGE))
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return CREATE_FAILED();
+            return CREATE_BADARGS();
         }
     }
     else
@@ -1150,7 +1188,7 @@ CreatePrimaryGptPartition(
         if (!StringToGUID(&guidPartitionType, pszPartitionType))
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return CREATE_FAILED();
+            return CREATE_BADARGS();
         }
     }
     else
@@ -1245,7 +1283,7 @@ CreatePrimaryPartition(
             if (!ParseSizeMegabytes(pszSuffix, &ullSize, &bSizeGiven))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                return CREATE_FAILED();
+                return CREATE_BADARGS();
             }
         }
         else if (HasPrefix(argv[i], L"offset=", &pszSuffix))
@@ -1255,7 +1293,7 @@ CreatePrimaryPartition(
             if (!ParseOffsetKilobytes(pszSuffix, CurrentDisk->BytesPerSector, &ullOffset))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                return CREATE_FAILED();
+                return CREATE_BADARGS();
             }
             bOffset = TRUE;
         }
@@ -1278,7 +1316,7 @@ CreatePrimaryPartition(
         else
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return CREATE_FAILED();
+            return CREATE_BADARGS();
         }
     }
 
