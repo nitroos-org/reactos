@@ -133,6 +133,7 @@ extern void func_SetActiveWindow(void);
 extern void func_SetCoalescableTimer(void);
 extern void func_SetCursorPos(void);
 extern void func_SetFocus(void);
+extern void func_SetFocusCallbacks(void);
 extern void func_SetParent(void);
 extern void func_SetProp(void);
 extern void func_SetScrollInfo(void);
@@ -311,6 +312,7 @@ const struct test winetest_testlist[] =
     { "SetCoalescableTimer", func_SetCoalescableTimer },
     { "SetCursorPos", func_SetCursorPos },
     { "SetFocus", func_SetFocus },
+    { "SetFocusCallbacks", func_SetFocusCallbacks },
     { "SetParent", func_SetParent },
     { "SetProp", func_SetProp },
     { "SetScrollInfo", func_SetScrollInfo },

@@ -134,6 +134,7 @@ list(APPEND SOURCE
     SetCoalescableTimer.c
     SetCursorPos.c
     SetFocus.c
+    SetFocusCallbacks.c
     SetParent.c
     SetProp.c
     SetScrollInfo.c
