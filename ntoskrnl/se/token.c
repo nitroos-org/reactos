@@ -2276,6 +2276,7 @@ SepCreateSystemAnonymousLogonToken(VOID)
     PSID PrimaryGroup;
     PTOKEN Token;
     ULONG GroupsLength;
+    ULONG LabelSid[SEP_MANDATORY_LABEL_SID_LENGTH / sizeof(ULONG)];
     LARGE_INTEGER Expiration;
     OBJECT_ATTRIBUTES ObjectAttributes;
     NTSTATUS Status;
@@ -2290,14 +2291,21 @@ SepCreateSystemAnonymousLogonToken(VOID)
     /* The primary group is also the anonymous logon */
     PrimaryGroup = SeAnonymousLogonSid;
 
-    /* The only group for the token is the World */
+    /*
+     * The groups are the World and the integrity level: the anonymous logon
+     * token that includes Everyone (EveryoneIncludesAnonymous set) runs at Low
+     * integrity, measured on Windows Server 2022 (the one without Everyone at
+     * Untrusted)
+     */
+    SepInitializeMandatoryLabelSid((PSID)LabelSid, SECURITY_MANDATORY_LOW_RID);
     SID_AND_ATTRIBUTES Groups[] =
     {
-        {SeWorldSid, SE_GROUP_ENABLED | SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT}
+        {SeWorldSid, SE_GROUP_ENABLED | SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT},
+        {(PSID)LabelSid, SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED}
     };
-    GroupsLength = sizeof(SID_AND_ATTRIBUTES) +
-                   SeLengthSid(Groups[0].Sid);
-    ASSERT(GroupsLength <= (sizeof(Groups) * sizeof(ULONG)));
+    GroupsLength = 2 * sizeof(SID_AND_ATTRIBUTES) +
+                   SeLengthSid(Groups[0].Sid) +
+                   SeLengthSid(Groups[1].Sid);
 
     /* Initialise the object attributes for the token */
     InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
@@ -2345,6 +2353,7 @@ SepCreateSystemAnonymousLogonTokenNoEveryone(VOID)
     SID_AND_ATTRIBUTES UserSid;
     PSID PrimaryGroup;
     PTOKEN Token;
+    ULONG LabelSid[SEP_MANDATORY_LABEL_SID_LENGTH / sizeof(ULONG)];
     LARGE_INTEGER Expiration;
     OBJECT_ATTRIBUTES ObjectAttributes;
     NTSTATUS Status;
@@ -2358,6 +2367,13 @@ SepCreateSystemAnonymousLogonTokenNoEveryone(VOID)
 
     /* The primary group is also the anonymous logon */
     PrimaryGroup = SeAnonymousLogonSid;
+
+    /* The only group is the integrity level, Untrusted (measured on Windows Server 2022) */
+    SepInitializeMandatoryLabelSid((PSID)LabelSid, SECURITY_MANDATORY_UNTRUSTED_RID);
+    SID_AND_ATTRIBUTES Groups[] =
+    {
+        {(PSID)LabelSid, SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED}
+    };
 
     /* Initialise the object attributes for the token */
     InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
@@ -2373,9 +2389,9 @@ SepCreateSystemAnonymousLogonTokenNoEveryone(VOID)
                             &SeAnonymousAuthenticationId,
                             &Expiration,
                             &UserSid,
-                            0,
-                            NULL,
-                            0,
+                            RTL_NUMBER_OF(Groups),
+                            Groups,
+                            sizeof(SID_AND_ATTRIBUTES) + SeLengthSid(Groups[0].Sid),
                             0,
                             NULL,
                             NULL,

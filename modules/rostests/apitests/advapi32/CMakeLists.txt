@@ -4,6 +4,8 @@ list(APPEND SOURCE
     AccessCheckAuditAlarmArgs.c
     AccessCheckAuditAlarmStress.c
     AccessCheckDifferential.c
+    AccessCheckMandatory.c
+    AccessCheckNoAccess.c
     AccessCheckObjectTypeList.c
     AddMandatoryAce.c
     SddlNullAcl.c

@@ -543,6 +543,13 @@ SepAccessCheckAndAuditAlarmWorker(
                                     UserMode);
     if (!NT_SUCCESS(Status))
     {
+        /* As NtAccessCheck: a client below the integrity level of the object is denied access first */
+        if (Status == STATUS_PRIVILEGE_NOT_HELD &&
+            SepMandatoryAccessDenied(ClientToken, SecurityDescriptor, DesiredAccess, GenericMapping))
+        {
+            Status = STATUS_ACCESS_DENIED;
+        }
+
         /* As NtAccessCheck: the call succeeds and the result is the failure */
         SepSetAccessCheckResults(GrantedAccessList,
                                  AccessStatusList,

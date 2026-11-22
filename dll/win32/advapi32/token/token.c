@@ -38,6 +38,13 @@ CheckTokenMembership(IN HANDLE ExistingTokenHandle,
         STANDARD_RIGHTS_ALL
     };
     PACL Dacl;
+    struct
+    {
+        ACL Acl;
+        SYSTEM_MANDATORY_LABEL_ACE Ace;
+        ULONG SidRest[2]; /* the label SID has one sub-authority: 12 bytes from SidStart */
+    } Sacl;
+    SID_IDENTIFIER_AUTHORITY LabelAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
     ULONG SidLen;
     HANDLE hToken = NULL;
     NTSTATUS Status, AccessStatus;
@@ -154,6 +161,34 @@ CheckTokenMembership(IN HANDLE ExistingTokenHandle,
     Status = RtlSetDaclSecurityDescriptor(SecurityDescriptor,
                                           TRUE,
                                           Dacl,
+                                          FALSE);
+    if (!NT_SUCCESS(Status))
+    {
+        goto Cleanup;
+    }
+
+    /*
+     * Membership is about the SIDs only: the descriptor is labelled
+     * Untrusted, so that the mandatory label of the access check (an implicit
+     * Medium one without it) does not take the right from a Low or an
+     * Untrusted token. Windows Server 2022 reports the membership of such
+     * tokens as of any other (measured).
+     */
+    Sacl.Acl.AclRevision = ACL_REVISION;
+    Sacl.Acl.Sbz1 = 0;
+    Sacl.Acl.AclSize = sizeof(Sacl);
+    Sacl.Acl.AceCount = 1;
+    Sacl.Acl.Sbz2 = 0;
+    Sacl.Ace.Header.AceType = SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+    Sacl.Ace.Header.AceFlags = 0;
+    Sacl.Ace.Header.AceSize = (USHORT)(FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) + RtlLengthRequiredSid(1));
+    Sacl.Ace.Mask = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
+    RtlInitializeSid((PSID)&Sacl.Ace.SidStart, &LabelAuthority, 1);
+    *RtlSubAuthoritySid((PSID)&Sacl.Ace.SidStart, 0) = SECURITY_MANDATORY_UNTRUSTED_RID;
+
+    Status = RtlSetSaclSecurityDescriptor(SecurityDescriptor,
+                                          TRUE,
+                                          &Sacl.Acl,
                                           FALSE);
     if (!NT_SUCCESS(Status))
     {
