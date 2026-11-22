@@ -1343,6 +1343,15 @@
 #endif
 
 /**
+ * LWIP_TCP_SACK_IN==1: TCP reads the selective acknowledgements (SACKs) of the remote host and, in fast recovery,
+ * retransmits the segments that were not SACKed instead of one segment per round trip (NitroOS; needs
+ * LWIP_TCP_SACK_OUT, which negotiates SACK). Partial acknowledgements are handled as in RFC 6582 either way.
+ */
+#if !defined LWIP_TCP_SACK_IN || defined __DOXYGEN__
+#define LWIP_TCP_SACK_IN                0
+#endif
+
+/**
  * TCP_MSS: TCP Maximum segment size. (default is 536, a conservative default,
  * you might want to increase this.)
  * For the receive side, this MSS is advertised to the remote side

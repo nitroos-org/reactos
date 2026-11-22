@@ -105,6 +105,17 @@ static void tcp_remove_sacks_gt(struct tcp_pcb *pcb, u32_t seq);
 #endif /* TCP_OOSEQ_BYTES_LIMIT || TCP_OOSEQ_PBUFS_LIMIT */
 #endif /* LWIP_TCP_SACK_OUT */
 
+#if LWIP_TCP_SACK_IN
+/* NitroOS: the SACK blocks of the segment being processed (tcp_parseopt; RFC 2018 allows 4 at most) */
+#define TCP_IN_SACK_MAX 4
+static struct tcp_sack_range tcp_in_sacks[TCP_IN_SACK_MAX];
+static u8_t tcp_in_sack_num;
+/* segments the current acknowledgement SACKed that were not SACKed before (tcp_sack_scoreboard) */
+static u16_t tcp_in_sack_new;
+static u16_t tcp_sack_scoreboard(struct tcp_pcb *pcb);
+static u8_t tcp_sack_rexmit_hole(struct tcp_pcb *pcb);
+#endif /* LWIP_TCP_SACK_IN */
+
 /**
  * The initial input processing of TCP. It verifies the TCP header, demultiplexes
  * the segment between the PCBs and passes it on to tcp_process(), which implements
@@ -196,6 +207,10 @@ tcp_input(struct pbuf *p, struct netif *inp)
      TCP data instead of the TCP header. */
   tcphdr_optlen = (u16_t)(hdrlen_bytes - TCP_HLEN);
   tcphdr_opt2 = NULL;
+#if LWIP_TCP_SACK_IN
+  tcp_in_sack_num = 0;
+  tcp_in_sack_new = 0;
+#endif
   if (p->len >= hdrlen_bytes) {
     /* all options are in the first pbuf */
     tcphdr_opt1len = tcphdr_optlen;
@@ -1202,12 +1217,22 @@ tcp_receive(struct tcp_pcb *pcb)
 {
   s16_t m;
   u32_t right_wnd_edge;
+#if LWIP_TCP_SACK_IN
+  u16_t sacked = 0;
+#endif
 
   LWIP_ASSERT("tcp_receive: invalid pcb", pcb != NULL);
   LWIP_ASSERT("tcp_receive: wrong state", pcb->state >= ESTABLISHED);
 
   if (flags & TCP_ACK) {
     right_wnd_edge = pcb->snd_wnd + pcb->snd_wl2;
+#if LWIP_TCP_SACK_IN
+    /* NitroOS: mark what the peer SACKed; the number of SACKed segments above the hole decides
+       fast retransmit as three duplicate acknowledgements do (RFC 6675 5, DupThresh) */
+    if (tcp_in_sack_num > 0 && pcb->unacked != NULL) {
+      sacked = tcp_sack_scoreboard(pcb);
+    }
+#endif
 
     /* Update window. */
     if (TCP_SEQ_LT(pcb->snd_wl1, seqno) ||
@@ -1258,7 +1283,14 @@ tcp_receive(struct tcp_pcb *pcb)
       /* Clause 2 */
       if (tcplen == 0) {
         /* Clause 3 */
-        if (pcb->snd_wl2 + pcb->snd_wnd == right_wnd_edge) {
+        /* NitroOS: an acknowledgement that SACKs data not SACKed before is a duplicate even if the window
+           changed (RFC 6675 2, "DupAck"): a receiver that is still growing its buffer announces a larger
+           window in every one, and none counted, so every loss waited for the retransmission timeout */
+        if (pcb->snd_wl2 + pcb->snd_wnd == right_wnd_edge
+#if LWIP_TCP_SACK_IN
+            || tcp_in_sack_new > 0
+#endif
+           ) {
           /* Clause 4 */
           if (pcb->rtime >= 0) {
             /* Clause 5 */
@@ -1270,9 +1302,22 @@ tcp_receive(struct tcp_pcb *pcb)
                 /* Inflate the congestion window */
                 TCP_WND_INC(pcb->cwnd, pcb->mss);
               }
-              if (pcb->dupacks >= 3) {
+              if (pcb->dupacks >= 3
+#if LWIP_TCP_SACK_IN
+                  || sacked >= 3
+#endif
+                 ) {
                 /* Do fast retransmit (checked via TF_INFR, not via dupacks count) */
-                tcp_rexmit_fast(pcb);
+                if (!(pcb->flags & TF_INFR)) {
+                  tcp_rexmit_fast(pcb);
+                }
+#if LWIP_TCP_SACK_IN
+                /* NitroOS: in recovery each acknowledgement that SACKs more data sends the next hole
+                   (RFC 6675 NextSeg rule 1, one segment per acknowledgement) */
+                else if (tcp_in_sack_new > 0) {
+                  tcp_sack_rexmit_hole(pcb);
+                }
+#endif
               }
             }
           }
@@ -1281,14 +1326,22 @@ tcp_receive(struct tcp_pcb *pcb)
     } else if (TCP_SEQ_BETWEEN(ackno, pcb->lastack + 1, pcb->snd_nxt)) {
       /* We come here when the ACK acknowledges new data. */
       tcpwnd_size_t acked;
+      /* NitroOS: an acknowledgement below the recovery point is partial (RFC 6582): the next hole is
+         retransmitted at once and recovery goes on, instead of waiting for three more duplicates (or the
+         retransmission timeout) for each further segment lost in the same window */
+      u8_t partial = 0;
 
       /* Reset the "IN Fast Retransmit" flag, since we are no longer
          in fast retransmit. Also reset the congestion window to the
          slow start threshold. */
       if (pcb->flags & TF_INFR) {
-        tcp_clear_flags(pcb, TF_INFR);
-        pcb->cwnd = pcb->ssthresh;
-        pcb->bytes_acked = 0;
+        if (TCP_SEQ_LT(ackno, pcb->recover)) {
+          partial = 1;
+        } else {
+          tcp_clear_flags(pcb, TF_INFR);
+          pcb->cwnd = pcb->ssthresh;
+          pcb->bytes_acked = 0;
+        }
       }
 
       /* Reset the number of retransmissions. */
@@ -1306,7 +1359,11 @@ tcp_receive(struct tcp_pcb *pcb)
 
       /* Update the congestion control variables (cwnd and
          ssthresh). */
-      if (pcb->state >= ESTABLISHED) {
+      if (partial) {
+        /* NitroOS: RFC 6582 3.2 step 5: deflate the window by the data acknowledged, then add back one MSS */
+        pcb->cwnd = (pcb->cwnd > acked) ? (tcpwnd_size_t)(pcb->cwnd - acked) : 0;
+        TCP_WND_INC(pcb->cwnd, pcb->mss);
+      } else if (pcb->state >= ESTABLISHED) {
         if (pcb->cwnd < pcb->ssthresh) {
           tcpwnd_size_t increase;
           /* limit to 1 SMSS segment during period following RTO */
@@ -1358,6 +1415,19 @@ tcp_receive(struct tcp_pcb *pcb)
         pcb->unsent_oversize = 0;
       }
 #endif /* TCP_OVERSIZE */
+
+      /* NitroOS: partial acknowledgement: retransmit the next hole now (RFC 6582 3.2 step 5; with SACK the
+         lowest segment that is neither SACKed nor retransmitted yet, RFC 6675) */
+      if (partial) {
+#if LWIP_TCP_SACK_IN
+        if (!tcp_sack_rexmit_hole(pcb))
+#endif
+        {
+          if (pcb->unacked != NULL && !(pcb->unacked->flags & (TF_SEG_RECOVERY_REXMIT | TF_SEG_SACKED))) {
+            tcp_rexmit_hole(pcb, &pcb->unacked);
+          }
+        }
+      }
 
 #if LWIP_IPV6 && LWIP_ND6_TCP_REACHABILITY_HINTS
       if (ip_current_is_v6()) {
@@ -1563,6 +1633,14 @@ tcp_receive(struct tcp_pcb *pcb)
               /* inseg cannot have FIN here (already processed above) */
               if ((TCPH_FLAGS(next->tcphdr) & TCP_FIN) != 0 &&
                   (TCPH_FLAGS(inseg.tcphdr) & TCP_SYN) == 0) {
+                /* Copying the FIN consumes one more sequence number. If inseg
+                   was already trimmed to fill the receive window, that extra
+                   byte would push tcplen past rcv_wnd and underflow the window
+                   update below. Leave the FIN segment on ooseq to be processed
+                   once the window has advanced. */
+                if (tcplen >= pcb->rcv_wnd) {
+                  break;
+                }
                 TCPH_SET_FLAG(inseg.tcphdr, TCP_FIN);
                 tcplen = TCP_TCPLEN(&inseg);
               }
@@ -1698,6 +1776,20 @@ tcp_receive(struct tcp_pcb *pcb)
         /* We get here if the incoming segment is out-of-sequence. */
 
 #if TCP_QUEUE_OOSEQ
+        /* The segment start was checked against the receive window, but its
+         * right edge may still extend beyond it. Trim before queuing so that
+         * dequeuing the segment cannot consume more than the remaining window. */
+        right_wnd_edge = pcb->rcv_nxt + pcb->rcv_wnd - seqno;
+        if ((TCPH_FLAGS(inseg.tcphdr) & TCP_FIN) && (inseg.len >= right_wnd_edge)) {
+          /* FIN consumes one sequence number after the payload. */
+          TCPH_FLAGS_SET(inseg.tcphdr, TCPH_FLAGS(inseg.tcphdr) & ~(unsigned int)TCP_FIN);
+        }
+        if (inseg.len > right_wnd_edge) {
+          inseg.len = (u16_t)right_wnd_edge;
+          pbuf_realloc(inseg.p, inseg.len);
+        }
+        tcplen = TCP_TCPLEN(&inseg);
+
         /* We queue the segment on the ->ooseq queue. */
         if (pcb->ooseq == NULL) {
           pcb->ooseq = tcp_seg_copy(&inseg);
@@ -1951,6 +2043,10 @@ static u8_t
 tcp_get_next_optbyte(void)
 {
   u16_t optidx = tcp_optidx++;
+  if (optidx >= tcphdr_optlen) {
+    /* Return 0 for any excess reads (like length fields) */
+    return LWIP_TCP_OPT_EOL;
+  }
   if ((tcphdr_opt2 == NULL) || (optidx < tcphdr_opt1len)) {
     u8_t *opts = (u8_t *)tcphdr + TCP_HLEN;
     return opts[optidx];
@@ -2071,6 +2167,33 @@ tcp_parseopt(struct tcp_pcb *pcb)
           }
           break;
 #endif /* LWIP_TCP_SACK_OUT */
+#if LWIP_TCP_SACK_IN
+        case LWIP_TCP_OPT_SACK:
+          /* NitroOS: the SACK blocks of an acknowledgement (RFC 2018), kept for tcp_receive */
+          LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_parseopt: SACK\n"));
+          data = tcp_get_next_optbyte();
+          if (data < 10 || ((data - 2) % 8) != 0 || (tcp_optidx - 2 + data) > tcphdr_optlen) {
+            /* Bad length */
+            LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_parseopt: bad length\n"));
+            return;
+          }
+          {
+            u8_t blocks = (u8_t)((data - 2) / 8), b, k;
+            for (b = 0; b < blocks; b++) {
+              u32_t edge[2] = { 0, 0 };
+              for (k = 0; k < 8; k++) {
+                edge[k / 4] = (edge[k / 4] << 8) | tcp_get_next_optbyte();
+              }
+              if ((pcb->flags & TF_SACK) && !(flags & TCP_SYN) && tcp_in_sack_num < TCP_IN_SACK_MAX &&
+                  TCP_SEQ_LT(edge[0], edge[1])) {
+                tcp_in_sacks[tcp_in_sack_num].left = edge[0];
+                tcp_in_sacks[tcp_in_sack_num].right = edge[1];
+                tcp_in_sack_num++;
+              }
+            }
+          }
+          break;
+#endif /* LWIP_TCP_SACK_IN */
         default:
           LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_parseopt: other\n"));
           data = tcp_get_next_optbyte();
@@ -2237,5 +2360,73 @@ tcp_remove_sacks_gt(struct tcp_pcb *pcb, u32_t seq)
 #endif /* TCP_OOSEQ_BYTES_LIMIT || TCP_OOSEQ_PBUFS_LIMIT */
 
 #endif /* LWIP_TCP_SACK_OUT */
+
+#if LWIP_TCP_SACK_IN
+/**
+ * NitroOS: marks the segments of the unacked queue that the SACK blocks of the current acknowledgement cover
+ * (a segment counts when all of it is inside one block) and moves pcb->sack_high up.
+ *
+ * @param pcb the tcp_pcb
+ * @return the number of SACKed segments on the unacked queue
+ */
+static u16_t
+tcp_sack_scoreboard(struct tcp_pcb *pcb)
+{
+  struct tcp_seg *seg;
+  u16_t count = 0;
+  u32_t high = pcb->lastack;
+  u8_t i;
+
+  for (seg = pcb->unacked; seg != NULL; seg = seg->next) {
+    u32_t left = lwip_ntohl(seg->tcphdr->seqno);
+    u32_t right = left + TCP_TCPLEN(seg);
+    if (!(seg->flags & TF_SEG_SACKED)) {
+      for (i = 0; i < tcp_in_sack_num; i++) {
+        if (TCP_SEQ_LEQ(tcp_in_sacks[i].left, left) && TCP_SEQ_GEQ(tcp_in_sacks[i].right, right) &&
+            TCP_SEQ_GT(right, left)) {
+          seg->flags |= TF_SEG_SACKED;
+          tcp_in_sack_new++;
+          break;
+        }
+      }
+    }
+    if (seg->flags & TF_SEG_SACKED) {
+      count++;
+      if (TCP_SEQ_GT(right, high)) {
+        high = right;
+      }
+    }
+  }
+  pcb->sack_high = high;
+  return count;
+}
+
+/**
+ * NitroOS: in fast recovery, retransmits the lowest segment of the unacked queue that is below the highest
+ * SACKed one and is neither SACKed nor already retransmitted in this recovery (RFC 6675 NextSeg rule 1).
+ *
+ * @param pcb the tcp_pcb
+ * @return 1 if a segment was queued for retransmission
+ */
+static u8_t
+tcp_sack_rexmit_hole(struct tcp_pcb *pcb)
+{
+  struct tcp_seg **pseg;
+
+  if (!(pcb->flags & TF_SACK) || !TCP_SEQ_GT(pcb->sack_high, pcb->lastack)) {
+    return 0;
+  }
+  for (pseg = &pcb->unacked; *pseg != NULL; pseg = &(*pseg)->next) {
+    struct tcp_seg *seg = *pseg;
+    if (!TCP_SEQ_LT(lwip_ntohl(seg->tcphdr->seqno), pcb->sack_high)) {
+      break;
+    }
+    if (!(seg->flags & (TF_SEG_SACKED | TF_SEG_RECOVERY_REXMIT))) {
+      return (u8_t)(tcp_rexmit_hole(pcb, pseg) == ERR_OK);
+    }
+  }
+  return 0;
+}
+#endif /* LWIP_TCP_SACK_IN */
 
 #endif /* LWIP_TCP */

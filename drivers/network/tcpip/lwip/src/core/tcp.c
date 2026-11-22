@@ -1540,6 +1540,29 @@ tcp_fasttmr_start:
         tcp_clear_flags(pcb, TF_CLOSEPEND);
         tcp_close_shutdown_fin(pcb);
       }
+#if LWIP_TCP_SACK_IN
+      /* NitroOS: a retransmission made in fast recovery can be lost as well; only the retransmission timeout
+         (1 to 1.5 s with the 500 ms timer, and the window back to one segment) found it. On a path whose
+         round trip is below one slow tick, the first unacknowledged segment, retransmitted in this recovery
+         and still not acknowledged two fast ticks (250-500 ms) later while nothing else was acknowledged, is
+         retransmitted again; recovery and the window stay as they are */
+      if ((pcb->flags & TF_INFR) && pcb->unacked != NULL && (pcb->unacked->flags & TF_SEG_RECOVERY_REXMIT) &&
+          (pcb->sa >> 3) == 0) {
+        if (pcb->lastack != pcb->recovery_ack) {
+          pcb->recovery_ack = pcb->lastack;
+          pcb->recovery_ticks = 0;
+        } else if (++pcb->recovery_ticks >= 2) {
+          pcb->recovery_ticks = 0;
+          pcb->unacked->flags &= (u8_t)~TF_SEG_RECOVERY_REXMIT;
+          if (tcp_rexmit_hole(pcb, &pcb->unacked) == ERR_OK) {
+            tcp_output(pcb);
+          }
+        }
+      } else {
+        pcb->recovery_ticks = 0;
+        pcb->recovery_ack = pcb->lastack;
+      }
+#endif /* LWIP_TCP_SACK_IN */
 
       next = pcb->next;
 
