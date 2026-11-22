@@ -500,10 +500,8 @@ CreateExtendedPartition(
     ULONGLONG ullSize = 0ULL;
     BOOLEAN bSizeGiven = FALSE;
     ULONGLONG ullSectorCount;
-#if 0
     ULONGLONG ullOffset = 0ULL;
-    BOOL bNoErr = FALSE;
-#endif
+    BOOLEAN bOffset = FALSE;
     INT i;
     PWSTR pszSuffix = NULL;
     NTSTATUS Status;
@@ -539,7 +537,12 @@ CreateExtendedPartition(
         {
             /* offset=<N> (KB) */
             DPRINT("Offset : %s\n", pszSuffix);
-            return RefuseUnsupportedOption(L"OFFSET");
+            if (!ParseOffsetKilobytes(pszSuffix, CurrentDisk->BytesPerSector, &ullOffset))
+            {
+                ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+                return CREATE_FAILED();
+            }
+            bOffset = TRUE;
         }
         else if (HasPrefix(argv[i], L"align=", &pszSuffix))
         {
@@ -591,38 +594,58 @@ CreateExtendedPartition(
 
     DPRINT1("SectorCount: %I64u\n", ullSectorCount);
 
-    /* The largest free space that holds it (the lowest offset among equals), not only the space at the end of the disk */
-    PartEntry = FindLargestFreeEntry(&CurrentDisk->PrimaryPartListHead, ullSectorCount, FALSE);
-    if (PartEntry == NULL)
+    if (bOffset)
     {
-        ConResPuts(StdOut, IDS_CREATE_PARTITION_FAIL);
-        return CREATE_FAILED();
-    }
+        /* offset=: exactly there, or nothing (the range must lie in unpartitioned space) */
+        ULONGLONG ullLength;
 
-    if (ullSectorCount == 0 || PartEntry->SectorCount.QuadPart == ullSectorCount)
-    {
-        PartEntry->IsPartitioned = TRUE;
-        PartEntry->New = TRUE;
-        PartEntry->DisplayNumber = 0;
-        PartEntry->Mbr.PartitionType = PARTITION_EXTENDED;
-        PartEntry->FormatState = Unformatted;
-        PartEntry->FileSystemName[0] = L'\0';
-
-        CurrentPartition = PartEntry;
-        CurrentDisk->Dirty = TRUE;
-    }
-    else
-    {
-        NewPartEntry = SplitFreeEntry(PartEntry, PartEntry->StartSector.QuadPart, ullSectorCount);
+        PartEntry = FindFreeEntryFor(&CurrentDisk->PrimaryPartListHead, ullOffset, ullSectorCount, FALSE, &ullLength);
+        NewPartEntry = (PartEntry != NULL) ? SplitFreeEntry(PartEntry, ullOffset, ullLength) : NULL;
         if (NewPartEntry == NULL)
         {
-            ConPuts(StdOut, L"Memory allocation failed!\n");
-            return CREATE_FAILED();
+            ConResPuts(StdOut, IDS_CREATE_PARTITION_FAIL);
+            return CREATE_NOSPACE();
         }
 
         NewPartEntry->Mbr.PartitionType = PARTITION_EXTENDED;
         CurrentPartition = NewPartEntry;
         CurrentDisk->Dirty = TRUE;
+    }
+    else
+    {
+        /* The largest free space that holds it (the lowest offset among equals), not only the space at the end of the disk */
+        PartEntry = FindLargestFreeEntry(&CurrentDisk->PrimaryPartListHead, ullSectorCount, FALSE);
+        if (PartEntry == NULL)
+        {
+            ConResPuts(StdOut, IDS_CREATE_PARTITION_FAIL);
+            return CREATE_FAILED();
+        }
+
+        if (ullSectorCount == 0 || PartEntry->SectorCount.QuadPart == ullSectorCount)
+        {
+            PartEntry->IsPartitioned = TRUE;
+            PartEntry->New = TRUE;
+            PartEntry->DisplayNumber = 0;
+            PartEntry->Mbr.PartitionType = PARTITION_EXTENDED;
+            PartEntry->FormatState = Unformatted;
+            PartEntry->FileSystemName[0] = L'\0';
+
+            CurrentPartition = PartEntry;
+            CurrentDisk->Dirty = TRUE;
+        }
+        else
+        {
+            NewPartEntry = SplitFreeEntry(PartEntry, PartEntry->StartSector.QuadPart, ullSectorCount);
+            if (NewPartEntry == NULL)
+            {
+                ConPuts(StdOut, L"Memory allocation failed!\n");
+                return CREATE_FAILED();
+            }
+
+            NewPartEntry->Mbr.PartitionType = PARTITION_EXTENDED;
+            CurrentPartition = NewPartEntry;
+            CurrentDisk->Dirty = TRUE;
+        }
     }
 
     UpdateMbrDiskLayout(CurrentDisk);

@@ -194,6 +194,59 @@ static void TestMbrChanges(void)
     ok(ListCount() == 0, "no partition expected after clean: %d\n", ListCount());
 }
 
+/*
+ * Options that the Windows DiskPart takes (measured on Windows Server 2022): "noerr" on assign, remove, delete partition,
+ * set id, uniqueid disk and format lets a failing command go on with the next one of the script, and "create partition
+ * extended" takes offset= (KB) like the other partition types.
+ */
+static void TestOptions(void)
+{
+    static char Out[OUT_SIZE];
+    const char *Value;
+
+    ok(RunOnDisk("convert mbr\r\n", Out, sizeof(Out)), "no convert\n");
+
+    /* a failing command with noerr: the next command of the script runs */
+    ok(RunOnDisk("assign noerr\r\nlist partition\r\n", Out, sizeof(Out)), "no assign\n");
+    ok(strstr(Out, "no partitions") != NULL, "assign noerr stops the script:\n%s\n", Out);
+    ok(strstr(Out, "not supported") == NULL, "assign noerr is refused:\n%s\n", Out);
+
+    ok(RunOnDisk("remove noerr\r\nlist partition\r\n", Out, sizeof(Out)), "no remove\n");
+    ok(strstr(Out, "no partitions") != NULL, "remove noerr stops the script:\n%s\n", Out);
+
+    ok(RunOnDisk("delete partition noerr\r\nlist partition\r\n", Out, sizeof(Out)), "no delete\n");
+    ok(strstr(Out, "no partitions") != NULL, "delete partition noerr stops the script:\n%s\n", Out);
+
+    ok(RunOnDisk("uniqueid disk id=zz noerr\r\nlist partition\r\n", Out, sizeof(Out)), "no uniqueid\n");
+    ok(strstr(Out, "no partitions") != NULL, "uniqueid disk noerr stops the script:\n%s\n", Out);
+
+    ok(RunOnDisk("create partition primary size=16\r\nselect partition 1\r\nset id=zz noerr\r\nlist partition\r\n",
+                 Out, sizeof(Out)), "no set id\n");
+    ok(ListCount() == 1, "one partition expected after set id noerr: %d\n", ListCount());
+    ok(strstr(Out, "Partition 1") != NULL, "set id noerr stops the script:\n%s\n", Out);
+
+    /* an id that is not 1 or 2 hex digits, or is 0, is a format error and changes nothing */
+    ok(RunOnDisk("select partition 1\r\nset id=0\r\nset id=g1\r\nset id=100\r\ndetail partition\r\n", Out, sizeof(Out)),
+       "no set id\n");
+    Value = DetailValue(Out, "Type");
+    ok(Value && _strnicmp(Value, "00", 2) != 0, "an invalid id has changed the type: %.20s\n", Value ? Value : "(none)");
+    ok(RunOnDisk("select partition 1\r\nset id=7\r\ndetail partition\r\n", Out, sizeof(Out)), "no set id\n");
+    Value = DetailValue(Out, "Type");
+    ok(Value && !_strnicmp(Value, "07", 2), "type 07 expected after set id=7: %.20s\n", Value ? Value : "(none)");
+
+    ok(RunOnDisk("clean\r\nconvert mbr\r\n", Out, sizeof(Out)), "no clean\n");
+
+    /* create partition extended offset=: exactly there */
+    ok(RunOnDisk("create partition extended size=64 offset=64000\r\nlist partition\r\n", Out, sizeof(Out)),
+       "no create extended\n");
+    ok(strstr(Out, "succeeded in creating") != NULL, "create partition extended offset= fails:\n%s\n", Out);
+    ok(strstr(Out, "Extended") != NULL, "no extended partition:\n%s\n", Out);
+    ok(strstr(Out, "not supported") == NULL, "offset= on extended is refused:\n%s\n", Out);
+
+    ok(RunOnDisk("clean\r\n", Out, sizeof(Out)), "no clean\n");
+    ok(ListCount() == 0, "no partition expected after clean: %d\n", ListCount());
+}
+
 START_TEST(diskpart_write)
 {
     static char Out[OUT_SIZE];
@@ -215,4 +268,5 @@ START_TEST(diskpart_write)
 
     TestGptDelete();
     TestMbrChanges();
+    TestOptions();
 }

@@ -51,16 +51,6 @@ UniqueIdDisk(
 
     for (i = 1; i < argc; i++)
     {
-        if (_wcsicmp(argv[i], L"noerr") == 0)
-        {
-            /* noerr */
-            DPRINT("NOERR\n");
-            return RefuseUnsupportedOption(L"NOERR");
-        }
-    }
-
-    for (i = 1; i < argc; i++)
-    {
         if (HasPrefix(argv[2], L"id=", &pszSuffix))
         {
             /* id=<Byte>|<GUID> */
@@ -69,7 +59,7 @@ UniqueIdDisk(
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr - Already handled above */
+            /* noerr: a failure does not stop the script; this command never sets an error level */
         }
         else
         {

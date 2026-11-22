@@ -31,16 +31,6 @@ assign_main(
 
     for (i = 1; i < argc; i++)
     {
-        if (_wcsicmp(argv[i], L"noerr") == 0)
-        {
-            /* noerr */
-            DPRINT("NoErr\n", pszSuffix);
-            return RefuseUnsupportedOption(L"NOERR");
-        }
-    }
-
-    for (i = 1; i < argc; i++)
-    {
         if (HasPrefix(argv[i], L"letter=", &pszSuffix))
         {
             if (wcslen(pszSuffix) == 1)
@@ -61,7 +51,7 @@ assign_main(
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr - Already handled above */
+            /* noerr: a failure does not stop the script; this command never sets an error level */
         }
         else
         {
