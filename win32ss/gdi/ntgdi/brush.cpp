@@ -450,6 +450,15 @@ NtGdiCreateDIBBrush(
         return NULL;
     }
 
+    /* A packed DIB starts with a BITMAPINFOHEADER (GreCreateDIBitmapFromPackedDIB refuses anything
+       shorter). Refuse it before the copy: a size of 0 was a zero-byte pool allocation, which a
+       checked build stops on. */
+    if (cj < sizeof(BITMAPINFOHEADER))
+    {
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
     /* Allocate a buffer for the packed DIB */
     pvPackedDIB = ExAllocatePoolWithTag(PagedPool, cj, GDITAG_TEMP);
     if (pvPackedDIB == NULL)
