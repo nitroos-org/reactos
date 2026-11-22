@@ -1155,6 +1155,14 @@ BOOL ParseCommandLine( int argc, char* argv[] )
                     if (pszEnd != pszValue)
                         State.timeout = dwValue;
                 }
+                else if( !strncmp( "-port=", argv[i], 6 ) )
+                {
+                    /* Windows takes the option and shows it, but still asks the server on port 53 (measured) */
+                    pszValue = &argv[i][6];
+                    dwValue = strtoul(pszValue, &pszEnd, 10);
+                    if (pszEnd != pszValue && dwValue > 0 && dwValue <= 65535)
+                        State.port = (USHORT)dwValue;
+                }
                 else if( !strncmp( "-querytype=", argv[i], 11 ) )
                 {
                     if( !strncmp( TypeA, &argv[i][11], strlen( TypeA ) ) && strncmp( TypeAAAA, &argv[i][11], strlen( TypeAAAA ) ) )
@@ -1459,6 +1467,14 @@ void InteractiveMode()
                         dwValue = strtoul(pszValue, &pszEnd, 10);
                         if (pszEnd != pszValue)
                             State.timeout = dwValue;
+                    }
+                    else if (!_strnicmp(args_vector[1], "port=", strlen("port=")))
+                    {
+                        /* shown by "set all" and kept, but the server is still asked on port 53, as on Windows */
+                        pszValue = &args_vector[1][strlen("port=")];
+                        dwValue = strtoul(pszValue, &pszEnd, 10);
+                        if (pszEnd != pszValue && dwValue > 0 && dwValue <= 65535)
+                            State.port = (USHORT)dwValue;
                     }
                     else if (!_strnicmp(args_vector[1], "domain=", strlen("domain=")))
                     {

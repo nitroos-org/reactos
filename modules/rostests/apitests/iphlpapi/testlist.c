@@ -39,6 +39,7 @@ extern void func_NeighborEntry2(void);
 extern void func_NetstatOutput(void);
 extern void func_NslookupErrors(void);
 extern void func_NslookupOutput(void);
+extern void func_NslookupPort(void);
 extern void func_NotifyAddrChange(void);
 extern void func_NotifyChanges(void);
 extern void func_NotifyIpInterfaceChange(void);
@@ -93,6 +94,7 @@ const struct test winetest_testlist[] =
     { "NetstatOutput",              func_NetstatOutput },
     { "NslookupErrors",             func_NslookupErrors },
     { "NslookupOutput",             func_NslookupOutput },
+    { "NslookupPort",               func_NslookupPort },
     { "NotifyAddrChange",          func_NotifyAddrChange },
     { "NotifyChanges",              func_NotifyChanges },
     { "NotifyIpInterfaceChange",    func_NotifyIpInterfaceChange },

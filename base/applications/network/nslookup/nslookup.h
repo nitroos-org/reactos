@@ -99,6 +99,9 @@ extern STATE    State;
 extern HANDLE   ProcessHeap;
 extern BOOL     g_bQuietTimeout;
 
+/* The port the DNS server is asked on. "set port=" and -port= are kept and shown (State.port) but, as on Windows, not used. */
+#define DNS_SERVER_PORT 53
+
 /* utility.c */
 
 BOOL SendRequest( PCHAR pInBuffer,
