@@ -196,6 +196,25 @@
 #define NITRO_TCP_SYN_RTO_MS            1000
 #define NITRO_TCP_SYN_LAST_WAIT_MS      6000
 
+/* Loss recovery. Segments that arrive after a hole are kept (TCP_QUEUE_OOSEQ, lwIP's default) and
+ * acknowledged at once; SACK-permitted is offered in our SYN and accepted in the peer's, and the duplicate
+ * acknowledgements carry SACK blocks (RFC 2018), as Windows does. Without them a sender that lost several
+ * segments of one window (a burst: a congested queue, Wi-Fi, a host that hands a 64K offload burst to a lossy
+ * link) learns of one hole per round trip: a 32 MB download over a 20 ms path with 0.1% burst loss took 85 s
+ * instead of the 2.7 s of a Linux receiver. As the sender, the SACK blocks of the peer choose what is
+ * retransmitted, and a partial acknowledgement retransmits the next hole at once (LWIP_TCP_SACK_IN, RFC 6582,
+ * RFC 6675; our lwIP change) */
+#define LWIP_TCP_SACK_OUT               1
+#define LWIP_TCP_SACK_IN                1
+/* With timestamps 3 blocks fit in an acknowledgement; the 4th entry keeps an older range for later */
+#define LWIP_TCP_MAX_SACK_NUM           4
+/* What one connection may hold out of order: no more bytes than its receive window, and no more segments
+ * than a window of 512-byte segments (at least 64). A peer that sends only data beyond a hole, in segments of
+ * one byte, otherwise makes every byte cost a segment of non-paged pool (about 200 bytes with the pbuf, the
+ * frame and the queue entry). Segments over the limit are dropped from the far end and sent again by the peer */
+#define TCP_OOSEQ_BYTES_LIMIT(pcb)      ((u32_t)TCP_WND_MAX(pcb))
+#define TCP_OOSEQ_PBUFS_LIMIT(pcb)      ((u16_t)LWIP_MIN(32768U, LWIP_MAX(64U, (u32_t)TCP_WND_MAX(pcb) / 512U)))
+
 #define TCP_LISTEN_BACKLOG              1
 
 /* thousands of connections sit in TIME-WAIT while a client loop runs: find them by hash, not by walking the list */
