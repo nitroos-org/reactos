@@ -115,6 +115,7 @@ extern void func_UniscribeForwarders(void);
 extern void func_TextTransform(void);
 extern void func_ThreadContextGdi(void);
 extern void func_TransformPointsBadPointer(void);
+extern void func_TransformPointsIdentityHistory(void);
 extern void func_TranslateCharsetInfo(void);
 extern void func_CreateHalftonePalette(void);
 
@@ -233,6 +234,7 @@ const struct test winetest_testlist[] =
     { "TextTransform", func_TextTransform },
     { "ThreadContextGdi", func_ThreadContextGdi },
     { "TransformPointsBadPointer", func_TransformPointsBadPointer },
+    { "TransformPointsIdentityHistory", func_TransformPointsIdentityHistory },
     { "TranslateCharsetInfo", func_TranslateCharsetInfo },
     { "CreateHalftonePalette", func_CreateHalftonePalette },
 

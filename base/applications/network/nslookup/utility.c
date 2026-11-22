@@ -9,6 +9,10 @@
 #include "nslookup.h"
 #include <assert.h>
 
+/* Set while the two queries of a plain lookup run: the caller says "Request to ... timed-out" itself, once, and only
+   when no query brought an address */
+BOOL g_bQuietTimeout = FALSE;
+
 BOOL SendRequest( PCHAR pInBuffer,
                   ULONG InBufferLength,
                   PCHAR pOutBuffer,
@@ -18,8 +22,8 @@ BOOL SendRequest( PCHAR pInBuffer,
     USHORT RequestID, ResponseID;
     BOOL bWait;
     SOCKET s;
-    SOCKADDR_IN RecAddr, RecAddr2;
-    SOCKADDR_IN6 RecAddr6, RecAddr26;
+    SOCKADDR_IN RecAddr;
+    SOCKADDR_IN6 RecAddr6;
     SOCKADDR_STORAGE SendAddr;
     int SendAddrLen = sizeof(SendAddr);
     BOOL bIPv6 = (strchr( State.DefaultServerAddress, ':' ) != NULL);
@@ -29,9 +33,7 @@ BOOL SendRequest( PCHAR pInBuffer,
     struct timeval Tv;
 
     RtlZeroMemory( &RecAddr, sizeof(SOCKADDR_IN) );
-    RtlZeroMemory( &RecAddr2, sizeof(SOCKADDR_IN) );
     RtlZeroMemory( &RecAddr6, sizeof(SOCKADDR_IN6) );
-    RtlZeroMemory( &RecAddr26, sizeof(SOCKADDR_IN6) );
     RtlZeroMemory( &SendAddr, sizeof(SendAddr) );
 
     /* Pull the request ID from the buffer. */
@@ -61,14 +63,10 @@ BOOL SendRequest( PCHAR pInBuffer,
             return FALSE;
         }
         RecAddr6.sin6_family = AF_INET6;
-        RecAddr6.sin6_port = htons( State.port );
+        RecAddr6.sin6_port = htons( DNS_SERVER_PORT );
 
-        /* Set up the structure to tell it what port to listen on. */
-        RecAddr26.sin6_family = AF_INET6;
-        RecAddr26.sin6_port = htons( State.port );
-
-        /* Bind the receive socket. */
-        bind( s, (SOCKADDR*)&RecAddr26, sizeof(RecAddr26) );
+        /* The socket is not bound: the stack picks the source port, as Windows does (a server on the local host
+           would get its own replies if the source port were the server's) */
 
         /* Send the datagram to the DNS server. */
         pDest = (SOCKADDR*)&RecAddr6;
@@ -84,16 +82,10 @@ BOOL SendRequest( PCHAR pInBuffer,
     {
         /* Set up the structure to tell it where we are going. */
         RecAddr.sin_family = AF_INET;
-        RecAddr.sin_port = htons( State.port );
+        RecAddr.sin_port = htons( DNS_SERVER_PORT );
         RecAddr.sin_addr.s_addr = inet_addr( State.DefaultServerAddress );
 
-        /* Set up the structure to tell it what port to listen on. */
-        RecAddr2.sin_family = AF_INET;
-        RecAddr2.sin_port = htons( State.port );
-        RecAddr2.sin_addr.s_addr = htonl( INADDR_ANY );
-
-        /* Bind the receive socket. */
-        bind( s, (SOCKADDR*)&RecAddr2, sizeof(RecAddr2) );
+        /* The socket is not bound, see above */
 
         /* Send the datagram to the DNS server. */
         pDest = (SOCKADDR*)&RecAddr;
@@ -206,7 +198,8 @@ BOOL SendRequest( PCHAR pInBuffer,
             }
 
             _tprintf( _T("DNS request timed out.\n    timeout was %d seconds.\n"), (int)State.timeout );
-            _tprintf( _T("*** Request to %s timed-out\n"), State.DefaultServer );
+            if( !g_bQuietTimeout )
+                _tprintf( _T("*** Request to %s timed-out\n"), State.DefaultServer );
             closesocket( s );
             return FALSE;
         }

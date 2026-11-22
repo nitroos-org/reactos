@@ -360,7 +360,7 @@ static void FormatIpv6( const UCHAR *Address, PCHAR Out )
 
 /* The A (WantType TYPE_A) or AAAA (TYPE_AAAA) records of the answer section, all of those that are in the packet
    (k is the offset of its first record) */
-static void PrintAddressAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswers, USHORT NumAuthority, PCHAR pName,
+static void PrintAddressAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswers, UCHAR Header1, PCHAR pName,
                                  USHORT WantType )
 {
     CHAR Text[48];
@@ -406,9 +406,15 @@ static void PrintAddressAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswe
 
         if( Pass == 0 )
         {
-            if( n == 0 ) return;
+            if( n == 0 )
+            {
+                _tprintf( TYPE_AAAA == WantType ? _T("*** No IPv6 address (AAAA) records available for %s\n") :
+                                                  _T("*** No address (A) records available for %s\n"), pName );
+                return;
+            }
 
-            if( 0 == NumAuthority )
+            /* the AA bit of the reply decides, not the number of authority records (measured on Windows Server 2022) */
+            if( !( Header1 & 0x04 ) )
                 _tprintf( _T("Non-authoritative answer:\n") );
 
             _tprintf( _T("Name:    %s\n"), pName );
@@ -673,28 +679,68 @@ static int CollectAddressAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnsw
     return Count;
 }
 
+/* "*** SERVER can't find NAME: <what the RCODE says>", the texts of the Windows nslookup */
+static void PrintRcodeError( PCHAR pName, int Rcode )
+{
+    PCSTR Text;
+
+    switch( Rcode )
+    {
+    case 1:  Text = "Format error"; break;
+    case 2:  Text = "Server failed"; break;
+    case RCODE_NXDOMAIN: Text = "Non-existent domain"; break;
+    case 4:  Text = "Not implemented"; break;
+    case RCODE_REFUSED:  Text = "Query refused"; break;
+    default: Text = "BAD ERROR VALUE"; break;
+    }
+    _tprintf( _T("*** %s can't find %s: %s\n"), State.DefaultServer, pName, Text );
+}
+
+typedef enum
+{
+    LQ_REPLY,    /* a reply with RCODE 0 (there may be no address in it) */
+    LQ_RCODE,    /* the server answered with an error code */
+    LQ_TIMEOUT,  /* no answer (SendRequest said so) */
+    LQ_BAD       /* an answer that is too short or malformed */
+} LQ_RESULT;
+
 /*
- * Asks the server for the AAAA records of pName and appends them to List. A reply that is not usable (no answer,
- * an error code, too short) adds nothing: the lookup is of both address types and the A answer decides what is said.
+ * Asks the server for the A (WantType TYPE_A) or AAAA (TYPE_AAAA) records of pName and appends the addresses to List
+ * (Count of them already in it). *pRcode is the RCODE of an error reply, *pAuthoritative the AA bit of a good one.
  */
-static int QueryAddressesAAAA( PCHAR pName, ADDRESS_TEXT *List, int Count )
+static LQ_RESULT QueryAddresses( PCHAR pName, USHORT WantType, ADDRESS_TEXT *List, int *pCount, int *pRcode,
+                                 BOOL *pAuthoritative )
 {
     PCHAR Buffer, RecBuffer;
     ULONG BufferLength = 12 + (ULONG)(strlen( pName ) + 2) + 4, RecBufferLength = 512;
+    LQ_RESULT Result = LQ_BAD;
     int k = 12;
 
+    *pRcode = 0;
+    *pAuthoritative = FALSE;
     Buffer = HeapAlloc( ProcessHeap, 0, BufferLength );
     RecBuffer = HeapAlloc( ProcessHeap, 0, RecBufferLength );
     if( Buffer && RecBuffer )
     {
-        BuildQuery( Buffer, pName, TYPE_AAAA );
-        if( SendRequest( Buffer, BufferLength, RecBuffer, &RecBufferLength ) &&
-            RecBufferLength >= DNS_HEADER_LENGTH &&
-            RCODE_NOERROR == (RecBuffer[3] & 0x0F) &&
-            SkipQuestions( RecBuffer, RecBufferLength, ntohs( ((PSHORT)&RecBuffer[4])[0] ), &k ) )
+        BuildQuery( Buffer, pName, WantType );
+        if( !SendRequest( Buffer, BufferLength, RecBuffer, &RecBufferLength ) )
         {
-            Count = CollectAddressAnswers( RecBuffer, RecBufferLength, k, ntohs( ((PUSHORT)&RecBuffer[6])[0] ),
-                                           TYPE_AAAA, List, Count );
+            Result = LQ_TIMEOUT;
+        }
+        else if( RecBufferLength >= DNS_HEADER_LENGTH )
+        {
+            *pRcode = RecBuffer[3] & 0x0F;
+            *pAuthoritative = (RecBuffer[2] & 0x04) != 0;
+            if( RCODE_NOERROR != *pRcode )
+            {
+                Result = LQ_RCODE;
+            }
+            else if( SkipQuestions( RecBuffer, RecBufferLength, ntohs( ((PSHORT)&RecBuffer[4])[0] ), &k ) )
+            {
+                *pCount = CollectAddressAnswers( RecBuffer, RecBufferLength, k, ntohs( ((PUSHORT)&RecBuffer[6])[0] ),
+                                                 WantType, List, *pCount );
+                Result = LQ_REPLY;
+            }
         }
     }
     if( Buffer ) HeapFree( ProcessHeap, 0, Buffer );
@@ -702,7 +748,61 @@ static int QueryAddressesAAAA( PCHAR pName, ADDRESS_TEXT *List, int Count )
 
     RequestID += 1;
 
-    return Count;
+    return Result;
+}
+
+/*
+ * The plain lookup of a name asks for A and AAAA, one after the other whatever the first answer is, and prints every
+ * address that came, the IPv6 ones first. When there is none the A query says why (measured on Windows Server 2022):
+ * its error code, or that the reply was empty, or the time-out; the AAAA error is never shown.
+ */
+static void PerformPlainLookup( PCHAR pName )
+{
+    ADDRESS_TEXT List6[MAX_ADDRESSES], List4[MAX_ADDRESSES];
+    int Count6 = 0, Count4 = 0, Rcode4, Rcode6, n;
+    BOOL Auth4, Auth6;
+    LQ_RESULT Result4, Result6;
+
+    g_bQuietTimeout = TRUE;
+    Result4 = QueryAddresses( pName, TYPE_A, List4, &Count4, &Rcode4, &Auth4 );
+    Result6 = QueryAddresses( pName, TYPE_AAAA, List6, &Count6, &Rcode6, &Auth6 );
+    g_bQuietTimeout = FALSE;
+    (void)Result6;
+
+    if( Count4 + Count6 > 0 )
+    {
+        if( LQ_REPLY == Result4 && Count4 > 0 && !Auth4 )
+            _tprintf( _T("Non-authoritative answer:\n") );
+
+        _tprintf( _T("Name:    %s\n"), pName );
+        for( n = 0; n < Count6 + Count4; n += 1 )
+        {
+            PCSTR Text = n < Count6 ? List6[n] : List4[n - Count6];
+
+            if( 0 == n )
+                _tprintf( Count4 + Count6 == 1 ? _T("Address:  %s\n") : _T("Addresses:  %s\n"), Text );
+            else
+                _tprintf( _T("          %s\n"), Text );
+        }
+        _tprintf( _T("\n") );
+        return;
+    }
+
+    switch( Result4 )
+    {
+    case LQ_RCODE:
+        PrintRcodeError( pName, Rcode4 );
+        break;
+    case LQ_TIMEOUT:
+        _tprintf( _T("*** Request to %s timed-out\n"), State.DefaultServer );
+        break;
+    case LQ_BAD:
+        _tprintf( _T("*** Invalid reply from %s: too short or malformed\n"), State.DefaultServer );
+        break;
+    default:
+        _tprintf( _T("*** No internal type for both IPv4 and IPv6 Addresses (A+AAAA) records available for %s\n"), pName );
+        break;
+    }
 }
 
 void PerformLookup( PCHAR pAddr )
@@ -740,6 +840,13 @@ void PerformLookup( PCHAR pAddr )
     else
         Type = TypeNametoTypeID( State.type );
     QueryType = Type;
+
+    /* The plain lookup of a name: A and AAAA are both asked, the A reply does not end it */
+    if( TYPE_A == QueryType && !strcmp( State.type, TypeBoth ) )
+    {
+        PerformPlainLookup( pAddr );
+        return;
+    }
 
     /* If it's a PTR lookup then append the ARPA sig to the end. */
     if( (Type == TYPE_PTR) && IsValidIPv6( pAddr ) )
@@ -815,20 +922,7 @@ void PerformLookup( PCHAR pAddr )
     d = Header2 & 0x0F;
     if( d != RCODE_NOERROR )
     {
-        switch( d )
-        {
-        case RCODE_NXDOMAIN:
-            _tprintf( _T("*** %s can't find %s: Non-existant domain\n"), State.DefaultServer, pAddr );
-            break;
-
-        case RCODE_REFUSED:
-            _tprintf( _T("*** %s can't find %s: Query refused\n"), State.DefaultServer, pAddr );
-            break;
-
-        default:
-            _tprintf( _T("*** %s can't find %s: Unknown RCODE\n"), State.DefaultServer, pAddr );
-        }
-
+        PrintRcodeError( pAddr, d );
         goto cleanup;
     }
 
@@ -840,7 +934,7 @@ void PerformLookup( PCHAR pAddr )
     /* AAAA: every address of the answer */
     if( TYPE_AAAA == QueryType )
     {
-        PrintAddressAnswers( RecBuffer, RecBufferLength, k, NumAnswers, NumAuthority, pAddr, TYPE_AAAA );
+        PrintAddressAnswers( RecBuffer, RecBufferLength, k, NumAnswers, Header1, pAddr, TYPE_AAAA );
         goto cleanup;
     }
 
@@ -853,35 +947,10 @@ void PerformLookup( PCHAR pAddr )
         goto cleanup;
     }
 
-    /* The plain lookup of a name asks for A and AAAA and prints all addresses, the IPv6 ones first */
-    if( TYPE_A == QueryType && !IsValidIP( pAddr ) && !strcmp( State.type, TypeBoth ) )
-    {
-        ADDRESS_TEXT List[MAX_ADDRESSES];
-        int Count = QueryAddressesAAAA( pAddr, List, 0 ), n;
-
-        Count = CollectAddressAnswers( RecBuffer, RecBufferLength, k, NumAnswers, TYPE_A, List, Count );
-        if( Count > 0 )
-        {
-            if( 0 == NumAuthority )
-                _tprintf( _T("Non-authoritative answer:\n") );
-
-            _tprintf( _T("Name:    %s\n"), pAddr );
-            for( n = 0; n < Count; n += 1 )
-            {
-                if( 0 == n )
-                    _tprintf( Count == 1 ? _T("Address:  %s\n") : _T("Addresses:  %s\n"), List[n] );
-                else
-                    _tprintf( _T("          %s\n"), List[n] );
-            }
-            _tprintf( _T("\n") );
-        }
-        goto cleanup;
-    }
-
     /* A (not a reverse lookup): every address of the answer that is in the packet */
     if( TYPE_A == QueryType && !IsValidIP( pAddr ) && !strcmp( State.type, TypeA ) )
     {
-        PrintAddressAnswers( RecBuffer, RecBufferLength, k, NumAnswers, NumAuthority, pAddr, TYPE_A );
+        PrintAddressAnswers( RecBuffer, RecBufferLength, k, NumAnswers, Header1, pAddr, TYPE_A );
         goto cleanup;
     }
 
@@ -1085,6 +1154,14 @@ BOOL ParseCommandLine( int argc, char* argv[] )
                     dwValue = strtoul(pszValue, &pszEnd, 10);
                     if (pszEnd != pszValue)
                         State.timeout = dwValue;
+                }
+                else if( !strncmp( "-port=", argv[i], 6 ) )
+                {
+                    /* Windows takes the option and shows it, but still asks the server on port 53 (measured) */
+                    pszValue = &argv[i][6];
+                    dwValue = strtoul(pszValue, &pszEnd, 10);
+                    if (pszEnd != pszValue && dwValue > 0 && dwValue <= 65535)
+                        State.port = (USHORT)dwValue;
                 }
                 else if( !strncmp( "-querytype=", argv[i], 11 ) )
                 {
@@ -1390,6 +1467,14 @@ void InteractiveMode()
                         dwValue = strtoul(pszValue, &pszEnd, 10);
                         if (pszEnd != pszValue)
                             State.timeout = dwValue;
+                    }
+                    else if (!_strnicmp(args_vector[1], "port=", strlen("port=")))
+                    {
+                        /* shown by "set all" and kept, but the server is still asked on port 53, as on Windows */
+                        pszValue = &args_vector[1][strlen("port=")];
+                        dwValue = strtoul(pszValue, &pszEnd, 10);
+                        if (pszEnd != pszValue && dwValue > 0 && dwValue <= 65535)
+                            State.port = (USHORT)dwValue;
                     }
                     else if (!_strnicmp(args_vector[1], "domain=", strlen("domain=")))
                     {

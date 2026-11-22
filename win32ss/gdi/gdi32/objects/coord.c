@@ -178,6 +178,12 @@ IntIsIdentityTransformDc(
 {
     XFORM xf;
 
+    /* The DC must also never have been changed since it was made (PAGE_TO_DEVICE_IDENTITY is cleared by the changes
+       of the map mode, extents, origins, world transform and layout that Windows counts, see the kernel's coord.c):
+       MM_TEXT -> MM_ANISOTROPIC -> MM_TEXT is not identity although the matrix is */
+    if (!(pdcattr->flXform & PAGE_TO_DEVICE_IDENTITY))
+        return FALSE;
+
     if ((pdcattr->iMapMode != MM_TEXT) && (pdcattr->iMapMode != MM_ANISOTROPIC))
         return FALSE;
 
@@ -545,6 +551,7 @@ SetViewportExtEx(
         /* Set the new viewport extension */
         pdcattr->szlViewportExt.cx = nXExtent;
         pdcattr->szlViewportExt.cy = nYExtent;
+        pdcattr->flXform &= ~PAGE_TO_DEVICE_IDENTITY;
 
         /* Handle right-to-left layout */
         if (pdcattr->dwLayout & LAYOUT_RTL)
@@ -600,6 +607,7 @@ SetWindowOrgEx(
 
     pdcattr->ptlWindowOrg.x = X;
     pdcattr->ptlWindowOrg.y = Y;
+    pdcattr->flXform &= ~PAGE_TO_DEVICE_IDENTITY;
 
     pdcattr->lWindowOrgx    = X;
     if (pdcattr->dwLayout & LAYOUT_RTL) NtGdiMirrorWindowOrg(hdc);
@@ -671,6 +679,7 @@ SetWindowExtEx(
 
         pdcattr->szlWindowExt.cx = nXExtent;
         pdcattr->szlWindowExt.cy = nYExtent;
+        pdcattr->flXform &= ~PAGE_TO_DEVICE_IDENTITY;
         if (pdcattr->dwLayout & LAYOUT_RTL)
             NtGdiMirrorWindowOrg(hdc);
 
@@ -720,6 +729,8 @@ SetViewportOrgEx(
     }
     pdcattr->flXform |= (PAGE_XLATE_CHANGED|WORLD_XFORM_CHANGED|DEVICE_TO_WORLD_INVALID);
     if (pdcattr->dwLayout & LAYOUT_RTL) X = -X;
+    if ((pdcattr->ptlViewportOrg.x != X) || (pdcattr->ptlViewportOrg.y != Y))
+        pdcattr->flXform &= ~PAGE_TO_DEVICE_IDENTITY;
     pdcattr->ptlViewportOrg.x = X;
     pdcattr->ptlViewportOrg.y = Y;
     return TRUE;
@@ -924,6 +935,7 @@ OffsetViewportOrgEx(
         }
 
         pdcattr->flXform |= (PAGE_XLATE_CHANGED|WORLD_XFORM_CHANGED|DEVICE_TO_WORLD_INVALID);
+        pdcattr->flXform &= ~PAGE_TO_DEVICE_IDENTITY;
         if (pdcattr->dwLayout & LAYOUT_RTL) nXOffset = -nXOffset;
         pdcattr->ptlViewportOrg.x += nXOffset;
         pdcattr->ptlViewportOrg.y += nYOffset;
@@ -978,6 +990,7 @@ OffsetWindowOrgEx(
         }
 
         pdcattr->flXform |= (PAGE_XLATE_CHANGED|WORLD_XFORM_CHANGED|DEVICE_TO_WORLD_INVALID);
+        pdcattr->flXform &= ~PAGE_TO_DEVICE_IDENTITY;
         pdcattr->ptlWindowOrg.x += nXOffset;
         pdcattr->ptlWindowOrg.y += nYOffset;
         pdcattr->lWindowOrgx += nXOffset;
