@@ -8,11 +8,64 @@
 
 /* INCLUDES ******************************************************************/
 
-#include <wdm.h>
+#include <ntifs.h>
 
 /* GLOBALS *******************************************************************/
 
 FAST_IO_DISPATCH FastIoDispatch;
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+ObSetSecurityObjectByPointer(
+    _In_ PVOID Object,
+    _In_ SECURITY_INFORMATION SecurityInformation,
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor);
+
+/* A SACL that holds one mandatory label: Untrusted, no write up */
+typedef struct _NULL_LABEL_SACL
+{
+    ACL Acl;
+    struct
+    {
+        ACE_HEADER Header;
+        ACCESS_MASK Mask;
+        SID Sid;
+    } Label;
+} NULL_LABEL_SACL;
+
+/*
+ * Object opens apply the mandatory label of the device object (SeAccessCheck
+ * in IopParseDevice); a device without one counts as Medium, so a process
+ * below Medium could not open NUL for write (cmd's "> nul" in a Low process).
+ * The null device reads nothing and discards what is written: label it
+ * Untrusted so that the label restricts no caller and the DACL alone decides,
+ * as before object opens applied labels.
+ */
+static
+VOID
+NullLabelDevice(
+    _In_ PDEVICE_OBJECT DeviceObject)
+{
+    static const NULL_LABEL_SACL Sacl =
+    {
+        { ACL_REVISION, 0, sizeof(NULL_LABEL_SACL), 1, 0 },
+        {
+            { SYSTEM_MANDATORY_LABEL_ACE_TYPE, 0, sizeof(((NULL_LABEL_SACL *)0)->Label) },
+            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+            { SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY}, {SECURITY_MANDATORY_UNTRUSTED_RID} }
+        }
+    };
+    SECURITY_DESCRIPTOR Sd;
+    NTSTATUS Status;
+
+    RtlCreateSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+    Status = RtlSetSaclSecurityDescriptor(&Sd, TRUE, (PACL)&Sacl, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = ObSetSecurityObjectByPointer(DeviceObject, LABEL_SECURITY_INFORMATION, &Sd);
+    if (!NT_SUCCESS(Status))
+        DbgPrint("Null: the device label could not be set (0x%lx)\n", Status);
+}
 
 /* FUNCTIONS *****************************************************************/
 
@@ -191,6 +244,8 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
                             &DeviceObject);
     if (!NT_SUCCESS(Status))
         return Status;
+
+    NullLabelDevice(DeviceObject);
 
     /* Register driver routines */
     DriverObject->MajorFunction[IRP_MJ_CLOSE] = NullDispatch;

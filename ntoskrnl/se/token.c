@@ -1766,10 +1766,6 @@ SepComputeIntegrityLevel(
     return SECURITY_MANDATORY_MEDIUM_RID;
 }
 
-/* Size of a label ACE with a mandatory label SID */
-#define SEP_LABEL_ACE_SIZE \
-    ((USHORT)(FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) + SEP_MANDATORY_LABEL_SID_LENGTH))
-
 /*
  * Checks a mandatory label ACE before anything reads or copies its SID.
  * An ACE that cannot hold its SID, or whose size breaks ACL alignment, is

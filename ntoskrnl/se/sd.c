@@ -1639,6 +1639,82 @@ SeAssignSecurityEx(
     _In_ PGENERIC_MAPPING GenericMapping,
     _In_ POOL_TYPE PoolType)
 {
+    UNREFERENCED_PARAMETER(PoolType);
+
+    PAGED_CODE();
+
+    return SepAssignSecurity(_ParentDescriptor,
+                             _ExplicitDescriptor,
+                             NewDescriptor,
+                             ObjectType,
+                             IsDirectoryObject,
+                             AutoInheritFlags,
+                             SubjectContext,
+                             GenericMapping,
+                             TRUE);
+}
+
+/*
+ * Whether an ACL holds a mandatory label that counts for the object itself:
+ * a label ACE that is not inherit-only (as SepMandatoryAllowedAccess reads
+ * it). The ACL is one this module has just built.
+ */
+static
+BOOLEAN
+SepAclHasEffectiveLabel(
+    _In_ PACL Acl)
+{
+    PACE_HEADER Ace;
+    ULONG Index;
+
+    for (Index = 0; Index < Acl->AceCount; Index++)
+    {
+        if (!NT_SUCCESS(RtlGetAce(Acl, Index, (PVOID *)&Ace)))
+            break;
+        if (Ace->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE && !(Ace->AceFlags & INHERIT_ONLY_ACE))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/**
+ * @brief
+ * SeAssignSecurityEx, with the choice whether an object created by a subject
+ * below Medium integrity gets the subject's level as its label.
+ *
+ * @remarks
+ * "Windows Integrity Mechanism Design" (Default integrity level; Labeling
+ * objects created by low subjects): every securable object created by a
+ * subject below the default level (Medium) is explicitly labelled by the
+ * security subsystem, "all kernel objects, registry keys, and file system
+ * objects are explicitly labeled at low when the subject integrity level is
+ * low", so that the subject can open again for write what it created;
+ * objects created at Medium and above get no label (implicit Medium). An
+ * explicit label from the creator, or one inherited from the parent
+ * container, counts instead (Mandatory label inheritance; Inheritance and
+ * explicit labels); an inherit-only label is not a label of the object
+ * (Inherit-only restriction), so the creator's level is added before it.
+ * The label added has the default policy NO_WRITE_UP ("Mandatory Integrity
+ * Control": "By default, the system creates every object with an access mask
+ * of SYSTEM_MANDATORY_LABEL_NO_WRITE_UP") and no inheritance flags. The
+ * subject is the client token when the creator impersonates, else the
+ * primary token. Token, process, thread and job objects have labels of
+ * their own (ObAssignSecurity) and are assigned with CreatorLabel FALSE.
+ */
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTSTATUS
+NTAPI
+SepAssignSecurity(
+    _In_opt_ PSECURITY_DESCRIPTOR _ParentDescriptor,
+    _In_opt_ PSECURITY_DESCRIPTOR _ExplicitDescriptor,
+    _Out_ PSECURITY_DESCRIPTOR *NewDescriptor,
+    _In_opt_ GUID *ObjectType,
+    _In_ BOOLEAN IsDirectoryObject,
+    _In_ ULONG AutoInheritFlags,
+    _In_ PSECURITY_SUBJECT_CONTEXT SubjectContext,
+    _In_ PGENERIC_MAPPING GenericMapping,
+    _In_ BOOLEAN CreatorLabel)
+{
     PISECURITY_DESCRIPTOR ParentDescriptor = _ParentDescriptor;
     PISECURITY_DESCRIPTOR ExplicitDescriptor = _ExplicitDescriptor;
     PISECURITY_DESCRIPTOR_RELATIVE Descriptor;
@@ -1665,10 +1741,14 @@ SeAssignSecurityEx(
     BOOLEAN SaclAutoInherit = BooleanFlagOn(AutoInheritFlags, SEF_SACL_AUTO_INHERIT);
     BOOLEAN DaclPresent;
     BOOLEAN SaclPresent;
+    ULONG LabelLevel = 0;
+    ULONG LabelRoom = 0;
+    PACL NewSacl;
+    ULONG LabelAce[(SEP_LABEL_ACE_SIZE + sizeof(ULONG) - 1) / sizeof(ULONG)];
+    PSYSTEM_MANDATORY_LABEL_ACE Label = (PSYSTEM_MANDATORY_LABEL_ACE)LabelAce;
     NTSTATUS Status;
 
     DBG_UNREFERENCED_PARAMETER(ObjectType);
-    UNREFERENCED_PARAMETER(PoolType);
 
     PAGED_CODE();
 
@@ -1689,6 +1769,42 @@ SeAssignSecurityEx(
     else
     {
         Token = SubjectContext->PrimaryToken;
+    }
+
+    /*
+     * An explicit label from the creator may not be above the creator's own
+     * level (inherit-only ones included) unless SeRelabelPrivilege is enabled:
+     * "Windows Integrity Mechanism Design", How to create an object with a
+     * specific mandatory label ("the integrity level on the new object must be
+     * less than or equal to the integrity level of the creating process"),
+     * Inheritance and explicit labels, Inherit-only restriction. The status is
+     * the one measured for an explicit process or thread label above the
+     * creator (STATUS_PRIVILEGE_NOT_HELD, SeAssignProcessObjectLabel, which
+     * keeps deciding for token, process and thread objects: CreatorLabel
+     * FALSE). Labels inherited from the parent are not the creator's and are
+     * not checked.
+     */
+    if (CreatorLabel && ExplicitDescriptor != NULL && (ExplicitDescriptor->Control & SE_SACL_PRESENT))
+    {
+        LUID_AND_ATTRIBUTES Relabel;
+        BOOLEAN HasLabel;
+        ULONG ExplicitLevel;
+
+        Status = SepGetDescriptorLabel(ExplicitDescriptor, &HasLabel, &ExplicitLevel, NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            SeUnlockSubjectContext(SubjectContext);
+            return Status;
+        }
+
+        Relabel.Luid = SeRelabelPrivilege;
+        Relabel.Attributes = SE_PRIVILEGE_ENABLED;
+        if (HasLabel && ExplicitLevel > Token->IntegrityLevel &&
+            !SepPrivilegeCheck(Token, &Relabel, 1, PRIVILEGE_SET_ALL_NECESSARY, UserMode))
+        {
+            SeUnlockSubjectContext(SubjectContext);
+            return STATUS_PRIVILEGE_NOT_HELD;
+        }
     }
 
     /* Inherit the Owner SID */
@@ -1849,8 +1965,19 @@ SeAssignSecurityEx(
         Control |= SE_SACL_AUTO_INHERITED;
     ASSERT(SaclLength % sizeof(ULONG) == 0);
 
+    /*
+     * A subject below Medium labels what it creates with its own level,
+     * unless the SACL brings a label of the object (see the remarks): room
+     * for the label ACE, and for an ACL header when there is no SACL
+     */
+    if (CreatorLabel && Token->IntegrityLevel < SECURITY_MANDATORY_MEDIUM_RID)
+    {
+        LabelLevel = Token->IntegrityLevel;
+        LabelRoom = SEP_LABEL_ACE_SIZE + (SaclLength == 0 ? sizeof(ACL) : 0);
+    }
+
     /* A merged ACL can exceed what AclSize can describe */
-    if (DaclLength > MAXUSHORT || SaclLength > MAXUSHORT)
+    if (DaclLength > MAXUSHORT || SaclLength + LabelRoom > MAXUSHORT)
     {
         SeUnlockSubjectContext(SubjectContext);
         return STATUS_BAD_INHERITANCE_ACL;
@@ -1858,7 +1985,7 @@ SeAssignSecurityEx(
 
     /* Allocate and initialize the new security descriptor */
     Length = sizeof(SECURITY_DESCRIPTOR_RELATIVE) +
-        OwnerLength + GroupLength + DaclLength + SaclLength;
+        OwnerLength + GroupLength + DaclLength + SaclLength + LabelRoom;
 
     DPRINT("L: sizeof(SECURITY_DESCRIPTOR) %u OwnerLength %lu GroupLength %lu DaclLength %lu SaclLength %lu\n",
            sizeof(SECURITY_DESCRIPTOR),
@@ -1882,20 +2009,45 @@ SeAssignSecurityEx(
 
     Current = sizeof(SECURITY_DESCRIPTOR_RELATIVE);
 
-    if (SaclLength != 0)
+    if (SaclLength != 0 || LabelRoom != 0)
     {
-        Status = SepPropagateAcl((PACL)((PUCHAR)Descriptor + Current),
-                                 &SaclLength,
-                                 Sacl,
-                                 SaclInherited,
-                                 Owner,
-                                 Group,
-                                 SaclAutoInherit,
-                                 IsDirectoryObject,
-                                 GenericMapping);
-        ASSERT(Status == STATUS_SUCCESS);
+        NewSacl = (PACL)((PUCHAR)Descriptor + Current);
+        if (SaclLength != 0)
+        {
+            Status = SepPropagateAcl(NewSacl,
+                                     &SaclLength,
+                                     Sacl,
+                                     SaclInherited,
+                                     Owner,
+                                     Group,
+                                     SaclAutoInherit,
+                                     IsDirectoryObject,
+                                     GenericMapping);
+            ASSERT(Status == STATUS_SUCCESS);
+        }
+        else
+        {
+            Status = RtlCreateAcl(NewSacl, sizeof(ACL), ACL_REVISION);
+            ASSERT(Status == STATUS_SUCCESS);
+            Descriptor->Control |= SE_SACL_PRESENT;
+        }
+
+        /* The creator's label goes first, where the access check looks */
+        if (LabelRoom != 0 && !SepAclHasEffectiveLabel(NewSacl))
+        {
+            Label->Header.AceType = SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+            Label->Header.AceFlags = 0;
+            Label->Header.AceSize = SEP_LABEL_ACE_SIZE;
+            Label->Mask = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
+            SepInitializeMandatoryLabelSid((PSID)&Label->SidStart, LabelLevel);
+
+            NewSacl->AclSize += SEP_LABEL_ACE_SIZE;
+            Status = RtlAddAce(NewSacl, NewSacl->AclRevision, 0, Label, SEP_LABEL_ACE_SIZE);
+            ASSERT(Status == STATUS_SUCCESS);
+        }
+
         Descriptor->Sacl = Current;
-        Current += SaclLength;
+        Current += NewSacl->AclSize;
     }
 
     if (DaclLength != 0)

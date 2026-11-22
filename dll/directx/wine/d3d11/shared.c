@@ -797,10 +797,11 @@ static HRESULT shared_create_section(struct d3d_shared *shared, SECURITY_ATTRIBU
             SetLastError(0);
             swprintf(token_name, ARRAY_SIZE(token_name), L"Local\\NitroD3D11Shared.%08lX", (unsigned long)shared->token);
             section = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, total, token_name);
-            if (section && GetLastError() != ERROR_ALREADY_EXISTS)
+            /* only a name in use is worth another try; a refused create (a process below Medium
+             * in the unlabelled BaseNamedObjects) is refused for every name */
+            if (!section || GetLastError() != ERROR_ALREADY_EXISTS)
                 break;
-            if (section)
-                CloseHandle(section);
+            CloseHandle(section);
             section = NULL;
             shared->token = 0x40000002 + 0x40 * ((InterlockedIncrement(&shared_token_counter) + GetCurrentProcessId() * 0x400) & 0xffffff);
         }

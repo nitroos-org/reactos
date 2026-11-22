@@ -74,6 +74,10 @@ WINAPI
 SecureSystemDirectories(VOID);
 
 BOOL
+SetLowIntegrityProfileFolder(
+    _In_ PCWSTR pszProfilePath);
+
+BOOL
 WINAPI
 SecureRegistryKeys(VOID);
 

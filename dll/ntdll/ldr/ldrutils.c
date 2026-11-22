@@ -905,8 +905,15 @@ LdrpCheckForKnownDll(PWSTR DllName,
                                    LdrpKnownDllObjectDirectory,
                                    NULL);
 
+        /*
+         * An image view is copy-on-write: mapping it needs no write access to
+         * the section (LdrpMapDll maps a known DLL PAGE_EXECUTE_WRITECOPY). The
+         * KnownDlls sections are SYSTEM's and carry no label (Medium): a process
+         * below Medium is refused SECTION_MAP_WRITE on them by the label, and
+         * would load no known DLL at all.
+         */
         Status = NtOpenSection(&Section,
-                               SECTION_MAP_READ | SECTION_MAP_EXECUTE | SECTION_MAP_WRITE,
+                               SECTION_MAP_READ | SECTION_MAP_EXECUTE,
                                &ObjectAttributes);
         if (!NT_SUCCESS(Status))
         {
@@ -1360,7 +1367,11 @@ SkipCheck:
     ArbitraryUserPointer = Teb->NtTib.ArbitraryUserPointer;
     Teb->NtTib.ArbitraryUserPointer = FullDllName.Buffer;
 
-    /* Map the DLL */
+    /*
+     * Map the DLL. The protection of an image view comes from its sections;
+     * the one given here only decides the access the section handle needs:
+     * a known DLL's handle has read and execute access only
+     */
     ViewBase = NULL;
     ViewSize = 0;
     Status = NtMapViewOfSection(SectionHandle,
@@ -1372,7 +1383,7 @@ SkipCheck:
                                 &ViewSize,
                                 ViewShare,
                                 0,
-                                PAGE_READWRITE);
+                                KnownDll ? PAGE_EXECUTE_WRITECOPY : PAGE_READWRITE);
 
     /* Restore */
     Teb->NtTib.ArbitraryUserPointer = ArbitraryUserPointer;
