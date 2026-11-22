@@ -886,9 +886,13 @@ TiDispatch(
     return IRPFinish(Irp, Status);
 }
 
+/* WindowsDeviceAcl: the descriptor of \Device\Ip as Windows Server 2022 has it: System and Administrators FILE_ALL_ACCESS,
+   Everyone WorldAccess, nobody else (no Network Service ACE). Without it: System, Administrators and Network Service
+   GENERIC_ALL (the descriptor that the privileged control requests are checked against, and of \Device\Tcp). */
 static
 NTSTATUS TiCreateSecurityDescriptor(
     _In_ ACCESS_MASK WorldAccess,
+    _In_ BOOLEAN WindowsDeviceAcl,
     _Out_ PSECURITY_DESCRIPTOR *SecurityDescriptor)
 {
     NTSTATUS Status;
@@ -934,7 +938,7 @@ NTSTATUS TiCreateSecurityDescriptor(
     /* Setup access */
     Status = RtlAddAccessAllowedAce(Dacl,
                                     ACL_REVISION,
-                                    GENERIC_ALL,
+                                    WindowsDeviceAcl ? FILE_ALL_ACCESS : GENERIC_ALL,
                                     SeExports->SeLocalSystemSid);
     if (!NT_SUCCESS(Status))
     {
@@ -944,7 +948,7 @@ NTSTATUS TiCreateSecurityDescriptor(
 
     Status = RtlAddAccessAllowedAce(Dacl,
                                     ACL_REVISION,
-                                    GENERIC_ALL,
+                                    WindowsDeviceAcl ? FILE_ALL_ACCESS : GENERIC_ALL,
                                     SeExports->SeAliasAdminsSid);
     if (!NT_SUCCESS(Status))
     {
@@ -952,14 +956,17 @@ NTSTATUS TiCreateSecurityDescriptor(
         goto Quit;
     }
 
-    Status = RtlAddAccessAllowedAce(Dacl,
-                                    ACL_REVISION,
-                                    GENERIC_ALL,
-                                    SeExports->SeNetworkServiceSid);
-    if (!NT_SUCCESS(Status))
+    if (!WindowsDeviceAcl)
     {
-        TI_DbgPrint(MIN_TRACE, ("Failed to add access allowed ACE for Network Service SID (0x%X)\n", Status));
-        goto Quit;
+        Status = RtlAddAccessAllowedAce(Dacl,
+                                        ACL_REVISION,
+                                        GENERIC_ALL,
+                                        SeExports->SeNetworkServiceSid);
+        if (!NT_SUCCESS(Status))
+        {
+            TI_DbgPrint(MIN_TRACE, ("Failed to add access allowed ACE for Network Service SID (0x%X)\n", Status));
+            goto Quit;
+        }
     }
 
     if (WorldAccess != 0)
@@ -1060,14 +1067,15 @@ Quit:
 static
 NTSTATUS TiSetupTcpDeviceSD(
     _In_ PDEVICE_OBJECT DeviceObject,
-    _In_ ACCESS_MASK WorldAccess)
+    _In_ ACCESS_MASK WorldAccess,
+    _In_ BOOLEAN WindowsDeviceAcl)
 {
     NTSTATUS Status;
     PSECURITY_DESCRIPTOR Sd;
     SECURITY_INFORMATION Info = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
 
     /* Obtain a security descriptor */
-    Status = TiCreateSecurityDescriptor(WorldAccess, &Sd);
+    Status = TiCreateSecurityDescriptor(WorldAccess, WindowsDeviceAcl, &Sd);
     if (!NT_SUCCESS(Status))
     {
         TI_DbgPrint(MIN_TRACE, ("Failed to create a security descriptor for the device object\n"));
@@ -1094,7 +1102,7 @@ NTSTATUS TiSecurityStartup(
     NTSTATUS Status;
 
     /* Reference SD for privileged control requests */
-    Status = TiCreateSecurityDescriptor(0, &TiControlSD);
+    Status = TiCreateSecurityDescriptor(0, FALSE, &TiControlSD);
     if (!NT_SUCCESS(Status))
     {
         TI_DbgPrint(MIN_TRACE, ("Failed to create the control security descriptor\n"));
@@ -1110,7 +1118,7 @@ NTSTATUS TiSecurityStartup(
     }
 
     /* Set security data for the TCP and IP device objects */
-    Status = TiSetupTcpDeviceSD(TCPDeviceObject, FILE_GENERIC_READ | FILE_GENERIC_WRITE);
+    Status = TiSetupTcpDeviceSD(TCPDeviceObject, FILE_GENERIC_READ | FILE_GENERIC_WRITE, FALSE);
     if (!NT_SUCCESS(Status))
     {
         TI_DbgPrint(MIN_TRACE, ("Failed to set security data for TCP device object\n"));
@@ -1121,18 +1129,21 @@ NTSTATUS TiSecurityStartup(
      * (0x1201bf): IcmpCreateFile() opens it with GENERIC_EXECUTE, which is how a
      * standard user can ping. */
     Status = TiSetupTcpDeviceSD(IPDeviceObject,
-                                FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE);
+                                FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE, TRUE);
     if (!NT_SUCCESS(Status))
     {
         TI_DbgPrint(MIN_TRACE, ("Failed to set security data for IP device object\n"));
         return Status;
     }
 
-    /* \Device\Ip6 as \Device\Ip: Icmp6CreateFile() opens it with GENERIC_EXECUTE (VERIFY ON ORACLE: its ACL) */
+    /* \Device\Ip6 as \Device\Ip: Icmp6CreateFile() opens it with GENERIC_EXECUTE (Windows Server 2022 has the same
+     * descriptor on both). Two differences from Windows are left for the operator to decide: both devices lack the
+     * restricted code ACE (S-1-5-12, read and execute) of Windows, and \Device\Tcp gives Everyone read and write where
+     * Windows gives read and execute only (0x1200a0). */
     if (Ip6DeviceObject)
     {
         Status = TiSetupTcpDeviceSD(Ip6DeviceObject,
-                                    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE);
+                                    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE, TRUE);
         if (!NT_SUCCESS(Status))
         {
             TI_DbgPrint(MIN_TRACE, ("Failed to set security data for IPv6 device object\n"));
