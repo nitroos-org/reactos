@@ -10,6 +10,7 @@
  */
 
 #include <apitest.h>
+#include <winioctl.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -129,6 +130,102 @@ static const char *DetailValue(char *Out, const char *Key)
     while (*p == ' ')
         p++;
     return p;
+}
+
+/* Writes the bytes that are already there: a write that is allowed changes nothing */
+static BOOL WriteSame(HANDLE Disk, LONGLONG Offset, DWORD Length, DWORD *Error)
+{
+    LARGE_INTEGER Pos;
+    DWORD Got;
+    BOOL Ok = FALSE;
+    PVOID Buf = VirtualAlloc(NULL, Length, MEM_COMMIT, PAGE_READWRITE);
+
+    *Error = 0;
+    Pos.QuadPart = Offset;
+    if (Buf && SetFilePointerEx(Disk, Pos, NULL, FILE_BEGIN) && ReadFile(Disk, Buf, Length, &Got, NULL) && Got == Length &&
+        SetFilePointerEx(Disk, Pos, NULL, FILE_BEGIN))
+    {
+        SetLastError(0);
+        Ok = WriteFile(Disk, Buf, Length, &Got, NULL) && Got == Length;
+        *Error = Ok ? 0 : GetLastError();
+    }
+    else
+    {
+        ok(0, "cannot read %lu bytes at %I64d: %lu\n", Length, Offset, GetLastError());
+    }
+    if (Buf)
+        VirtualFree(Buf, 0, MEM_RELEASE);
+    return Ok;
+}
+
+/* A write through the disk handle into a mounted volume is refused with ERROR_ACCESS_DENIED, unless the volume is
+   locked; outside the volumes (the partition table) and into a RAW partition it is allowed (Windows Server 2022) */
+static void TestDiskHandleWrites(void)
+{
+    static char Out[OUT_SIZE];
+    BYTE LayoutBuf[4096];
+    PDRIVE_LAYOUT_INFORMATION_EX Layout = (PDRIVE_LAYOUT_INFORMATION_EX)LayoutBuf;
+    LONGLONG Start1, Len1, Start2;
+    char Path[64];
+    HANDLE Disk, Vol;
+    DWORD Err, Size;
+
+    ok(RunOnDisk("convert mbr\r\n", Out, sizeof(Out)), "no convert\n");
+    ok(RunOnDisk("create partition primary size=16\r\ncreate partition primary size=16\r\n"
+                 "select partition 1\r\nformat fs=fat quick label=dwtest\r\nassign letter=V\r\n", Out, sizeof(Out)),
+       "no create\n");
+
+    sprintf(Path, "\\\\.\\PhysicalDrive%s", DiskNumber);
+    Disk = CreateFileA(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(Disk != INVALID_HANDLE_VALUE, "cannot open %s: %lu\n", Path, GetLastError());
+    if (Disk == INVALID_HANDLE_VALUE)
+        goto Clean;
+
+    if (!DeviceIoControl(Disk, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, NULL, 0, LayoutBuf, sizeof(LayoutBuf), &Size, NULL) ||
+        Layout->PartitionCount < 2)
+    {
+        skip("no layout with two partitions: %lu\n", GetLastError());
+        CloseHandle(Disk);
+        goto Clean;
+    }
+    Start1 = Layout->PartitionEntry[0].StartingOffset.QuadPart;
+    Len1 = Layout->PartitionEntry[0].PartitionLength.QuadPart;
+    Start2 = Layout->PartitionEntry[1].StartingOffset.QuadPart;
+
+    /* the volume is mounted when it is used */
+    if (!GetVolumeInformationA("V:\\", NULL, 0, NULL, NULL, NULL, NULL, 0))
+    {
+        skip("the volume V: is not mounted: %lu\n", GetLastError());
+        CloseHandle(Disk);
+        goto Clean;
+    }
+
+    ok(WriteSame(Disk, 0, 512, &Err), "a write outside the volumes failed: %lu\n", Err);
+    ok(!WriteSame(Disk, Start1, 512, &Err) && Err == ERROR_ACCESS_DENIED,
+       "write to the boot sector of a mounted volume: error %lu, expected %u\n", Err, ERROR_ACCESS_DENIED);
+    ok(!WriteSame(Disk, Start1 + 1024 * 1024, 512, &Err) && Err == ERROR_ACCESS_DENIED,
+       "write into a mounted volume: error %lu, expected %u\n", Err, ERROR_ACCESS_DENIED);
+    ok(!WriteSame(Disk, Start1 + Len1 - 512, 512, &Err) && Err == ERROR_ACCESS_DENIED,
+       "write to the last sector of a mounted volume: error %lu, expected %u\n", Err, ERROR_ACCESS_DENIED);
+    ok(!WriteSame(Disk, Start1 - 512, 1024, &Err) && Err == ERROR_ACCESS_DENIED,
+       "write that reaches into a mounted volume: error %lu, expected %u\n", Err, ERROR_ACCESS_DENIED);
+    ok(WriteSame(Disk, Start2 + 1024 * 1024, 512, &Err), "a write into a RAW partition failed: %lu\n", Err);
+
+    /* a locked volume takes it */
+    Vol = CreateFileA("\\\\.\\V:", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(Vol != INVALID_HANDLE_VALUE, "cannot open the volume: %lu\n", GetLastError());
+    if (Vol != INVALID_HANDLE_VALUE)
+    {
+        ok(DeviceIoControl(Vol, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &Size, NULL), "no lock: %lu\n", GetLastError());
+        ok(WriteSame(Disk, Start1 + 1024 * 1024, 512, &Err), "a write into a locked volume failed: %lu\n", Err);
+        DeviceIoControl(Vol, FSCTL_UNLOCK_VOLUME, NULL, 0, NULL, 0, &Size, NULL);
+        CloseHandle(Vol);
+    }
+    CloseHandle(Disk);
+
+Clean:
+    RunOnDisk("select partition 1\r\nremove noerr\r\n", Out, sizeof(Out));
+    ok(RunOnDisk("clean\r\n", Out, sizeof(Out)), "no clean\n");
 }
 
 static void TestGptDelete(void)
@@ -266,6 +363,7 @@ START_TEST(diskpart_write)
         return;
     }
 
+    TestDiskHandleWrites();
     TestGptDelete();
     TestMbrChanges();
     TestOptions();
