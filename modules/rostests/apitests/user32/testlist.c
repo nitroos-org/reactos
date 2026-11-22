@@ -128,6 +128,7 @@ extern void func_SendMessageCallbackReceiverExit(void);
 extern void func_SendMessageSenderDied(void);
 extern void func_SendMessageTimeout(void);
 extern void func_SendMessageCopyData(void);
+extern void func_SendMessageGetText(void);
 extern void func_SetActiveWindow(void);
 extern void func_SetCoalescableTimer(void);
 extern void func_SetCursorPos(void);
@@ -305,6 +306,7 @@ const struct test winetest_testlist[] =
     { "SendMessageSenderDied", func_SendMessageSenderDied },
     { "SendMessageTimeout", func_SendMessageTimeout },
     { "SendMessageCopyData", func_SendMessageCopyData },
+    { "SendMessageGetText", func_SendMessageGetText },
     { "SetActiveWindow", func_SetActiveWindow },
     { "SetCoalescableTimer", func_SetCoalescableTimer },
     { "SetCursorPos", func_SetCursorPos },
