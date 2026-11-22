@@ -19,6 +19,7 @@
  */
 
 #include <freeldr.h>
+#include <drivers/acpi/acpi.h>
 
 #include <debug.h>
 DBG_DEFAULT_CHANNEL(HWDETECT);
@@ -54,6 +55,76 @@ FindAcpiBios(VOID)
     return NULL;
 }
 
+
+#define ACPI_HEADER_SIZE    36
+#define ACPI_MADT_FIXED     44      /* ACPI table header, local APIC address, flags */
+#define ACPI_MADT_IOAPIC    1       /* interrupt controller structure type: I/O APIC */
+#define ACPI_MAX_TABLE      0x20000 /* sanity limit for the tables that are read */
+
+/*
+ * Look through the ACPI tables for an I/O APIC. TRUE only when the root table is valid, every table
+ * address in it can be used and no MADT (there may be none at all) has an I/O APIC structure: a
+ * PIC-only machine. FALSE whenever anything is unclear. Tables are read at their physical address:
+ * the 32-bit loader runs with all memory below 4 GB mapped one to one. The 64-bit loader does not
+ * (only the low memory is mapped, a table above it faults), and an x64 system never installs a
+ * PIC HAL, so it does not look.
+ */
+#ifdef _M_IX86
+static BOOLEAN
+AcpiTablesDescribeNoIoApic(PRSDP_DESCRIPTOR Rsdp)
+{
+    BOOLEAN IsXsdt = (Rsdp->revision > 0);
+    ULONGLONG RootAddress = IsXsdt ? Rsdp->xsdt_physical_address : Rsdp->rsdt_physical_address;
+    ULONG EntrySize = IsXsdt ? sizeof(ULONGLONG) : sizeof(ULONG);
+    PUCHAR Root, Table;
+    ULONG Length, Count, i, Pos;
+
+    if (RootAddress == 0 || RootAddress >= 0x100000000ULL)
+        return FALSE;
+
+    Root = (PUCHAR)(ULONG_PTR)RootAddress;
+    if (memcmp(Root, IsXsdt ? "XSDT" : "RSDT", 4) != 0)
+        return FALSE;
+    RtlCopyMemory(&Length, Root + 4, sizeof(Length));
+    if (Length < ACPI_HEADER_SIZE || Length > ACPI_MAX_TABLE)
+        return FALSE;
+
+    Count = (Length - ACPI_HEADER_SIZE) / EntrySize;
+    for (i = 0; i < Count; i++)
+    {
+        ULONGLONG Address = 0;
+
+        RtlCopyMemory(&Address, Root + ACPI_HEADER_SIZE + i * EntrySize, EntrySize);
+        if (Address == 0 || Address >= 0x100000000ULL)
+            return FALSE;
+
+        Table = (PUCHAR)(ULONG_PTR)Address;
+        if (memcmp(Table, "APIC", 4) != 0)
+            continue;
+
+        /* A MADT: any I/O APIC structure ends the search */
+        RtlCopyMemory(&Length, Table + 4, sizeof(Length));
+        if (Length < ACPI_MADT_FIXED || Length > ACPI_MAX_TABLE)
+            return FALSE;
+        for (Pos = ACPI_MADT_FIXED; Pos + 2 <= Length; Pos += Table[Pos + 1])
+        {
+            if (Table[Pos + 1] < 2)
+                return FALSE; /* damaged table */
+            if (Table[Pos] == ACPI_MADT_IOAPIC)
+                return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+#else
+static BOOLEAN
+AcpiTablesDescribeNoIoApic(PRSDP_DESCRIPTOR Rsdp)
+{
+    UNREFERENCED_PARAMETER(Rsdp);
+    return FALSE;
+}
+#endif
 
 VOID
 DetectAcpiBios(PCONFIGURATION_COMPONENT_DATA SystemKey, ULONG *BusNumber)
@@ -94,6 +165,11 @@ DetectAcpiBios(PCONFIGURATION_COMPONENT_DATA SystemKey, ULONG *BusNumber)
         PartialDescriptor->Type = CmResourceTypeDeviceSpecific;
         PartialDescriptor->ShareDisposition = CmResourceShareUndetermined;
         PartialDescriptor->u.DeviceSpecificData.DataSize = TableSize;
+        if (AcpiTablesDescribeNoIoApic(Rsdp))
+        {
+            TRACE("The ACPI tables describe no I/O APIC\n");
+            PartialDescriptor->u.DeviceSpecificData.Reserved1 = ACPI_BIOS_NODE_NO_IOAPIC;
+        }
 
         /* Fill the table */
         AcpiBiosData = (PACPI_BIOS_DATA)(PartialDescriptor + 1);

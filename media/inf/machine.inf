@@ -26,6 +26,8 @@ HKR, , Icon,           0, "-27"
 %IntelMfg% = IntelMfg
 %NecMfg% = NecMfg
 %nVidiaMfg% = nVidiaMfg
+%RedHatMfg% = RedHatMfg
+%VirtualBoxMfg% = VirtualBoxMfg
 
 [GenericMfg]
 %*PNP0000.DeviceDesc% = NO_DRV,*PNP0000
@@ -50,6 +52,7 @@ HKR, , Icon,           0, "-27"
 %*PNP0C0F.DeviceDesc% = NO_DRV,*PNP0C0F
 %*PNP0C15.DeviceDesc% = NO_DRV,*PNP0C15
 %*QEMU0002.DeviceDesc% = NO_DRV,*QEMU0002
+%*QEMUVGID.DeviceDesc% = NO_DRV,*QEMUVGID
 
 %SWENUM.DeviceDesc%   = SWENUM_Inst, ROOT\SWENUM
 %ACPI\FixedButton.DeviceDesc% = NO_DRV,ACPI\FixedButton
@@ -87,6 +90,13 @@ HKR, , Icon,           0, "-27"
 %PCI\VEN_10DE&DEV_01B8.DeviceDesc% = NO_DRV,PCI\VEN_10DE&DEV_01B8
 %PCI\VEN_10DE&DEV_02A5.DeviceDesc% = NO_DRV,PCI\VEN_10DE&DEV_02A5
 %PCI\VEN_10DE&DEV_02A6.DeviceDesc% = NO_DRV,PCI\VEN_10DE&DEV_02A6
+
+[RedHatMfg]
+%PCI\VEN_1AF4&DEV_1002.DeviceDesc% = NO_DRV,PCI\VEN_1AF4&DEV_1002
+%PCI\VEN_1AF4&DEV_1045.DeviceDesc% = NO_DRV,PCI\VEN_1AF4&DEV_1045
+
+[VirtualBoxMfg]
+%PCI\VEN_80EE&DEV_CAFE.DeviceDesc% = NO_DRV,PCI\VEN_80EE&DEV_CAFE
 
 ;---------------------------- NO DRIVER REQ -----------------------------
 
@@ -170,6 +180,8 @@ ReactOS = "ReactOS Project"
 IntelMfg = "Intel"
 NecMfg = "NEC"
 nVidiaMfg = "nVidia"
+RedHatMfg = "Red Hat"
+VirtualBoxMfg = "Oracle"
 
 ; Localizable
 SystemClassName = "System devices"
@@ -197,6 +209,7 @@ GenericMfg = "(Generic system devices)"
 *PNP0C0F.DeviceDesc = "PCI interrupt link device"
 *PNP0C15.DeviceDesc = "Docking Station"
 *QEMU0002.DeviceDesc = "QEMU firmware configuration device"
+*QEMUVGID.DeviceDesc = "QEMU VM generation ID device"
 
 SWENUM.DeviceDesc  = "Plug & Play Software Bus Enumerator"
 ACPI\FixedButton.DeviceDesc = "ACPI fixed feature button"
@@ -227,6 +240,11 @@ PCI\VEN_10DE&DEV_01B7.DeviceDesc = "nVidia nForce AGP to PCI Bridge"
 PCI\VEN_10DE&DEV_01B8.DeviceDesc = "nVidia nForce PCI to PCI Bridge"
 PCI\VEN_10DE&DEV_02A5.DeviceDesc = "nVidia MCPX CPU to PCI Bridge"
 PCI\VEN_10DE&DEV_02A6.DeviceDesc = "nVidia MCPX PCI RAM Controller"
+
+PCI\VEN_1AF4&DEV_1002.DeviceDesc = "VirtIO Balloon Device"
+PCI\VEN_1AF4&DEV_1045.DeviceDesc = "VirtIO Balloon Device"
+
+PCI\VEN_80EE&DEV_CAFE.DeviceDesc = "VirtualBox Guest Device"
 
 [Strings.0404]
 GenericMfg = "(標準系統裝置)"

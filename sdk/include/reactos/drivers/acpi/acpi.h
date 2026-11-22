@@ -16,6 +16,15 @@ typedef struct _ACPI_E820_ENTRY
     ULONGLONG Type;
 } ACPI_E820_ENTRY, *PACPI_E820_ENTRY;
 
+//
+// The boot loader sets this bit in Reserved1 of the device-specific data of the "ACPI BIOS" node
+// (CM_PARTIAL_RESOURCE_DESCRIPTOR) when it found valid ACPI tables that describe no I/O APIC
+// (no MADT, or a MADT without an I/O APIC structure): a PIC-only machine. Text-mode setup
+// installs the uniprocessor ACPI HAL there, because the APIC HALs never finish starting
+// without an I/O APIC. The bit is clear when the tables were not checked or not understood.
+//
+#define ACPI_BIOS_NODE_NO_IOAPIC    0x00000001
+
 typedef struct _ACPI_BIOS_MULTI_NODE
 {
     PHYSICAL_ADDRESS RsdtAddress;
