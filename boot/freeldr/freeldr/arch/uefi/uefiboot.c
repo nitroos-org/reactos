@@ -1073,10 +1073,18 @@ UefiBootEntryInit(VOID)
 
     /*
      * A hard disk partition (the hard drive node is the last node of its path)
-     * with our loader directory: an installed system.
+     * with our loader directory: an installed system. Not on removable media
+     * (a USB stick goes from computer to computer, and the removable-media
+     * path starts it), and not on an MBR disk without a signature (which does
+     * not tell disks apart).
      */
+    BlockIo = NULL;
     if (Ours->HaveHd && Ours->HdOffset + NV_HD_NODE_LENGTH == Ours->Length &&
-        (Ours->Hd.SignatureType == SIGNATURE_TYPE_GUID || Ours->Hd.SignatureType == SIGNATURE_TYPE_MBR) &&
+        (Ours->Hd.SignatureType == SIGNATURE_TYPE_GUID ||
+         (Ours->Hd.SignatureType == SIGNATURE_TYPE_MBR &&
+          (Ours->Hd.Signature[0] | Ours->Hd.Signature[1] | Ours->Hd.Signature[2] | Ours->Hd.Signature[3]) != 0)) &&
+        !EFI_ERROR(GlobalSystemTable->BootServices->HandleProtocol(LoadedImage->DeviceHandle, &NvBlockIoGuid, (VOID**)&BlockIo)) &&
+        BlockIo && BlockIo->Media && !BlockIo->Media->RemovableMedia &&
         NvFileExists(LoadedImage->DeviceHandle, NV_OWN_LOADER_PATH))
     {
         NvEnsureBootEntry(Ours, (const UCHAR *)Path);
