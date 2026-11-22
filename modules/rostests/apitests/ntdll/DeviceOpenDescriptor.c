@@ -9,6 +9,7 @@
  * Windows Server 2022 (measured, descriptors of the device objects, SDDL):
  *   \Device\NamedPipe, \Device\Null, \Device\Afd, \Device\Mailslot, \Device\KsecDD:
  *   O:BAG:SYD:(A;;0x1201bf;;;WD)(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;RC)
+ *   \Device\Ip and \Device\Ip6: the same (the RC ACE is not checked: ours has none, see the TCP/IP driver)
  */
 
 #include "precomp.h"
@@ -41,8 +42,8 @@ static void CheckDevice(PCWSTR Path)
     PACCESS_ALLOWED_ACE Ace;
     SID_IDENTIFIER_AUTHORITY WorldAuthority = { SECURITY_WORLD_SID_AUTHORITY };
     SID_IDENTIFIER_AUTHORITY NtAuthority = { SECURITY_NT_AUTHORITY };
-    UCHAR WorldBuffer[16], SystemBuffer[16], AdminsBuffer[16];
-    PSID World = (PSID)WorldBuffer, System = (PSID)SystemBuffer, Admins = (PSID)AdminsBuffer;
+    UCHAR WorldBuffer[16], SystemBuffer[16], AdminsBuffer[16], ServiceBuffer[16];
+    PSID World = (PSID)WorldBuffer, System = (PSID)SystemBuffer, Admins = (PSID)AdminsBuffer, Service = (PSID)ServiceBuffer;
 
     RtlInitUnicodeString(&Name, Path);
     InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
@@ -68,6 +69,8 @@ static void CheckDevice(PCWSTR Path)
     RtlInitializeSid(Admins, &NtAuthority, 2);
     *RtlSubAuthoritySid(Admins, 0) = SECURITY_BUILTIN_DOMAIN_RID;
     *RtlSubAuthoritySid(Admins, 1) = DOMAIN_ALIAS_RID_ADMINS;
+    RtlInitializeSid(Service, &NtAuthority, 1);
+    *RtlSubAuthoritySid(Service, 0) = SECURITY_NETWORK_SERVICE_RID;
 
     Status = RtlGetDaclSecurityDescriptor(Sd, &Present, &Dacl, &Defaulted);
     ok_hex(Status, STATUS_SUCCESS);
@@ -91,6 +94,9 @@ static void CheckDevice(PCWSTR Path)
     ok(Ace != NULL, "%ls: no ACE for Administrators\n", Path);
     if (Ace)
         ok(Ace->Mask == 0x001f01ff, "%ls: Administrators have 0x%08lx, expected 0x001f01ff\n", Path, Ace->Mask);
+
+    /* Windows has no ACE for Network Service on these devices */
+    ok(FindAce(Dacl, Service) == NULL, "%ls: has an ACE for Network Service\n", Path);
 }
 
 START_TEST(DeviceOpenDescriptor)
@@ -100,4 +106,6 @@ START_TEST(DeviceOpenDescriptor)
     CheckDevice(L"\\Device\\Mailslot");
     CheckDevice(L"\\Device\\Afd");
     CheckDevice(L"\\Device\\KsecDD");
+    CheckDevice(L"\\Device\\Ip");
+    CheckDevice(L"\\Device\\Ip6");
 }
