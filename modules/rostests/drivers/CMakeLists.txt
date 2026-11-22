@@ -4,6 +4,7 @@
 #add_subdirectory(ntoskrnl)
 add_subdirectory(tcpip)
 add_subdirectory(afdstub)
+add_subdirectory(kdhello)
 add_subdirectory(missimp)
 add_subdirectory(obcbtest)
 add_subdirectory(fakemp)
