@@ -60,6 +60,10 @@ typedef enum _E1000_RCVBUF_SIZE
 /* 3.2.3 Receive Descriptor Format */
 
 #define E1000_RDESC_STATUS_PIF          (1U << 7)   /* Passed in-exact filter */
+#define E1000_RDESC_STATUS_IPCS         (1U << 6)   /* IP Checksum Calculated on Packet */
+#define E1000_RDESC_STATUS_TCPCS        (1U << 5)   /* TCP Checksum Calculated on Packet */
+#define E1000_RDESC_STATUS_UDPCS        (1U << 4)   /* UDP Checksum Calculated on Packet */
+#define E1000_RDESC_STATUS_VP           (1U << 3)   /* Packet is 802.1Q (VLAN) */
 #define E1000_RDESC_STATUS_IXSM         (1U << 2)   /* Ignore Checksum Indication */
 #define E1000_RDESC_STATUS_EOP          (1U << 1)   /* End of Packet */
 #define E1000_RDESC_STATUS_DD           (1U << 0)   /* Descriptor Done */

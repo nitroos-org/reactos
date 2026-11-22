@@ -102,8 +102,10 @@ MiniportHandleInterrupt(
                 break;
             }
 
-            /* Ignoring these flags for now */
-            ReceiveDescriptor->Status &= ~(E1000_RDESC_STATUS_IXSM | E1000_RDESC_STATUS_PIF);
+            /* Ignoring these flags for now (the checksum indications are set by the 82574 family for every frame) */
+            ReceiveDescriptor->Status &= ~(E1000_RDESC_STATUS_IXSM | E1000_RDESC_STATUS_PIF |
+                                           E1000_RDESC_STATUS_VP | E1000_RDESC_STATUS_UDPCS |
+                                           E1000_RDESC_STATUS_TCPCS | E1000_RDESC_STATUS_IPCS);
 
             if (ReceiveDescriptor->Status != (E1000_RDESC_STATUS_EOP | E1000_RDESC_STATUS_DD))
             {
@@ -116,7 +118,10 @@ MiniportHandleInterrupt(
                 goto NextReceiveDescriptor;
             }
 
-            if (ReceiveDescriptor->Length != 0 && ReceiveDescriptor->Address != 0)
+            /* The length is written by the adapter: it must hold an Ethernet header and fit the buffer */
+            if (ReceiveDescriptor->Length > sizeof(ETH_HEADER) &&
+                ReceiveDescriptor->Length <= Adapter->ReceiveBufferEntrySize &&
+                ReceiveDescriptor->Address != 0)
             {
                 EthHeader = (PETH_HEADER)(Adapter->ReceiveBuffer + BufferOffset);
 
