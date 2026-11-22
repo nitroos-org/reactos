@@ -251,6 +251,136 @@ static void TestParameterNames(IShellDispatch *pSD)
     pDisp->Release();
 }
 
+/* FolderItemVerbs::_NewEnum: for-each over $item.Verbs(). Windows Server 2022: one element per menu item, Count of
+ * them (12 for notepad.exe: the separators come as verbs with an empty name), FolderItemVerb objects; Item(Count) is
+ * an empty verb and Item(Count + 1) is nothing, but neither is part of the enumeration. */
+static void TestVerbsEnum(FolderItems *pItems)
+{
+    FolderItem *pItem = NULL;
+    FolderItemVerbs *pVerbs = NULL;
+    IUnknown *pUnk = NULL;
+    IEnumVARIANT *pEnum = NULL, *pClone = NULL;
+    VARIANT Var[2], Index;
+    ULONG Fetched;
+    HRESULT hr;
+    long Count = -1;
+    int Seen = 0;
+
+    V_VT(&Index) = VT_I4;
+    V_I4(&Index) = 0;
+    hr = pItems->Item(Index, &pItem);
+    ok_long(hr, S_OK);
+    if (!pItem)
+        return;
+    hr = pItem->Verbs(&pVerbs);
+    ok_long(hr, S_OK);
+    pItem->Release();
+    if (!pVerbs)
+        return;
+    hr = pVerbs->get_Count(&Count);
+    ok_long(hr, S_OK);
+    if (Count <= 0)
+    {
+        skip("the item has no verbs\n");
+        pVerbs->Release();
+        return;
+    }
+
+    hr = pVerbs->_NewEnum(&pUnk);
+    ok_long(hr, S_OK);
+    if (!pUnk)
+    {
+        pVerbs->Release();
+        return;
+    }
+    hr = pUnk->QueryInterface(IID_IEnumVARIANT, (void **)&pEnum);
+    ok_long(hr, S_OK);
+    pUnk->Release();
+    if (pEnum)
+    {
+        for (;;)
+        {
+            VariantInit(&Var[0]);
+            Fetched = 99;
+            hr = pEnum->Next(1, Var, &Fetched);
+            if (hr != S_OK)
+            {
+                ok_long(hr, S_FALSE);
+                ok_long(Fetched, 0);
+                break;
+            }
+            ok_long(Fetched, 1);
+            ok_int(V_VT(&Var[0]), VT_DISPATCH);
+            if (V_VT(&Var[0]) == VT_DISPATCH && V_DISPATCH(&Var[0]))
+            {
+                FolderItemVerb *pVerb = NULL;
+                BSTR Name = NULL;
+
+                hr = V_DISPATCH(&Var[0])->QueryInterface(IID_FolderItemVerb, (void **)&pVerb);
+                ok_long(hr, S_OK);
+                if (pVerb)
+                {
+                    hr = pVerb->get_Name(&Name);
+                    ok_long(hr, S_OK);
+                    ok(Name != NULL, "verb %d has no name string\n", Seen);
+                    SysFreeString(Name);
+                    pVerb->Release();
+                }
+            }
+            VariantClear(&Var[0]);
+            Seen++;
+            if (Seen > Count + 2)
+                break;
+        }
+        ok(Seen == Count, "the enumerator gave %d elements, Count is %ld\n", Seen, Count);
+
+        /* Reset, then everything in one call; asking for more is S_FALSE */
+        hr = pEnum->Reset();
+        ok_long(hr, S_OK);
+        Fetched = 99;
+        VariantInit(&Var[0]);
+        VariantInit(&Var[1]);
+        hr = pEnum->Skip(Count);
+        ok_long(hr, S_OK);
+        hr = pEnum->Next(1, Var, &Fetched);
+        ok_long(hr, S_FALSE);
+        ok_long(Fetched, 0);
+        hr = pEnum->Reset();
+        hr = pEnum->Skip(1);
+        ok_long(hr, S_OK);
+        hr = pEnum->Clone(&pClone);
+        ok_long(hr, S_OK);
+        if (pClone)
+        {
+            Fetched = 99;
+            hr = pClone->Next(1, Var, &Fetched);
+            ok_long(hr, S_OK);
+            ok_long(Fetched, 1);
+            VariantClear(&Var[0]);
+            pClone->Release();
+        }
+        pEnum->Release();
+    }
+
+    /* what for-each does: Invoke(DISPID_NEWENUM) */
+    {
+        IDispatch *pDisp = NULL;
+        DISPPARAMS Params = { NULL, NULL, 0, 0 };
+        VARIANT Result;
+
+        if (SUCCEEDED(pVerbs->QueryInterface(IID_IDispatch, (void **)&pDisp)))
+        {
+            VariantInit(&Result);
+            hr = pDisp->Invoke(DISPID_NEWENUM, IID_NULL, LOCALE_USER_DEFAULT, DISPATCH_METHOD | DISPATCH_PROPERTYGET,
+                               &Params, &Result, NULL, NULL);
+            ok_long(hr, S_OK);
+            VariantClear(&Result);
+            pDisp->Release();
+        }
+    }
+    pVerbs->Release();
+}
+
 START_TEST(CFolderItems)
 {
     IShellDispatch *pSD = NULL;
@@ -284,6 +414,7 @@ START_TEST(CFolderItems)
         {
             TestEnum(pItems);
             TestNewEnumDispatch(pItems);
+            TestVerbsEnum(pItems);
             pItems->Release();
         }
         pFolder->Release();
