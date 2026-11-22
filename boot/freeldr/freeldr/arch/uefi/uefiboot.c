@@ -29,9 +29,12 @@
  *    nothing; so does a boot through any option (BootCurrent) that starts our
  *    loader from our partition, whoever made it. An option of ours (our
  *    description) for this partition with another device path (the disk
- *    moved to another port) is rewritten in place; an option of ours
- *    whose partition is gone (the system was copied to another disk) is reused,
- *    not duplicated. Options of other systems are never written. A firmware
+ *    moved to another port) is rewritten in place; an option of ours for a
+ *    partition the firmware does not show is left alone (it may be absent
+ *    only for this boot, or belong to another installation): a copy of the
+ *    system on another disk gets an option of its own, with a number that
+ *    is neither in use nor in BootOrder. Options of other systems are never
+ *    written. A firmware
  *    that refuses the write is logged and the boot goes on. A firmware that
  *    drops the option again at every boot gets it NV_MAX_WRITES times per
  *    partition and NV_MAX_WRITES_TOTAL times in all, then no more (counted in
@@ -426,8 +429,7 @@ typedef enum _NV_OPTION_KIND
     NvOptionOther,          /* not ours, or not readable */
     NvOptionMatch,          /* starts our loader from our partition: nothing to do */
     NvOptionOursMoved,      /* our description, loader and partition, another device path: rewrite it */
-    NvOptionOthersForUs,    /* another description, our loader and partition, another device path: never written */
-    NvOptionOursElsewhere   /* our description and loader, another partition */
+    NvOptionOthersForUs     /* another description, our loader and partition, another device path: never written */
 } NV_OPTION_KIND;
 
 /*
@@ -440,8 +442,7 @@ NV_OPTION_KIND
 NvClassifyOption(
     _In_ ULONG Number,
     _In_ const NV_PATH_INFO *Ours,
-    _In_ const UCHAR *OursPath,
-    _Out_opt_ HARDDRIVE_DEVICE_PATH *TheirPartition)
+    _In_ const UCHAR *OursPath)
 {
     WCHAR Name[9];
     UCHAR *Data;
@@ -505,12 +506,6 @@ NvClassifyOption(
             Kind = DescOurs ? NvOptionOursMoved : NvOptionOthersForUs;
         }
     }
-    else if (DescOurs)
-    {
-        Kind = NvOptionOursElsewhere;
-        if (TheirPartition)
-            *TheirPartition = Theirs->Hd;
-    }
 
 Done:
     NvFree(Theirs);
@@ -518,46 +513,13 @@ Done:
     return Kind;
 }
 
-/* Is there a partition with this signature among the block devices of the firmware? */
-static
-BOOLEAN
-NvPartitionPresent(
-    _In_ const HARDDRIVE_DEVICE_PATH *Partition)
-{
-    EFI_HANDLE *Handles = NULL;
-    UINTN Count = 0, i;
-    BOOLEAN Present = FALSE;
-    NV_PATH_INFO *Info = NvAlloc(sizeof(*Info));
-
-    if (!Info)
-        return TRUE; /* cannot tell: treat it as present, so that it is never overwritten */
-    if (EFI_ERROR(GlobalSystemTable->BootServices->LocateHandleBuffer(ByProtocol, &NvBlockIoGuid, NULL, &Count, &Handles)))
-    {
-        NvFree(Info);
-        return TRUE;
-    }
-
-    for (i = 0; i < Count && !Present; i++)
-    {
-        EFI_DEVICE_PATH_PROTOCOL *Path;
-
-        if (NvGetHandlePath(Handles[i], &Path) &&
-            NvParseDevicePath(Path, NV_NO_LIMIT, Info) && Info->HaveHd &&
-            NvSamePartition(&Info->Hd, Partition))
-        {
-            Present = TRUE;
-        }
-    }
-    NvFree(Handles);
-    NvFree(Info);
-    return Present;
-}
-
 /*
  * Every Boot#### variable, through GetNextVariableName: marks the numbers in
  * use and finds, in this order of preference: an option for our loader on our
- * partition, the same with another device path, our option of a partition
- * that is gone.
+ * partition, ours with another device path. An option of ours for a partition
+ * that the firmware does not show is not taken over: the partition may only
+ * be absent for this boot (a firmware that connects only the boot device, an
+ * external disk), and it may belong to another installation.
  */
 static
 BOOLEAN
@@ -566,8 +528,7 @@ NvScanAllOptions(
     _In_ const UCHAR *OursPath,
     _Out_writes_bytes_(0x10000 / 8) UCHAR *Used,
     _Out_ LONG *Match,
-    _Out_ LONG *Moved,
-    _Out_ LONG *Stale)
+    _Out_ LONG *Moved)
 {
     UINTN NameBytes = 128 * sizeof(WCHAR);
     WCHAR *Name = NvAlloc(NameBytes);
@@ -575,7 +536,7 @@ NvScanAllOptions(
     EFI_STATUS Status = EFI_SUCCESS;
     ULONG Rounds, Grown = 0;
 
-    *Match = *Moved = *Stale = -1;
+    *Match = *Moved = -1;
     RtlZeroMemory(Used, 0x10000 / 8);
     if (!Name)
         return FALSE;
@@ -586,7 +547,6 @@ NvScanAllOptions(
     {
         UINTN Size = NameBytes;
         ULONG Number;
-        HARDDRIVE_DEVICE_PATH Theirs;
         NV_OPTION_KIND Kind;
 
         Status = GlobalSystemTable->RuntimeServices->GetNextVariableName(&Size, Name, &Guid);
@@ -616,13 +576,11 @@ NvScanAllOptions(
         Used[Number / 8] |= (UCHAR)(1 << (Number % 8));
         if (*Match >= 0)
             continue;
-        Kind = NvClassifyOption(Number, Ours, OursPath, &Theirs);
+        Kind = NvClassifyOption(Number, Ours, OursPath);
         if (Kind == NvOptionMatch)
             *Match = (LONG)Number;
         else if (Kind == NvOptionOursMoved && *Moved < 0)
             *Moved = (LONG)Number;
-        else if (Kind == NvOptionOursElsewhere && *Stale < 0 && !NvPartitionPresent(&Theirs))
-            *Stale = (LONG)Number;
     }
 
     ERR("UEFI boot entry: cannot list the firmware variables (0x%lx)\n", (ULONG)Status);
@@ -721,7 +679,7 @@ NvEnsureBootEntry(
 {
     UCHAR *Order = NULL, *NewOrder = NULL, *Option = NULL, *Used = NULL, *Current = NULL;
     UINTN OrderSize = 0, CurrentSize, i, OptionSize, PathListLength, DescBytes, FileBytes, FileNodeLength;
-    LONG Match, Moved, Stale;
+    LONG Match, Moved;
     ULONG Number;
     BOOLEAN InOrder = FALSE;
     EFI_STATUS Status;
@@ -744,7 +702,7 @@ NvEnsureBootEntry(
     for (i = 0; i < OrderSize / 2; i++)
     {
         UINT16 Entry = (UINT16)(Order[2 * i] | (Order[2 * i + 1] << 8));
-        if (NvClassifyOption(Entry, Ours, OursPath, NULL) == NvOptionMatch)
+        if (NvClassifyOption(Entry, Ours, OursPath) == NvOptionMatch)
         {
             ERR("UEFI boot entry: Boot%04X starts this system, %lu variable writes\n", Entry, NvWriteCount);
             goto Quit;
@@ -765,7 +723,7 @@ NvEnsureBootEntry(
         if (CurrentSize == sizeof(UINT16))
         {
             Entry = (UINT16)(Current[0] | (Current[1] << 8));
-            Kind = NvClassifyOption(Entry, Ours, OursPath, NULL);
+            Kind = NvClassifyOption(Entry, Ours, OursPath);
         }
         NvFree(Current);
         if (Kind == NvOptionMatch || Kind == NvOptionOursMoved || Kind == NvOptionOthersForUs)
@@ -777,8 +735,15 @@ NvEnsureBootEntry(
 
     /* 2. Not in BootOrder: look at every option */
     Used = NvAlloc(0x10000 / 8);
-    if (!Used || !NvScanAllOptions(Ours, OursPath, Used, &Match, &Moved, &Stale))
+    if (!Used || !NvScanAllOptions(Ours, OursPath, Used, &Match, &Moved))
         goto Quit;
+
+    /* A number in BootOrder without its option is not free: a new option takes a number of its own and goes first */
+    for (i = 0; i < OrderSize / 2; i++)
+    {
+        UINT16 Entry = (UINT16)(Order[2 * i] | (Order[2 * i + 1] << 8));
+        Used[Entry / 8] |= (UCHAR)(1 << (Entry % 8));
+    }
 
     DescBytes = (wcslen(NV_DESCRIPTION) + 1) * sizeof(WCHAR);
     FileBytes = (wcslen(NV_OWN_LOADER_PATH) + 1) * sizeof(WCHAR);
@@ -798,14 +763,10 @@ NvEnsureBootEntry(
     }
     else
     {
-        /* Rewrite our option of this partition, or reuse ours of a partition that is gone, or the lowest free number */
+        /* Rewrite our option of this partition, or the lowest free number */
         if (Moved >= 0)
         {
             Number = (ULONG)Moved;
-        }
-        else if (Stale >= 0)
-        {
-            Number = (ULONG)Stale;
         }
         else
         {
