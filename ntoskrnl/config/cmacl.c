@@ -356,6 +356,7 @@ typedef struct _CMP_ACL_ENTRY
     BOOLEAN Restricted;
     BOOLEAN Impersonating;
     LONG WrittenCount;
+    ULONG Count;            /* restamp of a user hive in audit mode: the descriptors that would be replaced */
     LARGE_INTEGER Time;
     USHORT KeyChars;
     USHORT ChildChars;
@@ -2061,6 +2062,7 @@ typedef struct _CMP_ACL_USER_CHECK
 /* Counters of the user-hive checks (AuditStats) */
 static LONG CmpAclUserHivesChecked;     /* checked at their load (enforce mode) */
 static LONG CmpAclUserHivesSkipped;     /* a valid record: checked since the transition */
+static LONG CmpAclUserHivesFlagged;     /* audit mode: a load that would replace descriptors */
 static LONG CmpAclUserHiveRestamped;    /* descriptors replaced, links deleted */
 static LONG CmpAclUserHiveFailed;       /* checks that could not be completed (hive marked unchecked) */
 static ULONG CmpAclUserHiveMs;          /* how long the last check took */
@@ -2210,7 +2212,10 @@ CmpAclSdPlanted(
  * Record a key whose stored descriptor was replaced (Operation
  * CM_REGACL_OP_RESTAMP), or kept although it lets others than administrators
  * change the key (CM_REGACL_OP_KEPTGRANT): counted, printed (capped) and logged.
- * User: a key of a user hive checked at its load (counted there).
+ * User: a key of a user hive checked at its load (counted there, logged with
+ * "hive":"user","applied":1). Without User, AuditCount > 0: a user hive loaded
+ * in audit mode (KeyName its root) that has AuditCount descriptors the check
+ * would replace under enforcement; nothing was changed ("applied":0).
  */
 static
 VOID
@@ -2220,7 +2225,8 @@ CmpAclRecordRestamp(
     _In_ ULONG Reasons,
     _In_opt_ PSID OldOwner,
     _In_ NTSTATUS Status,
-    _Inout_opt_ PCMP_ACL_USER_CHECK User)
+    _Inout_opt_ PCMP_ACL_USER_CHECK User,
+    _In_ ULONG AuditCount)
 {
     PCMP_ACL_ENTRY Entry;
     UNICODE_STRING Owner = {0};
@@ -2240,6 +2246,10 @@ CmpAclRecordRestamp(
             InterlockedIncrement(&User->Failed);
         }
     }
+    else if (AuditCount)
+    {
+        /* Counted by the caller */
+    }
     else if (Operation == CM_REGACL_OP_KEPTGRANT)
     {
         InterlockedIncrement(&CmpAclKeptGrants);
@@ -2252,14 +2262,21 @@ CmpAclRecordRestamp(
     {
         InterlockedIncrement(&CmpAclRestampFailed);
     }
-    if (!User && Operation == CM_REGACL_OP_RESTAMP && (Reasons & CMP_ACL_PLANTED_OWNER))
+    if (!User && !AuditCount && Operation == CM_REGACL_OP_RESTAMP && (Reasons & CMP_ACL_PLANTED_OWNER))
         InterlockedIncrement(&CmpAclRestampUserOwned);
 
     RtlInitEmptyUnicodeString(&Owner, OwnerBuffer, sizeof(OwnerBuffer));
     if (!OldOwner || !NT_SUCCESS(RtlConvertSidToUnicodeString(&Owner, OldOwner, FALSE)))
         Owner.Length = 0;
 
-    if (InterlockedIncrement(&CmpAclRestampPrinted) <= CMP_ACL_RESTAMP_PRINT_MAX)
+    if (AuditCount)
+    {
+        DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL,
+                   "CM-ACL-AUDIT: user hive %wZ: %lu stored descriptors would be replaced under enforcement "
+                   "(reasons 0x%lx), nothing changed\n",
+                   KeyName, AuditCount, Reasons);
+    }
+    else if (InterlockedIncrement(&CmpAclRestampPrinted) <= CMP_ACL_RESTAMP_PRINT_MAX)
     {
         DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL,
                    "CM-ACL: %s%wZ: stored descriptor %s (reasons 0x%lx, owner %wZ): 0x%lx\n",
@@ -2289,7 +2306,10 @@ CmpAclRecordRestamp(
     Entry->Id = (ULONG)InterlockedIncrement(&CmpAclNextId);
     Entry->Slot = MAXULONG;
     Entry->Operation = Operation;
-    Entry->Rule = CmpAclRuleCell;
+    /* A user hive's entry: rule "user", Granted 1 when the descriptor was replaced */
+    Entry->Rule = (User || AuditCount) ? CmpAclRuleUser : CmpAclRuleCell;
+    Entry->Granted = User ? 1 : 0;
+    Entry->Count = AuditCount;
     Entry->Desired = Reasons;
     Entry->ShadowStatus = Status;
     KeQuerySystemTime(&Entry->Time);
@@ -2546,7 +2566,7 @@ CmpAclCheckStoredKey(
     {
         if (Name)
         {
-            CmpAclRecordRestamp(CM_REGACL_OP_KEPTGRANT, Name, Kept, Owner, STATUS_SUCCESS, NULL);
+            CmpAclRecordRestamp(CM_REGACL_OP_KEPTGRANT, Name, Kept, Owner, STATUS_SUCCESS, NULL, 0);
             CmpFree(Name, 0);
         }
         return 0;
@@ -2561,7 +2581,7 @@ CmpAclCheckStoredKey(
             Reasons |= CMP_ACL_LINK_DELETED;
             if (Name)
             {
-                CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons & ~CMP_ACL_LINK_DELETED, Owner, Status, User);
+                CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons & ~CMP_ACL_LINK_DELETED, Owner, Status, User, 0);
                 CmpFree(Name, 0);
             }
             else if (User)
@@ -2576,7 +2596,7 @@ CmpAclCheckStoredKey(
          * key there gets, so that its owner can no longer change its target.
          */
         if (Name)
-            CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons, Owner, Status, User);
+            CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons, Owner, Status, User, 0);
         else if (User)
             InterlockedIncrement(&User->Failed);
         Reasons &= ~CMP_ACL_PLANTED_LINK;
@@ -2602,7 +2622,7 @@ CmpAclCheckStoredKey(
     }
     if (Name)
     {
-        CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons, Owner, Status, User);
+        CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons, Owner, Status, User, 0);
         CmpFree(Name, 0);
     }
     else if (User)
@@ -2808,7 +2828,7 @@ CmpAclStampPolicySd(
     if (Name)
     {
         CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, CMP_ACL_PLANTED_SYSTEM | CMP_ACL_PLANTED_INHERIT, NULL, Status,
-                            NULL);
+                            NULL, 0);
         CmpFree(Name, 0);
     }
 }
@@ -3422,6 +3442,8 @@ CmpAclUserHiveTarget(
  * it). *Flagged: descriptors that would be replaced where a key may have
  * them (the root's own cell, used by the root alone, is judged as the
  * root's: the load recounted the references); *Reasons their reasons;
+ * *Certain: those of them that are wrong at any place (not a package grant
+ * that is right below AppContainer\Storage, which only the walk can tell);
  * *Unjudged: cells that could not be copied (no memory). A cache that does
  * not hold every cell of the hive counts as one unjudged cell. The hive is
  * reachable by the loading thread only.
@@ -3433,7 +3455,8 @@ CmpAclUserHivePass1(
     _In_ PSID OwnSid,
     _Out_ PULONG Flagged,
     _Out_ PULONG Reasons,
-    _Out_ PULONG Unjudged)
+    _Out_ PULONG Unjudged,
+    _Out_ PULONG Certain)
 {
     ULONG Buffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
     PHHIVE Hive = &CmHive->Hive;
@@ -3447,7 +3470,7 @@ CmpAclUserHivePass1(
     PVOID Pool;
     BOOLEAN Acquired;
 
-    *Flagged = *Reasons = *Unjudged = 0;
+    *Flagged = *Reasons = *Unjudged = *Certain = 0;
 
     Root = (PCM_KEY_NODE)HvGetCell(Hive, Hive->BaseBlock->RootCell);
     if (Root)
@@ -3511,6 +3534,12 @@ CmpAclUserHivePass1(
                     /* Also a package grant that is right below AppContainer\Storage: only the keys can tell */
                     (*Flagged)++;
                     *Reasons |= Verdict;
+                    /* Wrong wherever it is (not only where it may be right): what audit mode reports */
+                    if (CmpAclUserHiveSdVerdict(Copy, OwnSid, CMP_ACL_UH_PLACE_ROOT | CMP_ACL_UH_PLACE_APPCONTAINER,
+                                                &CmpKeyObjectType->TypeInfo.GenericMapping, NULL))
+                    {
+                        (*Certain)++;
+                    }
                 }
             }
             if (Pool)
@@ -3536,8 +3565,8 @@ CmpAclUserHivePass1(
  * the hive written to its file, then the record. A check that could not be
  * completed marks the hive unchecked (CMHIVE_FLAG_ACL_UNCHECKED: only its
  * account and the system get in, see CmpAclDecide) and writes no record.
- * Audit mode (nothing is enforced, as the transition), legacy mode and setup:
- * nothing.
+ * Audit mode: pass 1, one log entry when it found something, nothing
+ * changed, no record. Legacy mode and setup: nothing.
  */
 VOID
 NTAPI
@@ -3552,10 +3581,10 @@ CmpAclCheckUserHive(
     LARGE_INTEGER Start, End, Frequency, HiveTime;
     PUNICODE_STRING RootName = NULL;
     PWCHAR RootPath = NULL;
-    ULONG Flagged, Reasons, Unjudged, Cells;
+    ULONG Flagged, Reasons, Unjudged, Certain, Cells;
     BOOLEAN Classes, Synced = TRUE, Complete;
 
-    if (!CmpAclReady || CmpAclSetupRunning || CmpRegistryAclEffectiveMode != CM_REGACL_MODE_ENFORCE ||
+    if (!CmpAclReady || CmpAclSetupRunning || CmpRegistryAclEffectiveMode == CM_REGACL_MODE_LEGACY ||
         !CmHive || !RootKcb || (CmHive->Hive.HiveFlags & HIVE_VOLATILE))
     {
         return;
@@ -3567,16 +3596,29 @@ CmpAclCheckUserHive(
     }
 
     HiveTime = CmHive->Hive.BaseBlock->TimeStamp;
-    if (CmpAclUserRecordValid(&Name, HiveTime))
+    if (CmpRegistryAclEffectiveMode == CM_REGACL_MODE_ENFORCE && CmpAclUserRecordValid(&Name, HiveTime))
     {
         InterlockedIncrement(&CmpAclUserHivesSkipped);
         return;
     }
 
     Start = KeQueryPerformanceCounter(&Frequency);
-    CmpAclUserHivePass1(CmHive, (PSID)SidBuffer, &Flagged, &Reasons, &Unjudged);
+    CmpAclUserHivePass1(CmHive, (PSID)SidBuffer, &Flagged, &Reasons, &Unjudged, &Certain);
     Cells = CmHive->SecurityCount;
     RootName = CmpConstructName(RootKcb);
+
+    if (CmpRegistryAclEffectiveMode != CM_REGACL_MODE_ENFORCE)
+    {
+        /* Audit: what enforcement would replace, nothing changed */
+        if (Certain && RootName)
+        {
+            InterlockedIncrement(&CmpAclUserHivesFlagged);
+            CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, RootName, Reasons, NULL, STATUS_SUCCESS, NULL, Certain);
+        }
+        if (RootName)
+            CmpFree(RootName, 0);
+        return;
+    }
 
     InterlockedIncrement(&CmpAclUserHivesChecked);
     RtlZeroMemory(&User, sizeof(User));
@@ -4138,6 +4180,12 @@ CmpAclPublish(VOID)
     CmpAclSetDword(Key, L"RestampFailed", (ULONG)CmpAclRestampFailed);
     CmpAclSetDword(Key, L"TransitionIncomplete", (ULONG)CmpAclWalkIncomplete);
     CmpAclSetDword(Key, L"KeptGrants", (ULONG)CmpAclKeptGrants);
+    CmpAclSetDword(Key, L"UserHivesChecked", (ULONG)CmpAclUserHivesChecked);
+    CmpAclSetDword(Key, L"UserHivesSkipped", (ULONG)CmpAclUserHivesSkipped);
+    CmpAclSetDword(Key, L"UserHivesFlagged", (ULONG)CmpAclUserHivesFlagged);
+    CmpAclSetDword(Key, L"UserHiveRestamped", (ULONG)CmpAclUserHiveRestamped);
+    CmpAclSetDword(Key, L"UserHiveFailed", (ULONG)CmpAclUserHiveFailed);
+    CmpAclSetDword(Key, L"UserHiveMs", CmpAclUserHiveMs);
     CmpAclSetDword(Key, L"Checks", (ULONG)CmpAclChecks);
     CmpAclSetDword(Key, L"Denials", (ULONG)CmpAclDenials);
     CmpAclSetDword(Key, L"Entries", (ULONG)CmpAclEntryCount);
@@ -4168,6 +4216,13 @@ CmpAclFormatEntry(
         CmpAclLineFormat(Line, ",\"reasons\":\"0x%lx\",\"status\":\"0x%08lx\",\"oldowner\":",
                          Entry->Desired, (ULONG)Entry->ShadowStatus);
         CmpAclLineString(Line, p, Entry->UserChars, CMP_ACL_LINE_USER_BYTES);
+        if (Entry->Rule == CmpAclRuleUser)
+        {
+            /* A user hive checked at its load: replaced (applied 1), or only found in audit mode */
+            CmpAclLineFormat(Line, ",\"hive\":\"user\",\"applied\":%lu", Entry->Granted);
+            if (!Entry->Granted)
+                CmpAclLineFormat(Line, ",\"descriptors\":%lu", Entry->Count);
+        }
         CmpAclLineFormat(Line, ",\"mode\":\"%s\"}\n", CmpAclModeNames[CmpRegistryAclMode]);
         return;
     }
