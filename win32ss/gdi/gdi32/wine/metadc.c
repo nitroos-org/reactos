@@ -824,6 +824,9 @@ INT METADC_StretchDIBits( HDC hdc, INT x_dst, INT y_dst, INT width_dst,
     DWORD len = (DWORD)len64;
     METARECORD *mr;
 
+    /* The sizes above read a BITMAPINFOHEADER: a core header has none of those fields (they would
+       come from its colour table and bits), so it cannot be recorded as it is */
+    if (info->bmiHeader.biSize < sizeof(BITMAPINFOHEADER)) return 0;
     if (len64 > MAXLONG) return 0;
     if (!(mr = HeapAlloc( GetProcessHeap(), 0, len ))) return 0;
 
@@ -858,6 +861,8 @@ INT METADC_SetDIBitsToDevice( HDC hdc, INT x_dst, INT y_dst, DWORD width, DWORD 
     DWORD len = (DWORD)len64;
     METARECORD *mr;
 
+    /* as in METADC_StretchDIBits: no core headers */
+    if (info->bmiHeader.biSize < sizeof(BITMAPINFOHEADER)) return 0;
     if (len64 > MAXLONG) return 0;
     if (!(mr = HeapAlloc( GetProcessHeap(), 0, len ))) return 0;
 

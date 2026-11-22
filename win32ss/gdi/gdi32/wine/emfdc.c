@@ -1704,6 +1704,10 @@ BOOL EMFDC_StretchDIBits( WINEDC *dc_attr, INT x_dst, INT y_dst, INT width_dst, 
     UINT bmi_size, emr_size;
     ULONGLONG emr_size64;
 
+    /* The sizes below read a BITMAPINFOHEADER: a core header has none of those fields (they would
+       come from its colour table and bits), so it cannot be recorded as it is */
+    if (info->bmiHeader.biSize < sizeof(BITMAPINFOHEADER)) return 0;
+
     /* calculate the size of the colour table */
     bmi_size = get_dib_info_size( info, usage );
 
@@ -1764,6 +1768,8 @@ BOOL EMFDC_SetDIBitsToDevice( WINEDC *dc_attr, INT x_dst, INT y_dst, DWORD width
     DWORD size = (DWORD)size64;
     BOOL ret;
 
+    /* as in EMFDC_StretchDIBits: no core headers */
+    if (info->bmiHeader.biSize < sizeof(BITMAPINFOHEADER)) return FALSE;
     if (size64 > MAXLONG) return FALSE;
     if (!(emr = HeapAlloc( GetProcessHeap(), 0, size ))) return FALSE;
 
