@@ -15,6 +15,7 @@
  * that loopback data still arrives intact so damage shows up inside the test. */
 
 #define LOOPS 1000
+#define BATCH 50
 #define CHUNK 65536
 
 static USHORT GetClosedPort(void)
@@ -215,7 +216,7 @@ START_TEST(getsockname)
 {
     WSADATA WsaData;
     SOCKADDR_IN Address;
-    SOCKET Listener, Socket;
+    SOCKET Listener;
     USHORT ClosedPort, ListenPort;
     int Length, i;
     u_long NonBlocking = 1;
@@ -251,41 +252,51 @@ START_TEST(getsockname)
 
     TestRefusedConnect(ClosedPort);
 
-    for (i = 0; i < LOOPS && !Failed && DataOk; i++)
+    /* A refused connect takes about 2 s, as on Windows (the SYN is sent again after each reset): the attempts run
+       BATCH at a time, and each is given up to 5 s to fail */
+    for (i = 0; i < LOOPS && !Failed && DataOk; i += BATCH)
     {
-        fd_set Write, Except;
-        struct timeval Timeout = { 2, 0 };
+        SOCKET Batch[BATCH];
+        int j, n = 0;
 
-        Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (Socket == INVALID_SOCKET)
+        for (j = 0; j < BATCH; j++)
         {
-            ok(0, "socket failed: %d\n", WSAGetLastError());
-            break;
+            Batch[j] = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (Batch[j] == INVALID_SOCKET)
+            {
+                ok(0, "socket failed: %d\n", WSAGetLastError());
+                break;
+            }
+            n++;
+            ioctlsocket(Batch[j], FIONBIO, &NonBlocking);
+            Address.sin_family = AF_INET;
+            Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            Address.sin_port = htons(ClosedPort);
+            connect(Batch[j], (struct sockaddr *)&Address, sizeof(Address));
+
+            CheckQuery(Batch[j], &Failed, "connect in progress");
         }
-        ioctlsocket(Socket, FIONBIO, &NonBlocking);
-        Address.sin_family = AF_INET;
-        Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        Address.sin_port = htons(ClosedPort);
-        connect(Socket, (struct sockaddr *)&Address, sizeof(Address));
 
-        CheckQuery(Socket, &Failed, "connect in progress");
-
-        FD_ZERO(&Write);
-        FD_ZERO(&Except);
-        FD_SET(Socket, &Write);
-        FD_SET(Socket, &Except);
-        select(0, NULL, &Write, &Except, &Timeout);
-
+        for (j = 0; j < n; j++)
         {
+            fd_set Write, Except;
+            struct timeval Timeout = { 5, 0 };
             USHORT KeptPort = 0;
 
-            CheckKeptBinding(Socket, INADDR_ANY, &KeptPort, &Failed, "connect refused");
-            CheckKeptBinding(Socket, INADDR_ANY, &KeptPort, &Failed, "connect refused, again");
-        }
-        closesocket(Socket);
+            FD_ZERO(&Write);
+            FD_ZERO(&Except);
+            FD_SET(Batch[j], &Write);
+            FD_SET(Batch[j], &Except);
+            select(0, NULL, &Write, &Except, &Timeout);
 
-        if (i % 50 == 49)
-            DataOk = CheckLoopbackData(Listener, ListenPort, Send, Receive, i);
+            CheckKeptBinding(Batch[j], INADDR_ANY, &KeptPort, &Failed, "connect refused");
+            CheckKeptBinding(Batch[j], INADDR_ANY, &KeptPort, &Failed, "connect refused, again");
+            closesocket(Batch[j]);
+        }
+        if (n < BATCH)
+            break;
+
+        DataOk = CheckLoopbackData(Listener, ListenPort, Send, Receive, i);
     }
     ok(!Failed, "getsockname misbehaved at iteration %d\n", i);
     ok(DataOk, "loopback data mismatch at iteration %d\n", i);
