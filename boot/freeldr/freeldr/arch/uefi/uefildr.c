@@ -38,6 +38,13 @@ EfiEntry(
     /* Debugger pre-initialization */
     DebugInit(BootMgrInfo.DebugString);
 
+    /*
+     * While the firmware's boot services are there and before the screen
+     * mode changes: from the installation disc, offer to start an installed
+     * system; from an installed system, make sure the firmware has its boot entry.
+     */
+    UefiBootEntryInit();
+
     MachInit(CmdLine);
 
     /* UI pre-initialization */

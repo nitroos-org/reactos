@@ -225,6 +225,7 @@ typedef INT64   INTN;
 // Processor specific defines
 //
 
+#ifndef _WIN64
 ///
 /// A value of native width with the highest bit set.
 ///
@@ -233,6 +234,17 @@ typedef INT64   INTN;
 /// A value of native width with the two highest bits set.
 ///
 #define MAX_2_BITS  0xC0000000
+#else
+///
+/// A value of native width with the highest bit set: the error bit of the
+/// EFI status codes, which the 64-bit firmware returns as 64-bit values.
+///
+#define MAX_BIT     0x8000000000000000ULL
+///
+/// A value of native width with the two highest bits set.
+///
+#define MAX_2_BITS  0xC000000000000000ULL
+#endif
 
 ///
 /// Maximum legal IA-32 address.
