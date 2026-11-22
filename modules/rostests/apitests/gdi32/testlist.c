@@ -14,6 +14,7 @@ extern void func_BitmapSizeOverflow(void);
 extern void func_ClipExtremeCoords(void);
 extern void func_CombineRgn(void);
 extern void func_CombineTransform(void);
+extern void func_Dib4bppOddLeft(void);
 extern void func_CreateBitmap(void);
 extern void func_CreateBitmapIndirect(void);
 extern void func_CreateCompatibleBitmap(void);
@@ -134,6 +135,7 @@ const struct test winetest_testlist[] =
     { "ClipExtremeCoords", func_ClipExtremeCoords },
     { "CombineRgn", func_CombineRgn },
     { "CombineTransform", func_CombineTransform },
+    { "Dib4bppOddLeft", func_Dib4bppOddLeft },
     { "CreateBitmap", func_CreateBitmap },
     { "CreateBitmapIndirect", func_CreateBitmapIndirect },
     { "CreateCompatibleBitmap", func_CreateCompatibleBitmap },
