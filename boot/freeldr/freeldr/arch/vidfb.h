@@ -51,6 +51,9 @@ PixelBitmasksToBpp(
 }
 
 #include <drivers/bootvid/framebuf.h>
+VOID
+VidFbSetNoDisplay(VOID);
+
 BOOLEAN
 VidFbInitializeVideo(
     _Out_opt_ PCM_FRAMEBUF_DEVICE_DATA* pFbData,

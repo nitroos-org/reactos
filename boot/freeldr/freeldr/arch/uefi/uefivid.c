@@ -51,8 +51,6 @@ static UEFI_BGRT_LOGO UefiBgrtLogo = {0};
 #define BGRT_ORIENTATION_180          2
 #define BGRT_ORIENTATION_270          3
 
-#define LOWEST_SUPPORTED_RES 1
-
 #include <pshpack1.h>
 typedef struct _BMP_FILE_HEADER
 {
@@ -515,85 +513,321 @@ UefiDrawBgrtLogo(VOID)
     }
 }
 
+/*
+ * The Graphics Output Protocol instance and mode choice.
+ *
+ * The mode of the GOP is the display mode for the whole life of the system
+ * when no display driver of the hardware takes over (the firmware framebuffer
+ * driver lfbmp.sys, the boot screen and text-mode Setup draw into it), and it
+ * can only be chosen here, while the firmware's boot services still run.
+ * By default the mode the firmware set stays (its preferred one: the native
+ * resolution of a panel, the configured resolution of a virtual machine), as
+ * long as it has a framebuffer and is at least 640x480. Otherwise the mode
+ * closest to 1024x768 is chosen. freeldr.ini can name another one:
+ *   [Display]
+ *   DisplayMode=1280x1024      (a resolution of the GOP mode list)
+ *   DisplayMode=GOP3           (a GOP mode number)
+ */
+static EFI_GRAPHICS_OUTPUT_PROTOCOL* UefiGop = NULL;
+
+#define GOP_MIN_WIDTH       640
+#define GOP_MIN_HEIGHT      480
+#define GOP_DEFAULT_WIDTH   1024
+#define GOP_DEFAULT_HEIGHT  768
+#define GOP_NO_MODE         ((UINT32)-1)
+
+/* Pixel masks and depth of a GOP mode; FALSE for a mode without a framebuffer (BltOnly) */
 static
-EFI_STATUS
-UefiInitializeGop(VOID)
+BOOLEAN
+UefiGopGetPixelFormat(
+    _In_ EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* Info,
+    _Out_ EFI_PIXEL_BITMASK** PixelBitmask,
+    _Out_ PULONG BitsPerPixel)
 {
-    EFI_STATUS Status;
-    EFI_GRAPHICS_OUTPUT_PROTOCOL* gop = NULL;
-
-    EFI_GRAPHICS_PIXEL_FORMAT PixelFormat;
-    EFI_PIXEL_BITMASK* pPixelBitmask;
-    ULONG BitsPerPixel;
-
-    Status = GlobalSystemTable->BootServices->LocateProtocol(&EfiGraphicsOutputProtocol, 0, (void**)&gop);
-    if (Status != EFI_SUCCESS)
-    {
-        TRACE("Failed to find GOP with status %d\n", Status);
-        return Status;
-    }
-
-    /* We don't need high resolutions for freeldr */
-    gop->SetMode(gop, LOWEST_SUPPORTED_RES);
-
-    /* Physical format of the pixel */
-    PixelFormat = gop->Mode->Info->PixelFormat;
-    switch (PixelFormat)
+    switch (Info->PixelFormat)
     {
         case PixelRedGreenBlueReserved8BitPerColor:
         case PixelBlueGreenRedReserved8BitPerColor:
-        {
-            pPixelBitmask = &EfiPixelMasks[PixelFormat];
-            BitsPerPixel = RTL_BITS_OF(EFI_GRAPHICS_OUTPUT_BLT_PIXEL);
-            break;
-        }
+            *PixelBitmask = &EfiPixelMasks[Info->PixelFormat];
+            *BitsPerPixel = RTL_BITS_OF(EFI_GRAPHICS_OUTPUT_BLT_PIXEL);
+            return TRUE;
 
         case PixelBitMask:
-        {
             /*
              * When the GOP pixel format is given by PixelBitMask, the pixel
              * element size _may be_ different from 4 bytes.
              * See UEFI Spec Rev.2.10 Section 12.9 "Graphics Output Protocol":
              * example code "GetPixelElementSize()" function.
              */
-            pPixelBitmask = &gop->Mode->Info->PixelInformation;
-            BitsPerPixel =
-                PixelBitmasksToBpp(pPixelBitmask->RedMask,
-                                   pPixelBitmask->GreenMask,
-                                   pPixelBitmask->BlueMask,
-                                   pPixelBitmask->ReservedMask);
-            break;
-        }
+            *PixelBitmask = &Info->PixelInformation;
+            *BitsPerPixel = PixelBitmasksToBpp(Info->PixelInformation.RedMask,
+                                               Info->PixelInformation.GreenMask,
+                                               Info->PixelInformation.BlueMask,
+                                               Info->PixelInformation.ReservedMask);
+            return TRUE;
 
         case PixelBltOnly:
         default:
+            *PixelBitmask = NULL;
+            *BitsPerPixel = 0;
+            return FALSE;
+    }
+}
+
+/* A mode the framebuffer console can draw to (32 bits per pixel, a framebuffer) */
+static
+BOOLEAN
+UefiGopIsModeUsable(
+    _In_ EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* Info)
+{
+    EFI_PIXEL_BITMASK* PixelBitmask;
+    ULONG BitsPerPixel;
+
+    return UefiGopGetPixelFormat(Info, &PixelBitmask, &BitsPerPixel) &&
+           (BitsPerPixel == 32) &&
+           (Info->HorizontalResolution > 0) && (Info->VerticalResolution > 0) &&
+           (Info->PixelsPerScanLine >= Info->HorizontalResolution);
+}
+
+static
+EFI_GRAPHICS_OUTPUT_MODE_INFORMATION*
+UefiGopQueryMode(
+    _In_ UINT32 Mode)
+{
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* Info = NULL;
+    UINTN SizeOfInfo = 0;
+
+    if (UefiGop->QueryMode(UefiGop, Mode, &SizeOfInfo, &Info) != EFI_SUCCESS)
+        return NULL;
+    if (!Info || (SizeOfInfo < sizeof(*Info)))
+        return NULL;
+    return Info;
+}
+
+/* Score of a usable mode for the default choice: the lower the better */
+static
+ULONGLONG
+UefiGopModeDistance(
+    _In_ EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* Info)
+{
+    LONGLONG Area = (LONGLONG)Info->HorizontalResolution * Info->VerticalResolution;
+    LONGLONG Distance = Area - (LONGLONG)GOP_DEFAULT_WIDTH * GOP_DEFAULT_HEIGHT;
+
+    if (Distance < 0)
+        Distance = -Distance;
+    /* Below 640x480 only if there is nothing else */
+    if ((Info->HorizontalResolution < GOP_MIN_WIDTH) || (Info->VerticalResolution < GOP_MIN_HEIGHT))
+        Distance += 0x100000000LL;
+    return (ULONGLONG)Distance;
+}
+
+/*
+ * Finds a usable GOP mode: Width x Height if Width is not 0 (GOP_NO_MODE if
+ * there is none), else the default choice.
+ */
+static
+UINT32
+UefiGopFindMode(
+    _In_ ULONG Width,
+    _In_ ULONG Height)
+{
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* Info;
+    UINT32 Mode, Best = GOP_NO_MODE;
+    ULONGLONG Distance, BestDistance = ~0ULL;
+
+    for (Mode = 0; Mode < UefiGop->Mode->MaxMode; Mode++)
+    {
+        Info = UefiGopQueryMode(Mode);
+        if (!Info || !UefiGopIsModeUsable(Info))
+            continue;
+
+        if (Width != 0)
         {
-            ERR("Unsupported UEFI GOP format %lu\n", PixelFormat);
-            pPixelBitmask = NULL;
-            BitsPerPixel = 0;
-            break;
+            if ((Info->HorizontalResolution == Width) && (Info->VerticalResolution == Height))
+                return Mode;
+            continue;
+        }
+
+        Distance = UefiGopModeDistance(Info);
+        if (Distance < BestDistance)
+        {
+            BestDistance = Distance;
+            Best = Mode;
         }
     }
 
-    VramAddress = (ULONG_PTR)gop->Mode->FrameBufferBase;
-    VramSize = gop->Mode->FrameBufferSize;
+    return Best;
+}
+
+#if DBG
+/* The firmware's GOP modes, in the debug log (as errors: when a DisplayMode was not found) */
+#define GOP_LOG(AsError, ...) do { if (AsError) ERR(__VA_ARGS__); else TRACE(__VA_ARGS__); } while (0)
+
+static
+VOID
+UefiGopTraceModes(
+    _In_ BOOLEAN AsError)
+{
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* Info;
+    UINT32 Mode;
+
+    GOP_LOG(AsError, "GOP: %lu modes, current %lu, framebuffer 0x%llx (0x%llx bytes)\n",
+            UefiGop->Mode->MaxMode, UefiGop->Mode->Mode,
+            (ULONGLONG)UefiGop->Mode->FrameBufferBase, (ULONGLONG)UefiGop->Mode->FrameBufferSize);
+    for (Mode = 0; Mode < UefiGop->Mode->MaxMode; Mode++)
+    {
+        Info = UefiGopQueryMode(Mode);
+        if (!Info)
+            continue;
+        GOP_LOG(AsError, "GOP mode %lu: %lux%lu, %lu pixels per scan line, format %lu%s\n",
+                Mode, Info->HorizontalResolution, Info->VerticalResolution,
+                Info->PixelsPerScanLine, Info->PixelFormat,
+                UefiGopIsModeUsable(Info) ? "" : " (not usable)");
+    }
+}
+#endif
+
+/* Sets up the framebuffer console (and its description for the kernel) for the current GOP mode */
+static
+BOOLEAN
+UefiGopUseCurrentMode(VOID)
+{
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* Info = UefiGop->Mode->Info;
+    EFI_PIXEL_BITMASK* PixelBitmask;
+    ULONG BitsPerPixel;
+
+    VramAddress = 0;
+    VramSize = 0;
+    FrameBufferData = NULL;
+    /* Until a framebuffer is set up: a console that draws nothing */
+    VidFbSetNoDisplay();
+
+    if (!UefiGopGetPixelFormat(Info, &PixelBitmask, &BitsPerPixel))
+        return FALSE;
+
+#ifndef _WIN64
+    /* A 32-bit loader cannot reach a framebuffer above 4 GB */
+    if ((UefiGop->Mode->FrameBufferBase + UefiGop->Mode->FrameBufferSize) > 0x100000000ULL)
+    {
+        ERR("GOP framebuffer at 0x%llx is above 4 GB\n", (ULONGLONG)UefiGop->Mode->FrameBufferBase);
+        return FALSE;
+    }
+#endif
+
+    if ((UefiGop->Mode->FrameBufferBase == 0) || (UefiGop->Mode->FrameBufferSize == 0) ||
+        (UefiGop->Mode->FrameBufferSize > MAXULONG))
+    {
+        return FALSE;
+    }
+
+    VramAddress = (ULONG_PTR)UefiGop->Mode->FrameBufferBase;
+    VramSize = (ULONG)UefiGop->Mode->FrameBufferSize;
     if (!VidFbInitializeVideo(&FrameBufferData,
                               VramAddress,
                               VramSize,
-                              gop->Mode->Info->HorizontalResolution,
-                              gop->Mode->Info->VerticalResolution,
-                              gop->Mode->Info->PixelsPerScanLine,
+                              Info->HorizontalResolution,
+                              Info->VerticalResolution,
+                              Info->PixelsPerScanLine,
                               BitsPerPixel,
-                              (PPIXEL_BITMASK)pPixelBitmask))
+                              (PPIXEL_BITMASK)PixelBitmask))
     {
-        ERR("Couldn't initialize video framebuffer\n");
-        Status = EFI_UNSUPPORTED;
+        VramAddress = 0;
+        VramSize = 0;
+        FrameBufferData = NULL;
+        return FALSE;
     }
-    else
+
+    TRACE("GOP: using mode %lu, %lux%lu\n", UefiGop->Mode->Mode,
+          Info->HorizontalResolution, Info->VerticalResolution);
+    return TRUE;
+}
+
+/* Switches to a GOP mode and uses it; on failure goes back to the previous mode */
+static
+BOOLEAN
+UefiGopSetMode(
+    _In_ UINT32 Mode)
+{
+    UINT32 PreviousMode = UefiGop->Mode->Mode;
+
+    if (Mode == PreviousMode)
+        return UefiGopUseCurrentMode();
+
+    if (UefiGop->SetMode(UefiGop, Mode) == EFI_SUCCESS && UefiGopUseCurrentMode())
+        return TRUE;
+
+    ERR("GOP: cannot use mode %lu, staying in mode %lu\n", Mode, PreviousMode);
+    if (UefiGop->Mode->Mode != PreviousMode)
+        UefiGop->SetMode(UefiGop, PreviousMode);
+    return UefiGopUseCurrentMode();
+}
+
+/* Tells the user, through the firmware's text console, that nothing can be drawn */
+static
+VOID
+UefiGopReportNoFramebuffer(VOID)
+{
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL* ConOut = GlobalSystemTable->ConOut;
+
+    ERR("GOP: no mode of this display adapter has a 32-bit framebuffer (BltOnly or another format)\n");
+    if (!ConOut)
+        return;
+
+    ConOut->OutputString(ConOut,
+        L"\r\n\r\nThe display adapter offers no 32-bit linear framebuffer to the operating\r\n"
+        L"system (UEFI Graphics Output Protocol: BltOnly or another pixel format).\r\n"
+        L"The boot menu, the boot screen and Setup cannot be shown on it, and the\r\n"
+        L"desktop appears only if a driver for this adapter is installed (virtio-gpu\r\n"
+        L"has one).\r\n"
+        L"Use a display adapter with a framebuffer (for example QEMU std VGA,\r\n"
+        L"virtio-vga, ramfb; VirtualBox VBoxSVGA or VMSVGA) to see the boot.\r\n"
+        L"Starting in 10 seconds...\r\n");
+    GlobalSystemTable->BootServices->Stall(10 * 1000 * 1000);
+}
+
+static
+EFI_STATUS
+UefiInitializeGop(VOID)
+{
+    EFI_STATUS Status;
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* Info;
+    UINT32 Mode;
+
+    Status = GlobalSystemTable->BootServices->LocateProtocol(&EfiGraphicsOutputProtocol, 0, (void**)&UefiGop);
+    if (Status != EFI_SUCCESS)
+    {
+        TRACE("Failed to find GOP with status %d\n", Status);
+        UefiGop = NULL;
+        return Status;
+    }
+
+#if DBG
+    UefiGopTraceModes(FALSE);
+#endif
+
+    /* Keep the firmware's mode if it has a framebuffer and is at least 640x480 */
+    Info = UefiGop->Mode->Info;
+    if (Info && UefiGopIsModeUsable(Info) &&
+        (Info->HorizontalResolution >= GOP_MIN_WIDTH) &&
+        (Info->VerticalResolution >= GOP_MIN_HEIGHT) &&
+        UefiGopUseCurrentMode())
     {
         UefiInitializeBgrtLogo();
+        return EFI_SUCCESS;
     }
-    return Status;
+
+    /* Else the usable mode closest to 1024x768 */
+    Mode = UefiGopFindMode(0, 0);
+    if ((Mode != GOP_NO_MODE) && UefiGopSetMode(Mode))
+    {
+        UefiInitializeBgrtLogo();
+        return EFI_SUCCESS;
+    }
+
+    ERR("Couldn't initialize video framebuffer\n");
+    if (Mode == GOP_NO_MODE)
+        UefiGopReportNoFramebuffer();
+    return EFI_UNSUPPORTED;
 }
 
 static
@@ -669,8 +903,13 @@ UefiInitializeVideo(VOID)
     if (Status == EFI_SUCCESS)
         return Status;
 
-    /* We didn't find GOP or Apple Graphics Info, probably a UGA-only system */
+    /* We didn't find GOP or Apple Graphics Info, probably a UGA-only system:
+     * the UI still needs a screen size, it just draws nothing */
     ERR("Cannot find framebuffer!\n");
+    VidFbSetNoDisplay();
+    FrameBufferData = NULL;
+    VramAddress = 0;
+    VramSize = 0;
     return Status;
 }
 
@@ -693,10 +932,54 @@ UefiVideoGetDisplaySize(PULONG Width, PULONG Height, PULONG Depth)
     FbConsGetDisplaySize(Width, Height, Depth);
 }
 
+/*
+ * [Display] DisplayMode of freeldr.ini, read before the UI starts:
+ * "WIDTHxHEIGHT" (an optional "xBPP" is ignored: the console draws in 32 bits)
+ * or "GOPn", a mode number of the firmware's list. The mode stays for the
+ * whole boot: it is the one the kernel's framebuffer drivers get.
+ */
 VIDEODISPLAYMODE
 UefiVideoSetDisplayMode(PCSTR DisplayMode, BOOLEAN Init)
 {
-    /* We only have one mode, semi-text */
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* Info;
+    ULONG Width = 0, Height = 0;
+    UINT32 Mode = GOP_NO_MODE;
+    PCHAR End;
+
+    /* We only have one mode, semi-text: just pick the GOP mode it is drawn in */
+    if (!Init || !DisplayMode || !*DisplayMode || !UefiGop)
+        return VideoTextMode;
+
+    if (_strnicmp(DisplayMode, "GOP", 3) == 0)
+    {
+        Mode = strtoul(DisplayMode + 3, &End, 10);
+        Info = (End != DisplayMode + 3) ? UefiGopQueryMode(Mode) : NULL;
+        if (!Info || !UefiGopIsModeUsable(Info))
+            Mode = GOP_NO_MODE;
+    }
+    else
+    {
+        Width = strtoul(DisplayMode, &End, 10);
+        if ((End != DisplayMode) && ((*End == 'x') || (*End == 'X')))
+            Height = strtoul(End + 1, &End, 10);
+        if ((Width != 0) && (Height != 0))
+            Mode = UefiGopFindMode(Width, Height);
+    }
+
+    if (Mode == GOP_NO_MODE)
+    {
+        ERR("DisplayMode '%s': no such usable GOP mode, keeping %lux%lu\n", DisplayMode,
+            FrameBufferData ? FrameBufferData->ScreenWidth : 0,
+            FrameBufferData ? FrameBufferData->ScreenHeight : 0);
+#if DBG
+        UefiGopTraceModes(TRUE);
+#endif
+        return VideoTextMode;
+    }
+
+    TRACE("DisplayMode '%s': GOP mode %lu\n", DisplayMode, Mode);
+    UefiGopSetMode(Mode);
+    UefiInitializeBgrtLogo();
     return VideoTextMode;
 }
 
