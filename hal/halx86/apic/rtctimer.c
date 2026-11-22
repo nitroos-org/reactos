@@ -69,7 +69,10 @@ static LONG64 HalpClockOffset[CLOCK_PHASE_WINDOW];
    virtual RTC of Hyper-V generation 1 machines raises the update-ended
    interrupt but never sets the periodic flag. The time is counted in RTC
    periods all the same; the PIT period differs from it by less than 200 ppm,
-   which the counting with the TSC absorbs. */
+   which the counting with the TSC absorbs.
+   Without a PIT either (Hyper-V generation 2) it comes from the local APIC
+   timer of the boot processor (HalpClockUsesApicTimer, apictimer.c), at the
+   RTC clock rate as well. */
 static BOOLEAN HalpClockUsesPit;
 extern ULONG HalpPicVectorRedirect[16];
 
@@ -90,6 +93,35 @@ HalpPitSetClockRate(
     __outbyte(TIMER_CONTROL_PORT, TimerControl.Bits);
     __outbyte(TIMER_CHANNEL0_DATA_PORT, (UCHAR)(Count & 0xFF));
     __outbyte(TIMER_CHANNEL0_DATA_PORT, (UCHAR)(Count >> 8));
+}
+
+/*!
+    \brief Returns whether the PIT counts: channel 0 is set to the clock rate
+           and its count is latched twice, 1 ms apart. Where there is no PIT,
+           the ports read 0xFF and the count never changes.
+*/
+static
+CODE_SEG("INIT")
+BOOLEAN
+HalpPitCounts(VOID)
+{
+    USHORT Count[2];
+    ULONG i;
+
+    HalpPitSetClockRate(32768 >> (HalpCurrentClockRate - 1));
+
+    for (i = 0; i < 2; i++)
+    {
+        if (i)
+            KeStallExecutionProcessor(1000);
+
+        /* Latch channel 0, then read low and high byte */
+        __outbyte(TIMER_CONTROL_PORT, 0);
+        Count[i] = __inbyte(TIMER_CHANNEL0_DATA_PORT);
+        Count[i] |= __inbyte(TIMER_CHANNEL0_DATA_PORT) << 8;
+    }
+
+    return Count[0] != Count[1];
 }
 
 /*!
@@ -192,6 +224,12 @@ RtcSetClockRate(UCHAR ClockRate)
         return;
     }
 
+    if (HalpClockUsesApicTimer)
+    {
+        HalpApicTimerSetClockRate(RtcHz);
+        return;
+    }
+
     /* Acquire CMOS lock */
     HalpAcquireCmosSpinLock();
 
@@ -258,19 +296,30 @@ HalpInitializeClock(VOID)
     /* Set initial rate */
     RtcSetClockRate(HalpCurrentClockRate);
 
-    /* Without the periodic interrupt of the RTC, take the clock from the PIT */
-    if (!HalpRtcPeriodicFlagSets() && (HalpPicVectorRedirect[0] < APIC_MAX_IRQ))
+    /* Without the periodic interrupt of the RTC, take the clock from the PIT,
+       and without a PIT from the local APIC timer */
+    if (!HalpRtcPeriodicFlagSets())
     {
         HalpAcquireCmosSpinLock();
         HalpWriteCmos(RTC_REGISTER_B, RegisterB & ~RTC_REG_B_PI);
         HalpReadCmos(RTC_REGISTER_C);
         HalpReleaseCmosSpinLock();
 
-        HalpClockUsesPit = TRUE;
-        HalpSetClockInput((UCHAR)HalpPicVectorRedirect[0]);
-        RtcSetClockRate(HalpCurrentClockRate);
-        DPRINT1("The RTC has no periodic interrupt: clock from the PIT, I/O APIC input %lu\n",
-                HalpPicVectorRedirect[0]);
+        if ((HalpPicVectorRedirect[0] < APIC_MAX_IRQ) && HalpPitCounts())
+        {
+            HalpClockUsesPit = TRUE;
+            HalpSetClockInput((UCHAR)HalpPicVectorRedirect[0]);
+            RtcSetClockRate(HalpCurrentClockRate);
+            DPRINT1("The RTC has no periodic interrupt: clock from the PIT, I/O APIC input %lu\n",
+                    HalpPicVectorRedirect[0]);
+        }
+        else
+        {
+            HalpReleaseClockInput();
+            HalpApicTimerStartClock();
+            RtcSetClockRate(HalpCurrentClockRate);
+            DPRINT1("Neither the RTC periodic interrupt nor a PIT: clock from the local APIC timer\n");
+        }
     }
 
     /* Restore interrupt state */
@@ -285,10 +334,13 @@ HalpInitializeClock(VOID)
     HalpClockIpiTickOffset = (LONG)HalpMaximumTimeIncrement;
 
     /* Enable the timer interrupt */
-    HalEnableSystemInterrupt(APIC_CLOCK_VECTOR, CLOCK_LEVEL, Latched);
+    if (HalpClockUsesApicTimer)
+        HalpApicTimerEnableClock();
+    else
+        HalEnableSystemInterrupt(APIC_CLOCK_VECTOR, CLOCK_LEVEL, Latched);
 
     /* The pin is edge triggered */
-    if (!HalpClockUsesPit)
+    if (!HalpClockUsesPit && !HalpClockUsesApicTimer)
     {
         HalpAcquireCmosSpinLock();
         HalpReadCmos(RTC_REGISTER_C);
@@ -451,7 +503,7 @@ HalpClockInterruptHandler(IN PKTRAP_FRAME TrapFrame)
 
     /* Read register C, so that the next interrupt can happen; under the lock,
        or another processor can select a register between the index write and the read */
-    if (!HalpClockUsesPit)
+    if (!HalpClockUsesPit && !HalpClockUsesApicTimer)
     {
         HalpAcquireCmosSpinLock();
         HalpReadCmos(RTC_REGISTER_C);

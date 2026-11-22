@@ -368,6 +368,25 @@ HalpSetClockInput(_In_ UCHAR Index);
 
 VOID
 NTAPI
+HalpReleaseClockInput(VOID);
+
+extern BOOLEAN HalpClockUsesApicTimer;
+
+VOID
+NTAPI
+HalpApicTimerStartClock(VOID);
+
+VOID
+NTAPI
+HalpApicTimerSetClockRate(
+    _In_ ULONG Hz);
+
+VOID
+NTAPI
+HalpApicTimerEnableClock(VOID);
+
+VOID
+NTAPI
 HalInitializeProfiling(VOID);
 
 VOID
