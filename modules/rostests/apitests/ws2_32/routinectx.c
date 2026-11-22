@@ -64,7 +64,15 @@ static void StreamCase(void)
     ok(getsockname(Listener, (struct sockaddr *)&Addr, &Length) == 0, "getsockname failed\n");
     ok(listen(Listener, 1) == 0, "listen failed\n");
     Client = WSASocketW(AF_INET, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
-    ok(connect(Client, (struct sockaddr *)&Addr, sizeof(Addr)) == 0, "connect failed: %d\n", WSAGetLastError());
+    Result = connect(Client, (struct sockaddr *)&Addr, sizeof(Addr));
+    ok(Result == 0, "connect failed: %d\n", WSAGetLastError());
+    if (Result != 0)
+    {
+        /* No connection (a computer whose ports are all in TIME-WAIT towards the listener): accept would wait for ever */
+        closesocket(Client);
+        closesocket(Listener);
+        return;
+    }
     Server = accept(Listener, NULL, NULL);
     ok(Server != INVALID_SOCKET, "accept failed\n");
     closesocket(Listener);
