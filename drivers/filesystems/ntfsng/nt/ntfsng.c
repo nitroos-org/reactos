@@ -502,6 +502,7 @@ VOID NgDereferenceFcb(PNG_FCB Fcb)
     if (!Free)
         return;
     FsRtlUninitializeFileLock(&Fcb->FileLock);
+    ngc_home_free(Fcb->Home);
     if (Fcb->Runs)
         ExFreePoolWithTag(Fcb->Runs, TAG_NTFSNG);
     if (Fcb->DelPath.Buffer)

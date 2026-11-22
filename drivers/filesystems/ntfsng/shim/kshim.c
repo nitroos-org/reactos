@@ -686,6 +686,19 @@ static int kshim_dev_read_bounce(struct block_device *b, u64 off, u8 *buf, size_
 	kfree(sec);
 	return err;
 }
+/* A write that goes to its place on the device (not held by the journal's overlay). */
+static int kshim_dev_write_place(struct block_device *b, u64 off, void *buf, size_t len)
+{
+	if (((off | len) & (b->logical_block_size - 1)) || ((uintptr_t)buf & 3))
+		return kshim_dev_write_rmw(b, off, buf, len);
+	if (b->kshim_defer_now) {
+		/* Sent now, waited for before any flush or journal header (and before the volume lock is let go): see ngc_set_defer. */
+		int r = ngos_dev_write_start(b->osdev, off, buf, (unsigned int)len, b->kshim_wt_fua, 1);
+		if (r <= 0)
+			return r ? -EIO : 0;
+	}
+	return kshim_dw(b, off, buf, (unsigned int)len) ? -EIO : 0;
+}
 static int kshim_dev_rw_do(struct block_device *b, int write, u64 off, void *buf, size_t len);
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len)
 {
@@ -726,15 +739,17 @@ static int kshim_dev_rw_do(struct block_device *b, int write, u64 off, void *buf
 		}
 		if (b->jnl)
 			kshim_jnl_patch(b, 1, off, buf, len);
-		if (((off | len) & (b->logical_block_size - 1)) || ((uintptr_t)buf & 3))
-			return kshim_dev_write_rmw(b, off, buf, len);
-		if (b->kshim_defer_now) {
-			/* Sent now, waited for before any flush or journal header (and before the volume lock is let go): see ngc_set_defer. */
-			int r = ngos_dev_write_start(b->osdev, off, buf, (unsigned int)len, b->kshim_wt_fua, 1);
-			if (r <= 0)
-				return r ? -EIO : 0;
+		{
+			/*
+			 * Not through the overlay: the volume's place changes (kshim_home_mark, before the write is sent and after it
+			 * ended; a deferred one is only sent here, and waited for before the volume lock goes).
+			 */
+			int r;
+			kshim_home_mark(b, off, len);
+			r = kshim_dev_write_place(b, off, buf, len);
+			kshim_home_mark(b, off, len);
+			return r;
 		}
-		return kshim_dw(b, off, buf, (unsigned int)len) ? -EIO : 0;
 	}
 	kshim_counter_reads++;
 	if (off >= b->size) {
@@ -2018,6 +2033,18 @@ struct block_device *kshim_bdev_open(void *osdev, u64 size, unsigned int sector_
 	b->osdev = osdev;
 	b->size = size;
 	b->logical_block_size = sector_size;
+	{
+		/*
+		 * The count of writes to the volume's place starts above every count an earlier open of a device reached, so that
+		 * nothing kept from another mount (ngc_flush_home's memo) can pass for current; no table: every write counts
+		 * against everything.
+		 */
+		static unsigned long long epoch __attribute__((aligned(8)));
+		unsigned long long g = __atomic_add_fetch(&epoch, 1, __ATOMIC_SEQ_CST) << 40;
+		b->kshim_home_gen = g;
+		b->kshim_home_wide = g;
+		b->kshim_home_pg = kzalloc(KSHIM_HOME_N * sizeof(*b->kshim_home_pg), GFP_KERNEL);
+	}
 	bi->i_private = b;
 	bi->i_size = size;
 	bi->i_blkbits = PAGE_SHIFT;
@@ -2036,6 +2063,7 @@ void kshim_bdev_close(struct block_device *b)
 	if (!b) return;
 	kshim_jnl_deactivate(b);
 	truncate_inode_pages_final(b->bd_mapping);
+	kfree(b->kshim_home_pg);
 	kfree(b->bd_inode);
 	kfree(b);
 }

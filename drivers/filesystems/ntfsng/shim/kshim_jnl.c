@@ -666,6 +666,7 @@ int kshim_jnl_activate(struct block_device *b, const struct kj_ext *ext, int nex
 		return err;
 	}
 	b->jnl = j;
+	kshim_home_all(b);	/* nothing seen of the medium before holds across a change of how it is written */
 	printk(KERN_WARNING "journal: active, %llu slots in $LogFile (%llu pages), seq %llu\n",
 	       (unsigned long long)j->capacity, (unsigned long long)lf_pages, (unsigned long long)seq);
 	return 0;
@@ -681,6 +682,7 @@ void kshim_jnl_deactivate(struct block_device *b)
 	kj_free_retained(j);
 	kj_drop_all(j);
 	b->jnl = NULL;
+	kshim_home_all(b);
 	kfree(j->ext);
 	kfree(j->hdrpage);
 	kfree(j);
@@ -798,6 +800,94 @@ int kshim_jnl_holds(struct block_device *b, u64 off, u64 len)
 		return 0;
 	return (j->npages && kj_holds_h(j->hash, off, len)) || (j->snpages && kj_holds_h(j->shash, off, len)) ||
 	       (j->rnpages && kj_holds_h(j->rhash, off, len));
+}
+
+/*
+ * Writes to the volume's place on the medium (kshim_jnl.h).  The count only grows; a page's slot holds the count of the last
+ * write that touched a page hashing to it, stored before the write is sent (and, by kshim_dev_rw, once more after it ended),
+ * so a reader of the slot that finds it at or below its @since knows that no write to the page was sent since.  The in-place
+ * passes of the journal run under the volume lock or as the I/O of a sealed transaction (kshim_jnl_busy), so a caller that
+ * holds the lock and finds no I/O in flight sees all of theirs; file data written outside the lock is marked before and after.
+ * A slot is only ever raised (kshim_home_raise): file data is marked without the volume lock, so a writer that took its count
+ * earlier can store it after a later writer stored a higher one into the same slot (two pages that hash alike), and a plain
+ * store would then hide the later write from every reader whose @since lies between the two.
+ */
+static void kshim_home_raise(unsigned long long *slot, u64 g)
+{
+	u64 o = __atomic_load_n(slot, __ATOMIC_SEQ_CST);
+	while (o < g && !__atomic_compare_exchange_n(slot, &o, g, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+		;
+}
+
+void kshim_home_all(struct block_device *b)
+{
+	u64 g = __atomic_add_fetch(&b->kshim_home_gen, 1, __ATOMIC_SEQ_CST);
+	kshim_home_raise(&b->kshim_home_wide, g);
+}
+
+void kshim_home_mark(struct block_device *b, u64 off, u64 len)
+{
+	unsigned long long *pg = b->kshim_home_pg;
+	u64 g, p, e;
+	if (!len)
+		return;
+	if (!pg) {
+		kshim_home_all(b);
+		return;
+	}
+	g = __atomic_add_fetch(&b->kshim_home_gen, 1, __ATOMIC_SEQ_CST);
+	e = (off + len - 1) / KJ_PAGE;
+	if (e - off / KJ_PAGE >= KSHIM_HOME_N) {
+		kshim_home_raise(&b->kshim_home_wide, g);
+		return;
+	}
+	for (p = off / KJ_PAGE; p <= e; p++)
+		kshim_home_raise(&pg[p % KSHIM_HOME_N], g);
+}
+
+u64 kshim_home_now(struct block_device *b)
+{
+	return __atomic_load_n(&b->kshim_home_gen, __ATOMIC_SEQ_CST);
+}
+
+int kshim_home_changed(struct block_device *b, u64 off, u64 len, u64 since)
+{
+	unsigned long long *pg = b->kshim_home_pg;
+	u64 p, e;
+	if (!pg || !len || __atomic_load_n(&b->kshim_home_wide, __ATOMIC_SEQ_CST) > since)
+		return 1;
+	e = (off + len - 1) / KJ_PAGE;
+	if (e - off / KJ_PAGE >= KSHIM_HOME_N)
+		return 1;
+	for (p = off / KJ_PAGE; p <= e; p++)
+		if (__atomic_load_n(&pg[p % KSHIM_HOME_N], __ATOMIC_SEQ_CST) > since)
+			return 1;
+	return 0;
+}
+
+int kshim_jnl_retained_copy(struct block_device *b, u64 off, u32 len, u8 *buf)
+{
+	struct kshim_jnl *j = b->jnl;
+	u32 held = 0, all = len / KJ_SECT;
+	/* Nothing sealed (running or finished and not released): the next checkpoint writes the retained pages, as they are now. */
+	if (!j || !len || j->snpages || __atomic_load_n(&j->sstate, __ATOMIC_ACQUIRE) != KJ_S_NONE ||
+	    (off % KJ_SECT) || (len % KJ_SECT))
+		return -ENOENT;
+	if (!j->rnpages)
+		return 1;
+	while (len) {
+		u64 blk = off / KJ_PAGE;
+		u32 in = (u32)(off % KJ_PAGE), n = min_t(u32, len, KJ_PAGE - in);
+		struct kj_ent *e = kj_find_in(j->rhash, blk);
+		for (u32 s = in; s < in + n; s += KJ_SECT)
+			held += e && (e->mask & (1u << (s / KJ_SECT)));
+		if (e)
+			memcpy(buf, e->data + in, n);
+		off += n;
+		buf += n;
+		len -= n;
+	}
+	return held == all ? 0 : held ? -ENOENT : 1;
 }
 
 /* to_overlay 0: copy held sectors over a buffer read from the device; 1: update held sectors from a direct write. */
@@ -933,6 +1023,7 @@ static void kj_batch_add(struct kj_batch *w, u64 dev, const void *data, size_t l
 static void kj_apply_ent_m(struct kj_batch *w, struct kj_ent *e, u8 mask)
 {
 	u64 base = e->blk * KJ_PAGE;
+	kshim_home_mark(w->b, base, KJ_PAGE);	/* the volume's place changes: before anything of the page is sent */
 	if (mask == 0xff) {
 		kj_batch_add(w, base, e->data, KJ_PAGE);
 		return;
@@ -1978,6 +2069,7 @@ int kshim_jnl_degrade(struct block_device *b)
 		j->refused = 1;
 		return -ENOMEM;
 	}
+	kshim_home_all(b);
 	printk(KERN_ERR "journal: out of memory for the overlay: writing in place until the next commit\n");
 	if (kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn))
 		return -EIO;

@@ -251,6 +251,9 @@ typedef struct _NG_FCB
     SHARE_ACCESS ShareAccess;
     ngc_node *Node;                 /* referenced core inode while handles are open; NULL when parked */
     BOOLEAN HasNode;                /* a regular FCB (not the volume) that can re-acquire its node */
+    ngc_home *Home;                 /* what the last flush knew of the file's record on the disk (ngc_flush_home; CoreLock) */
+    BOOLEAN HomeFresh;              /* the file was created by the open that made this FCB and not flushed since (set before the
+                                       FCB is listed, cleared under CoreLock); only spares a device read */
     struct ngc_stat Stat;
     BOOLEAN IsVolume;
     BOOLEAN IsDirectory;

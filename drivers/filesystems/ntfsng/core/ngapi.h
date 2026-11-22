@@ -144,8 +144,17 @@ void ngc_commit_wait(ngc_vol *v);
  * <0 when a write failed (the journal still holds the changes; the next mount replays them).
  */
 int ngc_checkpoint(ngc_vol *v);
-/* 1: the base MFT record of the file on the device already is the one in memory, apart from times and attributes (details at the definition); 0: not, or cannot tell. */
-int ngc_record_home(ngc_vol *v, ngc_node *n);
+/*
+ * A file flush after its retained commit: the file's base MFT record on the volume itself is the committed one apart from times
+ * and attributes when this returns 0, by knowing it is there (@memo, without a device read when possible) or by ngc_checkpoint
+ * (details at the definition).  @memo: per file, NULL at first, kept between flushes, freed with ngc_home_free.  @fresh: the
+ * file's record was made by the create of the caller's file object and has not been flushed since (no point reading the disk).
+ */
+typedef struct ngc_home ngc_home;
+int ngc_flush_home(ngc_vol *v, ngc_node *n, ngc_home **memo, int fresh);
+void ngc_home_free(ngc_home *h);
+/* A write of file data that the glue sends to the device itself (unlocked paging writes): before it is sent and after it ended. */
+void ngc_home_mark(ngc_vol *v, unsigned long long off, unsigned long long len);
 /* The overlay is past its threshold, or (alloc_bytes > 0: a growth of about that many bytes) a free is not committed and an allocation follows that cannot go around the freed clusters. */
 int ngc_commit_wanted(ngc_vol *v, long long alloc_bytes);
 extern int ngc_free_reservation;	/* 0: an allocation after a free waits for the commit (registry NoFreeReservation=1) */
