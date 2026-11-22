@@ -275,6 +275,7 @@ Return Value:
     BOOLEAN UnwindOutstandingAsync = FALSE;
     BOOLEAN PagingIoResourceAcquired = FALSE;
     BOOLEAN SuccessfulPurge = FALSE;
+    BOOLEAN PurgeAgainAfterWrite = FALSE;
 
     BOOLEAN SynchronousIo;
     BOOLEAN WriteToEof;
@@ -1397,6 +1398,19 @@ Return Value:
                 }
 
                 //
+                //  A purge that failed leaves cached pages of the range that the
+                //  write below makes stale.  What held them may be gone once the
+                //  write is done (the cache manager's own views on their way out);
+                //  the paging I/O resource, held across the write, keeps a page
+                //  fault from bringing the old data back meanwhile.  Purge again
+                //  before the write completes.  What still fails then is a range
+                //  that a process maps, which a non-cached write is documented not
+                //  to keep coherent.
+                //
+
+                PurgeAgainAfterWrite = !SuccessfulPurge;
+
+                //
                 //  Indicate we're OK with the fcb being demoted to shared access
                 //  if that turns out to be possible later on after VDL extension
                 //  is checked for.
@@ -2441,6 +2455,24 @@ Return Value:
 
                     if (FcbOrDcb->ValidDataToDisk < NewValidDataToDisk) {
                         FcbOrDcb->ValidDataToDisk = NewValidDataToDisk;
+                    }
+
+                    //
+                    //  The coherency purge before the write failed: try again,
+                    //  the paging I/O resource is still held (see above).
+                    //
+
+                    if (PurgeAgainAfterWrite) {
+
+                        LARGE_INTEGER PurgeStart;
+
+                        NT_ASSERT( PagingIoResourceAcquired );
+
+                        PurgeStart.QuadPart = StartingVbo;
+                        (VOID)CcPurgeCacheSection( FileObject->SectionObjectPointer,
+                                                   &PurgeStart,
+                                                   ByteCount,
+                                                   FALSE );
                     }
                 }
 
