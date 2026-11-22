@@ -65,6 +65,7 @@ list(APPEND SOURCE
     PowerSettingNotification.c
     ScreenSaverSecurePolicy.c
     OwnerZOrderNotice.c
+    OwnedWindowThreadExit.c
     NcPaintLayered.c
     SetWindowPosFlags.c
     SetParentCrossProcess.c
