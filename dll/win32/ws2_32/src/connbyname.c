@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS WinSock 2 API
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
- * PURPOSE:     WSAConnectByNameA / WSAConnectByNameW
+ * PURPOSE:     WSAConnectByNameA / WSAConnectByNameW / WSAConnectByList
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -417,4 +417,122 @@ WSAConnectByNameA(IN SOCKET s,
     HeapFree(GetProcessHeap(), 0, Service);
     SetLastError(Error);
     return Result;
+}
+
+/*
+ * WSAConnectByList: the same race over the addresses of a SOCKET_ADDRESS_LIST. The statuses are those of Windows
+ * Server 2022 (measured 2026-11-22 against loopback listeners): WSAEINVAL for a Reserved pointer, a missing or empty
+ * list, a socket that is not a TCP stream socket of AF_INET or AF_INET6, and a list with no address of the socket's own
+ * family (an AF_INET6 socket takes no IPv4 address from a list, unlike WSAConnectByName); WSAENOTSOCK for a closed
+ * socket, WSAEISCONN for a connected one, WSAEFAULT when an address buffer is too small. The timeout counts only when it
+ * is positive. The local address comes back without its port, as Windows returns it.
+ */
+BOOL
+WSAAPI
+WSAConnectByList(IN SOCKET s,
+                 IN PSOCKET_ADDRESS_LIST SocketAddress,
+                 IN OUT LPDWORD LocalAddressLength,
+                 OUT LPSOCKADDR LocalAddress,
+                 IN OUT LPDWORD RemoteAddressLength,
+                 OUT LPSOCKADDR RemoteAddress,
+                 IN const struct timeval *timeout,
+                 LPWSAOVERLAPPED Reserved)
+{
+    WSAPROTOCOL_INFOW Info;
+    int InfoLength = sizeof(Info), Error = 0, Length;
+    CBN_TRY *Tries;
+    INT Item;
+    ULONG Count = 0, Winner = 0;
+    DWORD Start = GetTickCount(), Limit = INFINITE;
+    SOCKADDR_STORAGE Target, Local, Remote;
+    int LocalLength = sizeof(Local), RemoteLength = sizeof(Remote);
+
+    if (Reserved || !SocketAddress || SocketAddress->iAddressCount <= 0)
+    {
+        SetLastError(WSAEINVAL);
+        return FALSE;
+    }
+    if (timeout && timeout->tv_sec >= 0 && timeout->tv_usec >= 0 && (timeout->tv_sec || timeout->tv_usec))
+        Limit = (DWORD)min((ULONGLONG)timeout->tv_sec * 1000 + timeout->tv_usec / 1000, (ULONGLONG)(INFINITE - 1));
+    if (getsockopt(s, SOL_SOCKET, SO_PROTOCOL_INFOW, (char *)&Info, &InfoLength) == SOCKET_ERROR)
+        return FALSE;
+    if (Info.iSocketType != SOCK_STREAM || (Info.iAddressFamily != AF_INET && Info.iAddressFamily != AF_INET6))
+    {
+        SetLastError(WSAEINVAL);
+        return FALSE;
+    }
+
+    Tries = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, CBN_MAX_TRIES * sizeof(*Tries));
+    if (!Tries)
+    {
+        SetLastError(WSA_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    for (Item = 0; Item < SocketAddress->iAddressCount && Count < CBN_MAX_TRIES; Item++)
+    {
+        LPSOCKADDR Address = SocketAddress->Address[Item].lpSockaddr;
+        INT AddressLength = SocketAddress->Address[Item].iSockaddrLength;
+        INT Needed;
+
+        if (!Address || AddressLength < (INT)sizeof(USHORT) || AddressLength > (INT)sizeof(SOCKADDR_STORAGE) ||
+            Address->sa_family != Info.iAddressFamily)
+            continue;
+        Needed = (Address->sa_family == AF_INET) ? (INT)sizeof(SOCKADDR_IN) : (INT)sizeof(SOCKADDR_IN6);
+        if (AddressLength < Needed)
+            continue;
+        Tries[Count].Socket = INVALID_SOCKET;
+        CopyMemory(&Tries[Count].Address, Address, AddressLength);
+        Tries[Count].AddressLength = AddressLength;
+        Count++;
+    }
+    if (!Count)
+    {
+        HeapFree(GetProcessHeap(), 0, Tries);
+        SetLastError(WSAEINVAL);
+        return FALSE;
+    }
+
+    /* a connected socket is refused whatever the list holds */
+    if (getpeername(s, (SOCKADDR *)&Remote, &RemoteLength) == 0)
+    {
+        HeapFree(GetProcessHeap(), 0, Tries);
+        SetLastError(WSAEISCONN);
+        return FALSE;
+    }
+    RemoteLength = sizeof(Remote);
+
+    if (Count > 1 && !CbnRace(Tries, Count, Start, Limit, &Winner, &Error))
+    {
+        HeapFree(GetProcessHeap(), 0, Tries);
+        SetLastError(Error);
+        return FALSE;
+    }
+    CbnForSocket(Info.iAddressFamily, &Tries[Winner].Address, Tries[Winner].AddressLength, &Target, &Length);
+    HeapFree(GetProcessHeap(), 0, Tries);
+    if (!CbnConnect(s, (SOCKADDR *)&Target, Length, Start, Limit, &Error))
+    {
+        SetLastError(Error);
+        return FALSE;
+    }
+
+    if ((LocalAddressLength && LocalAddress && getsockname(s, (SOCKADDR *)&Local, &LocalLength) == SOCKET_ERROR) ||
+        (RemoteAddressLength && RemoteAddress && getpeername(s, (SOCKADDR *)&Remote, &RemoteLength) == SOCKET_ERROR))
+        return FALSE;
+    if (LocalAddressLength && LocalAddress)
+    {
+        if (Local.ss_family == AF_INET)
+            ((SOCKADDR_IN *)&Local)->sin_port = 0;
+        else if (Local.ss_family == AF_INET6)
+            ((SOCKADDR_IN6 *)&Local)->sin6_port = 0;
+    }
+    /* a buffer that is too small fails the call and the lengths stay as the caller gave them (Windows) */
+    if ((LocalAddressLength && LocalAddress && *LocalAddressLength < (DWORD)LocalLength) ||
+        (RemoteAddressLength && RemoteAddress && *RemoteAddressLength < (DWORD)RemoteLength))
+    {
+        SetLastError(WSAEFAULT);
+        return FALSE;
+    }
+    CbnCopyOut(LocalAddressLength, LocalAddress, &Local, LocalLength);
+    CbnCopyOut(RemoteAddressLength, RemoteAddress, &Remote, RemoteLength);
+    return TRUE;
 }

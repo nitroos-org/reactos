@@ -10,6 +10,7 @@ list(APPEND SOURCE
     addresschange.c
     addrchange6.c
     connectbyname.c
+    connectbylist.c
     asyncselect.c
     backlog.c
     basehandle.c
