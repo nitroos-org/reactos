@@ -884,6 +884,27 @@ SpiScreenSaverSetBlocked(VOID)
     return FALSE;
 }
 
+/*
+ * The user policy "ScreenSaverIsSecure" decides the password protection of the saver: SPI_SETSCREENSAVESECURE fails
+ * with ERROR_ACCESS_DISABLED_BY_POLICY while the policy value is there, whatever it says (measured on Windows
+ * Server 2022 with a REG_DWORD 0 policy value; SPI_GETSCREENSAVESECURE stays the user's setting).
+ */
+static
+BOOL
+SpiScreenSaverSecurePolicyBlocks(VOID)
+{
+    DWORD dwValue;
+    WCHAR awcValue[12];
+
+    if (RegReadUserSetting(KEY_DESKTOP_POLICY, L"ScreenSaverIsSecure", REG_DWORD, &dwValue, sizeof(dwValue)) ||
+        RegReadUserSetting(KEY_DESKTOP_POLICY, L"ScreenSaverIsSecure", REG_SZ, awcValue, sizeof(awcValue)))
+    {
+        EngSetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static
 UINT_PTR
 SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
@@ -1671,6 +1692,8 @@ SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
 
         case SPI_SETSCREENSAVESECURE:
             if (SpiScreenSaverSetBlocked())
+                return 0;
+            if (SpiScreenSaverSecurePolicyBlocks())
                 return 0;
             return SpiSetBool(&gspv.bScrSaverSecure, uiParam ? 1 : 0, KEY_DESKTOP, L"ScreenSaverIsSecure", fl);
 
