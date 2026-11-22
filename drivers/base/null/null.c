@@ -22,7 +22,7 @@ ObSetSecurityObjectByPointer(
     _In_ SECURITY_INFORMATION SecurityInformation,
     _In_ PSECURITY_DESCRIPTOR SecurityDescriptor);
 
-/* A SACL that holds one mandatory label: Untrusted, no write up */
+/* A SACL that holds one mandatory label: Low, no write up */
 typedef struct _NULL_LABEL_SACL
 {
     ACL Acl;
@@ -38,9 +38,9 @@ typedef struct _NULL_LABEL_SACL
  * Object opens apply the mandatory label of the device object (SeAccessCheck
  * in IopParseDevice); a device without one counts as Medium, so a process
  * below Medium could not open NUL for write (cmd's "> nul" in a Low process).
- * The null device reads nothing and discards what is written: label it
- * Untrusted so that the label restricts no caller and the DACL alone decides,
- * as before object opens applied labels.
+ * Windows Server 2022 labels \Device\Null Low, NO_WRITE_UP (measured, V15):
+ * a Low process opens NUL for read and write, an Untrusted one only for read
+ * (its "echo x > nul" fails).
  */
 static
 VOID
@@ -53,7 +53,7 @@ NullLabelDevice(
         {
             { SYSTEM_MANDATORY_LABEL_ACE_TYPE, 0, sizeof(((NULL_LABEL_SACL *)0)->Label) },
             SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
-            { SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY}, {SECURITY_MANDATORY_UNTRUSTED_RID} }
+            { SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY}, {SECURITY_MANDATORY_LOW_RID} }
         }
     };
     SECURITY_DESCRIPTOR Sd;
