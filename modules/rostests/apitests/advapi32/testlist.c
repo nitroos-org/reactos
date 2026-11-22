@@ -8,6 +8,7 @@ extern void func_AccessCheckAuditAlarmStress(void);
 extern void func_AccessCheckDifferential(void);
 extern void func_AccessCheckMandatory(void);
 extern void func_AccessCheckNoAccess(void);
+extern void func_AccessCheckGenericAce(void);
 extern void func_AccessCheckObjectTypeList(void);
 extern void func_AddMandatoryAce(void);
 extern void func_RegSaveKeyExFormat(void);
@@ -189,6 +190,7 @@ const struct test winetest_testlist[] =
     { "AccessCheckDifferential", func_AccessCheckDifferential },
     { "AccessCheckMandatory", func_AccessCheckMandatory },
     { "AccessCheckNoAccess", func_AccessCheckNoAccess },
+    { "AccessCheckGenericAce", func_AccessCheckGenericAce },
     { "AccessCheckObjectTypeList", func_AccessCheckObjectTypeList },
     { "AddMandatoryAce", func_AddMandatoryAce },
     { "RegSaveKeyExFormat", func_RegSaveKeyExFormat },
