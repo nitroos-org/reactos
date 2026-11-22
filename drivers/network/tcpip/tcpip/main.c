@@ -1338,8 +1338,10 @@ DriverEntry(
     EntityCount = 0;
     EntityMax   = TDI_ENTITIES_INITIAL;
 
-    /* Allocate NDIS packet descriptors */
-    NdisAllocatePacketPoolEx(&NdisStatus, &GlobalPacketPool, 500, 1500, sizeof(PACKET_CONTEXT));
+    /* Allocate NDIS packet descriptors: a receive queue full of segments (LAN_RECEIVE_QUEUE_LIMIT), the frames
+       other than TCP (LAN_MAX_PENDING_FRAMES, lan.c) and what is sent. The pool is a fixed array: when it is empty
+       a received frame is dropped (and counted, lan.c) */
+    NdisAllocatePacketPoolEx(&NdisStatus, &GlobalPacketPool, 500, LAN_RECEIVE_QUEUE_LIMIT + 1500, sizeof(PACKET_CONTEXT));
     if (NdisStatus != NDIS_STATUS_SUCCESS) {
         TiUnload(DriverObject);
         return STATUS_INSUFFICIENT_RESOURCES;
