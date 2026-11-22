@@ -568,18 +568,46 @@ ObAssignSecurity(IN PACCESS_STATE AccessState,
     KIRQL CalloutIrql;
     PAGED_CODE();
 
-    /* Build the new security descriptor */
-    Status = SeAssignSecurity(SecurityDescriptor,
-                              AccessState->SecurityDescriptor,
-                              &NewDescriptor,
-                              (Type == ObpDirectoryObjectType),
-                              &AccessState->SubjectSecurityContext,
-                              &Type->TypeInfo.GenericMapping,
-                              PagedPool);
+    /*
+     * Build the new security descriptor. An object created by a subject below
+     * Medium is labelled with the subject's level (SepAssignSecurity), except
+     * token, process and thread objects, which have labels of their own below
+     * ("Windows Integrity Mechanism Design", How Windows assigns a mandatory
+     * label to objects: the security subsystem labels process, thread, access
+     * token and job objects when they are created).
+     */
+    Status = SepAssignSecurity(SecurityDescriptor,
+                               AccessState->SecurityDescriptor,
+                               &NewDescriptor,
+                               NULL,
+                               (Type == ObpDirectoryObjectType),
+                               0,
+                               &AccessState->SubjectSecurityContext,
+                               &Type->TypeInfo.GenericMapping,
+                               !(Type == SeTokenObjectType ||
+                                 Type == PsProcessType ||
+                                 Type == PsThreadType));
     if (!NT_SUCCESS(Status)) return Status;
 
+    /*
+     * A job object is labelled with its creator's level, with the default
+     * policy (NO_WRITE_UP); below Medium SepAssignSecurity did it already
+     */
+    if (Type == PsJobType)
+    {
+        Status = SeAssignObjectLabel((PTOKEN)SeQuerySubjectContextToken(&AccessState->SubjectSecurityContext),
+                                     SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+                                     &NewDescriptor,
+                                     &Type->TypeInfo.GenericMapping);
+        if (!NT_SUCCESS(Status))
+        {
+            SeDeassignSecurity(&NewDescriptor);
+            return Status;
+        }
+    }
+
     /* A token object is labelled with the token's integrity level */
-    if (Type == SeTokenObjectType)
+    else if (Type == SeTokenObjectType)
     {
         Status = SeAssignObjectLabel(Object,
                                      SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,

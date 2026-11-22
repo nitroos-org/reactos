@@ -445,6 +445,10 @@ SepDereferenceLowbox(
 /* Mandatory label of tokens */
 #define SEP_MANDATORY_LABEL_SID_LENGTH ((ULONG)FIELD_OFFSET(SID, SubAuthority[1]))
 
+/* Size of a label ACE with a mandatory label SID */
+#define SEP_LABEL_ACE_SIZE \
+    ((USHORT)(FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) + SEP_MANDATORY_LABEL_SID_LENGTH))
+
 BOOLEAN
 NTAPI
 SepIsMandatoryLabelSid(
@@ -481,6 +485,19 @@ NTAPI
 SeCheckLabelChange(
     _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
     _In_ KPROCESSOR_MODE AccessMode);
+
+NTSTATUS
+NTAPI
+SepAssignSecurity(
+    _In_opt_ PSECURITY_DESCRIPTOR ParentDescriptor,
+    _In_opt_ PSECURITY_DESCRIPTOR ExplicitDescriptor,
+    _Out_ PSECURITY_DESCRIPTOR *NewDescriptor,
+    _In_opt_ GUID *ObjectType,
+    _In_ BOOLEAN IsDirectoryObject,
+    _In_ ULONG AutoInheritFlags,
+    _In_ PSECURITY_SUBJECT_CONTEXT SubjectContext,
+    _In_ PGENERIC_MAPPING GenericMapping,
+    _In_ BOOLEAN CreatorLabel);
 
 NTSTATUS
 NTAPI
