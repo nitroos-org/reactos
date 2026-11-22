@@ -511,7 +511,8 @@ static void IntSendDestroyMsg(HWND hWnd)
        */
       // Rule #1
       if ( ti->MessageQueue->spwndActive == Window || // Fixes CORE-106 RegSvr32 exit and return focus to CMD.
-          (ti->MessageQueue->spwndActive == NULL && ti->MessageQueue == IntGetFocusMessageQueue()) )
+          (ti->MessageQueue->spwndActive == NULL && Window->head.rpdesk &&
+           ti->MessageQueue == Window->head.rpdesk->ActiveMessageQueue) )
       {
          co_WinPosActivateOtherWindow(Window);
       }

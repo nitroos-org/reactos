@@ -188,6 +188,48 @@ IsHotKey(UINT fsModifiers, WORD wVk)
  *
  * Sends WM_HOTKEY message if given keys are hotkey
  */
+/*
+ * A hot key is the key of a program of the desktop that has the input. One registered by a
+ * program of another desktop does not fire, and the key goes where it would go without it: a
+ * program of the application desktop must not take, or learn, keys typed on the lock screen or
+ * the Security screen. Winlogon's own keys (Ctrl+Alt+Del, Ctrl+Shift+Esc, Win+L, Win+U on its
+ * SAS window) work on every desktop, the system's own (negative ids) are checked where handled.
+ */
+static BOOL FASTCALL
+IntHotKeyOnInputDesktop(PHOT_KEY pHotKey)
+{
+    if (pHotKey->pWnd && pHotKey->pWnd != PWND_BOTTOM)
+    {
+        if (hwndSAS && UserHMGetHandle(pHotKey->pWnd) == hwndSAS)
+            return TRUE;
+        return pHotKey->pWnd->head.rpdesk && pHotKey->pWnd->head.rpdesk == IntGetActiveDesktop();
+    }
+
+    if (pHotKey->id < 0 && pHotKey->id != IDHK_WNDKEY)
+        return TRUE;
+
+    return IntIsThreadOnInputDesktop(pHotKey->pti);
+}
+
+/* The hot key that this key press triggers, of those that can fire now */
+static PHOT_KEY FASTCALL
+IsInputHotKey(UINT fsModifiers, WORD wVk)
+{
+    PHOT_KEY pHotKey;
+
+    for (pHotKey = gphkFirst; pHotKey; pHotKey = pHotKey->pNext)
+    {
+        if (pHotKey->fsModifiers == fsModifiers &&
+            pHotKey->vk == wVk &&
+            IntHotKeyOnInputDesktop(pHotKey))
+        {
+            return pHotKey;
+        }
+    }
+
+    return NULL;
+}
+
 BOOL NTAPI
 co_UserProcessHotKeys(WORD wVk, BOOL bIsDown)
 {
@@ -217,7 +259,7 @@ co_UserProcessHotKeys(WORD wVk, BOOL bIsDown)
         else
         {
             /* Regular key down -- check for hotkey, and reset mod candidates */
-            pHotKey = IsHotKey(fModifiers, wVk);
+            pHotKey = IsInputHotKey(fModifiers, wVk);
             gfsModOnlyCandidate = 0;
         }
     }
@@ -226,7 +268,7 @@ co_UserProcessHotKeys(WORD wVk, BOOL bIsDown)
         if (IsModifier)
         {
             /* Modifier key up -- modifier-only keys are triggered here */
-            pHotKey = IsHotKey(gfsModOnlyCandidate, 0);
+            pHotKey = IsInputHotKey(gfsModOnlyCandidate, 0);
             gfsModOnlyCandidate = 0;
         }
         else
@@ -263,7 +305,8 @@ co_UserProcessHotKeys(WORD wVk, BOOL bIsDown)
         {
             ASSERT(!bIsDown);
             pWnd = ValidateHwndNoErr(InputWindowStation->ShellWindow);
-            if (pWnd)
+            /* The shell's Start menu only while the shell's desktop has the input */
+            if (pWnd && pWnd->head.rpdesk == IntGetActiveDesktop())
             {
                TRACE("System Hot key Id %d Key %u\n", pHotKey->id, wVk );
                UserPostMessage(UserHMGetHandle(pWnd), WM_SYSCOMMAND, SC_TASKLIST, 0);

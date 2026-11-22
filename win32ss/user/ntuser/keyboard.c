@@ -687,16 +687,59 @@ NtUserGetAsyncKeyState(INT Key)
 
     UserEnterExclusive();
 
-    if (IS_KEY_DOWN(gafAsyncKeyState, Key))
-        wRet |= 0x8000; // If down, windows returns 0x8000.
-    if (gafAsyncKeyStateRecentDown[Key / 8] & (1 << (Key % 8)))
-        wRet |= 0x1;
-    gafAsyncKeyStateRecentDown[Key / 8] &= ~(1 << (Key % 8));
+    /* "The return value is zero ... The current desktop is not the active desktop" (GetAsyncKeyState,
+       learn.microsoft.com): a program of a desktop without the input does not see the keys typed on the
+       one that has it (the password on the lock screen), and does not consume their "pressed since" bit */
+    if (IntIsThreadOnInputDesktop(PsGetCurrentThreadWin32Thread()))
+    {
+        if (IS_KEY_DOWN(gafAsyncKeyState, Key))
+            wRet |= 0x8000; // If down, windows returns 0x8000.
+        if (gafAsyncKeyStateRecentDown[Key / 8] & (1 << (Key % 8)))
+            wRet |= 0x1;
+        gafAsyncKeyStateRecentDown[Key / 8] &= ~(1 << (Key % 8));
+    }
 
     UserLeave();
 
     TRACE("Leave NtUserGetAsyncKeyState, ret=%u\n", wRet);
     return wRet;
+}
+
+/*
+ * UserCopyAsyncKeyState
+ *
+ * The key state a queue starts from (a new queue, AttachThreadInput). On a desktop without the
+ * input only the toggles of Caps Lock, Num Lock and Scroll Lock are taken: the up/down state and
+ * the toggle bit of every other key would tell which keys are being typed on the input desktop.
+ */
+VOID FASTCALL
+UserCopyAsyncKeyState(PBYTE afKeyState, BOOL bInputDesktop)
+{
+    static const BYTE LockKeys[] = { VK_CAPITAL, VK_NUMLOCK, VK_SCROLL };
+    UINT i;
+
+    if (bInputDesktop)
+    {
+        RtlCopyMemory(afKeyState, gafAsyncKeyState, sizeof(gafAsyncKeyState));
+        return;
+    }
+
+    RtlZeroMemory(afKeyState, sizeof(gafAsyncKeyState));
+    for (i = 0; i < _countof(LockKeys); i++)
+        SET_KEY_LOCKED(afKeyState, LockKeys[i], IS_KEY_LOCKED(gafAsyncKeyState, LockKeys[i]));
+}
+
+/*
+ * UserResetAsyncKeyStateRecent
+ *
+ * NtUserSwitchDesktop: the "pressed since the last call" bits of GetAsyncKeyState start again. Kept,
+ * the first call of a program of the desktop switched back to would tell which keys were typed on the
+ * other one (the lock screen: the letters of the password).
+ */
+VOID FASTCALL
+UserResetAsyncKeyStateRecent(VOID)
+{
+    RtlZeroMemory(&gafAsyncKeyStateRecentDown, sizeof(gafAsyncKeyStateRecentDown));
 }
 
 /*
@@ -1113,7 +1156,9 @@ IntHandleAltNumpad(
                 msgChar.time = dwTime;
                 msgChar.pt = gpsi->ptCursor;
 
-                if (!UserRawInputQueueNoLegacy(pFocusQueue, RIM_TYPEKEYBOARD))
+                if ((pFocusQueue->ptiKeyboard == gptiDesktopThread ||
+                     IntIsThreadOnInputDesktop(pFocusQueue->ptiKeyboard)) &&
+                    !UserRawInputQueueNoLegacy(pFocusQueue, RIM_TYPEKEYBOARD))
                     MsqPostMessage(pFocusQueue->ptiKeyboard, &msgChar, FALSE, QS_KEY, 0, 0);
             }
         }
@@ -1351,7 +1396,14 @@ ProcessKeyEvent(WORD wVk, WORD wScanCode, DWORD dwFlags, BOOL bInjected, DWORD d
         /* Post a keyboard message */
         TRACE("Posting keyboard msg %u wParam 0x%x lParam 0x%x\n", Msg.message, Msg.wParam, Msg.lParam);
         if (!Wnd) {ERR("Window is NULL\n");}
-        if (!UserRawInputNoLegacy(pti->ppi, RIM_TYPEKEYBOARD))
+        /* A key goes only to a window (else a thread) of the desktop that has the input; the
+           desktop window thread serves every desktop */
+        if (Wnd ? (Wnd->head.rpdesk != IntGetActiveDesktop())
+                : (pti != gptiDesktopThread && !IntIsThreadOnInputDesktop(pti)))
+        {
+            WARN("Key not posted: thread 0x%p is not on the input desktop\n", pti);
+        }
+        else if (!UserRawInputNoLegacy(pti->ppi, RIM_TYPEKEYBOARD))
             MsqPostMessage(pti, &Msg, TRUE, QS_KEY, 0, dwExtraInfo);
     }
     return TRUE;

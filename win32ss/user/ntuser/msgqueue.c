@@ -783,6 +783,14 @@ co_MsqInsertMouseMessageEx(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Ho
           return;
        }
 
+       /* Mouse input goes only to a window of the desktop that has the input (the capture is
+          the one of its foreground queue, hit testing walks its windows) */
+       if (pwnd->head.rpdesk != pwndDesktop->head.rpdesk)
+       {
+          WARN("Mouse message not posted: window %p is not on the input desktop\n", Msg->hwnd);
+          return;
+       }
+
        // Check to see if this is attached.
        if ( pti != MessageQueue->ptiMouse &&
             MessageQueue->cThreads > 1 )
@@ -2688,7 +2696,8 @@ MsqInitializeMessageQueue(PTHREADINFO pti, PUSER_MESSAGE_QUEUE MessageQueue)
       TRACE("Default cursor hcur %p\n",UserHMGetHandle(MessageQueue->CursorObject));
       UserReferenceObject(MessageQueue->CursorObject);
    }
-   RtlCopyMemory(MessageQueue->afKeyState, gafAsyncKeyState, sizeof(gafAsyncKeyState));
+   /* A thread not on a desktop yet is checked again when it gets one (IntSetThreadDesktop) */
+   UserCopyAsyncKeyState(MessageQueue->afKeyState, !pti->rpdesk || IntIsThreadOnInputDesktop(pti));
    MessageQueue->ptiMouse = pti;
    MessageQueue->ptiKeyboard = pti;
    MessageQueue->cThreads++;
@@ -2916,9 +2925,12 @@ MsqCleanupMessageQueue(PTHREADINFO pti)
        UserDereferenceObject(pCursor);
    }
 
+   /* MsqDestroyMessageQueue took the queue off its desktop already. What is left is the global
+      foreground: cleared, never the foreground queue of the input desktop when that is another
+      queue (this one was the foreground of a desktop switched away from) */
    if (gpqForeground == MessageQueue)
    {
-      IntSetFocusMessageQueue(NULL);
+      IntRemoveFocusMessageQueue(MessageQueue);
    }
    if (gpqForegroundPrev == MessageQueue)
    {

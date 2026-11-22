@@ -405,7 +405,9 @@ co_WinPosActivateOtherWindow(PWND Wnd)
    if (IntIsDesktopWindow(Wnd))
    {
       //ERR("WinPosActivateOtherWindow Set Focus Msg Q No window!\n");
-      IntSetFocusMessageQueue(NULL);
+      /* Only the foreground of the desktop that has the input, if it is this window's desktop */
+      if (Wnd->head.rpdesk == IntGetActiveDesktop())
+         IntSetFocusMessageQueue(NULL);
       return;
    }
 
@@ -459,7 +461,11 @@ co_WinPosActivateOtherWindow(PWND Wnd)
 done:
    if (WndTo) UserRefObjectCo(WndTo, &Ref);
 
-   if (gpqForeground && (!gpqForeground->spwndActive || Wnd == gpqForeground->spwndActive))
+   /* The foreground is handed on only on the desktop that has the input: a window of another desktop
+      that goes away while the foreground queue there has no active window (a dialog of the lock screen
+      being replaced) must not take the foreground away from it */
+   if (gpqForeground && (!gpqForeground->spwndActive || Wnd == gpqForeground->spwndActive) &&
+       (!Wnd || Wnd->head.rpdesk == IntGetActiveDesktop()))
    {
       /* ReactOS can pass WndTo = NULL to co_IntSetForegroundWindow and returns FALSE. */
       //ERR("WinPosActivateOtherWindow Set FG 0x%p hWnd %p\n", WndTo, WndTo ? UserHMGetHandle(WndTo) : NULL);
@@ -470,6 +476,16 @@ done:
       }
    }
    //ERR("WinPosActivateOtherWindow Set Active  0x%p\n",WndTo);
+   /* On a desktop without the input the window is only activated in its own queue (as SetWindowPos does) */
+   if (WndTo && IntGetActiveDesktop() && WndTo->head.rpdesk != IntGetActiveDesktop())
+   {
+      TRACE("WPAOW: activate %p in its queue (desktop without the input)\n", UserHMGetHandle(WndTo));
+      if (co_IntSetActiveWindow(WndTo, FALSE, TRUE, FALSE))
+      {
+         UserDerefObjectCo(WndTo);
+         return;
+      }
+   }
    if (!UserSetActiveWindow(WndTo))  /* Ok for WndTo to be NULL here */
    {
       //ERR("WPAOW SA 1\n");
@@ -3307,7 +3323,10 @@ co_WinPosShowWindow(PWND Wnd, INT Cmd)
 
    if ((Cmd == SW_HIDE) || (Cmd == SW_MINIMIZE))
    {
-      if ( Wnd == pti->MessageQueue->spwndActive && pti->MessageQueue == IntGetFocusMessageQueue()  )
+      /* The foreground queue of the window's own desktop: of the input desktop, or of a desktop switched
+         away from, which hands its activation on in the same way and gets it back when switched to */
+      if ( Wnd == pti->MessageQueue->spwndActive &&
+           Wnd->head.rpdesk && pti->MessageQueue == Wnd->head.rpdesk->ActiveMessageQueue )
       {
           if (UserIsDesktopWindow(Wnd->spwndParent))
           {

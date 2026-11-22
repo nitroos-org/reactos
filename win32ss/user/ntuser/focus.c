@@ -61,6 +61,37 @@ IntSetForegroundProcess(PTHREADINFO ptiNew)
     }
 }
 
+/*
+ * NtUserSwitchDesktop: the global foreground (gpqForeground, gptiForeground: keyboard, Alt-Tab,
+ * GetForegroundWindow, hot keys, the foreground rules of SetForegroundWindow) becomes the
+ * foreground of the new input desktop, the one it had when it was last switched away from. The
+ * desktop left keeps its own foreground queue, it is just no longer the global one: switched to
+ * again, its foreground window is the foreground window again.
+ */
+VOID FASTCALL
+IntForegroundFollowsInputDesktop(VOID)
+{
+    PDESKTOP pdesk = IntGetActiveDesktop();
+    PUSER_MESSAGE_QUEUE pumq = pdesk ? pdesk->ActiveMessageQueue : NULL;
+    PTHREADINFO pti = NULL;
+
+    if (pumq)
+    {
+        if (pumq->spwndActive && !(pumq->spwndActive->state & WNDS_DESTROYED))
+            pti = pumq->spwndActive->head.pti;
+        else
+            pti = pumq->ptiKeyboard;
+
+        if (pti && (pti->MessageQueue != pumq || (pti->TIF_flags & TIF_INCLEANUP) ||
+                    (pti->rpdesk != pdesk && pti != gptiDesktopThread)))
+            pti = NULL;
+    }
+
+    gpqForeground = pumq;
+    gptiForeground = pti;
+    IntSetForegroundProcess(pti);
+}
+
 VOID FASTCALL
 IntForegroundProcessExit(PEPROCESS Process)
 {
@@ -848,6 +879,13 @@ co_IntSetForegroundMessageQueue(
       return FALSE;
    }
 
+   // No foreground at all is set only from the desktop that has the input: a program of another desktop
+   // whose last window goes away must not leave the lock screen or the Security screen without the keyboard.
+   if (!Wnd && pti && pti->rpdesk && pti->rpdesk != IntGetActiveDesktop())
+   {
+      return FALSE;
+   }
+
    if ( !gptiForeground || gptiForeground->TIF_flags & TIF_INCLEANUP )
       ptiPrev = NULL;
    else
@@ -856,7 +894,10 @@ co_IntSetForegroundMessageQueue(
    if (Wnd)
    {
       ptiChg = Wnd->head.pti;
-      IntSetFocusMessageQueue(Wnd->head.pti->MessageQueue);
+      if (!IntSetFocusMessageQueue(Wnd->head.pti))
+      {
+         return FALSE;
+      }
       gptiForeground = Wnd->head.pti;
       IntSetForegroundProcess(gptiForeground);
       //ERR("Set Foreground pti 0x%p Q 0x%p hWnd 0x%p\n", Wnd->head.pti, Wnd->head.pti->MessageQueue, UserHMGetHandle(Wnd));
@@ -1738,7 +1779,12 @@ NtUserGetForegroundWindow(VOID)
    TRACE("Enter NtUserGetForegroundWindow\n");
    UserEnterShared();
 
-   Ret = UserGetForegroundWindow();
+   /* A thread of a desktop without the input has no foreground window: the foreground window is
+      on the other desktop (the Wine user32 winstation test expects NULL there) */
+   if (IntIsThreadOnInputDesktop(PsGetCurrentThreadWin32Thread()))
+      Ret = UserGetForegroundWindow();
+   else
+      Ret = NULL;
 
    TRACE("Leave NtUserGetForegroundWindow, ret=%p\n", Ret);
    UserLeave();

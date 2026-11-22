@@ -113,6 +113,8 @@ VOID NTAPI UserInitKeyboard(HANDLE hKeyboardDevice);
 PKL W32kGetDefaultKeyLayout(VOID);
 VOID NTAPI UserProcessKeyboardInput(PINPUT_DEVICE_INFO pDeviceInfo, PKEYBOARD_INPUT_DATA pKeyInput);
 BOOL NTAPI UserSendKeyboardInput(KEYBDINPUT *pKbdInput, BOOL bInjected);
+VOID FASTCALL UserCopyAsyncKeyState(PBYTE afKeyState, BOOL bInputDesktop);
+VOID FASTCALL UserResetAsyncKeyStateRecent(VOID);
 PKL NTAPI UserHklToKbl(HKL hKl);
 BOOL NTAPI UserSetDefaultInputLang(HKL hKl);
 extern DWORD gdwLanguageToggleKey;

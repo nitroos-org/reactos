@@ -887,8 +887,11 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
 
            ptiTo->MessageQueue->iCursorLevel -= ptiFrom->iCursorLevel;
 
-           if (ptiFrom->MessageQueue == gpqForeground)
+           /* The queue of ptiFrom is the foreground queue of its desktop (of the input desktop: the global
+              foreground; of a desktop switched away from: the one it gets back) */
+           if (ptiFrom->MessageQueue == gpqForeground || ptiFrom->MessageQueue->Desktop)
            {
+              PDESKTOP pdeskFg = ptiFrom->MessageQueue->Desktop;
               ERR("ptiFrom is Foreground\n");
               ptiTo->MessageQueue->spwndActive  = ptiFrom->MessageQueue->spwndActive;
               ptiTo->MessageQueue->spwndFocus   = ptiFrom->MessageQueue->spwndFocus;
@@ -897,9 +900,19 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
               RtlCopyMemory(&ptiTo->MessageQueue->CaretInfo,
                             &ptiFrom->MessageQueue->CaretInfo,
                             sizeof(ptiTo->MessageQueue->CaretInfo));
-              IntSetFocusMessageQueue(NULL);
-              IntSetFocusMessageQueue(ptiTo->MessageQueue);
-              gptiForeground = ptiTo;
+              if (ptiFrom->MessageQueue == gpqForeground)
+              {
+                 /* The foreground queue is the one of the input desktop, both threads are on it */
+                 IntSetFocusMessageQueue(NULL);
+                 IntSetFocusMessageQueue(ptiTo);
+                 gptiForeground = ptiTo;
+              }
+              else
+              {
+                 /* Only that desktop's own foreground moves to the shared queue */
+                 IntRemoveFocusMessageQueue(ptiFrom->MessageQueue);
+                 IntSetDesktopFocusMessageQueue(pdeskFg, ptiTo);
+              }
            }
            else
            {
@@ -1063,8 +1076,9 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
     /* Note that key state, which can be ascertained by calls to the GetKeyState
        or GetKeyboardState function, is reset after a call to AttachThreadInput.
        ATM which one?
+       Not the keys typed on another desktop: both threads are on the same one (checked above).
      */
-    RtlCopyMemory(ptiTo->MessageQueue->afKeyState, gafAsyncKeyState, sizeof(gafAsyncKeyState));
+    UserCopyAsyncKeyState(ptiTo->MessageQueue->afKeyState, IntIsThreadOnInputDesktop(ptiTo));
 
     ptiTo->MessageQueue->msgDblClk.message = 0;
 

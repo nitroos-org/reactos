@@ -130,8 +130,17 @@ IntGetCurrentThreadDesktopWindow(VOID);
 PUSER_MESSAGE_QUEUE FASTCALL
 IntGetFocusMessageQueue(VOID);
 
+BOOL FASTCALL
+IntSetFocusMessageQueue(PTHREADINFO ptiNew);
+
 VOID FASTCALL
-IntSetFocusMessageQueue(PUSER_MESSAGE_QUEUE NewQueue);
+IntRemoveFocusMessageQueue(PUSER_MESSAGE_QUEUE Queue);
+
+BOOL FASTCALL
+IntSetDesktopFocusMessageQueue(PDESKTOP pdesk, PTHREADINFO ptiNew);
+
+BOOL FASTCALL
+IntIsThreadOnInputDesktop(PTHREADINFO pti);
 
 PDESKTOP FASTCALL
 IntGetActiveDesktop(VOID);
