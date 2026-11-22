@@ -488,6 +488,12 @@ tcp_write(struct tcp_pcb *pcb, const void *arg, u16_t len, u8_t apiflags)
     unsent_optlen = LWIP_TCP_OPT_LENGTH_SEGMENT(last_unsent->flags, pcb);
     LWIP_ASSERT("mss_local is too small", mss_local >= last_unsent->len + unsent_optlen);
     space = mss_local - (last_unsent->len + unsent_optlen);
+    /* NitroOS: the last unsent segment can be one queued again for retransmission (tcp_rexmit, tcp_rexmit_hole)
+       that the window holds back; it does not end where the new data begins (snd_lbb), and data appended to it
+       would go out under the wrong sequence numbers. New data then gets segments of its own */
+    if (lwip_ntohl(last_unsent->tcphdr->seqno) + TCP_TCPLEN(last_unsent) != pcb->snd_lbb) {
+      space = 0;
+    }
 
     /*
      * Phase 1: Copy data directly into an oversized pbuf.
@@ -1012,7 +1018,9 @@ tcp_send_fin(struct tcp_pcb *pcb)
     for (last_unsent = pcb->unsent; last_unsent->next != NULL;
          last_unsent = last_unsent->next);
 
-    if ((TCPH_FLAGS(last_unsent->tcphdr) & (TCP_SYN | TCP_FIN | TCP_RST)) == 0) {
+    /* NitroOS: not on a segment queued again for retransmission that ends before the last data (tcp_write) */
+    if ((TCPH_FLAGS(last_unsent->tcphdr) & (TCP_SYN | TCP_FIN | TCP_RST)) == 0 &&
+        lwip_ntohl(last_unsent->tcphdr->seqno) + TCP_TCPLEN(last_unsent) == pcb->snd_lbb) {
       /* no SYN/FIN/RST flag in the header, we can add the FIN flag */
       TCPH_SET_FLAG(last_unsent->tcphdr, TCP_FIN);
       tcp_set_flags(pcb, TF_FIN);
@@ -1656,18 +1664,56 @@ tcp_rexmit_rto_prepare(struct tcp_pcb *pcb)
     LWIP_DEBUGF(TCP_RTO_DEBUG, ("tcp_rexmit_rto: segment busy\n"));
     return ERR_VAL;
   }
-  /* concatenate unsent queue after unacked queue */
-  seg->next = pcb->unsent;
+  /* NitroOS: the unsent queue may hold segments that were sent before and queued again for retransmission
+     (tcp_rexmit, tcp_rexmit_hole) but not sent yet, the window being too small: they come before the last
+     unacked segment. Concatenating the queues then left the unsent queue out of order, with the hole behind
+     segments above it that the window held back: it was never sent and the connection stalled. Both queues are
+     sorted: merge them */
+  {
+    struct tcp_seg *a = pcb->unacked, *b = pcb->unsent, *head = NULL, **tail = &head, *last = NULL;
+#if TCP_OVERSIZE
+    struct tcp_seg *old_last_unsent = pcb->unsent;
+    while (old_last_unsent != NULL && old_last_unsent->next != NULL) {
+      old_last_unsent = old_last_unsent->next;
+    }
+#endif /* TCP_OVERSIZE */
+    while (a != NULL || b != NULL) {
+      if (b == NULL || (a != NULL && TCP_SEQ_LT(lwip_ntohl(a->tcphdr->seqno), lwip_ntohl(b->tcphdr->seqno)))) {
+        *tail = a;
+        a = a->next;
+      } else {
+        *tail = b;
+        b = b->next;
+      }
+      last = *tail;
+      tail = &last->next;
+    }
+    *tail = NULL;
+#if TCP_OVERSIZE
+    /* if last unsent changed, we need to update unsent_oversize */
+    if (old_last_unsent != last) {
 #if TCP_OVERSIZE_DBGCHECK
-  /* if last unsent changed, we need to update unsent_oversize */
-  if (pcb->unsent == NULL) {
-    pcb->unsent_oversize = seg->oversize_left;
-  }
+      pcb->unsent_oversize = last->oversize_left;
+#else
+      pcb->unsent_oversize = 0;
 #endif /* TCP_OVERSIZE_DBGCHECK */
-  /* unsent queue is the concatenated queue (of unacked, unsent) */
-  pcb->unsent = pcb->unacked;
+    }
+#endif /* TCP_OVERSIZE */
+    /* unsent queue is the merged queue (of unacked, unsent) */
+    pcb->unsent = head;
+  }
   /* unacked queue is now empty */
   pcb->unacked = NULL;
+
+  /* NitroOS: a timeout ends fast recovery (RFC 5681 3.2, RFC 6582 4) and the SACK scoreboard is not trusted
+     any more (RFC 6675 5.1): everything in flight is sent again */
+  tcp_clear_flags(pcb, TF_INFR);
+  {
+    struct tcp_seg *s;
+    for (s = pcb->unsent; s != NULL; s = s->next) {
+      s->flags &= (u8_t)~(TF_SEG_SACKED | TF_SEG_RECOVERY_REXMIT);
+    }
+  }
 
   /* Mark RTO in-progress */
   tcp_set_flags(pcb, TF_RTO);
@@ -1727,16 +1773,38 @@ tcp_rexmit_rto(struct tcp_pcb *pcb)
 err_t
 tcp_rexmit(struct tcp_pcb *pcb)
 {
-  struct tcp_seg *seg;
-  struct tcp_seg **cur_seg;
+  err_t err;
 
   LWIP_ASSERT("tcp_rexmit: invalid pcb", pcb != NULL);
 
-  if (pcb->unacked == NULL) {
+  err = tcp_rexmit_hole(pcb, &pcb->unacked);
+  if (err == ERR_OK && pcb->nrtx < 0xFF) {
+    ++pcb->nrtx;
+  }
+  return err;
+}
+
+/**
+ * NitroOS: requeue one unacked segment (*pseg, a link of the unacked queue) for retransmission: the segment
+ * moves to its place in the unsent queue, and the next tcp_output() sends it (tcp_output keeps the unacked
+ * queue sorted when it comes back). Unlike tcp_rexmit, the retransmission count is not changed: this is
+ * not a timeout.
+ *
+ * @param pcb the tcp_pcb
+ * @param pseg the link that points to the segment (&pcb->unacked or &prev->next)
+ */
+err_t
+tcp_rexmit_hole(struct tcp_pcb *pcb, struct tcp_seg **pseg)
+{
+  struct tcp_seg *seg;
+  struct tcp_seg **cur_seg;
+
+  LWIP_ASSERT("tcp_rexmit_hole: invalid pcb", pcb != NULL);
+
+  seg = *pseg;
+  if (seg == NULL) {
     return ERR_VAL;
   }
-
-  seg = pcb->unacked;
 
   /* Give up if the segment is still referenced by the netif driver
      due to deferred transmission. */
@@ -1745,9 +1813,10 @@ tcp_rexmit(struct tcp_pcb *pcb)
     return ERR_VAL;
   }
 
-  /* Move the first unacked segment to the unsent queue */
+  /* Move the unacked segment to the unsent queue */
   /* Keep the unsent queue sorted. */
-  pcb->unacked = seg->next;
+  *pseg = seg->next;
+  seg->flags |= TF_SEG_RECOVERY_REXMIT;
 
   cur_seg = &(pcb->unsent);
   while (*cur_seg &&
@@ -1762,10 +1831,6 @@ tcp_rexmit(struct tcp_pcb *pcb)
     pcb->unsent_oversize = 0;
   }
 #endif /* TCP_OVERSIZE */
-
-  if (pcb->nrtx < 0xFF) {
-    ++pcb->nrtx;
-  }
 
   /* Don't take any rtt measurements after retransmitting. */
   pcb->rttest = 0;
@@ -1789,13 +1854,28 @@ tcp_rexmit_fast(struct tcp_pcb *pcb)
   LWIP_ASSERT("tcp_rexmit_fast: invalid pcb", pcb != NULL);
 
   if (pcb->unacked != NULL && !(pcb->flags & TF_INFR)) {
+    struct tcp_seg *s;
     /* This is fast retransmit. Retransmit the first unacked segment. */
     LWIP_DEBUGF(TCP_FR_DEBUG,
                 ("tcp_receive: dupacks %"U16_F" (%"U32_F
                  "), fast retransmit %"U32_F"\n",
                  (u16_t)pcb->dupacks, pcb->lastack,
                  lwip_ntohl(pcb->unacked->tcphdr->seqno)));
+    /* NitroOS: a new recovery: no segment has been retransmitted in it yet */
+#if LWIP_TCP_SACK_IN
+    pcb->sack_high = pcb->lastack;
+#endif
+    for (s = pcb->unacked; s != NULL; s = s->next) {
+      s->flags &= (u8_t)~TF_SEG_RECOVERY_REXMIT;
+#if LWIP_TCP_SACK_IN
+      if ((s->flags & TF_SEG_SACKED) && TCP_SEQ_GT(lwip_ntohl(s->tcphdr->seqno) + TCP_TCPLEN(s), pcb->sack_high)) {
+        pcb->sack_high = lwip_ntohl(s->tcphdr->seqno) + TCP_TCPLEN(s);
+      }
+#endif
+    }
     if (tcp_rexmit(pcb) == ERR_OK) {
+      /* NitroOS: recovery ends when everything sent so far is acknowledged (RFC 6582) */
+      pcb->recover = pcb->snd_nxt;
       /* Set ssthresh to half of the minimum of the current
        * cwnd and the advertised window */
       pcb->ssthresh = LWIP_MIN(pcb->cwnd, pcb->snd_wnd) / 2;

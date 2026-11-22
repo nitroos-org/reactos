@@ -85,6 +85,9 @@ err_t            tcp_rexmit_rto_prepare(struct tcp_pcb *pcb);
 void             tcp_rexmit_rto_commit(struct tcp_pcb *pcb);
 void             tcp_rexmit_rto  (struct tcp_pcb *pcb);
 void             tcp_rexmit_fast (struct tcp_pcb *pcb);
+/* NitroOS: fast recovery retransmits a segment that is not the first one (LWIP_TCP_SACK_IN), or the first one
+   again after a partial acknowledgement (RFC 6582) */
+err_t            tcp_rexmit_hole (struct tcp_pcb *pcb, struct tcp_seg **pseg);
 u32_t            tcp_update_rcv_ann_wnd(struct tcp_pcb *pcb);
 err_t            tcp_process_refused_data(struct tcp_pcb *pcb);
 
@@ -277,6 +280,9 @@ struct tcp_seg {
                                                checksummed into 'chksum' */
 #define TF_SEG_OPTS_WND_SCALE   (u8_t)0x08U /* Include WND SCALE option (only used in SYN segments) */
 #define TF_SEG_OPTS_SACK_PERM   (u8_t)0x10U /* Include SACK Permitted option (only used in SYN segments) */
+/* NitroOS: loss recovery state of a segment on the unacked queue (LWIP_TCP_SACK_IN) */
+#define TF_SEG_SACKED           (u8_t)0x40U /* The remote host SACKed it */
+#define TF_SEG_RECOVERY_REXMIT  (u8_t)0x80U /* Retransmitted during the current fast recovery */
   struct tcp_hdr *tcphdr;  /* the TCP header */
 };
 
@@ -285,6 +291,7 @@ struct tcp_seg {
 #define LWIP_TCP_OPT_MSS        2
 #define LWIP_TCP_OPT_WS         3
 #define LWIP_TCP_OPT_SACK_PERM  4
+#define LWIP_TCP_OPT_SACK       5
 #define LWIP_TCP_OPT_TS         8
 
 #define LWIP_TCP_OPT_LEN_MSS    4

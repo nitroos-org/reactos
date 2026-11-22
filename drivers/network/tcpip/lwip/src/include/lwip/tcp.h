@@ -321,6 +321,17 @@ struct tcp_pcb {
   /* first byte following last rto byte */
   u32_t rto_end;
 
+  /* NitroOS: snd_nxt when fast recovery began; recovery ends when it is acknowledged (RFC 6582) */
+  u32_t recover;
+#if LWIP_TCP_SACK_IN
+  /* NitroOS: the end of the highest SACKed segment in the unacked queue (RFC 6675 HighACK/HighData) */
+  u32_t sack_high;
+  /* NitroOS: lost retransmission in fast recovery (tcp_fasttmr): lastack at the last fast tick, and for how many
+     fast ticks it has not moved */
+  u32_t recovery_ack;
+  u8_t recovery_ticks;
+#endif
+
   /* sender variables */
   u32_t snd_nxt;   /* next new seqno to be sent */
   u32_t snd_wl1, snd_wl2; /* Sequence and acknowledgement numbers of last
