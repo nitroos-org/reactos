@@ -50,6 +50,8 @@ typedef struct _DESKTOP
 #define DF_DESTROYED        0x00008000
 #define DF_DESKWNDDESTROYED 0x00010000
 #define DF_DYING            0x00020000
+/* ReactOS: a desktop the logon process made for itself (Winlogon, Screen-Saver), set once when it is created */
+#define DF_LOGONDESKTOP     0x00040000
 
 // Index offset for Desktop data. Should these be global?
 #define DT_GWL_PROCESSID 0
@@ -141,6 +143,9 @@ IntSetDesktopFocusMessageQueue(PDESKTOP pdesk, PTHREADINFO ptiNew);
 
 BOOL FASTCALL
 IntIsThreadOnInputDesktop(PTHREADINFO pti);
+
+BOOL FASTCALL
+IntIsLogonDesktopInput(VOID);
 
 PDESKTOP FASTCALL
 IntGetActiveDesktop(VOID);

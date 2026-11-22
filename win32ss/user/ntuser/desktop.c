@@ -1788,6 +1788,18 @@ IntIsThreadOnInputDesktop(PTHREADINFO pti)
 }
 
 /*
+ * Does a desktop of the logon process have the input (the logon or unlock dialog, the Security screen,
+ * the screen saver)? Then a program of another desktop learns nothing of the keys: no hot key of it
+ * fires. With an ordinary second desktop (CreateDesktop + SwitchDesktop) Windows lets the hot keys of
+ * the other desktops fire (measured on Windows Server 2022, rows V4 / W-H1 / W-H2).
+ */
+BOOL FASTCALL
+IntIsLogonDesktopInput(VOID)
+{
+    return gpdeskInputDesktop && (gpdeskInputDesktop->dwDTFlags & DF_LOGONDESKTOP);
+}
+
+/*
  * Every desktop has its own foreground queue (ActiveMessageQueue), always a queue of a thread
  * of that desktop. The foreground queue of the INPUT desktop is the global foreground
  * (gpqForeground): it routes the keyboard and the mouse capture. The others are kept for the
@@ -3223,6 +3235,19 @@ IntCreateDesktop(
     {
         ERR("Failed to reference desktop object\n");
         goto Quit;
+    }
+
+    /* The desktops the logon process makes for itself (the Winlogon desktop: logon, lock, Security screen;
+       the Screen-Saver desktop) get the secure treatment while they have the input: nothing of what is typed
+       there reaches a program of another desktop, not even through the hot keys and raw input that Windows
+       leaves open between ordinary desktops. Decided once, here, from who creates the desktop: only the
+       process registered by CSRSS as the logon process can be that creator (a desktop of the same name made by
+       anyone else is an ordinary desktop, and the flag never changes afterwards). The application desktop
+       "Default" is made by the logon process too and is the ordinary desktop of the session. */
+    if (gpidLogon && PsGetCurrentProcessId() == gpidLogon && pdesk->pDeskInfo &&
+        _wcsicmp(pdesk->pDeskInfo->szDesktopName, L"Default") != 0)
+    {
+        pdesk->dwDTFlags |= DF_LOGONDESKTOP;
     }
 
     /* Get the desktop window class. The thread desktop does not belong to any desktop

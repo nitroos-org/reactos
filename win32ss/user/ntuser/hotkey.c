@@ -189,12 +189,39 @@ IsHotKey(UINT fsModifiers, WORD wVk)
  * Sends WM_HOTKEY message if given keys are hotkey
  */
 /*
- * A hot key is the key of a program of the desktop that has the input. One registered by a
- * program of another desktop does not fire, and the key goes where it would go without it: a
- * program of the application desktop must not take, or learn, keys typed on the lock screen or
- * the Security screen. Winlogon's own keys (Ctrl+Alt+Del, Ctrl+Shift+Esc, Win+L, Win+U on its
- * SAS window) work on every desktop, the system's own (negative ids) are checked where handled.
+ * Which hot keys can fire while a desktop has the input (measured on Windows Server 2022, rows V4, W-H1,
+ * W-H2 and the InputDesktopRouting apitest run there):
+ * - those of the programs of the desktop that has the input;
+ * - while an ordinary desktop (CreateDesktop + SwitchDesktop) has it, also those of a program on another
+ *   desktop whose process has a thread on the desktop that has the input (the program that made and
+ *   switched to that desktop): its hot keys fire and take the key. The hot keys of any other program of
+ *   another desktop do not fire, and the key goes where it would go without them;
+ * - while a desktop of the logon process has it (logon or unlock dialog, Security screen, screen saver):
+ *   only those of that desktop. A program of the application desktop must not take, or learn, keys
+ *   typed there (no WM_HOTKEY on the credential UI, row W-H1).
+ * Winlogon's own keys (Ctrl+Alt+Del, Ctrl+Shift+Esc, Win+L, Win+U on its SAS window) work on every
+ * desktop, the system's own (negative ids) are checked where handled.
  */
+static BOOL FASTCALL
+IntHotKeyOwnerCanFire(PTHREADINFO ptiOwner, PDESKTOP pdeskOwner)
+{
+    PDESKTOP pdeskInput = IntGetActiveDesktop();
+    PTHREADINFO pti;
+
+    if (!pdeskOwner || !ptiOwner || !pdeskInput)
+        return FALSE;
+    if (pdeskOwner == pdeskInput)
+        return TRUE;
+    if (IntIsLogonDesktopInput() || !ptiOwner->ppi)
+        return FALSE;
+    for (pti = ptiOwner->ppi->ptiList; pti; pti = pti->ptiSibling)
+    {
+        if (pti->rpdesk == pdeskInput && !(pti->TIF_flags & TIF_INCLEANUP))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static BOOL FASTCALL
 IntHotKeyOnInputDesktop(PHOT_KEY pHotKey)
 {
@@ -202,13 +229,17 @@ IntHotKeyOnInputDesktop(PHOT_KEY pHotKey)
     {
         if (hwndSAS && UserHMGetHandle(pHotKey->pWnd) == hwndSAS)
             return TRUE;
-        return pHotKey->pWnd->head.rpdesk && pHotKey->pWnd->head.rpdesk == IntGetActiveDesktop();
+        /* WM_SETHOTKEY activates its window through the input desktop's active window: only a window
+           of the input desktop (not measured on Windows across desktops: kept as before) */
+        if (IsWindowHotKey(pHotKey))
+            return pHotKey->pWnd->head.rpdesk && pHotKey->pWnd->head.rpdesk == IntGetActiveDesktop();
+        return IntHotKeyOwnerCanFire(pHotKey->pWnd->head.pti, pHotKey->pWnd->head.rpdesk);
     }
 
     if (pHotKey->id < 0 && pHotKey->id != IDHK_WNDKEY)
         return TRUE;
 
-    return IntIsThreadOnInputDesktop(pHotKey->pti);
+    return pHotKey->pti && IntHotKeyOwnerCanFire(pHotKey->pti, pHotKey->pti->rpdesk);
 }
 
 /* The hot key that this key press triggers, of those that can fire now */
