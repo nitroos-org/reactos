@@ -315,9 +315,12 @@ SepMandatoryAllowedAccess(
      * The object opens (SeAccessCheck) pass descriptors that were not
      * captured here (file systems read theirs from the disk): every ACE must
      * lie within the ACL; the walk stops at the first one that does not, and
-     * the label found so far (or the implicit one) counts.
+     * the label found so far (or the implicit one) counts. Most descriptors
+     * have no SACL (every object opens through here): the control bit says
+     * so without the lookup.
      */
-    if (NT_SUCCESS(RtlGetSaclSecurityDescriptor(SecurityDescriptor, &Present, &Sacl, &Defaulted)) &&
+    if ((((PISECURITY_DESCRIPTOR)SecurityDescriptor)->Control & SE_SACL_PRESENT) &&
+        NT_SUCCESS(RtlGetSaclSecurityDescriptor(SecurityDescriptor, &Present, &Sacl, &Defaulted)) &&
         Present && Sacl != NULL && Sacl->AclSize >= sizeof(ACL))
     {
         AclEnd = (PUCHAR)Sacl + Sacl->AclSize;
@@ -2402,10 +2405,11 @@ SeAccessCheck(
      */
     ASSERT(Token != NULL);
     MandatoryAllowed = SepMandatoryAllowedAccess(Token, SecurityDescriptor, GenericMapping);
-    CallerGrantedAccess = PreviouslyGrantedAccess;
-    RtlMapGenericMask(&CallerGrantedAccess, GenericMapping);
+    CallerGrantedAccess = 0;
     if (MandatoryAllowed != MAXULONG)
     {
+        CallerGrantedAccess = PreviouslyGrantedAccess;
+        RtlMapGenericMask(&CallerGrantedAccess, GenericMapping);
         MappedAccess = DesiredAccess;
         RtlMapGenericMask(&MappedAccess, GenericMapping);
         if (MappedAccess & ~(MAXIMUM_ALLOWED | MandatoryAllowed))
