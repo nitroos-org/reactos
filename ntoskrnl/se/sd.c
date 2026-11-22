@@ -1771,6 +1771,42 @@ SepAssignSecurity(
         Token = SubjectContext->PrimaryToken;
     }
 
+    /*
+     * An explicit label from the creator may not be above the creator's own
+     * level (inherit-only ones included) unless SeRelabelPrivilege is enabled:
+     * "Windows Integrity Mechanism Design", How to create an object with a
+     * specific mandatory label ("the integrity level on the new object must be
+     * less than or equal to the integrity level of the creating process"),
+     * Inheritance and explicit labels, Inherit-only restriction. The status is
+     * the one measured for an explicit process or thread label above the
+     * creator (STATUS_PRIVILEGE_NOT_HELD, SeAssignProcessObjectLabel, which
+     * keeps deciding for token, process and thread objects: CreatorLabel
+     * FALSE). Labels inherited from the parent are not the creator's and are
+     * not checked.
+     */
+    if (CreatorLabel && ExplicitDescriptor != NULL && (ExplicitDescriptor->Control & SE_SACL_PRESENT))
+    {
+        LUID_AND_ATTRIBUTES Relabel;
+        BOOLEAN HasLabel;
+        ULONG ExplicitLevel;
+
+        Status = SepGetDescriptorLabel(ExplicitDescriptor, &HasLabel, &ExplicitLevel, NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            SeUnlockSubjectContext(SubjectContext);
+            return Status;
+        }
+
+        Relabel.Luid = SeRelabelPrivilege;
+        Relabel.Attributes = SE_PRIVILEGE_ENABLED;
+        if (HasLabel && ExplicitLevel > Token->IntegrityLevel &&
+            !SepPrivilegeCheck(Token, &Relabel, 1, PRIVILEGE_SET_ALL_NECESSARY, UserMode))
+        {
+            SeUnlockSubjectContext(SubjectContext);
+            return STATUS_PRIVILEGE_NOT_HELD;
+        }
+    }
+
     /* Inherit the Owner SID */
     if (ExplicitDescriptor != NULL)
     {
