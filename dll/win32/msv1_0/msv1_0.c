@@ -97,6 +97,60 @@ IsTrustedClient(
 
 
 /*
+ * Do the two NT names open the same file (same volume serial number and file index)? Returns FALSE when either file
+ * cannot be opened or identified; *Same is only valid then.
+ */
+static
+BOOL
+MsvpIsSameFile(
+    _In_ PCUNICODE_STRING Name1,
+    _In_ PCWSTR Name2,
+    _Out_ PBOOL Same)
+{
+    UNICODE_STRING Names[2];
+    ULONG Serial[2];
+    LARGE_INTEGER Index[2];
+    ULONG i;
+
+    RtlCopyMemory(&Names[0], Name1, sizeof(UNICODE_STRING));
+    RtlInitUnicodeString(&Names[1], Name2);
+
+    for (i = 0; i < 2; i++)
+    {
+        OBJECT_ATTRIBUTES ObjectAttributes;
+        IO_STATUS_BLOCK IoStatusBlock;
+        FILE_INTERNAL_INFORMATION Internal;
+        FILE_FS_VOLUME_INFORMATION VolumeInfo;
+        HANDLE File;
+        NTSTATUS Status;
+
+        InitializeObjectAttributes(&ObjectAttributes, &Names[i], OBJ_CASE_INSENSITIVE, NULL, NULL);
+        Status = NtOpenFile(&File, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &ObjectAttributes, &IoStatusBlock,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_SYNCHRONOUS_IO_NONALERT);
+        if (!NT_SUCCESS(Status))
+            return FALSE;
+
+        Status = NtQueryInformationFile(File, &IoStatusBlock, &Internal, sizeof(Internal), FileInternalInformation);
+        if (NT_SUCCESS(Status))
+        {
+            Index[i] = Internal.IndexNumber;
+            /* the label is not needed: only the fixed part is read, the call may report an overflow for the label */
+            Status = NtQueryVolumeInformationFile(File, &IoStatusBlock, &VolumeInfo, sizeof(VolumeInfo), FileFsVolumeInformation);
+            if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_OVERFLOW)
+                Serial[i] = VolumeInfo.VolumeSerialNumber;
+            else
+                Status = STATUS_UNSUCCESSFUL;
+        }
+        NtClose(File);
+        if (!NT_SUCCESS(Status))
+            return FALSE;
+    }
+
+    *Same = Serial[0] == Serial[1] && Index[0].QuadPart == Index[1].QuadPart;
+    return TRUE;
+}
+
+/*
  * Is this the logon of the logon dialog on the console? Measured on Windows Server 2022:
  * a blank-password account logs on through the logon dialog on the console, while every LogonUser type, also from a
  * process in the console session and from LocalSystem (LsaRegisterLogonProcess, SeTcbPrivilege, Interactive, any token
@@ -122,6 +176,7 @@ MsvpIsConsoleLogonClient(
     WCHAR Drive[3];
     ULONG Length;
     UINT Chars;
+    BOOL Same;
     NTSTATUS Status;
 
     if (LogonType != Interactive && LogonType != Unlock)
@@ -140,12 +195,18 @@ MsvpIsConsoleLogonClient(
     if (!NT_SUCCESS(Status) || SessionInfo.SessionId != SharedUserData->ActiveConsoleId)
         return FALSE;
 
-    /* The client is winlogon.exe of the system directory: compare the NT names */
+    /* The client is winlogon.exe of the system directory */
     Status = NtQueryInformationProcess(ProcessHandle, ProcessImageFileName,
                                        &ImageName, sizeof(ImageName), &Length);
     if (!NT_SUCCESS(Status))
         return FALSE;
 
+    /* The same file, not the same string: the image name and the name of the system directory can reach the file
+       through different device names (symbolic link hops, the boot device named differently by another disk driver) */
+    if (MsvpIsSameFile(&ImageName.String, L"\\SystemRoot\\system32\\winlogon.exe", &Same))
+        return Same;
+
+    /* A file that cannot be identified falls back to the comparison of the NT names */
     Chars = GetSystemDirectoryW(SystemDir, ARRAYSIZE(SystemDir));
     if (Chars < 3 || Chars >= ARRAYSIZE(SystemDir) || SystemDir[1] != L':')
         return FALSE;
