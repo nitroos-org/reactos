@@ -28,6 +28,7 @@ u8_t LibIp6HopLimit(struct netif *netif, u8_t hl);
 int LibNd6RaAccept(struct netif *netif);
 u8_t LibNd6DadAttempts(struct netif *netif);
 /* ip/transport/tcp/iid6.c */
+u32_t TCPConnectionHash(const ip_addr_t *LocalIp, u16_t LocalPort, const ip_addr_t *RemoteIp, u16_t RemotePort);
 int LibNd6SlaacAddress(struct netif *netif, const ip6_addr_t *prefix, ip6_addr_t *addr);
 int LibNd6DadFailed(struct netif *netif, s8_t index);
 /* ip/transport/tcp/if6.c */
