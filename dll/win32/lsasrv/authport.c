@@ -257,6 +257,18 @@ LsapHandlePortConnection(PLSA_API_MSG RequestMsg)
 
         RequestMsg->ConnectInfo.Status = Status;
     }
+    else
+    {
+        /* A connection without a logon context (secur32 opens one per process for the logon session and
+         * policy notification requests) still has a communication port handle here: it needs an entry too,
+         * or the handle is never closed. It has no client process handle, which the requests of a logon
+         * process need */
+        LogonContext = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(LSAP_LOGON_CONTEXT));
+        if (LogonContext == NULL)
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        else
+            LogonContext->ContextId = LsapNextLogonContextId++;
+    }
 
     if (NT_SUCCESS(Status))
     {
@@ -281,7 +293,8 @@ LsapHandlePortConnection(PLSA_API_MSG RequestMsg)
         /* The connection never existed, release what the check opened */
         if (LogonContext != NULL)
         {
-            NtClose(LogonContext->ClientProcessHandle);
+            if (LogonContext->ClientProcessHandle != NULL)
+                NtClose(LogonContext->ClientProcessHandle);
             RtlFreeHeap(RtlGetProcessHeap(), 0, LogonContext);
         }
         return Status;
@@ -290,7 +303,8 @@ LsapHandlePortConnection(PLSA_API_MSG RequestMsg)
     /* A rejected connection has no handle and no use for the context */
     if (Accept == FALSE && LogonContext != NULL)
     {
-        NtClose(LogonContext->ClientProcessHandle);
+        if (LogonContext->ClientProcessHandle != NULL)
+            NtClose(LogonContext->ClientProcessHandle);
         RtlFreeHeap(RtlGetProcessHeap(), 0, LogonContext);
         LogonContext = NULL;
     }
@@ -393,8 +407,9 @@ AuthPortThreadRoutine(PVOID Param)
             default:
                 TRACE("Received request (ApiNumber: %lu)\n", RequestMsg.ApiNumber);
 
-                /* These requests need the context of the connection */
-                if (LogonContext == NULL &&
+                /* These requests need the logon context of the connection (a connection made without one has
+                 * an entry without a client process) */
+                if ((LogonContext == NULL || LogonContext->ClientProcessHandle == NULL) &&
                     (RequestMsg.ApiNumber == LSASS_REQUEST_CALL_AUTHENTICATION_PACKAGE ||
                      RequestMsg.ApiNumber == LSASS_REQUEST_LOGON_USER ||
                      RequestMsg.ApiNumber == LSASS_REQUEST_LOOKUP_AUTHENTICATION_PACKAGE ||
