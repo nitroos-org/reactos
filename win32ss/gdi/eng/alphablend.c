@@ -54,6 +54,16 @@ EngAlphaBlend(
     OutputRect = *DestRect;
     RECTL_vMakeWellOrdered(&OutputRect);
 
+    /* The destination comes from the caller's coordinates; its width and height divide when a
+       clipped part is scaled. A rectangle across more than MAXLONG pixels wrapped them (to -1, and
+       INT_MIN / -1 is a divide error): refuse it. */
+    if (((LONGLONG)OutputRect.right - OutputRect.left > MAXLONG) ||
+        ((LONGLONG)OutputRect.bottom - OutputRect.top > MAXLONG))
+    {
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     /* Validate input */
     InputRect = *SourceRect;
     RECTL_vMakeWellOrdered(&InputRect);
@@ -139,10 +149,10 @@ EngAlphaBlend(
             if (RECTL_bIntersectRect(&CombinedRect, &OutputRect, &ClipRect))
             {
                 /* take into acount clipping results when calculating new input rect (scaled to input rect size) */
-                Rect.left = InputRect.left + (CombinedRect.left - OutputRect.left) * (InputRect.right - InputRect.left) / (OutputRect.right - OutputRect.left);
-                Rect.right = InputRect.right + (CombinedRect.right - OutputRect.right) * (InputRect.right - InputRect.left) / (OutputRect.right - OutputRect.left);
-                Rect.top = InputRect.top + (CombinedRect.top - OutputRect.top) * (InputRect.bottom - InputRect.top) / (OutputRect.bottom - OutputRect.top);
-                Rect.bottom = InputRect.bottom + (CombinedRect.bottom - OutputRect.bottom) * (InputRect.bottom - InputRect.top) / (OutputRect.bottom - OutputRect.top);
+                Rect.left = InputRect.left + (LONG)((LONGLONG)(CombinedRect.left - OutputRect.left) * (InputRect.right - InputRect.left) / (OutputRect.right - OutputRect.left));
+                Rect.right = InputRect.right + (LONG)((LONGLONG)(CombinedRect.right - OutputRect.right) * (InputRect.right - InputRect.left) / (OutputRect.right - OutputRect.left));
+                Rect.top = InputRect.top + (LONG)((LONGLONG)(CombinedRect.top - OutputRect.top) * (InputRect.bottom - InputRect.top) / (OutputRect.bottom - OutputRect.top));
+                Rect.bottom = InputRect.bottom + (LONG)((LONGLONG)(CombinedRect.bottom - OutputRect.bottom) * (InputRect.bottom - InputRect.top) / (OutputRect.bottom - OutputRect.top));
 
                 /* Aplha blend one rect */
                 Ret = DibFunctionsForBitmapFormat[OutputObj->iBitmapFormat].DIB_AlphaBlend(
@@ -167,10 +177,10 @@ EngAlphaBlend(
                     if (RECTL_bIntersectRect(&CombinedRect, &OutputRect, &ClipRect))
                     {
                         /* take into acount clipping results when calculating new input rect (scaled to input rect size) */
-                        Rect.left = InputRect.left + (CombinedRect.left - OutputRect.left) * (InputRect.right - InputRect.left) / (OutputRect.right - OutputRect.left);
-                        Rect.right = InputRect.right + (CombinedRect.right - OutputRect.right) * (InputRect.right - InputRect.left) / (OutputRect.right - OutputRect.left);
-                        Rect.top = InputRect.top + (CombinedRect.top - OutputRect.top) * (InputRect.bottom - InputRect.top) / (OutputRect.bottom - OutputRect.top);
-                        Rect.bottom = InputRect.bottom + (CombinedRect.bottom - OutputRect.bottom) * (InputRect.bottom - InputRect.top) / (OutputRect.bottom - OutputRect.top);
+                        Rect.left = InputRect.left + (LONG)((LONGLONG)(CombinedRect.left - OutputRect.left) * (InputRect.right - InputRect.left) / (OutputRect.right - OutputRect.left));
+                        Rect.right = InputRect.right + (LONG)((LONGLONG)(CombinedRect.right - OutputRect.right) * (InputRect.right - InputRect.left) / (OutputRect.right - OutputRect.left));
+                        Rect.top = InputRect.top + (LONG)((LONGLONG)(CombinedRect.top - OutputRect.top) * (InputRect.bottom - InputRect.top) / (OutputRect.bottom - OutputRect.top));
+                        Rect.bottom = InputRect.bottom + (LONG)((LONGLONG)(CombinedRect.bottom - OutputRect.bottom) * (InputRect.bottom - InputRect.top) / (OutputRect.bottom - OutputRect.top));
 
                         /* Alpha blend one rect */
                         Ret = DibFunctionsForBitmapFormat[OutputObj->iBitmapFormat].DIB_AlphaBlend(
