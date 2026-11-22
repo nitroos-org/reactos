@@ -2423,9 +2423,9 @@ NtSaveKeyEx(IN HANDLE KeyHandle,
     DPRINT("NtSaveKeyEx(0x%p, 0x%p, %lu)\n", KeyHandle, FileHandle, Flags);
 
     /* Verify the flags */
+    /* Windows Server 2022: 1 and 2 only; 0, 3, 4 (REG_NO_COMPRESSION alone), 5, 6, 7, 8 are invalid parameters */
     if ((Flags != REG_STANDARD_FORMAT)
-        && (Flags != REG_LATEST_FORMAT)
-        && (Flags != REG_NO_COMPRESSION))
+        && (Flags != REG_LATEST_FORMAT))
     {
         /* Only one of these values can be specified */
         return STATUS_INVALID_PARAMETER;

@@ -5479,14 +5479,15 @@ RegSaveKeyA(HKEY hKey,
 
 
 /************************************************************************
- *  RegSaveKeyW
+ *  RegSaveKeyInternal (RegSaveKeyW and RegSaveKeyExW)
  *
  * @implemented
  */
-LONG WINAPI
-RegSaveKeyW(HKEY hKey,
-            LPCWSTR lpFile,
-            LPSECURITY_ATTRIBUTES lpSecurityAttributes)
+static LONG
+RegSaveKeyInternal(HKEY hKey,
+                   LPCWSTR lpFile,
+                   LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+                   DWORD Flags)
 {
     PSECURITY_DESCRIPTOR SecurityDescriptor = NULL;
     OBJECT_ATTRIBUTES ObjectAttributes;
@@ -5541,8 +5542,9 @@ RegSaveKeyW(HKEY hKey,
         goto Cleanup;
     }
 
-    Status = NtSaveKey(KeyHandle,
-                       FileHandle);
+    Status = NtSaveKeyEx(KeyHandle,
+                         FileHandle,
+                         Flags);
     NtClose (FileHandle);
 
 Cleanup:
@@ -5554,6 +5556,20 @@ Cleanup:
     }
 
     return ERROR_SUCCESS;
+}
+
+
+/************************************************************************
+ *  RegSaveKeyInternal (RegSaveKeyW and RegSaveKeyExW)
+ *
+ * @implemented
+ */
+LONG WINAPI
+RegSaveKeyW(HKEY hKey,
+            LPCWSTR lpFile,
+            LPSECURITY_ATTRIBUTES lpSecurityAttributes)
+{
+    return RegSaveKeyInternal(hKey, lpFile, lpSecurityAttributes, REG_STANDARD_FORMAT);
 }
 
 
@@ -5593,7 +5609,7 @@ RegSaveKeyExA(HKEY hKey,
 /************************************************************************
  *  RegSaveKeyExW
  *
- * @unimplemented
+ * @implemented
  */
 LONG
 WINAPI
@@ -5602,21 +5618,8 @@ RegSaveKeyExW(HKEY hKey,
               LPSECURITY_ATTRIBUTES lpSecurityAttributes,
               DWORD Flags)
 {
-    switch (Flags)
-    {
-        case REG_STANDARD_FORMAT:
-        case REG_LATEST_FORMAT:
-        case REG_NO_COMPRESSION:
-            break;
-        default:
-            return ERROR_INVALID_PARAMETER;
-    }
-
-    FIXME("RegSaveKeyExW(): Flags ignored!\n");
-
-    return RegSaveKeyW(hKey,
-                       lpFile,
-                       lpSecurityAttributes);
+    /* the flags are checked by NtSaveKeyEx after the file is made, as on Windows */
+    return RegSaveKeyInternal(hKey, lpFile, lpSecurityAttributes, Flags);
 }
 
 
