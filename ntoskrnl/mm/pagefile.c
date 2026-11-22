@@ -1403,10 +1403,6 @@ EarlyQuit:
 
     MmSwapSpaceMessage = FALSE;
 
-    /* The registry value is read, but nothing clears the file yet (separate ticket): say so once */
-    if (MmZeroPageFile && (MmNumberOfPagingFiles == 1))
-        DPRINT1("MM: ClearPageFileAtShutdown is set, but paging files are not cleared at shutdown\n");
-
     /* The thread that grows paging files toward their maximum */
     MiStartPagingFileGrowthThread();
 

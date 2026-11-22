@@ -305,6 +305,72 @@ MiShutdownLogLostWrite(
     IoWriteErrorLogEntry(Packet);
 }
 
+/*
+ * ClearPageFileAtShutdown (HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management = 1): the contents
+ * of the paging files are overwritten with zeros before the system powers off, so that no private memory of the
+ * session stays on the disk. The writer is stopped and nothing uses the files any more (the file objects stay
+ * referenced until MmShutdownSystem(1)), the file systems are still up. It runs before the file is closed: the close
+ * deletes it. The whole file is cleared: a slot that a process gave back keeps its old data (and its tag is 0 again).
+ */
+#define MI_CLEAR_CHUNK_PAGES 16
+
+static
+VOID
+MiClearPagingFile(
+    _In_ PMMPAGING_FILE PagingFile)
+{
+    PVOID Zeros;
+    PMDL Mdl;
+    PFN_NUMBER Chunk, Chunks;
+    ULONG Cleared = 0, Failed = 0;
+
+    if (PagingFile->FileObject == NULL || PagingFile->FileObject->DeviceObject == NULL)
+        return;
+
+    Zeros = ExAllocatePoolWithTag(NonPagedPool, MI_CLEAR_CHUNK_PAGES * PAGE_SIZE, TAG_MM);
+    if (Zeros == NULL)
+        return;
+    RtlZeroMemory(Zeros, MI_CLEAR_CHUNK_PAGES * PAGE_SIZE);
+    Mdl = IoAllocateMdl(Zeros, MI_CLEAR_CHUNK_PAGES * PAGE_SIZE, FALSE, FALSE, NULL);
+    if (Mdl == NULL)
+    {
+        ExFreePoolWithTag(Zeros, TAG_MM);
+        return;
+    }
+    MmBuildMdlForNonPagedPool(Mdl);
+
+    Chunks = (PagingFile->Size + MI_CLEAR_CHUNK_PAGES - 1) / MI_CLEAR_CHUNK_PAGES;
+    for (Chunk = 0; Chunk < Chunks; Chunk++)
+    {
+        LARGE_INTEGER Offset;
+        IO_STATUS_BLOCK Iosb;
+        KEVENT Event;
+        NTSTATUS Status;
+        /* The last chunk does not reach beyond the end of the file */
+        Offset.QuadPart = (LONGLONG)Chunk * MI_CLEAR_CHUNK_PAGES * PAGE_SIZE;
+        if (Chunk * MI_CLEAR_CHUNK_PAGES + MI_CLEAR_CHUNK_PAGES > PagingFile->Size)
+            Offset.QuadPart = ((LONGLONG)PagingFile->Size - MI_CLEAR_CHUNK_PAGES) * PAGE_SIZE;
+        if (Offset.QuadPart < 0)
+            Offset.QuadPart = 0;
+
+        KeInitializeEvent(&Event, NotificationEvent, FALSE);
+        Status = IoSynchronousPageWrite(PagingFile->FileObject, Mdl, &Offset, &Event, &Iosb);
+        if (Status == STATUS_PENDING)
+        {
+            KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+            Status = Iosb.Status;
+        }
+        if (NT_SUCCESS(Status))
+            Cleared++;
+        else
+            Failed++;
+    }
+
+    IoFreeMdl(Mdl);
+    ExFreePoolWithTag(Zeros, TAG_MM);
+    DPRINT1("MM: ClearPageFileAtShutdown: %lu chunks of %lu pages cleared, %lu failed\n", Cleared, (ULONG)MI_CLEAR_CHUNK_PAGES, Failed);
+}
+
 VOID
 MiShutdownSystem(VOID)
 {
@@ -321,6 +387,10 @@ MiShutdownSystem(VOID)
     /* Loop through all the paging files */
     for (i = 0; i < MmNumberOfPagingFiles; i++)
     {
+        /* Nothing uses the file any more: clear it before it is closed (the close deletes it) when the registry asks for it */
+        if (MmZeroPageFile)
+            MiClearPagingFile(MmPagingFile[i]);
+
         /* Free page file name */
         ASSERT(MmPagingFile[i]->PageFileName.Buffer != NULL);
         ExFreePoolWithTag(MmPagingFile[i]->PageFileName.Buffer, TAG_MM);
@@ -422,6 +492,7 @@ MiShutdownSystem(VOID)
         DPRINT1("MM: shutdown gave up %lu page writes (the pages stay dirty, the file systems' own shutdown flush still tries them once)\n",
                 MiShutdownGivenUpPages);
     }
+
 }
 
 VOID
