@@ -127,6 +127,14 @@ KdDebuggerInitialize0(IN PLOADER_PARAMETER_BLOCK LoaderBlock OPTIONAL)
     PSTR CommandLine, PortString, BaudString;
     ULONG Value;
 
+    /*
+     * Without a loader block (KD enabled again, or by a bug check after a
+     * CRASHDEBUG boot) keep the port the boot options gave us, instead of
+     * falling back to the default one.
+     */
+    if (!LoaderBlock && KdComPort.Address)
+        return STATUS_SUCCESS;
+
     /* Check if we have a LoaderBlock */
     if (LoaderBlock)
     {
