@@ -350,6 +350,11 @@ BasepGetNamedObjectDirectory(VOID);
 
 NTSTATUS
 WINAPI
+BasepCheckNamedObjectDirectory(
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes);
+
+NTSTATUS
+WINAPI
 BasepMapFile(IN LPCWSTR lpApplicationName,
              OUT PHANDLE hSection,
              OUT PUNICODE_STRING ApplicationName);

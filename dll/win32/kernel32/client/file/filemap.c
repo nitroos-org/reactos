@@ -127,14 +127,18 @@ CreateFileMappingW(HANDLE hFile,
         }
     }
 
-    /* Now create the actual section */
-    Status = NtCreateSection(&SectionHandle,
-                             DesiredAccess,
-                             ObjectAttributes,
-                             SectionSize,
-                             flProtect,
-                             Attributes,
-                             hFile);
+    /* Now create the actual section (a named one needs the named object directory) */
+    Status = BasepCheckNamedObjectDirectory(ObjectAttributes);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtCreateSection(&SectionHandle,
+                                 DesiredAccess,
+                                 ObjectAttributes,
+                                 SectionSize,
+                                 flProtect,
+                                 Attributes,
+                                 hFile);
+    }
     if (!NT_SUCCESS(Status))
     {
         /* We failed */
@@ -332,7 +336,9 @@ OpenFileMappingW(IN DWORD dwDesiredAccess,
     }
 
     /* Open the section */
-    Status = NtOpenSection(&SectionHandle, dwDesiredAccess, &ObjectAttributes);
+    Status = BasepCheckNamedObjectDirectory(&ObjectAttributes);
+    if (NT_SUCCESS(Status))
+        Status = NtOpenSection(&SectionHandle, dwDesiredAccess, &ObjectAttributes);
     if (!NT_SUCCESS(Status))
     {
         /* We failed */

@@ -24,6 +24,9 @@
 UNICODE_STRING Restricted = RTL_CONSTANT_STRING(L"Restricted");
 BOOL bIsFileApiAnsi = TRUE; // set the file api to ansi or oem
 
+/* Why the named object directory could not be opened (BaseNamedObjectDirectory is NULL) */
+static NTSTATUS BaseNamedObjectDirectoryStatus = STATUS_SUCCESS;
+
 PRTL_CONVERT_STRING Basep8BitStringToUnicodeString = RtlAnsiStringToUnicodeString;
 PRTL_CONVERT_STRINGA BasepUnicodeStringTo8BitString = RtlUnicodeStringToAnsiString;
 PRTL_COUNT_STRING BasepUnicodeStringTo8BitSize = BasepUnicodeStringToAnsiSize;
@@ -184,7 +187,10 @@ BaseGetNamedObjectDirectory(
      * Windows Server 2022 (an Untrusted process: ERROR_ACCESS_DENIED for every
      * create and for an open for SYNCHRONIZE alone).
      */
-    if (NT_SUCCESS(Status)) BaseNamedObjectDirectory = BnoHandle;
+    if (NT_SUCCESS(Status))
+        BaseNamedObjectDirectory = BnoHandle;
+    else
+        BaseNamedObjectDirectoryStatus = Status;
 
 Quickie:
 
@@ -201,6 +207,23 @@ Quickie:
     }
 
     *DirectoryHandle = BaseNamedObjectDirectory;
+    return BaseNamedObjectDirectory ? STATUS_SUCCESS : BaseNamedObjectDirectoryStatus;
+}
+
+/*
+ * A named object is created or opened relative to the named object directory:
+ * without one (BaseGetNamedObjectDirectory failed, e.g. for a process below
+ * the directory's label) the create or open fails with the status of that
+ * failure, as on Windows (an Untrusted process: ERROR_ACCESS_DENIED), instead
+ * of passing a relative name without a root directory to the kernel.
+ */
+NTSTATUS
+WINAPI
+BasepCheckNamedObjectDirectory(
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes)
+{
+    if (ObjectAttributes && ObjectAttributes->ObjectName && !ObjectAttributes->RootDirectory)
+        return NT_SUCCESS(BaseNamedObjectDirectoryStatus) ? STATUS_ACCESS_DENIED : BaseNamedObjectDirectoryStatus;
     return STATUS_SUCCESS;
 }
 
