@@ -315,6 +315,11 @@ struct tcp_pcb {
   u8_t giveup_armed;
   u32_t giveup_start;
 #endif
+#ifdef NITRO_TCP_SYN_RST_RETRIES
+  /* NitroOS: resets answered to our SYN so far, and whether the SYN is to be sent again (tcp_syn_rst_retry) */
+  u8_t syn_rst_count;
+  u8_t syn_rst_pending;
+#endif
 
   /* fast retransmit/recovery */
   u8_t dupacks;

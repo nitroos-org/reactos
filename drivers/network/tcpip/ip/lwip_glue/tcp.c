@@ -912,7 +912,17 @@ LibTCPFullListenerSyn(struct pbuf *p, struct netif *inp, const ip4_addr_t *Src, 
     Loopback = ip4_addr_isloopback(Dest) || ip4_addr_eq(Src, Dest);
     if (Loopback)
     {
-        if (LibTCPTakeDroppedSyn(Src, SrcPort, DestPort, Now))
+#ifdef NITRO_TCP_SYN_RST_RETRIES
+        /* The connecting side sends the SYN again after each reset and gives up after the last one (lwipopts.h):
+           refused at once, the attempt fails after about 2 s as on Windows (a connect that finds room during its
+           retries is accepted). Dropping the first SYN as well made the attempt alternate between a dropped SYN
+           and a reset, and run into the connect timeout (21 s, WSAETIMEDOUT) */
+        BOOLEAN Refuse = TRUE;
+#else
+        BOOLEAN Refuse = LibTCPTakeDroppedSyn(Src, SrcPort, DestPort, Now);
+#endif
+
+        if (Refuse)
         {
             ip_addr_t SrcAddr, DestAddr;
 
