@@ -13,6 +13,74 @@
    when no query brought an address */
 BOOL g_bQuietTimeout = FALSE;
 
+/* The query again over TCP (RFC 1035, 4.2.2: a two byte length before each message), for an answer that did not
+   fit a datagram (the TC bit): Windows' nslookup does the same. Returns the length of the answer or 0 when the
+   exchange failed (the truncated datagram answer is then what there is). */
+static ULONG SendRequestTcp( PCHAR pInBuffer,
+                             ULONG InBufferLength,
+                             PCHAR pOutBuffer,
+                             ULONG OutBufferLength,
+                             PSOCKADDR pDest,
+                             int DestLen )
+{
+    SOCKET s;
+    UCHAR Len[2];
+    ULONG Got, Want, Total = 0;
+    int j;
+    DWORD Tmo = (State.timeout ? State.timeout : 1) * 1000 * 4;
+    PCHAR pTmp = HeapAlloc( GetProcessHeap(), 0, OutBufferLength );
+
+    if( !pTmp ) return 0;
+
+    s = socket( pDest->sa_family, SOCK_STREAM, IPPROTO_TCP );
+    if( s == INVALID_SOCKET )
+    {
+        HeapFree( GetProcessHeap(), 0, pTmp );
+        return 0;
+    }
+
+    setsockopt( s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&Tmo, sizeof(Tmo) );
+    setsockopt( s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&Tmo, sizeof(Tmo) );
+
+    if( connect( s, pDest, DestLen ) != 0 ) goto fail;
+
+    Len[0] = (UCHAR)(InBufferLength >> 8);
+    Len[1] = (UCHAR)InBufferLength;
+    if( send( s, (const char*)Len, 2, 0 ) != 2 ) goto fail;
+    if( send( s, pInBuffer, InBufferLength, 0 ) != (int)InBufferLength ) goto fail;
+
+    /* The two byte length of the answer, then the answer; what does not fit the buffer is read and dropped */
+    for( Got = 0; Got < 2; Got += j )
+    {
+        j = recv( s, (char*)&Len[Got], 2 - Got, 0 );
+        if( j <= 0 ) goto fail;
+    }
+    Want = ((ULONG)Len[0] << 8) | Len[1];
+    if( Want < DNS_HEADER_LENGTH ) goto fail;
+
+    while( Total < Want )
+    {
+        char Skip[512];
+        if( Total < OutBufferLength )
+            j = recv( s, pTmp + Total, min( Want - Total, OutBufferLength - Total ), 0 );
+        else
+            j = recv( s, Skip, min( Want - Total, sizeof(Skip) ), 0 );
+        if( j <= 0 ) goto fail;
+        Total += j;
+    }
+
+    closesocket( s );
+    /* Only a complete answer replaces the datagram's */
+    RtlCopyMemory( pOutBuffer, pTmp, min( Want, OutBufferLength ) );
+    HeapFree( GetProcessHeap(), 0, pTmp );
+    return min( Want, OutBufferLength );
+
+fail:
+    closesocket( s );
+    HeapFree( GetProcessHeap(), 0, pTmp );
+    return 0;
+}
+
 BOOL SendRequest( PCHAR pInBuffer,
                   ULONG InBufferLength,
                   PCHAR pOutBuffer,
@@ -302,6 +370,13 @@ BOOL SendRequest( PCHAR pInBuffer,
 
     /* We don't need the sockets anymore. */
     closesocket( s );
+
+    /* The answer was truncated (TC): ask again over TCP, as Windows does */
+    if( (pOutBuffer[2] & 0x02) && j >= DNS_HEADER_LENGTH )
+    {
+        ULONG Tcp = SendRequestTcp( pInBuffer, InBufferLength, pOutBuffer, *pOutBufferLength, pDest, DestLen );
+        if( Tcp && ntohs( ((PSHORT)&pOutBuffer[0])[0] ) == RequestID ) j = Tcp;
+    }
 
     /* If debug information then display debug information. */
     if( State.debug ) PrintDebug( pOutBuffer, j );
