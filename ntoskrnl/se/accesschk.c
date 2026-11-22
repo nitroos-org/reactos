@@ -248,7 +248,7 @@ SepTokenGetsImplicitOwnerRights(
 /*
  * Mandatory integrity in the access check services (NtAccessCheck,
  * NtAccessCheckByType, NtAccessCheckByTypeResultList and their audit alarm
- * forms). Measured on Windows Server 2022 with impersonation tokens of every
+ * forms) and in the object opens (SeAccessCheck). Measured on Windows Server 2022 with impersonation tokens of every
  * level (Untrusted to System, the anonymous logon token, Low restricted and
  * write restricted tokens, a standard user at Medium and Low), descriptors
  * without a label and with labels of every level and policy, three generic
@@ -265,8 +265,13 @@ SepTokenGetsImplicitOwnerRights(
  *   and the WRITE_DAC the owner would get implicitly) is denied before the
  *   privileges and the DACL are looked at; MAXIMUM_ALLOWED gets what the DACL
  *   grants within those rights.
- * The object opens of the kernel (SeAccessCheck) do not apply labels yet;
- * the registry applies its own (CmpAclMandatoryAllowed).
+ * The object opens of the kernel (SeAccessCheck) apply the same function:
+ * measured on the same system, opens of named objects, files and keys by an
+ * Untrusted, Low or anonymous client are limited the same way (NtOpenEvent
+ * MAXIMUM_ALLOWED of a Low owner on an empty DACL: READ_CONTROL, no
+ * WRITE_DAC; the hosts file for write by LocalSystem lowered to Low: denied).
+ * "Windows Integrity Mechanism Design" (How access checks work with mandatory
+ * policy): SeAccessCheck enforces the policy as AccessCheck does.
  */
 
 /**
@@ -300,18 +305,32 @@ SepMandatoryAllowedAccess(
     PACL Sacl = NULL;
     PACE_HEADER Ace;
     PISID LabelSid;
+    PUCHAR AclEnd;
     ULONG AceIndex;
     ULONG Rid;
 
     PAGED_CODE();
 
+    /*
+     * The object opens (SeAccessCheck) pass descriptors that were not
+     * captured here (file systems read theirs from the disk): every ACE must
+     * lie within the ACL; the walk stops at the first one that does not, and
+     * the label found so far (or the implicit one) counts.
+     */
     if (NT_SUCCESS(RtlGetSaclSecurityDescriptor(SecurityDescriptor, &Present, &Sacl, &Defaulted)) &&
-        Present && Sacl != NULL)
+        Present && Sacl != NULL && Sacl->AclSize >= sizeof(ACL))
     {
-        for (AceIndex = 0; AceIndex < Sacl->AceCount; AceIndex++)
+        AclEnd = (PUCHAR)Sacl + Sacl->AclSize;
+        Ace = (PACE_HEADER)(Sacl + 1);
+        for (AceIndex = 0; AceIndex < Sacl->AceCount; AceIndex++,
+             Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize))
         {
-            if (!NT_SUCCESS(RtlGetAce(Sacl, AceIndex, (PVOID*)&Ace)))
+            if ((ULONG_PTR)(AclEnd - (PUCHAR)Ace) < sizeof(ACE_HEADER) ||
+                Ace->AceSize < sizeof(ACE_HEADER) ||
+                (ULONG_PTR)(AclEnd - (PUCHAR)Ace) < Ace->AceSize)
+            {
                 break;
+            }
 
             if (Ace->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE || (Ace->AceFlags & INHERIT_ONLY_ACE))
                 continue;
@@ -2320,6 +2339,8 @@ SeAccessCheck(
     _Out_ PACCESS_MASK GrantedAccess,
     _Out_ PNTSTATUS AccessStatus)
 {
+    ACCESS_MASK MandatoryAllowed, MappedAccess, CallerGrantedAccess;
+    PACCESS_TOKEN Token;
     BOOLEAN ret;
 
     PAGED_CODE();
@@ -2366,15 +2387,43 @@ SeAccessCheck(
     if (!SubjectContextLocked)
         SeLockSubjectContext(SubjectSecurityContext);
 
+    Token = SubjectSecurityContext->ClientToken ?
+            SubjectSecurityContext->ClientToken : SubjectSecurityContext->PrimaryToken;
+
+    /*
+     * The mandatory label first, with the rule of the access check services
+     * (SepMandatoryAllowedAccess, measured there): a subject below the level
+     * of the object is refused every right it asks for that the label does
+     * not leave it, before the owner's implicit rights, the privileges and
+     * the DACL count. The rights the caller passes as granted already (a
+     * privilege the caller checked itself, such as SeDebugPrivilege for a
+     * process open or a backup open of a file) are the caller's decision and
+     * stay granted. MAXIMUM_ALLOWED gets the DACL's rights within the label's.
+     */
+    ASSERT(Token != NULL);
+    MandatoryAllowed = SepMandatoryAllowedAccess(Token, SecurityDescriptor, GenericMapping);
+    CallerGrantedAccess = PreviouslyGrantedAccess;
+    RtlMapGenericMask(&CallerGrantedAccess, GenericMapping);
+    if (MandatoryAllowed != MAXULONG)
+    {
+        MappedAccess = DesiredAccess;
+        RtlMapGenericMask(&MappedAccess, GenericMapping);
+        if (MappedAccess & ~(MAXIMUM_ALLOWED | MandatoryAllowed))
+        {
+            *GrantedAccess = 0;
+            *AccessStatus = STATUS_ACCESS_DENIED;
+            if (!SubjectContextLocked)
+                SeUnlockSubjectContext(SubjectSecurityContext);
+            return FALSE;
+        }
+    }
+
     /*
      * Check if the token is the owner and grant WRITE_DAC and READ_CONTROL rights,
      * unless the DACL has an OWNER RIGHTS ACE for the object
      */
     if (DesiredAccess & (WRITE_DAC | READ_CONTROL | MAXIMUM_ALLOWED))
     {
-         PACCESS_TOKEN Token = SubjectSecurityContext->ClientToken ?
-             SubjectSecurityContext->ClientToken : SubjectSecurityContext->PrimaryToken;
-
         if (SepTokenGetsImplicitOwnerRights(Token, SecurityDescriptor))
         {
             if (DesiredAccess & MAXIMUM_ALLOWED)
@@ -2418,6 +2467,17 @@ SeAccessCheck(
                                    Privileges,
                                    GrantedAccess,
                                    AccessStatus);
+    }
+
+    /* MAXIMUM_ALLOWED below the label: nothing beyond the label's rights, but what the caller granted */
+    if (ret && MandatoryAllowed != MAXULONG && (DesiredAccess & MAXIMUM_ALLOWED))
+    {
+        *GrantedAccess &= MandatoryAllowed | CallerGrantedAccess;
+        if (*GrantedAccess == 0)
+        {
+            *AccessStatus = STATUS_ACCESS_DENIED;
+            ret = FALSE;
+        }
     }
 
     /* Release the lock if needed */

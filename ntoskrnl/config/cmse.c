@@ -16,13 +16,20 @@
 
 /*
  * The descriptor every key had before keys had their own (owner and group
- * Everyone, a DACL that grants Everyone all key rights, a NULL SACL): what the
- * open decision is still made against (CmpCheckKeyOpenAccess) until key
- * access is enforced, and what a key reports in legacy mode. KEY_ALL_ACCESS
- * (what GENERIC_ALL maps to for keys), not GENERIC_ALL: the access check does
- * not map generic rights inside an ACE (Windows does not).
+ * Everyone, a DACL that grants Everyone all key rights): what the open
+ * decision is still made against (CmpCheckKeyOpenAccess) until key access is
+ * enforced. KEY_ALL_ACCESS (what GENERIC_ALL maps to for keys), not
+ * GENERIC_ALL: the access check does not map generic rights inside an ACE
+ * (Windows does not). Its SACL holds a mandatory label at the Untrusted level, which
+ * restricts no token: SeAccessCheck applies labels, and without one (an
+ * implicit Medium label) the check would refuse a Low client every write to
+ * every key, also to keys labelled Low, in the modes that do not enforce key
+ * security at all. Key labels count where key descriptors count: under
+ * enforcement (CmpAclDecide, the same SeAccessCheck with the key's own
+ * descriptor) and in the audit mode's shadow check, which logs what
+ * enforcement would deny.
  */
-typedef struct _CMP_LEGACY_KEY_SD
+typedef struct _CMP_LEGACY_KEY_CHECK_SD
 {
     SECURITY_DESCRIPTOR_RELATIVE Header;
     SID Owner;
@@ -34,31 +41,43 @@ typedef struct _CMP_LEGACY_KEY_SD
         ACCESS_MASK Mask;
         SID Sid;
     } Ace;
-} CMP_LEGACY_KEY_SD;
+    ACL Sacl;
+    struct
+    {
+        ACE_HEADER Header;
+        ACCESS_MASK Mask;
+        SID Sid;
+    } Label;
+} CMP_LEGACY_KEY_CHECK_SD;
 
-static CMP_LEGACY_KEY_SD CmpLegacyKeySd =
+static CMP_LEGACY_KEY_CHECK_SD CmpLegacyKeyCheckSd =
 {
     {
         SECURITY_DESCRIPTOR_REVISION, 0,
         SE_SELF_RELATIVE | SE_DACL_PRESENT | SE_SACL_PRESENT,
-        FIELD_OFFSET(CMP_LEGACY_KEY_SD, Owner),
-        FIELD_OFFSET(CMP_LEGACY_KEY_SD, Group),
-        0,
-        FIELD_OFFSET(CMP_LEGACY_KEY_SD, Dacl)
+        FIELD_OFFSET(CMP_LEGACY_KEY_CHECK_SD, Owner),
+        FIELD_OFFSET(CMP_LEGACY_KEY_CHECK_SD, Group),
+        FIELD_OFFSET(CMP_LEGACY_KEY_CHECK_SD, Sacl),
+        FIELD_OFFSET(CMP_LEGACY_KEY_CHECK_SD, Dacl)
     },
     { SID_REVISION, 1, {SECURITY_WORLD_SID_AUTHORITY}, {SECURITY_WORLD_RID} },
     { SID_REVISION, 1, {SECURITY_WORLD_SID_AUTHORITY}, {SECURITY_WORLD_RID} },
-    { ACL_REVISION, 0, sizeof(ACL) + sizeof(((CMP_LEGACY_KEY_SD *)0)->Ace), 1, 0 },
+    { ACL_REVISION, 0, sizeof(ACL) + sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->Ace), 1, 0 },
     {
-        { ACCESS_ALLOWED_ACE_TYPE, 0, sizeof(((CMP_LEGACY_KEY_SD *)0)->Ace) },
+        { ACCESS_ALLOWED_ACE_TYPE, 0, sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->Ace) },
         KEY_ALL_ACCESS,
         { SID_REVISION, 1, {SECURITY_WORLD_SID_AUTHORITY}, {SECURITY_WORLD_RID} }
+    },
+    { ACL_REVISION, 0, sizeof(ACL) + sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->Label), 1, 0 },
+    {
+        { SYSTEM_MANDATORY_LABEL_ACE_TYPE, 0, sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->Label) },
+        SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        { SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY}, {SECURITY_MANDATORY_UNTRUSTED_RID} }
     }
 };
 
-/* Room for the legacy descriptor, whatever part of it is asked for */
+/* Room for the legacy descriptor a key reports (CmpQuerySecurityDescriptor), whatever part of it is asked for */
 #define CMP_LEGACY_SD_BUFFER 128
-C_ASSERT(sizeof(CMP_LEGACY_KEY_SD) <= CMP_LEGACY_SD_BUFFER);
 
 /* FUNCTIONS *****************************************************************/
 
@@ -89,7 +108,7 @@ CmpCheckKeyOpenAccess(
     _In_ KPROCESSOR_MODE AccessMode,
     _Out_ PNTSTATUS AccessStatus)
 {
-    PSECURITY_DESCRIPTOR Sd = (PSECURITY_DESCRIPTOR)&CmpLegacyKeySd;
+    PSECURITY_DESCRIPTOR Sd = (PSECURITY_DESCRIPTOR)&CmpLegacyKeyCheckSd;
     PPRIVILEGE_SET Privileges = NULL;
     ACCESS_MASK GrantedAccess = 0;
     BOOLEAN Result;
