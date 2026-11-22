@@ -1076,12 +1076,30 @@ LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp)
 u32_t
 LibTCPNextIss(const ip_addr_t *LocalIp, u16_t LocalPort, const ip_addr_t *RemoteIp, u16_t RemotePort)
 {
+    static BOOLEAN ClockStarted;
+    static LONGLONG StartTime;
+    static LARGE_INTEGER StartCounter, CounterFrequency;
     PTIME_WAIT_REOPEN Reopen;
-    LARGE_INTEGER Now;
+    LARGE_INTEGER Now, Counter;
+    LONGLONG Elapsed;
     u32_t Next, Floor;
 
-    KeQuerySystemTime(&Now);
-    Next = (u32_t)(Now.QuadPart / 40) + TCPConnectionHash(LocalIp, LocalPort, RemoteIp, RemotePort);
+    /* The clock: the system time at the first use plus the performance counter since then. The system time alone
+       moves once per clock tick (10-15 ms): two connections of one 4-tuple within a tick got the same number, and
+       a SYN that is not above the old connection's is dropped by the peer in TIME-WAIT (the TIME-WAIT of our own
+       listener included: ws2_32 timewait). The caller holds the core lock */
+    if (!ClockStarted)
+    {
+        KeQuerySystemTime(&Now);
+        StartTime = Now.QuadPart;
+        StartCounter = KeQueryPerformanceCounter(&CounterFrequency);
+        ClockStarted = TRUE;
+    }
+    Counter = KeQueryPerformanceCounter(NULL);
+    Elapsed = Counter.QuadPart - StartCounter.QuadPart;
+    Elapsed = (Elapsed / CounterFrequency.QuadPart) * 10000000 +
+              (Elapsed % CounterFrequency.QuadPart) * 10000000 / CounterFrequency.QuadPart;
+    Next = (u32_t)((StartTime + Elapsed) / 40) + TCPConnectionHash(LocalIp, LocalPort, RemoteIp, RemotePort);
     if (IP_IS_V4(LocalIp) && IP_IS_V4(RemoteIp))
     {
         Reopen = LibTCPFindReopen(ip_2_ip4(LocalIp), LocalPort, ip_2_ip4(RemoteIp), RemotePort);
