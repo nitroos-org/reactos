@@ -1153,10 +1153,18 @@ HalBeginSystemInterrupt(
         /* Check if it's valid */
         if (Index < APIC_MAX_IRQ)
         {
-            /* Re-request the interrupt to be handled later, with the saved trigger mode:
-               reading the redirection entry here would take the I/O APIC lock and make
-               four uncached register accesses in interrupt context */
-            ApicRequestSelfInterrupt(Vector, HalpIoApicTriggerMode[Index]);
+            /* Re-request an edge-triggered interrupt to be handled later; the trigger mode
+               is saved, as reading the redirection entry here would take the I/O APIC lock
+               and make four uncached register accesses in interrupt context.
+               A level-triggered input that is still asserted is sent again by the I/O APIC
+               when the EOI above clears its remote IRR, and waits in the IRR for the TPR.
+               It must not be re-requested: the trigger mode of a fixed IPI is ignored (Intel
+               SDM vol. 3A, "Interrupt Command Register"), so the self IPI is accepted as edge
+               triggered and clears the vector's TMR bit, and the EOI of the handled interrupt
+               is then not sent to the I/O APIC ("Signaling Interrupt Servicing Completion"):
+               its remote IRR stays set and the input is blocked for good, as on Hyper-V. */
+            if (HalpIoApicTriggerMode[Index] == APIC_TGM_Edge)
+                ApicRequestSelfInterrupt(Vector, APIC_TGM_Edge);
        }
        else
        {
