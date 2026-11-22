@@ -76,6 +76,7 @@ extern void func_WmDde(void);
 extern void func_WmMenuDragIme(void);
 extern void func_WmPointerMessages(void);
 extern void func_InitializeLpkHooks(void);
+extern void func_InputDesktopRouting(void);
 extern void func_IsDialogMessage(void);
 extern void func_IsServerSideWindow(void);
 extern void func_IsWindowArranged(void);
@@ -251,6 +252,7 @@ const struct test winetest_testlist[] =
     { "WmMenuDragIme", func_WmMenuDragIme },
     { "WmPointerMessages", func_WmPointerMessages },
     { "InitializeLpkHooks", func_InitializeLpkHooks },
+    { "InputDesktopRouting", func_InputDesktopRouting },
     { "IsDialogMessage", func_IsDialogMessage },
     { "IsServerSideWindow", func_IsServerSideWindow },
     { "IsWindowArranged", func_IsWindowArranged },
