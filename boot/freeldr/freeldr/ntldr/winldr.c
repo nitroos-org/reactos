@@ -648,7 +648,18 @@ NtLdrDetectBootVid(
     };
 
     /* Default BootVid file name */
+#ifdef UEFIBOOT
+    /*
+     * Under UEFI never the VGA one: there is no VGA BIOS, and its
+     * initialization calls INT 10h through the HAL's x86 emulator, which
+     * then runs whatever the vector points to, with real I/O port access.
+     * Without a framebuffer the framebuffer one fails to initialize and the
+     * system starts without a boot screen.
+     */
+    RtlStringCbCopyA(BootVidName, BootVidNameSize, "lfbbvid.dll");
+#else
     RtlStringCbCopyA(BootVidName, BootVidNameSize, "bootvid.dll");
+#endif
 
     /* Attempt auto-detection by System ID */
     PCONFIGURATION_COMPONENT_DATA Entry;
