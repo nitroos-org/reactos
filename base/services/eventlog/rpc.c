@@ -531,6 +531,20 @@ ElfCallerIsAnonymous(VOID)
 }
 
 
+/*
+ * An event source called "Security" cannot be registered, by anybody (measured on Windows Server 2022: error 5
+ * for an administrator and for a standard user, with RegisterEventSourceA and RegisterEventSourceW).
+ */
+static BOOL
+ElfIsSecuritySourceName(PCUNICODE_STRING Name)
+{
+    static const WCHAR Security[] = L"Security";
+
+    return (Name->Length == sizeof(Security) - sizeof(WCHAR)) &&
+           (_wcsnicmp(Name->Buffer, Security, RTL_NUMBER_OF(Security) - 1) == 0);
+}
+
+
 /* Function 7 */
 NTSTATUS
 WINAPI
@@ -606,6 +620,9 @@ ElfrRegisterEventSourceW(
 
     /* The anonymous logon may not register an event source (measured on Windows Server 2022: error 5) */
     if (ElfCallerIsAnonymous())
+        return STATUS_ACCESS_DENIED;
+
+    if (ElfIsSecuritySourceName((PUNICODE_STRING)ModuleName))
         return STATUS_ACCESS_DENIED;
 
     return ElfCreateEventLogHandle((PLOGHANDLE*)LogHandle,
@@ -1020,6 +1037,12 @@ ElfrRegisterEventSourceA(
 
     /* The anonymous logon may not register an event source (as in ElfrRegisterEventSourceW) */
     if (ElfCallerIsAnonymous())
+    {
+        RtlFreeUnicodeString(&ModuleNameW);
+        return STATUS_ACCESS_DENIED;
+    }
+
+    if (ElfIsSecuritySourceName(&ModuleNameW))
     {
         RtlFreeUnicodeString(&ModuleNameW);
         return STATUS_ACCESS_DENIED;
