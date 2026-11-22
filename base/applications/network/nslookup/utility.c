@@ -9,6 +9,10 @@
 #include "nslookup.h"
 #include <assert.h>
 
+/* Set while the two queries of a plain lookup run: the caller says "Request to ... timed-out" itself, once, and only
+   when no query brought an address */
+BOOL g_bQuietTimeout = FALSE;
+
 BOOL SendRequest( PCHAR pInBuffer,
                   ULONG InBufferLength,
                   PCHAR pOutBuffer,
@@ -206,7 +210,8 @@ BOOL SendRequest( PCHAR pInBuffer,
             }
 
             _tprintf( _T("DNS request timed out.\n    timeout was %d seconds.\n"), (int)State.timeout );
-            _tprintf( _T("*** Request to %s timed-out\n"), State.DefaultServer );
+            if( !g_bQuietTimeout )
+                _tprintf( _T("*** Request to %s timed-out\n"), State.DefaultServer );
             closesocket( s );
             return FALSE;
         }

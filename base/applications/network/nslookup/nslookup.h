@@ -97,6 +97,7 @@ typedef struct _STATE
 
 extern STATE    State;
 extern HANDLE   ProcessHeap;
+extern BOOL     g_bQuietTimeout;
 
 /* utility.c */
 

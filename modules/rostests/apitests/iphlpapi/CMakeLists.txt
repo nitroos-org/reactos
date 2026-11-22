@@ -35,6 +35,7 @@ list(APPEND SOURCE
     Ipv6Temporary.c
     NeighborEntry2.c
     NetstatOutput.c
+    NslookupErrors.c
     NslookupOutput.c
     NotifyAddrChange.c
     NotifyChanges.c
