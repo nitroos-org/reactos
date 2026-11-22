@@ -824,6 +824,9 @@ CopySystemProfile(
 
     CreateLegacyProfileJunctions(szProfilePath);
 
+    /* The copy does not carry labels: AppData\LocalLow gets its Low label here */
+    SetLowIntegrityProfileFolder(szProfilePath);
+
     bResult = TRUE;
 
 done:
@@ -1145,6 +1148,9 @@ CreateUserProfileExW(
     }
 
     CreateLegacyProfileJunctions(szUserProfilePath);
+
+    /* The copy does not carry labels: AppData\LocalLow gets its Low label here */
+    SetLowIntegrityProfileFolder(szUserProfilePath);
 
     /* Add profile to profile list */
     if (!ConvertSidToStringSidW(pSid,
@@ -2188,6 +2194,9 @@ UpgradeProfileSecurity(
         SecureExistingProfileDirectory(pszProfilePath, ProfileDirUser, pUserSid, TRUE);
         LocalFree(pUserSid);
     }
+
+    /* A profile made before LocalLow was labelled gets its label at its next load */
+    SetLowIntegrityProfileFolder(pszProfilePath);
 }
 
 

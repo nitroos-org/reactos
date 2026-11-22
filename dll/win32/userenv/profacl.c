@@ -1032,4 +1032,69 @@ SecureSystemDirectories(VOID)
     return bResult;
 }
 
+/*
+ * AppData\LocalLow of a profile: "Windows Integrity Mechanism Design" (Mandatory label inheritance):
+ * "This folder is assigned a low mandatory label when the profile is initialized and intended as the
+ * top-level folder that is writeable by default by low-integrity applications"; the label is inheritable
+ * (OI)(CI) with NO_WRITE_UP, so what is created below it is Low too. Low and Untrusted processes cannot
+ * write anywhere else in the profile. Creates the folder if it is missing and labels it if it has no label
+ * of its own; a folder that carries a label already is left alone.
+ */
+BOOL
+SetLowIntegrityProfileFolder(
+    _In_ PCWSTR pszProfilePath)
+{
+    WCHAR szPath[MAX_PATH];
+    PSECURITY_DESCRIPTOR pSd = NULL, pLabelSd = NULL;
+    PACL pSacl = NULL;
+    BOOL bPresent, bDefaulted;
+    DWORD dwError;
+
+    if (FAILED(StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\AppData\\LocalLow", pszProfilePath)))
+    {
+        SetLastError(ERROR_BUFFER_OVERFLOW);
+        return FALSE;
+    }
+
+    if (!CreateDirectoryW(szPath, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+    {
+        DPRINT1("Cannot create %S (error %lu)\n", szPath, GetLastError());
+        return FALSE;
+    }
+
+    dwError = GetNamedSecurityInfoW(szPath, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION,
+                                    NULL, NULL, NULL, &pSacl, &pSd);
+    if (dwError == ERROR_SUCCESS && pSacl != NULL && pSacl->AceCount != 0)
+    {
+        LocalFree(pSd);
+        return TRUE;
+    }
+    if (pSd)
+        LocalFree(pSd);
+
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"S:(ML;OICI;NW;;;LW)", SDDL_REVISION_1,
+                                                              &pLabelSd, NULL))
+    {
+        return FALSE;
+    }
+    pSacl = NULL;
+    if (!GetSecurityDescriptorSacl(pLabelSd, &bPresent, &pSacl, &bDefaulted) || !pSacl)
+    {
+        LocalFree(pLabelSd);
+        SetLastError(ERROR_INVALID_SECURITY_DESCR);
+        return FALSE;
+    }
+
+    dwError = SetNamedSecurityInfoW(szPath, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION,
+                                    NULL, NULL, NULL, pSacl);
+    LocalFree(pLabelSd);
+    if (dwError != ERROR_SUCCESS)
+    {
+        DPRINT1("Cannot label %S Low (error %lu)\n", szPath, dwError);
+        SetLastError(dwError);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 /* EOF */

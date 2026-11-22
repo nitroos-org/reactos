@@ -266,6 +266,10 @@ CreateStandardProfile(
         lpFolderData++;
     }
 
+    /* The Default profile's LocalLow carries its Low label, as every profile's */
+    if (pProfileParams->pFolderList == UserShellFolders)
+        SetLowIntegrityProfileFolder(szProfilePath);
+
     /* Set 'Shell Folders' values */
     Error = RegOpenKeyExW(pProfileParams->hRootKey,
                           pProfileParams->pszShellFoldersKey,
