@@ -475,6 +475,10 @@ IntLeaveInputDesktop(IN PDESKTOP pdesk)
     }
 
     gpdeskInputDesktop = pdeskNew;
+    /* As NtUserSwitchDesktop: the global foreground becomes the one of the desktop that has the input
+       now (no foreground when there is none), and the "pressed since" bits start again */
+    IntForegroundFollowsInputDesktop();
+    UserResetAsyncKeyStateRecent();
     UserSpbDropAll();
     /* Window redirection: no composed pixels of the old input desktop are kept */
     UserRedirFreeFrameBuffer();
