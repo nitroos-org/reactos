@@ -1895,6 +1895,7 @@ NtUserSetWindowsHookEx( HINSTANCE Mod,
           EngSetLastError(ERROR_ACCESS_DENIED);
           goto Cleanup; // Return NULL
        }
+       /* WH_KEYBOARD measured on Windows Server 2022: thread 0 without a module, ERROR_HOOK_NEEDS_HMOD */
        if ( !Mod &&
             (HookId == WH_GETMESSAGE ||
              HookId == WH_CALLWNDPROC ||
@@ -1904,7 +1905,8 @@ NtUserSetWindowsHookEx( HINSTANCE Mod,
              HookId == WH_DEBUG ||
              HookId == WH_SHELL ||
              HookId == WH_FOREGROUNDIDLE ||
-             HookId == WH_CALLWNDPROCRET) )
+             HookId == WH_CALLWNDPROCRET ||
+             HookId == WH_KEYBOARD) )
        {
           ERR("Global hook needs hMod HookId: %d\n",HookId);
           EngSetLastError(ERROR_HOOK_NEEDS_HMOD);
