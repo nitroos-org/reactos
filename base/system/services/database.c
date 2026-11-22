@@ -3838,7 +3838,8 @@ ScmStartServiceInChain(PSERVICE Service,
 static BOOL
 ScmIsDependencyErrorKept(DWORD dwError)
 {
-    return dwError == ERROR_SHUTDOWN_IN_PROGRESS ||
+    return dwError == ERROR_CIRCULAR_DEPENDENCY ||
+           dwError == ERROR_SHUTDOWN_IN_PROGRESS ||
            dwError == ERROR_SERVICE_DATABASE_LOCKED ||
            dwError == ERROR_NOT_ENOUGH_MEMORY;
 }
@@ -4014,6 +4015,7 @@ ScmStartDependencyGroup(PSERVICE Service,
     PWSTR pszNames = NULL, pszName, pszEnd = NULL;
     SIZE_T cchNames = 0, cchName;
     BOOL bAnyMember = FALSE, bRunning = FALSE;
+    DWORD dwMemberError, dwKeptError = ERROR_SUCCESS;
     ULONG nPass;
 
     /* The names of the members are copied: the database lock cannot be held while they are started */
@@ -4058,13 +4060,25 @@ ScmStartDependencyGroup(PSERVICE Service,
     for (pszName = pszNames; *pszName != UNICODE_NULL; pszName += wcslen(pszName) + 1)
     {
         bAnyMember = TRUE;
-        if (ScmStartDependencyByName(pszName, Chain) == ERROR_SUCCESS)
+        dwMemberError = ScmStartDependencyByName(pszName, Chain);
+        if (dwMemberError == ERROR_SUCCESS)
             bRunning = TRUE;
+        else if (ScmIsDependencyErrorKept(dwMemberError) && dwKeptError == ERROR_SUCCESS)
+            dwKeptError = dwMemberError;
+
+        if (dwMemberError == ERROR_SHUTDOWN_IN_PROGRESS)
+            break;
     }
 
     HeapFree(GetProcessHeap(), 0, pszNames);
 
-    return (bAnyMember && !bRunning) ? ERROR_SERVICE_DEPENDENCY_FAIL : ERROR_SUCCESS;
+    if (dwKeptError == ERROR_SHUTDOWN_IN_PROGRESS)
+        return dwKeptError;
+    if (!bAnyMember || bRunning)
+        return ERROR_SUCCESS;
+
+    /* No member came up: a member that closes a cycle (or the like) says why */
+    return (dwKeptError != ERROR_SUCCESS) ? dwKeptError : ERROR_SERVICE_DEPENDENCY_FAIL;
 }
 
 
@@ -4166,11 +4180,17 @@ ScmStartServiceInChain(PSERVICE Service,
     DWORD dwState;
     ULONG i;
 
-    /* A service that depends on itself, through others, or a chain that is too deep, cannot start */
+    /* A service that depends on itself, directly, through others or through a group, cannot start: the chain holds
+       the services being started on this path, so the cycle is seen as soon as it closes (ERROR_CIRCULAR_DEPENDENCY,
+       the code CreateService and ChangeServiceConfig document for a circular dependency). A chain that is too deep
+       without a cycle fails as a dependency that does not start. */
     for (i = 0; i < Chain->Depth; i++)
     {
         if (Chain->Services[i] == Service)
-            return ERROR_SERVICE_DEPENDENCY_FAIL;
+        {
+            DPRINT1("Circular dependency: '%S' depends on itself\n", Service->lpServiceName);
+            return ERROR_CIRCULAR_DEPENDENCY;
+        }
     }
     if (Chain->Depth >= SCM_MAX_DEPENDENCY_DEPTH)
         return ERROR_SERVICE_DEPENDENCY_FAIL;
