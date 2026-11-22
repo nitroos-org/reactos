@@ -3781,6 +3781,36 @@ Quit:
  *    @unimplemented
  */
 
+/* The first visible top-level window of the input desktop that can be activated becomes its foreground window */
+static VOID FASTCALL
+IntActivateTopWindowOfInputDesktop(PDESKTOP pdesk)
+{
+    PWND pwnd;
+    USER_REFERENCE_ENTRY Ref;
+
+    if (!pdesk->pDeskInfo || !pdesk->pDeskInfo->spwnd)
+        return;
+    for (pwnd = pdesk->pDeskInfo->spwnd->spwndChild; pwnd; pwnd = pwnd->spwndNext)
+    {
+        if ((pwnd->style & (WS_VISIBLE | WS_DISABLED)) != WS_VISIBLE ||
+            (pwnd->ExStyle & (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)) ||
+            (pwnd->state & WNDS_DESTROYED) ||
+            !pwnd->head.pti || pwnd->head.pti == gptiDesktopThread ||
+            (pwnd->head.pti->TIF_flags & TIF_INCLEANUP) ||
+            pwnd->head.rpdesk != pdesk)
+        {
+            continue;
+        }
+        break;
+    }
+    if (!pwnd)
+        return;
+
+    UserRefObjectCo(pwnd, &Ref);
+    co_IntSetForegroundMessageQueue(pwnd, PsGetCurrentThreadWin32Thread(), FALSE, 0);
+    UserDerefObjectCo(pwnd);
+}
+
 BOOL APIENTRY
 NtUserSwitchDesktop(HDESK hdesk)
 {
@@ -3884,6 +3914,13 @@ NtUserSwitchDesktop(HDESK hdesk)
 #if (_WIN32_WINNT >= _WIN32_WINNT_VISTA)
     IntNotifyWinEvent(EVENT_SYSTEM_DESKTOPSWITCH, NULL, OBJID_WINDOW, CHILDID_SELF, 0);
 #endif
+
+    /* A desktop that has no foreground yet (switched to for the first time) gets one: its top-level window
+       is activated, as on Windows (Server 2022, user32 apitest InputDesktopRouting row R0: the only window
+       of a new desktop is its foreground window right after SwitchDesktop). The window's own thread
+       activates it (an event posted to it); the desktop may have changed during the callbacks above. */
+    if (gpdeskInputDesktop == pdesk && !gpqForeground)
+        IntActivateTopWindowOfInputDesktop(pdesk);
 
     TRACE("SwitchDesktop gpdeskInputDesktop 0x%p\n", gpdeskInputDesktop);
     ObDereferenceObject(pdesk);

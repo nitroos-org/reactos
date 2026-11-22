@@ -3323,10 +3323,10 @@ co_WinPosShowWindow(PWND Wnd, INT Cmd)
 
    if ((Cmd == SW_HIDE) || (Cmd == SW_MINIMIZE))
    {
-      /* The foreground queue of the window's own desktop: of the input desktop, or of a desktop switched
-         away from, which hands its activation on in the same way and gets it back when switched to */
-      if ( Wnd == pti->MessageQueue->spwndActive &&
-           Wnd->head.rpdesk && pti->MessageQueue == Wnd->head.rpdesk->ActiveMessageQueue )
+      /* Only on the desktop that has the input: on a desktop without it the hidden window stays the
+         active window and only the focus goes (Windows Server 2022, row V2: ShowWindow(SW_HIDE) of the
+         active window leaves GetActiveWindow() as it was and GetFocus() NULL) */
+      if ( Wnd == pti->MessageQueue->spwndActive && pti->MessageQueue == IntGetFocusMessageQueue() )
       {
           if (UserIsDesktopWindow(Wnd->spwndParent))
           {
