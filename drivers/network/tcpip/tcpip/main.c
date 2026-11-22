@@ -141,7 +141,7 @@ TiCreateRawSecurityDescriptor(VOID)
     if (NT_SUCCESS(Status))
         Status = RtlCreateAcl(Dacl, DaclSize, ACL_REVISION);
     for (i = 0; NT_SUCCESS(Status) && i < RTL_NUMBER_OF(Sids); i++)
-        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, GENERIC_ALL, Sids[i]);
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, FILE_ALL_ACCESS, Sids[i]);
     if (NT_SUCCESS(Status))
         Status = RtlSetDaclSecurityDescriptor(&AbsSD, TRUE, Dacl, FALSE);
     if (NT_SUCCESS(Status))
@@ -888,7 +888,8 @@ TiDispatch(
 
 /* WindowsDeviceAcl: the descriptor of \Device\Ip as Windows Server 2022 has it: System and Administrators FILE_ALL_ACCESS,
    Everyone WorldAccess, nobody else (no Network Service ACE). Without it: System, Administrators and Network Service
-   GENERIC_ALL (the descriptor that the privileged control requests are checked against, and of \Device\Tcp). */
+   FILE_ALL_ACCESS (the descriptor that the privileged control requests are checked against, and of \Device\Tcp).
+   Specific rights, not GENERIC_ALL: the access check does not map generic rights inside an ACE (Windows does not). */
 static
 NTSTATUS TiCreateSecurityDescriptor(
     _In_ ACCESS_MASK WorldAccess,
@@ -938,7 +939,7 @@ NTSTATUS TiCreateSecurityDescriptor(
     /* Setup access */
     Status = RtlAddAccessAllowedAce(Dacl,
                                     ACL_REVISION,
-                                    WindowsDeviceAcl ? FILE_ALL_ACCESS : GENERIC_ALL,
+                                    FILE_ALL_ACCESS,
                                     SeExports->SeLocalSystemSid);
     if (!NT_SUCCESS(Status))
     {
@@ -948,7 +949,7 @@ NTSTATUS TiCreateSecurityDescriptor(
 
     Status = RtlAddAccessAllowedAce(Dacl,
                                     ACL_REVISION,
-                                    WindowsDeviceAcl ? FILE_ALL_ACCESS : GENERIC_ALL,
+                                    FILE_ALL_ACCESS,
                                     SeExports->SeAliasAdminsSid);
     if (!NT_SUCCESS(Status))
     {
@@ -960,7 +961,7 @@ NTSTATUS TiCreateSecurityDescriptor(
     {
         Status = RtlAddAccessAllowedAce(Dacl,
                                         ACL_REVISION,
-                                        GENERIC_ALL,
+                                        FILE_ALL_ACCESS,
                                         SeExports->SeNetworkServiceSid);
         if (!NT_SUCCESS(Status))
         {

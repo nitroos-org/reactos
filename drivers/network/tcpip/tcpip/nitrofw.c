@@ -779,7 +779,7 @@ static VOID FwFreeSD(VOID)
     FwSD = NULL;
 }
 
-/* D:P(A;;GA;;;SY)(A;;GA;;;BA), owner BA, group SY */
+/* D:P(A;;FA;;;SY)(A;;FA;;;BA), owner BA, group SY (specific rights: the access check maps no generic right in an ACE) */
 static NTSTATUS FwCreateSD(VOID)
 {
     SECURITY_DESCRIPTOR AbsSD;
@@ -794,8 +794,8 @@ static NTSTATUS FwCreateSD(VOID)
         return STATUS_INSUFFICIENT_RESOURCES;
     Status = RtlCreateSecurityDescriptor(&AbsSD, SECURITY_DESCRIPTOR_REVISION);
     if (NT_SUCCESS(Status)) Status = RtlCreateAcl(Dacl, DaclSize, ACL_REVISION);
-    if (NT_SUCCESS(Status)) Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, GENERIC_ALL, SeExports->SeLocalSystemSid);
-    if (NT_SUCCESS(Status)) Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, GENERIC_ALL, SeExports->SeAliasAdminsSid);
+    if (NT_SUCCESS(Status)) Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, FILE_ALL_ACCESS, SeExports->SeLocalSystemSid);
+    if (NT_SUCCESS(Status)) Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, FILE_ALL_ACCESS, SeExports->SeAliasAdminsSid);
     if (NT_SUCCESS(Status)) Status = RtlSetDaclSecurityDescriptor(&AbsSD, TRUE, Dacl, FALSE);
     if (NT_SUCCESS(Status)) Status = RtlSetOwnerSecurityDescriptor(&AbsSD, SeExports->SeAliasAdminsSid, FALSE);
     if (NT_SUCCESS(Status)) Status = RtlSetGroupSecurityDescriptor(&AbsSD, SeExports->SeLocalSystemSid, FALSE);
