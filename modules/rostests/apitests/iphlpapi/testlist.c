@@ -37,6 +37,7 @@ extern void func_Ipv6UnscopedLinkLocal(void);
 extern void func_Ipv6Temporary(void);
 extern void func_NeighborEntry2(void);
 extern void func_NetstatOutput(void);
+extern void func_NslookupErrors(void);
 extern void func_NslookupOutput(void);
 extern void func_NotifyAddrChange(void);
 extern void func_NotifyChanges(void);
@@ -90,6 +91,7 @@ const struct test winetest_testlist[] =
     { "Ipv6Temporary",              func_Ipv6Temporary },
     { "NeighborEntry2",             func_NeighborEntry2 },
     { "NetstatOutput",              func_NetstatOutput },
+    { "NslookupErrors",             func_NslookupErrors },
     { "NslookupOutput",             func_NslookupOutput },
     { "NotifyAddrChange",          func_NotifyAddrChange },
     { "NotifyChanges",              func_NotifyChanges },
