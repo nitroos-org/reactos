@@ -109,6 +109,7 @@ list(APPEND SOURCE
     NextDlgItem.c
     OwnDcDestroy.c
     PaintDesktopSwitch.c
+    ExtractIconAni.c
     PrivateExtractIcons.c
     ProcessConnectTerminate.c
     PngIconRows.c

@@ -108,6 +108,7 @@ extern void func_NextDlgItem(void);
 extern void func_OwnDcDestroy(void);
 extern void func_PaintDesktopSwitch(void);
 extern void func_PrintWindow(void);
+extern void func_ExtractIconAni(void);
 extern void func_PrivateExtractIcons(void);
 extern void func_PngIconRows(void);
 extern void func_ProcessConnectTerminate(void);
@@ -286,6 +287,7 @@ const struct test winetest_testlist[] =
     { "OwnDcDestroy", func_OwnDcDestroy },
     { "PaintDesktopSwitch", func_PaintDesktopSwitch },
     { "PrintWindow", func_PrintWindow },
+    { "ExtractIconAni", func_ExtractIconAni },
     { "PrivateExtractIcons", func_PrivateExtractIcons },
     { "ProcessConnectTerminate", func_ProcessConnectTerminate },
     { "RawInput", func_RawInput },

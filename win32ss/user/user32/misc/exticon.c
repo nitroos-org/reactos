@@ -380,29 +380,35 @@ static UINT ICO_ExtractIconExW(
      * Also, is this resource an animjated icon/cursor (RIFF) */
     if ((fsizel >= 52) && !memcmp(peimage, "RIFF", 4))
     {
-        UINT anihOffset;
-        UINT anihMax;
-        /* Get size of the animation data */
-        ULONG uSize = MAKEWORD(peimage[4], peimage[5]);
+        UINT anihOffset = 0;
+        ULONGLONG cbPos;
+        DWORD cbRiff, cbChunk, cFrames;
+        /* The RIFF size is a DWORD that does not count its own 8 byte header; the data is no more than the file */
+        ULONG uSize;
 
-        /* Check if uSize is reasonable with respect to fsizel */
-        if ((uSize < strlen("anih")) || (uSize > fsizel))
-            goto end;
+        RtlCopyMemory(&cbRiff, &peimage[4], sizeof(cbRiff));
+        uSize = (ULONG)min((ULONGLONG)cbRiff + 8, fsizeh ? 0xFFFFFFFFULL : (ULONGLONG)fsizel);
 
-        /* Look though the reported size less search string length */
-        anihMax = uSize - strlen("anih"); 
-        /* Search for 'anih' indicating animation header */
-        for (anihOffset = 0; anihOffset < anihMax; anihOffset++)
+        /* Walk the chunks that follow the RIFF header (RIFF, size, ACON), each inside the data, to the 'anih' one */
+        for (cbPos = 12; cbPos + 8 <= uSize; )
         {
-            if (memcmp(&peimage[anihOffset], "anih", 4) == 0)
+            RtlCopyMemory(&cbChunk, &peimage[cbPos + 4], sizeof(cbChunk));
+            if (memcmp(&peimage[cbPos], "anih", 4) == 0)
+            {
+                if ((cbChunk >= sizeof(aniheader)) && (cbPos + 8 + sizeof(aniheader) <= uSize))
+                    anihOffset = (UINT)cbPos;
                 break;
+            }
+            /* The next chunk follows after the padding to an even size */
+            cbPos += 8 + (((ULONGLONG)cbChunk + 1) & ~1ULL);
         }
 
-        if (anihOffset + sizeof(aniheader) > fsizel)
+        if (anihOffset == 0)
             goto end;
 
-        /* Get count of images for return value */
-        ret = MAKEWORD(peimage[anihOffset + 12], peimage[anihOffset + 13]);
+        /* Get count of images for return value: the frame count is the DWORD after the header size */
+        RtlCopyMemory(&cFrames, &peimage[anihOffset + 8 + 4], sizeof(cFrames));
+        ret = cFrames;
 
         TRACE("RIFF File with '%u' images at Offset '%u'.\n", ret, anihOffset);
 
