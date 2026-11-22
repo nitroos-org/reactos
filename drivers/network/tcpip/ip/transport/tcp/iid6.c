@@ -700,6 +700,32 @@ TCPConnectionKeyInit(VOID)
     Iid6NewSecret(TcpIsnKey, "TCP connection number key (this start only)");
 }
 
+/* F() of RFC 6528: a keyed hash of the four values of a connection. Any IRQL */
+u32_t
+TCPConnectionHash(const ip_addr_t *LocalIp, u16_t LocalPort, const ip_addr_t *RemoteIp, u16_t RemotePort)
+{
+    UCHAR Input[1 + 2 * 16 + 2 * 2];
+    ULONGLONG Hash;
+    const ip_addr_t *Address[2];
+    ULONG i;
+
+    RtlZeroMemory(Input, sizeof(Input));
+    Address[0] = LocalIp;
+    Address[1] = RemoteIp;
+    Input[0] = IP_IS_V4(LocalIp) ? 4 : 6;
+    for (i = 0; i < 2; i++)
+    {
+        if (IP_IS_V4(Address[i]))
+            RtlCopyMemory(Input + 1 + 16 * i, &ip_2_ip4(Address[i])->addr, sizeof(ip4_addr_t));
+        else
+            RtlCopyMemory(Input + 1 + 16 * i, ip_2_ip6(Address[i])->addr, 16);
+    }
+    RtlCopyMemory(Input + 1 + 2 * 16, &LocalPort, sizeof(LocalPort));
+    RtlCopyMemory(Input + 1 + 2 * 16 + 2, &RemotePort, sizeof(RemotePort));
+    Hash = Iid6SipHash(TcpIsnKey, Input, sizeof(Input));
+    return (u32_t)(Hash ^ (Hash >> 32));
+}
+
 /* A pseudo-random number under the key of this start, not repeated: the first ephemeral port. Any IRQL */
 ULONG
 TCPConnectionRandom(VOID)

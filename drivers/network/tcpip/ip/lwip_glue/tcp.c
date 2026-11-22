@@ -1068,16 +1068,20 @@ LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp)
     return 0;
 }
 
-/* LWIP_HOOK_TCP_ISN: lwIP's own generator, raised for an open of a reopened 4-tuple */
+/* LWIP_HOOK_TCP_ISN: RFC 6528, a clock that counts every 4 microseconds (the system time: it goes on over a
+   restart) plus a keyed hash of the four values of the connection (a key made at every start, iid6.c), raised
+   for every connection that is opened or accepted. lwIP's own generator added tcp_ticks to a static 6510 and
+   began at 6510 at every start; a peer that held a connection of the start before in TIME-WAIT dropped the SYN.
+   An open of a reopened 4-tuple of ours is raised above the old connection (Reopen) */
 u32_t
 LibTCPNextIss(const ip_addr_t *LocalIp, u16_t LocalPort, const ip_addr_t *RemoteIp, u16_t RemotePort)
 {
-    static u32_t Iss = 6510;
     PTIME_WAIT_REOPEN Reopen;
+    LARGE_INTEGER Now;
     u32_t Next, Floor;
 
-    Iss += tcp_ticks;
-    Next = Iss;
+    KeQuerySystemTime(&Now);
+    Next = (u32_t)(Now.QuadPart / 40) + TCPConnectionHash(LocalIp, LocalPort, RemoteIp, RemotePort);
     if (IP_IS_V4(LocalIp) && IP_IS_V4(RemoteIp))
     {
         Reopen = LibTCPFindReopen(ip_2_ip4(LocalIp), LocalPort, ip_2_ip4(RemoteIp), RemotePort);
