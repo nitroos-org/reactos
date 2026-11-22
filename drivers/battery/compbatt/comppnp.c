@@ -260,18 +260,33 @@ CompBattGetBatteries(
 
     /* Get all battery links */
     Status = IoGetDeviceInterfaces(&GUID_DEVICE_BATTERY, NULL, 0, &LinkList);
-    p = LinkList;
-    if (NT_SUCCESS(Status))
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
     {
+        /* No battery has registered its interface yet (a machine with an AC adapter and no battery,
+           or a battery that is started later): there is nothing to pick up now, the composite
+           battery starts and the arrival notification adds the batteries when they show up */
+        if (CompBattDebug & COMPBATT_DEBUG_WARN)
+            DbgPrint("CompBatt: No battery interface registered yet\n");
+        Status = STATUS_SUCCESS;
+    }
+    else if (NT_SUCCESS(Status))
+    {
+        p = LinkList;
+
         /* Loop all strings inside */
         while (TRUE)
         {
+            NTSTATUS AddStatus;
+
             /* Create the string */
             RtlInitUnicodeString(&LinkString, p);
             if (!LinkString.Length) break;
 
-            /* Add this battery and move on */
-            Status = CompBattAddNewBattery(&LinkString, DeviceExtension);
+            /* Add this battery and move on. A battery that cannot be added now does not stop the
+               composite battery from starting */
+            AddStatus = CompBattAddNewBattery(&LinkString, DeviceExtension);
+            if (!NT_SUCCESS(AddStatus) && (CompBattDebug & COMPBATT_DEBUG_ERR))
+                DbgPrint("CompBatt: Couldn't add battery - %x\n", AddStatus);
             p += (LinkString.Length / sizeof(WCHAR)) + sizeof(UNICODE_NULL);
         }
 
