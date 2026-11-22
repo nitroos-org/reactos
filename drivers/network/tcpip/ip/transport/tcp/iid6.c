@@ -79,6 +79,8 @@
 
 BOOLEAN TCP6RandomizeIdentifiers;
 static UCHAR Iid6Secret[IID6_SECRET_SIZE];
+/* Iid6Secret is the secret kept in the registry (read or stored), not one made for this start only */
+static BOOLEAN Iid6SecretStored;
 /* The key of the random identifiers of temporary addresses (temp6.c): made at every start, never stored */
 static UCHAR Iid6TempKey[IID6_SECRET_SIZE];
 static ULONGLONG Iid6TempCounter;
@@ -685,19 +687,42 @@ TCP6RandomIdentifier(UCHAR Iid[8])
 /* ---- the key of the TCP connection numbers: the first ephemeral port and the initial sequence numbers ----
  *
  * RFC 6056 (ephemeral ports) and RFC 6528 (initial sequence numbers): what a peer cannot know of a connection to
- * us is the number it would have to guess, so the first port after a start and the F() of RFC 6528 depend on a key
- * made at every start and never stored. A start that begins at port 49152 with sequence number 6510, as this
+ * us is the number it would have to guess, so the first port after a start and the F() of RFC 6528 depend on a
+ * secret key. A start that begins at port 49152 with sequence number 6510, as this
  * stack did, repeats the four values of the connections of the start before, and a peer that still holds one of
  * those in TIME-WAIT (Windows Server does: 21 s of SYNs without an answer) drops the new SYN.
  */
 static UCHAR TcpIsnKey[IID6_SECRET_SIZE];
 static volatile LONG TcpIsnCounter;
 
-/* PASSIVE_LEVEL, before the first TCP connection (TCPStartup) */
+/* PASSIVE_LEVEL, before the first TCP connection (TCPStartup, after the IPv6 identifier settings: they load the
+   installation's secret). The key is derived from that secret, so that it is the same in every start of the
+   installation: the number F() adds to the clock then belongs to the connection, not to the start, and the sequence
+   numbers of one 4-tuple keep rising over a restart (the clock goes on with the system time; a peer that holds the
+   old connection in TIME-WAIT accepts the new SYN, which is above it). Without that secret (IPv6 identifiers off,
+   the registry key could not be protected) the key is made for this start only, as RFC 6528 allows */
 VOID
 TCPConnectionKeyInit(VOID)
 {
-    Iid6NewSecret(TcpIsnKey, "TCP connection number key (this start only)");
+    static const UCHAR Domain[] = "NitroOS TCP connection number key";
+    UCHAR Input[sizeof(Domain) + 1];
+    ULONGLONG Half;
+    ULONG i;
+
+    if (!Iid6SecretStored)
+    {
+        Iid6NewSecret(TcpIsnKey, "TCP connection number key (this start only)");
+        return;
+    }
+
+    RtlCopyMemory(Input, Domain, sizeof(Domain));
+    for (i = 0; i < 2; i++)
+    {
+        Input[sizeof(Domain)] = (UCHAR)i;
+        Half = Iid6SipHash(Iid6Secret, Input, sizeof(Input));
+        RtlCopyMemory(TcpIsnKey + 8 * i, &Half, 8);
+    }
+    DbgPrint("TCPIP: TCP connection number key derived from the identifier secret of this installation\n");
 }
 
 /* F() of RFC 6528: a keyed hash of the four values of a connection. Any IRQL */
@@ -726,14 +751,20 @@ TCPConnectionHash(const ip_addr_t *LocalIp, u16_t LocalPort, const ip_addr_t *Re
     return (u32_t)(Hash ^ (Hash >> 32));
 }
 
-/* A pseudo-random number under the key of this start, not repeated: the first ephemeral port. Any IRQL */
+/* A pseudo-random number under the key, different at every call and every start (the counter, the interrupt time and
+   the cycle counter go in with the key): the first ephemeral port. Any IRQL */
 ULONG
 TCPConnectionRandom(VOID)
 {
-    ULONGLONG Input[2], Hash;
+    ULONGLONG Input[3], Hash;
 
     Input[0] = (ULONG)InterlockedIncrement(&TcpIsnCounter);
     Input[1] = KeQueryInterruptTime();
+#if defined(_M_IX86) || defined(_M_AMD64)
+    Input[2] = __rdtsc();
+#else
+    Input[2] = 0;
+#endif
     Hash = Iid6SipHash(TcpIsnKey, (const UCHAR *)Input, sizeof(Input));
     return (ULONG)(Hash ^ (Hash >> 32));
 }
@@ -954,6 +985,7 @@ Iid6LoadSecret(VOID)
     if (Keep)
     {
         RtlCopyMemory(Iid6Secret, Info->Data, IID6_SECRET_SIZE);
+        Iid6SecretStored = TRUE;
         if (Marked)
             DbgPrint("TCPIP: IPv6 identifier secret made during setup, replaced at the first start after it\n");
         if (Weak)
@@ -985,6 +1017,7 @@ Iid6LoadSecret(VOID)
             Status = ZwSetValueKey(Key, &ValueName, 0, REG_BINARY, Iid6Secret, IID6_SECRET_SIZE);
             if (NT_SUCCESS(Status))
             {
+                Iid6SecretStored = TRUE;
                 if (!Setup && Marked)
                 {
                     Status = ZwDeleteValueKey(Key, &MarkName);

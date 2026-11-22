@@ -1069,7 +1069,7 @@ LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp)
 }
 
 /* LWIP_HOOK_TCP_ISN: RFC 6528, a clock that counts every 4 microseconds (the system time: it goes on over a
-   restart) plus a keyed hash of the four values of the connection (a key made at every start, iid6.c), raised
+   restart) plus a keyed hash of the four values of the connection (a secret key, iid6.c), raised
    for every connection that is opened or accepted. lwIP's own generator added tcp_ticks to a static 6510 and
    began at 6510 at every start; a peer that held a connection of the start before in TIME-WAIT dropped the SYN.
    An open of a reopened 4-tuple of ours is raised above the old connection (Reopen) */
