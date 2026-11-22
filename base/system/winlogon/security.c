@@ -96,6 +96,46 @@ ConvertToSelfRelative(
     return RelativeSd;
 }
 
+/*
+ * A SACL with one mandatory label: Low, no write up, not inherited.
+ * Object opens apply mandatory labels, and an unlabelled object counts as
+ * Medium: a process below Medium (Low, as Protected Mode browsers and other
+ * sandboxed programs run) would get only the read and execute rights of
+ * the interactive window station and of its application desktop, and so no
+ * clipboard (WINSTA_ACCESSCLIPBOARD) and no window creation rights. Those
+ * processes use both on Windows ("low integrity processes ... have access
+ * to the Global Atom Table, Window Station properties, the user's
+ * clipboard and the \Default Desktop object", Full Disclosure 2010-12,
+ * "Practical sandboxing" research on Protected Mode). The label is not
+ * inheritable, so the Winlogon and screen saver desktops stay Medium.
+ */
+static struct
+{
+    ACL Acl;
+    struct
+    {
+        ACE_HEADER Header;
+        ACCESS_MASK Mask;
+        SID Sid;
+    } Label;
+} LowLabelSacl =
+{
+    { ACL_REVISION, 0, sizeof(LowLabelSacl), 1, 0 },
+    {
+        { SYSTEM_MANDATORY_LABEL_ACE_TYPE, 0, sizeof(LowLabelSacl.Label) },
+        SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        { SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY}, {SECURITY_MANDATORY_LOW_RID} }
+    }
+};
+
+static
+BOOL
+SetLowLabel(
+    _Inout_ PSECURITY_DESCRIPTOR AbsoluteSd)
+{
+    return SetSecurityDescriptorSacl(AbsoluteSd, TRUE, &LowLabelSacl.Acl, FALSE);
+}
+
 /**
  * @brief
  * Creates a security descriptor for the default
@@ -297,6 +337,13 @@ CreateWinstaSecurity(
         goto Quit;
     }
 
+    /* The Low label (see LowLabelSacl) */
+    if (!SetLowLabel(&AbsoluteSd))
+    {
+        ERR("CreateWinstaSecurity(): Failed to set up the label (error code %lu)\n", GetLastError());
+        goto Quit;
+    }
+
     /* Convert it to self-relative format */
     RelativeSd = ConvertToSelfRelative(&AbsoluteSd);
     if (RelativeSd == NULL)
@@ -473,6 +520,13 @@ CreateApplicationDesktopSecurity(
     if (!SetSecurityDescriptorDacl(&AbsoluteSd, TRUE, Dacl, FALSE))
     {
         ERR("CreateApplicationDesktopSecurity(): Failed to set up DACL to absolute security descriptor (error code %lu)\n", GetLastError());
+        goto Quit;
+    }
+
+    /* The Low label (see LowLabelSacl) */
+    if (!SetLowLabel(&AbsoluteSd))
+    {
+        ERR("CreateApplicationDesktopSecurity(): Failed to set up the label (error code %lu)\n", GetLastError());
         goto Quit;
     }
 
