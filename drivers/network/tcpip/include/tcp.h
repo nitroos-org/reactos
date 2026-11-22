@@ -263,6 +263,14 @@ struct netif;
 BOOLEAN
 TCP6SetStableLinkLocal(struct netif *netif);
 
+/* The key of the connection numbers of this start (iid6.c): TCPConnectionKeyInit at PASSIVE_LEVEL before the first
+   connection, TCPConnectionRandom at any IRQL (the first ephemeral port); the initial sequence numbers use the
+   same key (TCPConnectionHash, lwip_hooks.h) */
+VOID
+TCPConnectionKeyInit(VOID);
+ULONG
+TCPConnectionRandom(VOID);
+
 /* Random identifiers for temporary addresses (iid6.c, any IRQL), and the RFC 5453 reserved ones */
 VOID
 TCP6RandomIdentifier(UCHAR Iid[8]);

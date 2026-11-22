@@ -682,6 +682,36 @@ TCP6RandomIdentifier(UCHAR Iid[8])
     RtlSecureZeroMemory(Input, sizeof(Input));
 }
 
+/* ---- the key of the TCP connection numbers: the first ephemeral port and the initial sequence numbers ----
+ *
+ * RFC 6056 (ephemeral ports) and RFC 6528 (initial sequence numbers): what a peer cannot know of a connection to
+ * us is the number it would have to guess, so the first port after a start and the F() of RFC 6528 depend on a key
+ * made at every start and never stored. A start that begins at port 49152 with sequence number 6510, as this
+ * stack did, repeats the four values of the connections of the start before, and a peer that still holds one of
+ * those in TIME-WAIT (Windows Server does: 21 s of SYNs without an answer) drops the new SYN.
+ */
+static UCHAR TcpIsnKey[IID6_SECRET_SIZE];
+static volatile LONG TcpIsnCounter;
+
+/* PASSIVE_LEVEL, before the first TCP connection (TCPStartup) */
+VOID
+TCPConnectionKeyInit(VOID)
+{
+    Iid6NewSecret(TcpIsnKey, "TCP connection number key (this start only)");
+}
+
+/* A pseudo-random number under the key of this start, not repeated: the first ephemeral port. Any IRQL */
+ULONG
+TCPConnectionRandom(VOID)
+{
+    ULONGLONG Input[2], Hash;
+
+    Input[0] = (ULONG)InterlockedIncrement(&TcpIsnCounter);
+    Input[1] = KeQueryInterruptTime();
+    Hash = Iid6SipHash(TcpIsnKey, (const UCHAR *)Input, sizeof(Input));
+    return (ULONG)(Hash ^ (Hash >> 32));
+}
+
 /* The DACL of the secret's key: SYSTEM and Administrators, full access, nobody else; not inherited from the
    parent (protected), inherited by any subkey */
 static

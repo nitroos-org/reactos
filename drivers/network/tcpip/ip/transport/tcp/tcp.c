@@ -222,6 +222,11 @@ NTSTATUS TCPStartup(VOID)
         return Status;
     }
 
+    /* RFC 6056: the ephemeral ports of a start begin at a random port of the dynamic range, not at
+       TCP_EPHEMERAL_FIRST in every start (iid6.c; NextPort is a host-order port, ports.c) */
+    TCPConnectionKeyInit();
+    TCPPorts.NextPort = TCP_EPHEMERAL_FIRST + TCPConnectionRandom() % (TCP_EPHEMERAL_LAST - TCP_EPHEMERAL_FIRST + 1);
+
     ExInitializeNPagedLookasideList(&TdiBucketLookasideList,
                                     NULL,
                                     NULL,
