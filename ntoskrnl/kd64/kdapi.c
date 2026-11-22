@@ -2242,6 +2242,27 @@ KdSystemDebugControl(
     NTSTATUS Status;
     ULONG Length = 0;
 
+    /*
+     * The ROS-internal commands below take raw kernel pointers (a callback to call, a buffer to read):
+     * they are for kernel-mode callers only, whatever the caller passes. NtSystemDebugControl does not
+     * forward them; this keeps it so should that ever change.
+     */
+    if (PreviousMode != KernelMode)
+    {
+        switch ((ULONG)Command)
+        {
+            case ' soR':
+            case 'CsoR':
+            case 'DsoR':
+            case 'RbdK':
+            case 'PdbK':
+                return STATUS_INVALID_INFO_CLASS;
+
+            default:
+                break;
+        }
+    }
+
     /* Handle some internal commands */
     switch ((ULONG)Command)
     {
