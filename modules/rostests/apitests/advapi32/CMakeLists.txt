@@ -8,6 +8,7 @@ list(APPEND SOURCE
     AccessCheckNoAccess.c
     AccessCheckObjectTypeList.c
     AddMandatoryAce.c
+    RegSaveKeyBigValue.c
     SddlNullAcl.c
     AuditCategories.c
     CveEventWrite.c
