@@ -1023,8 +1023,27 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
            {
               if (spwndActive->head.pti == ptiFrom)
               {
+                 PDESKTOP pdeskFg = ptiTo->MessageQueue->Desktop;
+
                  ptiFrom->MessageQueue->spwndActive = spwndActive;
                  ptiTo->MessageQueue->spwndActive = 0;
+
+                 /* The shared queue was the foreground queue of its desktop and its active window goes with
+                    the detached thread: the foreground goes with it too. Left with the other thread, whose
+                    queue has no active window now, the desktop would have no foreground window at all after
+                    the usual "attach to the foreground thread, SetForegroundWindow, detach" sequence (the
+                    Wine user32 winstation test expects the window to stay the foreground window) */
+                 if (pdeskFg && ptiFrom->rpdesk == pdeskFg)
+                 {
+                    BOOL bInput = (ptiTo->MessageQueue == gpqForeground);
+
+                    IntRemoveFocusMessageQueue(ptiTo->MessageQueue);
+                    if (IntSetDesktopFocusMessageQueue(pdeskFg, ptiFrom) && bInput)
+                    {
+                       gptiForeground = ptiFrom;
+                       IntSetForegroundProcess(ptiFrom);
+                    }
+                 }
               }
            }
            if (spwndFocus)
