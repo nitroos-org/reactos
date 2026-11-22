@@ -230,7 +230,7 @@ CmpDedupInheritedAces(IN OUT PSECURITY_DESCRIPTOR Sd)
     PISECURITY_DESCRIPTOR_RELATIVE Relative = (PISECURITY_DESCRIPTOR_RELATIVE)Sd;
     PACL Dacl;
     PACE_HEADER Ace, Earlier;
-    ULONG i, j, Total, OldSize, NewSize;
+    ULONG i, j, Total, OldSize, NewSize, Offset, AceOffset, EarlierOffset, Used;
     BOOLEAN Deleted = FALSE;
 
     if (!(Relative->Control & SE_SELF_RELATIVE) || !(Relative->Control & SE_DACL_PRESENT) || Relative->Dacl == 0)
@@ -241,13 +241,28 @@ CmpDedupInheritedAces(IN OUT PSECURITY_DESCRIPTOR Sd)
     if (Relative->Dacl + OldSize > Total)
         return;
 
+    /*
+     * The ACEs are walked with offsets (CmpAclNextAce), not RtlGetAce by index, which starts again from the first
+     * ACE for every index: with the inner loop that was cubic in the ACE count of an inherited DACL (thousands of
+     * ACEs in 64 KB). Now each ACE is compared with the ones before it once. Used: where the last ACE ends.
+     */
+    Used = sizeof(ACL);
+    for (i = 0; i < Dacl->AceCount; i++)
+    {
+        if (!CmpAclNextAce(Dacl, &Used))
+            return;
+    }
+
+    Offset = sizeof(ACL);
     for (i = 0; i < Dacl->AceCount; i++)
     {
         PACCESS_ALLOWED_ACE Plain, PlainEarlier;
         ACCESS_MASK KeyMask = 0, ContainerMask = 0, ObjectMask = 0;
         BOOLEAN KeyCovered, PassCovered;
 
-        if (!NT_SUCCESS(RtlGetAce(Dacl, i, (PVOID *)&Ace)))
+        AceOffset = Offset;
+        Ace = CmpAclNextAce(Dacl, &Offset);
+        if (!Ace)
             return;
         if ((Ace->AceType != ACCESS_ALLOWED_ACE_TYPE && Ace->AceType != ACCESS_DENIED_ACE_TYPE) ||
             !(Ace->AceFlags & INHERITED_ACE))
@@ -256,9 +271,11 @@ CmpDedupInheritedAces(IN OUT PSECURITY_DESCRIPTOR Sd)
             continue;
         Plain = (PACCESS_ALLOWED_ACE)Ace;
 
+        EarlierOffset = sizeof(ACL);
         for (j = 0; j < i; j++)
         {
-            if (!NT_SUCCESS(RtlGetAce(Dacl, j, (PVOID *)&Earlier)))
+            Earlier = CmpAclNextAce(Dacl, &EarlierOffset);
+            if (!Earlier)
                 return;
             PlainEarlier = (PACCESS_ALLOWED_ACE)Earlier;
             if (Earlier->AceType != Ace->AceType || !(Earlier->AceFlags & INHERITED_ACE) ||
@@ -279,8 +296,14 @@ CmpDedupInheritedAces(IN OUT PSECURITY_DESCRIPTOR Sd)
             continue;
         if (PassCovered)
         {
-            if (!NT_SUCCESS(RtlDeleteAce(Dacl, i)))
-                return;
+            /* Delete it: the ACEs behind it move up (as RtlDeleteAce), the next one is at AceOffset now */
+            ULONG Size = Ace->AceSize;
+
+            RtlMoveMemory(Ace, (PUCHAR)Ace + Size, Used - Offset);
+            Used -= Size;
+            RtlZeroMemory((PUCHAR)Dacl + Used, Size);
+            Dacl->AceCount--;
+            Offset = AceOffset;
             Deleted = TRUE;
             i--;
         }
@@ -293,14 +316,7 @@ CmpDedupInheritedAces(IN OUT PSECURITY_DESCRIPTOR Sd)
         return;
 
     /* the ACL ends where its last ACE does; what stands behind it moves up */
-    NewSize = sizeof(ACL);
-    if (Dacl->AceCount != 0)
-    {
-        if (!NT_SUCCESS(RtlGetAce(Dacl, Dacl->AceCount - 1, (PVOID *)&Ace)))
-            return;
-        NewSize = (ULONG)((PUCHAR)Ace + Ace->AceSize - (PUCHAR)Dacl);
-    }
-    NewSize = ALIGN_UP_BY(NewSize, sizeof(ULONG));
+    NewSize = ALIGN_UP_BY(Used, sizeof(ULONG));
     if (NewSize >= OldSize)
         return;
     {

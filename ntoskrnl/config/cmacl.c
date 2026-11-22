@@ -995,7 +995,7 @@ CmpAclSdHasNoPropagate(
     BOOLEAN Present, Defaulted;
     PACL Acl;
     PACE_HEADER Ace;
-    ULONG Which, i;
+    ULONG Which, i, Offset;
 
     for (Which = 0; Which < 2; Which++)
     {
@@ -1012,9 +1012,11 @@ CmpAclSdHasNoPropagate(
         }
         if (!Acl)
             continue;
+        Offset = sizeof(ACL);
         for (i = 0; i < Acl->AceCount; i++)
         {
-            if (!NT_SUCCESS(RtlGetAce(Acl, i, (PVOID *)&Ace)))
+            Ace = CmpAclNextAce(Acl, &Offset);
+            if (!Ace)
                 return TRUE;    /* cannot tell: take the exact path */
             if (Ace->AceFlags & NO_PROPAGATE_INHERIT_ACE)
                 return TRUE;
@@ -1172,7 +1174,7 @@ CmpAclSdAdminWriteOnly(
     PSID Owner, Sid;
     PACE_HEADER Ace;
     ACCESS_MASK Mask;
-    ULONG i;
+    ULONG i, Offset = sizeof(ACL);
 
     if (!NT_SUCCESS(RtlGetOwnerSecurityDescriptor(Sd, &Owner, &Defaulted)) ||
         !Owner || !CmpAclIsAdminSid(Owner))
@@ -1184,7 +1186,8 @@ CmpAclSdAdminWriteOnly(
 
     for (i = 0; i < Dacl->AceCount; i++)
     {
-        if (!NT_SUCCESS(RtlGetAce(Dacl, i, (PVOID *)&Ace)))
+        Ace = CmpAclNextAce(Dacl, &Offset);
+        if (!Ace)
             return FALSE;
         if (Ace->AceFlags & INHERIT_ONLY_ACE)
             continue;
@@ -2153,7 +2156,7 @@ CmpAclSdPlanted(
     PACL Dacl;
     PACE_HEADER Ace;
     ACCESS_MASK Mask;
-    ULONG Reasons = 0, i;
+    ULONG Reasons = 0, i, Offset = sizeof(ACL);
 
     *Owner = NULL;
     if (!NT_SUCCESS(RtlGetOwnerSecurityDescriptor(Sd, Owner, &Defaulted)) || !*Owner ||
@@ -2173,7 +2176,8 @@ CmpAclSdPlanted(
         {
             for (i = 0; i < Dacl->AceCount; i++)
             {
-                if (!NT_SUCCESS(RtlGetAce(Dacl, i, (PVOID *)&Ace)))
+                Ace = CmpAclNextAce(Dacl, &Offset);
+                if (!Ace)
                 {
                     Reasons |= CMP_ACL_PLANTED_ACETYPE;
                     break;
@@ -3018,7 +3022,7 @@ CmpAclFileSdTrusted(
     PSID Owner;
     PACL Dacl;
     PACE_HEADER Ace;
-    ULONG i;
+    ULONG i, Offset = sizeof(ACL);
 
     if (!NT_SUCCESS(RtlGetOwnerSecurityDescriptor(Sd, &Owner, &Defaulted)) || !Owner || !CmpAclTrustedSid(Owner))
         return FALSE;
@@ -3026,7 +3030,8 @@ CmpAclFileSdTrusted(
         return FALSE;
     for (i = 0; i < Dacl->AceCount; i++)
     {
-        if (!NT_SUCCESS(RtlGetAce(Dacl, i, (PVOID *)&Ace)))
+        Ace = CmpAclNextAce(Dacl, &Offset);
+        if (!Ace)
             return FALSE;
         if (Ace->AceType == ACCESS_DENIED_ACE_TYPE)
             continue;
