@@ -393,7 +393,11 @@ DcUpdateMulticastList(
         UsePerfectFiltering = TRUE;
     }
 
-    Adapter->ProgramHashPerfectFilter = UsePerfectFiltering;
+    /* The descriptor's filter type selects how the chip reads the setup frame
+       (21140A and 21143 hardware reference manuals, transmit descriptor 1, FT1:FT0):
+       0 = perfect filtering of 16 addresses, FT0 alone = hash filtering of the
+       multicast addresses with the 512-bit table plus one perfect physical address */
+    Adapter->ProgramHashPerfectFilter = !UsePerfectFiltering;
     Adapter->OidPending = TRUE;
 
     if (UsePerfectFiltering)
