@@ -590,6 +590,69 @@ SepUpdatePrivilegeFlagsToken(
 
 /**
  * @brief
+ * Whether a privilege of a token may be enabled at the token's integrity
+ * level.
+ *
+ * @remarks
+ * Measured on Windows Server 2022 (V1, V8, V17): a token lowered to Low or
+ * Untrusted keeps its privileges, disabled, and AdjustTokenPrivileges does
+ * not enable them again (ERROR_NOT_ALL_ASSIGNED, the state stays disabled;
+ * SeImpersonatePrivilege, SeBackupPrivilege, SeRestorePrivilege,
+ * SeDebugPrivilege and SeShutdownPrivilege measured). Medium and above
+ * are not restricted. SeChangeNotifyPrivilege (traverse checking, on which
+ * every path lookup of a sandboxed process relies) is not measured and
+ * stays usable.
+ *
+ * @param[in] Token
+ * The token, locked by the caller.
+ *
+ * @param[in] Index
+ * Index of the privilege in the token.
+ *
+ * @return
+ * TRUE if the privilege may be enabled.
+ */
+BOOLEAN
+SepPrivilegeUsableAtIntegrity(
+    _In_ PTOKEN Token,
+    _In_ ULONG Index)
+{
+    ASSERT(Index < Token->PrivilegeCount);
+
+    if (Token->IntegrityLevel >= SECURITY_MANDATORY_MEDIUM_RID)
+        return TRUE;
+
+    return RtlEqualLuid(&Token->Privileges[Index].Luid, &SeChangeNotifyPrivilege);
+}
+
+/**
+ * @brief
+ * Disables the privileges a token may not use at its integrity level (see
+ * SepPrivilegeUsableAtIntegrity), enabled by default included: measured,
+ * SeImpersonatePrivilege attributes 0x3 before lowering a token to Low or
+ * Untrusted, 0x0 after.
+ *
+ * @param[in,out] Token
+ * The token, locked exclusively by the caller.
+ */
+VOID
+SepDisablePrivilegesForIntegrity(
+    _Inout_ PTOKEN Token)
+{
+    ULONG i;
+
+    for (i = 0; i < Token->PrivilegeCount; i++)
+    {
+        if (SepPrivilegeUsableAtIntegrity(Token, i))
+            continue;
+
+        Token->Privileges[i].Attributes &= ~(SE_PRIVILEGE_ENABLED | SE_PRIVILEGE_ENABLED_BY_DEFAULT);
+        SepUpdateSinglePrivilegeFlagToken(Token, i);
+    }
+}
+
+/**
+ * @brief
  * Removes a privilege from the token.
  *
  * @param[in,out] Token

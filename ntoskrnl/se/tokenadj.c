@@ -107,6 +107,17 @@ SepAdjustPrivileges(
                 /* Continue with the token's next privilege */
                 continue;
             }
+
+            /*
+             * A privilege the token may not use at its integrity level is
+             * not enabled: it counts as not assigned (V8, measured on
+             * Windows Server 2022: ERROR_NOT_ALL_ASSIGNED, still disabled)
+             */
+            if ((NewAttributes & SE_PRIVILEGE_ENABLED) && !(NewAttributes & SE_PRIVILEGE_REMOVED) &&
+                !SepPrivilegeUsableAtIntegrity(Token, i))
+            {
+                continue;
+            }
         }
 
         /* We found a privilege, count it */

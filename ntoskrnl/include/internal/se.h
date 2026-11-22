@@ -544,6 +544,15 @@ VOID
 SepUpdatePrivilegeFlagsToken(
     _Inout_ PTOKEN Token);
 
+BOOLEAN
+SepPrivilegeUsableAtIntegrity(
+    _In_ PTOKEN Token,
+    _In_ ULONG Index);
+
+VOID
+SepDisablePrivilegesForIntegrity(
+    _Inout_ PTOKEN Token);
+
 VOID
 SepRemovePrivilegeToken(
     _Inout_ PTOKEN Token,
