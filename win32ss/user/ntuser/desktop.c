@@ -4216,15 +4216,22 @@ IntSetThreadDesktop(IN HDESK hDesktop,
         return FALSE;
     }
 
-    /* A queue shared with other threads (AttachThreadInput) would then serve two desktops: the
-       foreground queue of one desktop would route the keys to a thread of another */
+    /* A queue shared with other threads (AttachThreadInput) must not serve two desktops: the foreground
+       queue of one desktop would route the keys to a thread of another. The thread leaves its attachments
+       and takes its own queue with it, as on Windows (Server 2022, row W-T1: SetThreadDesktop of an attached
+       thread returns TRUE, and AttachThreadInput(FALSE) afterwards fails: the attachment is gone) */
     if (pdesk && pti->rpdesk && pti->rpdesk != pdesk &&
         pti->MessageQueue && pti->MessageQueue->cThreads > 1)
     {
-        ObDereferenceObject(pdesk);
-        ERR("Attempted to change thread desktop although the thread shares its input queue!\n");
-        EngSetLastError(ERROR_BUSY);
-        return FALSE;
+        IsRemoveAttachThread(pti);
+        if (pti->MessageQueue && pti->MessageQueue->cThreads > 1)
+        {
+            /* Still shared through attachments between other threads of the queue */
+            ObDereferenceObject(pdesk);
+            ERR("Attempted to change thread desktop although the thread shares its input queue!\n");
+            EngSetLastError(ERROR_BUSY);
+            return FALSE;
+        }
     }
 
     /* Desktop is being re-set so clear out foreground: the queue stops being the foreground
