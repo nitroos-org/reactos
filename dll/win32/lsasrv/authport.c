@@ -343,6 +343,14 @@ AuthPortThreadRoutine(PVOID Param)
             break;
         }
 
+        /* The message buffer is reused: what the caller did not send must not be read as its request (it was the
+         * previous caller's message or its reply) */
+        if ((ULONG)sizeof(PORT_MESSAGE) + RequestMsg.h.u1.s1.DataLength < sizeof(RequestMsg))
+        {
+            RtlZeroMemory((PUCHAR)&RequestMsg + sizeof(PORT_MESSAGE) + RequestMsg.h.u1.s1.DataLength,
+                          sizeof(RequestMsg) - sizeof(PORT_MESSAGE) - RequestMsg.h.u1.s1.DataLength);
+        }
+
         /* A connection that is gone (or has no context) is not found */
         LogonContext = (RequestMsg.h.u2.s2.Type == LPC_CONNECTION_REQUEST) ?
                        NULL : LsapFindLogonContext(PortContext);
