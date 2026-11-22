@@ -868,6 +868,20 @@ CmpAclStampHiveRoot(
  */
 #define CMHIVE_FLAG_NO_ROOT_STAMP 0x80000000
 
+/*
+ * CMHIVE::Flags: a user hive whose check after the transition to enforcement
+ * (CmpAclCheckUserHive) could not be completed: while it stays loaded, only
+ * its own account, SYSTEM and administrators may open or create keys in it.
+ */
+#define CMHIVE_FLAG_ACL_UNCHECKED 0x20000000
+
+VOID
+NTAPI
+CmpAclCheckUserHive(
+    _In_ PCMHIVE CmHive,
+    _In_ PCM_KEY_CONTROL_BLOCK RootKcb
+);
+
 NTSTATUS
 NTAPI
 CmpStampKeySecurity(
