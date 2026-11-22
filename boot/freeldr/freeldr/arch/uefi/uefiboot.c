@@ -26,8 +26,10 @@
  *    while a full path that starts with the disk's own path is kept.
  *
  *    A normal boot reads BootOrder and the options it lists and writes
- *    nothing. An option of ours for this partition with another device path
- *    (the disk moved to another port) is rewritten in place; an option of ours
+ *    nothing; so does a boot through any option (BootCurrent) that starts our
+ *    loader from our partition, whoever made it. An option of ours (our
+ *    description) for this partition with another device path (the disk
+ *    moved to another port) is rewritten in place; an option of ours
  *    whose partition is gone (the system was copied to another disk) is reused,
  *    not duplicated. Options of other systems are never written. A firmware
  *    that refuses the write is logged and the boot goes on. A firmware that
@@ -423,7 +425,8 @@ typedef enum _NV_OPTION_KIND
 {
     NvOptionOther,          /* not ours, or not readable */
     NvOptionMatch,          /* starts our loader from our partition: nothing to do */
-    NvOptionOursMoved,      /* our loader on our partition, another device path: rewrite it */
+    NvOptionOursMoved,      /* our description, loader and partition, another device path: rewrite it */
+    NvOptionOthersForUs,    /* another description, our loader and partition, another device path: never written */
     NvOptionOursElsewhere   /* our description and loader, another partition */
 } NV_OPTION_KIND;
 
@@ -446,6 +449,7 @@ NvClassifyOption(
     UINT16 PathListLength;
     NV_PATH_INFO *Theirs;
     NV_OPTION_KIND Kind = NvOptionOther;
+    BOOLEAN DescOurs;
 
     NvOptionName(Name, Number);
     if (EFI_ERROR(NvGetVariable(Name, &NvGlobalVariableGuid, &Data, &Size)))
@@ -473,6 +477,20 @@ NvClassifyOption(
         goto Done;
     }
 
+    /* Ours by name: the description is ours too */
+    {
+        const UCHAR *Desc = &Data[6];
+        const WCHAR *Want = NV_DESCRIPTION;
+        UINTN i = 0;
+
+        while (Want[i] && 6 + 2 * i + 1 < DescEnd &&
+               (WCHAR)(Desc[2 * i] | (Desc[2 * i + 1] << 8)) == Want[i])
+        {
+            i++;
+        }
+        DescOurs = (Want[i] == UNICODE_NULL && 6 + 2 * i == DescEnd);
+    }
+
     if (NvSamePartition(&Theirs->Hd, &Ours->Hd))
     {
         /* The short form (starts at the hard drive node) or the device path of our disk */
@@ -483,27 +501,15 @@ NvClassifyOption(
         }
         else
         {
-            Kind = NvOptionOursMoved;
+            /* Made by hand or by another program, or rewritten by the firmware: not ours to change */
+            Kind = DescOurs ? NvOptionOursMoved : NvOptionOthersForUs;
         }
     }
-    else
+    else if (DescOurs)
     {
-        /* Ours by name: the description is ours too */
-        const UCHAR *Desc = &Data[6];
-        const WCHAR *Want = NV_DESCRIPTION;
-        UINTN i = 0;
-
-        while (Want[i] && 6 + 2 * i + 1 < DescEnd &&
-               (WCHAR)(Desc[2 * i] | (Desc[2 * i + 1] << 8)) == Want[i])
-        {
-            i++;
-        }
-        if (Want[i] == UNICODE_NULL && 6 + 2 * i == DescEnd)
-        {
-            Kind = NvOptionOursElsewhere;
-            if (TheirPartition)
-                *TheirPartition = Theirs->Hd;
-        }
+        Kind = NvOptionOursElsewhere;
+        if (TheirPartition)
+            *TheirPartition = Theirs->Hd;
     }
 
 Done:
@@ -713,8 +719,8 @@ NvEnsureBootEntry(
     _In_ const NV_PATH_INFO *Ours,
     _In_ const UCHAR *OursPath)
 {
-    UCHAR *Order = NULL, *NewOrder = NULL, *Option = NULL, *Used = NULL;
-    UINTN OrderSize = 0, i, OptionSize, PathListLength, DescBytes, FileBytes, FileNodeLength;
+    UCHAR *Order = NULL, *NewOrder = NULL, *Option = NULL, *Used = NULL, *Current = NULL;
+    UINTN OrderSize = 0, CurrentSize, i, OptionSize, PathListLength, DescBytes, FileBytes, FileNodeLength;
     LONG Match, Moved, Stale;
     ULONG Number;
     BOOLEAN InOrder = FALSE;
@@ -741,6 +747,30 @@ NvEnsureBootEntry(
         if (NvClassifyOption(Entry, Ours, OursPath, NULL) == NvOptionMatch)
         {
             ERR("UEFI boot entry: Boot%04X starts this system, %lu variable writes\n", Entry, NvWriteCount);
+            goto Quit;
+        }
+    }
+
+    /*
+     * The option that started us (BootCurrent, UEFI 2.10 3.3) starts our loader
+     * from our partition, though with a device path of its own (made by hand
+     * or by another program, or rewritten by the firmware) or from outside
+     * BootOrder (the firmware's boot menu): it works, nothing to do.
+     */
+    if (!EFI_ERROR(NvGetVariable(L"BootCurrent", &NvGlobalVariableGuid, &Current, &CurrentSize)))
+    {
+        NV_OPTION_KIND Kind = NvOptionOther;
+        UINT16 Entry = 0;
+
+        if (CurrentSize == sizeof(UINT16))
+        {
+            Entry = (UINT16)(Current[0] | (Current[1] << 8));
+            Kind = NvClassifyOption(Entry, Ours, OursPath, NULL);
+        }
+        NvFree(Current);
+        if (Kind == NvOptionMatch || Kind == NvOptionOursMoved || Kind == NvOptionOthersForUs)
+        {
+            ERR("UEFI boot entry: Boot%04X (BootCurrent) starts this system, %lu variable writes\n", Entry, NvWriteCount);
             goto Quit;
         }
     }
