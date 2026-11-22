@@ -473,6 +473,23 @@ NtUserEnumDisplayDevices(
     return NT_SUCCESS(Status); // FIXME
 }
 
+/* A copy of a DEVMODE and its driver data, which the caller frees (GDITAG_DEVMODE) */
+static
+PDEVMODEW
+UserCopyDevmode(
+    _In_ PDEVMODEW pdm)
+{
+    PDEVMODEW pdmCopy;
+    ULONG cjSize = pdm->dmSize + pdm->dmDriverExtra;
+
+    pdmCopy = ExAllocatePoolWithTag(PagedPool, cjSize, GDITAG_DEVMODE);
+    if (pdmCopy)
+        RtlCopyMemory(pdmCopy, pdm, cjSize);
+
+    return pdmCopy;
+}
+
+/* *ppdm: a copy of the current mode, for the caller to free */
 NTSTATUS
 NTAPI
 UserEnumCurrentDisplaySettings(
@@ -490,12 +507,14 @@ UserEnumCurrentDisplaySettings(
         return STATUS_INVALID_PARAMETER_1;
     }
 
-    *ppdm = ppdev->pdmwDev;
+    /* A copy: the caller reads it after the USER lock, when a mode change may have freed pdmwDev */
+    *ppdm = UserCopyDevmode(ppdev->pdmwDev);
     PDEVOBJ_vRelease(ppdev);
 
-    return STATUS_SUCCESS;
+    return *ppdm ? STATUS_SUCCESS : STATUS_NO_MEMORY;
 }
 
+/* *ppdm: a copy of mode iModeNum, for the caller to free */
 NTSTATUS
 NTAPI
 UserEnumDisplaySettings(
@@ -508,6 +527,7 @@ UserEnumDisplaySettings(
     PDEVMODEENTRY pdmentry;
     ULONG i, iFoundMode;
     PPDEVOBJ ppdev;
+    NTSTATUS Status = STATUS_INVALID_PARAMETER_2;
 
     TRACE("Enter UserEnumDisplaySettings('%wZ', %lu)\n",
           pustrDevice, iModeNum);
@@ -520,14 +540,20 @@ UserEnumDisplaySettings(
     {
         /* No device found */
         ERR("No device found!\n");
+        if (ppdev)
+            PDEVOBJ_vRelease(ppdev);
         return STATUS_INVALID_PARAMETER_1;
     }
 
+    /*
+     * The USER lock is shared here, so another thread can be in this function too and refresh the list, which frees
+     * the one this thread reads. The refresh takes the device lock: find the mode and copy it under that lock.
+     */
+    EngAcquireSemaphore(ppdev->hsemDevLock);
+
     /* let's politely ask the driver for an updated mode list,
        just in case there's something new in there (vbox) */
-
     PDEVOBJ_vRefreshModeList(ppdev);
-    PDEVOBJ_vRelease(ppdev);
 
     iFoundMode = 0;
     for (i = 0; i < pGraphicsDevice->cDevModes; i++)
@@ -543,8 +569,9 @@ UserEnumDisplaySettings(
             /* Is this the one we want? */
             if (iFoundMode == iModeNum)
             {
-                *ppdm = pdmentry->pdm;
-                return STATUS_SUCCESS;
+                *ppdm = UserCopyDevmode(pdmentry->pdm);
+                Status = *ppdm ? STATUS_SUCCESS : STATUS_NO_MEMORY;
+                break;
             }
 
             /* Increment number of found modes */
@@ -552,8 +579,11 @@ UserEnumDisplaySettings(
         }
     }
 
-    /* Nothing was found */
-    return STATUS_INVALID_PARAMETER_2;
+    EngReleaseSemaphore(ppdev->hsemDevLock);
+    PDEVOBJ_vRelease(ppdev);
+
+    /* STATUS_INVALID_PARAMETER_2: nothing was found */
+    return Status;
 }
 
 NTSTATUS
@@ -617,7 +647,7 @@ NtUserEnumDisplaySettings(
     WCHAR awcDevice[CCHDEVICENAME];
     NTSTATUS Status;
     ULONG cbSize, cbExtra;
-    DEVMODEW dmReg, *pdm;
+    DEVMODEW dmReg, *pdm, *pdmCopy = NULL;
 
     TRACE("Enter NtUserEnumDisplaySettings(%wZ, %lu, %p, 0x%lx)\n",
           pustrDevice, iModeNum, lpDevMode, dwFlags);
@@ -684,15 +714,17 @@ NtUserEnumDisplaySettings(
     else if (iModeNum == ENUM_CURRENT_SETTINGS)
     {
         /* Get the current settings */
-        Status = UserEnumCurrentDisplaySettings(pustrDevice, &pdm);
+        Status = UserEnumCurrentDisplaySettings(pustrDevice, &pdmCopy);
+        pdm = pdmCopy;
     }
     else
     {
         /* Get specified settings */
-        Status = UserEnumDisplaySettings(pustrDevice, iModeNum, &pdm, dwFlags);
+        Status = UserEnumDisplaySettings(pustrDevice, iModeNum, &pdmCopy, dwFlags);
+        pdm = pdmCopy;
     }
 
-    /* Release lock */
+    /* Release lock. The modes are copies: the device's mode list and current mode may be freed from now on */
     UserLeave();
 
     /* Did we succeed? */
@@ -718,6 +750,9 @@ NtUserEnumDisplaySettings(
         }
         _SEH2_END;
     }
+
+    if (pdmCopy)
+        ExFreePoolWithTag(pdmCopy, GDITAG_DEVMODE);
 
     return Status;
 }
