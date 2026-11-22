@@ -141,6 +141,7 @@ extern void func_OpenProcessTokenLimited(void);
 extern void func_ServiceAccessCheck(void);
 extern void func_ServiceArgs(void);
 extern void func_ServiceControllerQuery(void);
+extern void func_ServiceDependency(void);
 extern void func_ServiceEnv(void);
 extern void func_ServiceFailureActions(void);
 extern void func_ServiceRecovery(void);
@@ -326,6 +327,7 @@ const struct test winetest_testlist[] =
     { "ServiceAccessCheck", func_ServiceAccessCheck },
     { "ServiceArgs", func_ServiceArgs },
     { "ServiceControllerQuery", func_ServiceControllerQuery },
+    { "ServiceDependency", func_ServiceDependency },
     { "ServiceEnv", func_ServiceEnv },
     { "ServiceFailureActions", func_ServiceFailureActions },
     { "ServiceRecovery", func_ServiceRecovery },

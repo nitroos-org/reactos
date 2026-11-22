@@ -124,6 +124,7 @@ list(APPEND SOURCE
     ServiceAccessCheck.c
     ServiceArgs.c
     ServiceControllerQuery.c
+    ServiceDependency.c
     ServiceEnv.c
     ServiceFailureActions.c
     ServiceRecovery.c

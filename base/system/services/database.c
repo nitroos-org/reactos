@@ -3802,16 +3802,383 @@ ScmLoadService(PSERVICE Service,
 }
 
 
-DWORD
-ScmStartService(PSERVICE Service,
-                DWORD argc,
-                const PCWSTR* argv)
+/*
+ * The services a service depends on (DependOnService, DependOnGroup) are started before it, as on Windows
+ * (CreateService, lpDependencies: "names of services or load ordering groups that the system must start before this
+ * service"; "Dependency on a group means that this service can run if at least one member of the group is running after
+ * an attempt to start all members of the group"; ERROR_SERVICE_DEPENDENCY_FAIL 1068 and ERROR_SERVICE_DEPENDENCY_DELETED
+ * 1075 are the codes of the system error list).
+ *
+ * Locks: each service of the chain is started on its own, under the control critical section and the start lock, as
+ * a single StartService is (ScmStartOneService). The waits for a dependency to report its running state hold no lock:
+ * other starts and controls, LockServiceDatabase and the status queries go on meanwhile.
+ *
+ * Time: a dependency may take its wait hint (at least SCM_DEPENDENCY_MIN_WAIT) between two checkpoints; the waits of
+ * one StartService call together end after SCM_DEPENDENCY_CALL_LIMIT (the start of each service itself is bounded
+ * by the pipe timeout as before). A shutdown ends a wait at once (ERROR_SHUTDOWN_IN_PROGRESS).
+ */
+#define SCM_MAX_DEPENDENCY_DEPTH    16
+#define SCM_DEPENDENCY_MIN_WAIT     30000   /* ms a dependency may take between two checkpoints, at least */
+#define SCM_DEPENDENCY_CALL_LIMIT   120000  /* ms one StartService call may spend waiting for its dependencies */
+#define SCM_DEPENDENCY_STARTER_GRACE 5000   /* ms the call that started a dependency waits longer than the others */
+
+typedef struct _SCM_START_CHAIN
+{
+    ULONG Depth;
+    DWORD dwStartTime;      /* GetTickCount() at the start of the StartService call */
+    PSERVICE Services[SCM_MAX_DEPENDENCY_DEPTH];
+} SCM_START_CHAIN, *PSCM_START_CHAIN;
+
+static DWORD
+ScmStartServiceInChain(PSERVICE Service,
+                       DWORD argc,
+                       const PCWSTR* argv,
+                       PSCM_START_CHAIN Chain);
+
+/* The errors of a dependency that the dependent returns as they are; any other becomes ERROR_SERVICE_DEPENDENCY_FAIL */
+static BOOL
+ScmIsDependencyErrorKept(DWORD dwError)
+{
+    return dwError == ERROR_CIRCULAR_DEPENDENCY ||
+           dwError == ERROR_SHUTDOWN_IN_PROGRESS ||
+           dwError == ERROR_SERVICE_DATABASE_LOCKED ||
+           dwError == ERROR_NOT_ENOUGH_MEMORY;
+}
+
+/* Waits until the service has reached the running states (bStopped FALSE) or has stopped (bStopped TRUE). A wait
+   that sees no progress (the checkpoint) for the service's wait hint, at least SCM_DEPENDENCY_MIN_WAIT, or that
+   reaches the limit of the call, gives up. No lock is held while waiting.
+   The call that started the service waits SCM_DEPENDENCY_STARTER_GRACE longer than calls that found it pending: when
+   the service's own start code starts a service that depends on it (and so waits for itself, which the documentation
+   of ServiceMain warns against: the call blocks), that inner call gives up first, the service goes on, and the call
+   that started it still sees it running, instead of both giving up at the same moment. */
+static DWORD
+ScmWaitForServiceState(PSERVICE Service,
+                       BOOL bStopped,
+                       BOOL bStarter,
+                       PSCM_START_CHAIN Chain)
+{
+    DWORD dwState, dwCheckPoint, dwWaitHint, dwNow;
+    DWORD dwLastCheckPoint = (DWORD)-1;
+    DWORD dwProgressTime = GetTickCount();
+    DWORD dwAllowed = SCM_DEPENDENCY_MIN_WAIT;
+    DWORD dwError = ERROR_SERVICE_DEPENDENCY_FAIL;
+
+    for (;;)
+    {
+        if (ScmShutdown)
+        {
+            dwError = ERROR_SHUTDOWN_IN_PROGRESS;
+            break;
+        }
+
+        ScmLockDatabaseShared();
+        dwState = Service->Status.dwCurrentState;
+        dwCheckPoint = Service->Status.dwCheckPoint;
+        dwWaitHint = Service->Status.dwWaitHint;
+        ScmUnlockDatabase();
+
+        if (bStopped)
+        {
+            if (dwState == SERVICE_STOPPED)
+            {
+                dwError = ERROR_SUCCESS;
+                break;
+            }
+        }
+        else
+        {
+            if (dwState == SERVICE_STOPPED)
+                break;
+            if (dwState != SERVICE_START_PENDING && dwState != SERVICE_STOP_PENDING)
+            {
+                dwError = ERROR_SUCCESS;
+                break;
+            }
+        }
+
+        dwNow = GetTickCount();
+        if (dwCheckPoint != dwLastCheckPoint)
+        {
+            dwProgressTime = dwNow;
+            dwAllowed = max(dwWaitHint, SCM_DEPENDENCY_MIN_WAIT);
+            if (bStarter)
+                dwAllowed += SCM_DEPENDENCY_STARTER_GRACE;
+            dwLastCheckPoint = dwCheckPoint;
+        }
+
+        if (dwNow - dwProgressTime >= dwAllowed ||
+            dwNow - Chain->dwStartTime >= SCM_DEPENDENCY_CALL_LIMIT)
+        {
+            DPRINT1("Gave up waiting for '%S' (state %lu, checkpoint %lu)\n",
+                    Service->lpServiceName, dwState, dwCheckPoint);
+            break;
+        }
+
+        /* The shutdown event ends the pause early */
+        if (hFailureShutdownEvent != NULL)
+            WaitForSingleObject(hFailureShutdownEvent, 50);
+        else
+            Sleep(50);
+    }
+
+    return dwError;
+}
+
+/* Brings the named service to the running states, starting it (and what it depends on) when it is stopped */
+static DWORD
+ScmStartDependencyByName(PCWSTR pszName,
+                         PSCM_START_CHAIN Chain)
+{
+    PSERVICE Dependency;
+    DWORD dwError = ERROR_SUCCESS;
+    DWORD dwState;
+    DWORD dwStartType;
+    BOOL bDeleted;
+    BOOL bStarter;
+    int nTry;
+
+    ScmLockDatabaseShared();
+    Dependency = ScmGetServiceEntryByName(pszName);
+    if (Dependency != NULL)
+        ScmReferenceService(Dependency);
+    ScmUnlockDatabase();
+
+    if (Dependency == NULL)
+        return ERROR_SERVICE_DEPENDENCY_DELETED;
+
+    for (nTry = 0; nTry < 2; nTry++)
+    {
+        ScmLockDatabaseShared();
+        dwState = Dependency->Status.dwCurrentState;
+        dwStartType = Dependency->dwStartType;
+        bDeleted = Dependency->bDeleted;
+        ScmUnlockDatabase();
+
+        if (dwState == SERVICE_START_PENDING)
+        {
+            /* Started by somebody else: wait for it, without a lock */
+            dwError = ScmWaitForServiceState(Dependency, FALSE, FALSE, Chain);
+            break;
+        }
+        else if (dwState == SERVICE_STOP_PENDING)
+        {
+            /* Let the stop finish, then start it again */
+            dwError = ScmWaitForServiceState(Dependency, TRUE, FALSE, Chain);
+            if (dwError != ERROR_SUCCESS)
+                break;
+        }
+        else if (dwState != SERVICE_STOPPED)
+        {
+            /* Running (or paused): nothing to do */
+            dwError = ERROR_SUCCESS;
+            break;
+        }
+        else
+        {
+            if (bDeleted)
+            {
+                dwError = ERROR_SERVICE_DEPENDENCY_DELETED;
+                break;
+            }
+            if (dwStartType == SERVICE_DISABLED)
+            {
+                dwError = ERROR_SERVICE_DEPENDENCY_FAIL;
+                break;
+            }
+
+            /* Two callers may get here for the same dependency: the second one is told it is running already */
+            dwError = ScmStartServiceInChain(Dependency, 0, NULL, Chain);
+            bStarter = (dwError == ERROR_SUCCESS);
+            if (dwError == ERROR_SERVICE_ALREADY_RUNNING)
+                dwError = ERROR_SUCCESS;
+            else if (dwError != ERROR_SUCCESS && !ScmIsDependencyErrorKept(dwError))
+                dwError = ERROR_SERVICE_DEPENDENCY_FAIL;
+
+            /* A user-mode service must have reported its running state before the next one is started; the start
+               above has released its locks, so this wait holds none */
+            if (dwError == ERROR_SUCCESS)
+                dwError = ScmWaitForServiceState(Dependency, FALSE, bStarter, Chain);
+            break;
+        }
+    }
+
+    if (nTry == 2)
+        dwError = ERROR_SERVICE_DEPENDENCY_FAIL;
+
+    ScmLockDatabaseExclusive();
+    ScmDereferenceService(Dependency);
+    ScmUnlockDatabase();
+
+    return dwError;
+}
+
+/* Tries to start every member of a load ordering group (the disabled ones are left alone); the dependency is met when
+   one member is running afterwards. A group without any member does not stop the service (as before; not documented). */
+static DWORD
+ScmStartDependencyGroup(PSERVICE Service,
+                        PCWSTR pszGroup,
+                        PSCM_START_CHAIN Chain)
+{
+    PLIST_ENTRY ServiceEntry;
+    PSERVICE Member;
+    PWSTR pszNames = NULL, pszName, pszEnd = NULL;
+    SIZE_T cchNames = 0, cchName;
+    BOOL bAnyMember = FALSE, bRunning = FALSE;
+    DWORD dwMemberError, dwKeptError = ERROR_SUCCESS;
+    ULONG nPass;
+
+    /* The names of the members are copied: the database lock cannot be held while they are started */
+    ScmLockDatabaseShared();
+    for (nPass = 0; nPass < 2; nPass++)
+    {
+        if (nPass == 1)
+        {
+            pszNames = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (cchNames + 1) * sizeof(WCHAR));
+            if (pszNames == NULL)
+            {
+                ScmUnlockDatabase();
+                return ERROR_NOT_ENOUGH_MEMORY;
+            }
+            pszEnd = pszNames;
+        }
+
+        for (ServiceEntry = ServiceListHead.Flink; ServiceEntry != &ServiceListHead; ServiceEntry = ServiceEntry->Flink)
+        {
+            Member = CONTAINING_RECORD(ServiceEntry, SERVICE, ServiceListEntry);
+            /* Disabled members and members marked for deletion are members too: one that is running meets the
+               dependency, one that is stopped is not started (ScmStartDependencyByName) */
+            if (Member == Service || Member->lpGroup == NULL ||
+                _wcsicmp(Member->lpGroup->lpGroupName, pszGroup) != 0)
+            {
+                continue;
+            }
+
+            cchName = wcslen(Member->lpServiceName) + 1;
+            if (nPass == 0)
+            {
+                cchNames += cchName;
+            }
+            else
+            {
+                wcscpy(pszEnd, Member->lpServiceName);
+                pszEnd += cchName;
+            }
+        }
+    }
+    ScmUnlockDatabase();
+
+    for (pszName = pszNames; *pszName != UNICODE_NULL; pszName += wcslen(pszName) + 1)
+    {
+        bAnyMember = TRUE;
+        dwMemberError = ScmStartDependencyByName(pszName, Chain);
+        if (dwMemberError == ERROR_SUCCESS)
+            bRunning = TRUE;
+        else if (ScmIsDependencyErrorKept(dwMemberError) && dwKeptError == ERROR_SUCCESS)
+            dwKeptError = dwMemberError;
+
+        if (dwMemberError == ERROR_SHUTDOWN_IN_PROGRESS)
+            break;
+    }
+
+    HeapFree(GetProcessHeap(), 0, pszNames);
+
+    if (dwKeptError == ERROR_SHUTDOWN_IN_PROGRESS)
+        return dwKeptError;
+    if (!bAnyMember || bRunning)
+        return ERROR_SUCCESS;
+
+    /* No member came up: a member that closes a cycle (or the like) says why */
+    return (dwKeptError != ERROR_SUCCESS) ? dwKeptError : ERROR_SERVICE_DEPENDENCY_FAIL;
+}
+
+
+/* The System log entry of a service that is not started because of a dependency (the messages of netevent:
+   7001 a service that failed, 7002 a group of which no member started, 7003 a service that is not there) */
+static VOID
+ScmLogDependencyFailure(PSERVICE Service,
+                        PCWSTR pszDependency,
+                        DWORD dwError)
+{
+    LPCWSTR lpLogStrings[3];
+    WCHAR szError[16];
+
+    if (dwError == ERROR_SHUTDOWN_IN_PROGRESS || dwError == ERROR_SERVICE_DATABASE_LOCKED ||
+        Service->dwErrorControl == SERVICE_ERROR_IGNORE)
+    {
+        return;
+    }
+
+    lpLogStrings[0] = Service->lpDisplayName;
+    if (*pszDependency == SC_GROUP_IDENTIFIERW)
+    {
+        lpLogStrings[1] = pszDependency + 1;
+        ScmLogEvent(EVENT_SERVICE_START_FAILED_GROUP, EVENTLOG_ERROR_TYPE, 2, lpLogStrings);
+    }
+    else if (dwError == ERROR_SERVICE_DEPENDENCY_DELETED)
+    {
+        lpLogStrings[1] = pszDependency;
+        ScmLogEvent(EVENT_SERVICE_START_FAILED_NONE, EVENTLOG_ERROR_TYPE, 2, lpLogStrings);
+    }
+    else
+    {
+        StringCchPrintfW(szError, ARRAYSIZE(szError), L"%lu", dwError);
+        lpLogStrings[1] = pszDependency;
+        lpLogStrings[2] = szError;
+        ScmLogEvent(EVENT_SERVICE_START_FAILED_II, EVENTLOG_ERROR_TYPE, 3, lpLogStrings);
+    }
+}
+
+
+/* Starts what the service depends on; ERROR_SERVICE_DEPENDENCY_FAIL when a dependency does not come up */
+static DWORD
+ScmStartDependencies(PSERVICE Service,
+                     PSCM_START_CHAIN Chain)
+{
+    HKEY hServiceKey;
+    PWSTR pszDependencies = NULL, pszDependency;
+    DWORD dwLength;
+    DWORD dwError;
+
+    dwError = ScmOpenServiceKey(Service->lpServiceName, KEY_READ, &hServiceKey);
+    if (dwError != ERROR_SUCCESS)
+        return ERROR_SUCCESS;   /* no key, no dependencies: ScmLoadService reports what is wrong */
+
+    dwError = ScmReadDependencies(hServiceKey, &pszDependencies, &dwLength);
+    RegCloseKey(hServiceKey);
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
+    if (pszDependencies == NULL)
+        return ERROR_SUCCESS;
+
+    for (pszDependency = pszDependencies; *pszDependency != UNICODE_NULL; pszDependency += wcslen(pszDependency) + 1)
+    {
+        if (*pszDependency == SC_GROUP_IDENTIFIERW)
+            dwError = ScmStartDependencyGroup(Service, pszDependency + 1, Chain);
+        else
+            dwError = ScmStartDependencyByName(pszDependency, Chain);
+
+        if (dwError != ERROR_SUCCESS)
+        {
+            DPRINT1("Dependency '%S' of '%S' failed (Error %lu)\n", pszDependency, Service->lpServiceName, dwError);
+            ScmLogDependencyFailure(Service, pszDependency, dwError);
+            break;
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, pszDependencies);
+    return dwError;
+}
+
+
+/* Starts one service (not what it depends on), under the control critical section and the start lock */
+static DWORD
+ScmStartOneService(PSERVICE Service,
+                   DWORD argc,
+                   const PCWSTR* argv)
 {
     DWORD dwError = ERROR_SUCCESS;
     SC_RPC_LOCK Lock = NULL;
-
-    DPRINT("ScmStartService() called\n");
-    DPRINT("Start Service %p (%S)\n", Service, Service->lpServiceName);
 
     /* Acquire the service control critical section, to synchronize starts */
     EnterCriticalSection(&ControlServiceCriticalSection);
@@ -3846,6 +4213,84 @@ ScmStartService(PSERVICE Service,
 
 done:
     LeaveCriticalSection(&ControlServiceCriticalSection);
+
+    return dwError;
+}
+
+
+/* Starts the service after what it depends on. No lock is held here: ScmStartOneService takes them per service */
+static DWORD
+ScmStartServiceInChain(PSERVICE Service,
+                       DWORD argc,
+                       const PCWSTR* argv,
+                       PSCM_START_CHAIN Chain)
+{
+    DWORD dwError = ERROR_SUCCESS;
+    DWORD dwState;
+    ULONG i;
+
+    /* A service that depends on itself, directly, through others or through a group, cannot start: the chain holds
+       the services being started on this path, so the cycle is seen as soon as it closes (ERROR_CIRCULAR_DEPENDENCY,
+       the code CreateService and ChangeServiceConfig document for a circular dependency). A chain that is too deep
+       without a cycle fails as a dependency that does not start. */
+    for (i = 0; i < Chain->Depth; i++)
+    {
+        if (Chain->Services[i] == Service)
+        {
+            DPRINT1("Circular dependency: '%S' depends on itself\n", Service->lpServiceName);
+            return ERROR_CIRCULAR_DEPENDENCY;
+        }
+    }
+    if (Chain->Depth >= SCM_MAX_DEPENDENCY_DEPTH)
+        return ERROR_SERVICE_DEPENDENCY_FAIL;
+    Chain->Services[Chain->Depth++] = Service;
+
+    ScmLockDatabaseShared();
+    dwState = Service->Status.dwCurrentState;
+    ScmUnlockDatabase();
+
+    /* A service that is running or on its way needs nothing started (ScmLoadService says so) */
+    if (ScmShutdown)
+        dwError = ERROR_SHUTDOWN_IN_PROGRESS;
+    else if (dwState == SERVICE_STOPPED)
+        dwError = ScmStartDependencies(Service, Chain);
+
+    if (dwError == ERROR_SUCCESS)
+        dwError = ScmStartOneService(Service, argc, argv);
+
+    Chain->Depth--;
+    return dwError;
+}
+
+
+DWORD
+ScmStartService(PSERVICE Service,
+                DWORD argc,
+                const PCWSTR* argv)
+{
+    SCM_START_CHAIN Chain;
+    DWORD dwError;
+
+    DPRINT("ScmStartService() called\n");
+    DPRINT("Start Service %p (%S)\n", Service, Service->lpServiceName);
+
+    /*
+     * Counted as a worker for the whole chain: the waits for the dependencies take the database lock after a pause,
+     * and the shutdown must not delete that lock under them. The checks of ScmShutdown in the chain end it quickly.
+     */
+    InterlockedIncrement(&ScmActiveWorkers);
+    if (ScmShutdown)
+    {
+        InterlockedDecrement(&ScmActiveWorkers);
+        return ERROR_SHUTDOWN_IN_PROGRESS;
+    }
+
+    /* Only the named service gets the arguments; what it depends on is started without any */
+    Chain.Depth = 0;
+    Chain.dwStartTime = GetTickCount();
+    dwError = ScmStartServiceInChain(Service, argc, argv, &Chain);
+
+    InterlockedDecrement(&ScmActiveWorkers);
 
     DPRINT("ScmStartService() done (Error %lu)\n", dwError);
 
