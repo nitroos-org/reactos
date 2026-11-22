@@ -26,6 +26,7 @@
 /* INCLUDES *****************************************************************/
 
 #include "precomp.h"
+#include <drivers/acpi/acpi.h>
 #include "genlist.h"
 #include "infsupp.h"
 #include "mui.h"
@@ -42,9 +43,53 @@ static ULONG DefaultLanguageIndex = 0;
 
 /* FUNCTIONS ****************************************************************/
 
+/*
+ * The boot loader looks through the ACPI tables for an I/O APIC and says so in the device-specific
+ * data of its "ACPI BIOS" node (Reserved1, see acpi.h). Anything but a clear "none" (an older
+ * loader, data that is too short) means the computer is treated as it always was.
+ */
 static
 BOOLEAN
-IsAcpiComputer(VOID)
+AcpiBiosNodeHasNoIoApic(
+    _In_ HANDLE hDeviceKey)
+{
+    UNICODE_STRING ConfigDataU = RTL_CONSTANT_STRING(L"Configuration Data");
+    PKEY_VALUE_PARTIAL_INFORMATION Info;
+    PCM_FULL_RESOURCE_DESCRIPTOR Full;
+    ULONG Length = 0;
+    BOOLEAN NoIoApic = FALSE;
+    NTSTATUS Status;
+
+    Status = NtQueryValueKey(hDeviceKey, &ConfigDataU, KeyValuePartialInformation, NULL, 0, &Length);
+    if ((Status != STATUS_BUFFER_TOO_SMALL && Status != STATUS_BUFFER_OVERFLOW) || Length > 0x10000)
+        return FALSE;
+
+    Info = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+    if (!Info)
+        return FALSE;
+
+    Status = NtQueryValueKey(hDeviceKey, &ConfigDataU, KeyValuePartialInformation, Info, Length, &Length);
+    if (NT_SUCCESS(Status) &&
+        Info->Type == REG_FULL_RESOURCE_DESCRIPTOR &&
+        Info->DataLength >= sizeof(CM_FULL_RESOURCE_DESCRIPTOR))
+    {
+        Full = (PCM_FULL_RESOURCE_DESCRIPTOR)Info->Data;
+        if (Full->PartialResourceList.Count >= 1 &&
+            Full->PartialResourceList.PartialDescriptors[0].Type == CmResourceTypeDeviceSpecific)
+        {
+            NoIoApic = !!(Full->PartialResourceList.PartialDescriptors[0].u.DeviceSpecificData.Reserved1 &
+                          ACPI_BIOS_NODE_NO_IOAPIC);
+        }
+    }
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Info);
+    return NoIoApic;
+}
+
+/* Returns TRUE for a computer with ACPI; *HasIoApic then says whether the loader found an I/O APIC. */
+static
+BOOLEAN
+IsAcpiComputer(
+    _Out_ PBOOLEAN HasIoApic)
 {
     UNICODE_STRING MultiKeyPathU = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\HARDWARE\\DESCRIPTION\\System\\MultifunctionAdapter");
     UNICODE_STRING IdentifierU = RTL_CONSTANT_STRING(L"Identifier");
@@ -61,6 +106,8 @@ IsAcpiComputer(VOID)
     HANDLE hDeviceKey = NULL;
     NTSTATUS Status;
     BOOLEAN ret = FALSE;
+
+    *HasIoApic = TRUE;
 
     InitializeObjectAttributes(&ObjectAttributes,
                                &MultiKeyPathU,
@@ -188,6 +235,7 @@ IsAcpiComputer(VOID)
         {
             DPRINT("Found ACPI BIOS\n");
             ret = TRUE;
+            *HasIoApic = !AcpiBiosNodeHasNoIoApic(hDeviceKey);
             goto cleanup;
         }
 
@@ -221,6 +269,9 @@ GetComputerIdentifier(
     PKEY_FULL_INFORMATION pFullInfo;
     ULONG Size, SizeNeeded;
     NTSTATUS Status;
+#ifndef _M_AMD64
+    BOOLEAN HasIoApic;
+#endif
 
     DPRINT("GetComputerIdentifier() called\n");
 
@@ -281,9 +332,18 @@ GetComputerIdentifier(
     ComputerIdentifier = L"X64 UP";
 #endif
 #else
-    if (IsAcpiComputer())
+    if (IsAcpiComputer(&HasIoApic))
     {
-        ComputerIdentifier = L"ACPI MP";
+        if (HasIoApic)
+        {
+            ComputerIdentifier = L"ACPI MP";
+        }
+        else
+        {
+            /* The multiprocessor ACPI HAL needs an I/O APIC to start: use the uniprocessor ACPI HAL */
+            DPRINT1("SETUP: the ACPI tables list no I/O APIC, selecting the uniprocessor ACPI HAL\n");
+            ComputerIdentifier = L"ACPI UP";
+        }
     }
     else
     {
