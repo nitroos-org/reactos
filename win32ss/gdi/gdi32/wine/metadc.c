@@ -818,9 +818,16 @@ INT METADC_StretchDIBits( HDC hdc, INT x_dst, INT y_dst, INT width_dst,
                           const BITMAPINFO *info, UINT usage, DWORD rop )
 {
     DWORD infosize = get_dib_info_size( info, usage );
-    DWORD len = sizeof(METARECORD) + 10 * sizeof(WORD) + infosize + info->bmiHeader.biSizeImage;
+    /* biSizeImage is the caller's: in 32 bits the record size wrapped and the copy of the bits
+       below ran past the record */
+    ULONGLONG len64 = (ULONGLONG)sizeof(METARECORD) + 10 * sizeof(WORD) + infosize + info->bmiHeader.biSizeImage;
+    DWORD len = (DWORD)len64;
     METARECORD *mr;
 
+    /* The sizes above read a BITMAPINFOHEADER: a core header has none of those fields (they would
+       come from its colour table and bits), so it cannot be recorded as it is */
+    if (info->bmiHeader.biSize < sizeof(BITMAPINFOHEADER)) return 0;
+    if (len64 > MAXLONG) return 0;
     if (!(mr = HeapAlloc( GetProcessHeap(), 0, len ))) return 0;
 
     mr->rdSize = len / sizeof(WORD);
@@ -849,9 +856,14 @@ INT METADC_SetDIBitsToDevice( HDC hdc, INT x_dst, INT y_dst, DWORD width, DWORD 
 
 {
     DWORD infosize = get_dib_info_size(info, coloruse);
-    DWORD len = sizeof(METARECORD) + 8 * sizeof(WORD) + infosize + info->bmiHeader.biSizeImage;
+    /* as in METADC_StretchDIBits: the record size in 64 bits */
+    ULONGLONG len64 = (ULONGLONG)sizeof(METARECORD) + 8 * sizeof(WORD) + infosize + info->bmiHeader.biSizeImage;
+    DWORD len = (DWORD)len64;
     METARECORD *mr;
 
+    /* as in METADC_StretchDIBits: no core headers */
+    if (info->bmiHeader.biSize < sizeof(BITMAPINFOHEADER)) return 0;
+    if (len64 > MAXLONG) return 0;
     if (!(mr = HeapAlloc( GetProcessHeap(), 0, len ))) return 0;
 
     mr->rdSize = len / sizeof(WORD);

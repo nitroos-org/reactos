@@ -10,6 +10,7 @@ list(APPEND SOURCE
     BezierExtremeCoords.c
     BitBltBrushOrigin.c
     BitBltPointer.c
+    BitmapSizeOverflow.c
     ClipExtremeCoords.c
     CombineRgn.c
     CombineTransform.c

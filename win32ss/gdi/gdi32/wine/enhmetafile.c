@@ -206,6 +206,120 @@ static const char *get_emr_name(DWORD type)
 }
 
 /***********************************************************************
+ *          emr_dib_in_record
+ *
+ * Returns whether the BITMAPINFO (offBmi, cbBmi) and the bits (offBits, cbBits) a record
+ * carries lie inside the record, and the header with its colour table inside cbBmi.
+ * The offsets come from the metafile, which may be anything: without this a record makes
+ * the player read before or behind its buffer. An absent block (offset and size 0) is
+ * accepted, the callers handle it.
+ */
+static BOOL emr_dib_in_record( const ENHMETARECORD *mr, DWORD offBmi, DWORD cbBmi,
+                               DWORD offBits, DWORD cbBits )
+{
+    const BITMAPINFOHEADER *bih;
+    ULONGLONG cbInfo, colors;
+    DWORD bpp;
+
+    if (!offBmi && !cbBmi && !offBits && !cbBits) return TRUE;
+
+    if ((ULONGLONG)offBmi + cbBmi > mr->nSize || (ULONGLONG)offBits + cbBits > mr->nSize)
+        return FALSE;
+    if (cbBmi < sizeof(BITMAPCOREHEADER) || offBmi < sizeof(EMR))
+        return FALSE;
+
+    bih = (const BITMAPINFOHEADER *)((const BYTE *)mr + offBmi);
+    if (bih->biSize == sizeof(BITMAPCOREHEADER))
+    {
+        bpp = ((const BITMAPCOREHEADER *)bih)->bcBitCount;
+        colors = (bpp <= 8) ? (1u << bpp) : 0;
+        cbInfo = sizeof(BITMAPCOREHEADER) + colors * sizeof(RGBTRIPLE);
+    }
+    else if (bih->biSize >= sizeof(BITMAPINFOHEADER) && bih->biSize <= cbBmi)
+    {
+        bpp = bih->biBitCount;
+        colors = bih->biClrUsed;
+        if (colors > 256) colors = 256;
+        if (!colors && bpp <= 8) colors = 1u << bpp;
+        cbInfo = (ULONGLONG)bih->biSize + colors * sizeof(RGBQUAD);
+        if (bih->biCompression == BI_BITFIELDS && bih->biSize < sizeof(BITMAPV4HEADER))
+            cbInfo += 3 * sizeof(DWORD);
+    }
+    else
+        return FALSE;
+
+    /* DIB_PAL_COLORS tables are smaller, so the RGB size is an upper bound */
+    if (cbInfo > cbBmi && (ULONGLONG)offBmi + cbInfo > mr->nSize)
+        return FALSE;
+
+    return TRUE;
+}
+
+/* Size of a BITMAPINFO with its colour table (RGB entries or WORD indices), in 64 bits */
+static ULONGLONG emr_dib_info_size( const BITMAPINFO *info, DWORD usage )
+{
+    const BITMAPINFOHEADER *bih = &info->bmiHeader;
+    ULONGLONG colors;
+
+    if (bih->biSize == sizeof(BITMAPCOREHEADER))
+    {
+        DWORD bpp = ((const BITMAPCOREHEADER *)bih)->bcBitCount;
+        colors = (bpp <= 8) ? (1u << bpp) : 0;
+        return sizeof(BITMAPCOREHEADER) + colors * ((usage == DIB_RGB_COLORS) ? sizeof(RGBTRIPLE) : sizeof(WORD));
+    }
+    colors = bih->biClrUsed;
+    if (colors > 256) colors = 256;
+    if (!colors && bih->biBitCount <= 8) colors = 1u << bih->biBitCount;
+    return (ULONGLONG)max(bih->biSize, sizeof(BITMAPINFOHEADER) +
+                          (bih->biCompression == BI_BITFIELDS ? 3 * sizeof(DWORD) : 0)) +
+           colors * ((usage == DIB_RGB_COLORS) ? sizeof(RGBQUAD) : sizeof(WORD));
+}
+
+/***********************************************************************
+ *          emr_dib_sizeimage_fits
+ *
+ * StretchDIBits and SetDIBitsToDevice on a metafile DC (playing into another metafile) copy
+ * biSizeImage bytes of bits into the new record: when the header of a played record gives that
+ * size, it must not be more than the record carries (cbBits, already checked to be inside it).
+ */
+static BOOL emr_dib_sizeimage_fits( const ENHMETARECORD *mr, DWORD offBmi, DWORD cbBits )
+{
+    const BITMAPINFOHEADER *bih = (const BITMAPINFOHEADER *)((const BYTE *)mr + offBmi);
+    if (bih->biSize == sizeof(BITMAPCOREHEADER)) return TRUE;
+    return bih->biSizeImage <= cbBits;
+}
+
+/***********************************************************************
+ *          emr_dib_bits_fit
+ *
+ * Returns whether cbBits bytes hold the image the header describes. CreateDIBPatternBrushPt takes no
+ * size and reads that many bytes behind the colour table, so a pattern brush record must have them.
+ */
+static BOOL emr_dib_bits_fit( const BITMAPINFO *info, DWORD cbBits )
+{
+    ULONGLONG width, height, bpp, planes, cbImage;
+    DWORD compr = BI_RGB;
+
+    if (info->bmiHeader.biSize == sizeof(BITMAPCOREHEADER))
+    {
+        const BITMAPCOREHEADER *core = (const BITMAPCOREHEADER *)info;
+        width = core->bcWidth; height = core->bcHeight; bpp = core->bcBitCount; planes = core->bcPlanes;
+    }
+    else
+    {
+        if (info->bmiHeader.biWidth < 0) return FALSE;
+        width = info->bmiHeader.biWidth;
+        height = info->bmiHeader.biHeight < 0 ? -(LONGLONG)info->bmiHeader.biHeight : info->bmiHeader.biHeight;
+        bpp = info->bmiHeader.biBitCount; planes = info->bmiHeader.biPlanes;
+        compr = info->bmiHeader.biCompression;
+    }
+    if (compr != BI_RGB && compr != BI_BITFIELDS)
+        return info->bmiHeader.biSizeImage <= cbBits;
+    cbImage = (((width * planes * bpp + 31) & ~31ULL) >> 3) * height;
+    return cbImage <= cbBits;
+}
+
+/***********************************************************************
  *          is_dib_monochrome
  *
  * Returns whether a DIB can be converted to a monochrome DDB.
@@ -1185,6 +1299,15 @@ BOOL WINAPI PlayEnhMetaFileRecord(
       {
 	const EMRSTRETCHDIBITS *pStretchDIBits = (const EMRSTRETCHDIBITS *)mr;
 
+        if (!emr_dib_in_record(mr, pStretchDIBits->offBmiSrc, pStretchDIBits->cbBmiSrc,
+                               pStretchDIBits->offBitsSrc, pStretchDIBits->cbBitsSrc) ||
+            !pStretchDIBits->offBmiSrc ||
+            !emr_dib_sizeimage_fits(mr, pStretchDIBits->offBmiSrc, pStretchDIBits->cbBitsSrc))
+        {
+            ERR("Invalid EMR_STRETCHDIBITS record\n");
+            break;
+        }
+
 	StretchDIBits(hdc,
 		      pStretchDIBits->xDest,
 		      pStretchDIBits->yDest,
@@ -1833,6 +1956,17 @@ BOOL WINAPI PlayEnhMetaFileRecord(
             break;
         }
 
+        /* The packed DIB is cbBmi + cbBits bytes and CreateDIBPatternBrushPt reads as much as the
+           header says: the header and colour table must be in cbBmi, the image in cbBits */
+        if (!emr_dib_in_record(mr, lpCreate->offBmi, lpCreate->cbBmi, lpCreate->offBits, lpCreate->cbBits) ||
+            !lpCreate->offBmi ||
+            emr_dib_info_size((const BITMAPINFO *)((const BYTE *)mr + lpCreate->offBmi), lpCreate->iUsage) > lpCreate->cbBmi ||
+            !emr_dib_bits_fit((const BITMAPINFO *)((const BYTE *)mr + lpCreate->offBmi), lpCreate->cbBits))
+        {
+            ERR("EMR_CREATEDIBPATTERNBRUSHPT record does not hold its DIB\n");
+            break;
+        }
+
         /* This is a BITMAPINFO struct followed directly by bitmap bits */
         lpPackedStruct = HeapAlloc( GetProcessHeap(), 0,
                                     lpCreate->cbBmi + lpCreate->cbBits );
@@ -1863,6 +1997,14 @@ BOOL WINAPI PlayEnhMetaFileRecord(
         const EMRCREATEMONOBRUSH *pCreateMonoBrush = (const EMRCREATEMONOBRUSH *)mr;
         const BITMAPINFO *pbi = (const BITMAPINFO *)((const BYTE *)mr + pCreateMonoBrush->offBmi);
         HBITMAP hBmp;
+
+        if (!emr_dib_in_record(mr, pCreateMonoBrush->offBmi, pCreateMonoBrush->cbBmi,
+                               pCreateMonoBrush->offBits, pCreateMonoBrush->cbBits) ||
+            !pCreateMonoBrush->offBmi)
+        {
+            ERR("Invalid EMR_CREATEMONOBRUSH record\n");
+            break;
+        }
 
         /* Need to check if the bitmap is monochrome, and if the
            two colors are really black and white */
@@ -1908,6 +2050,14 @@ BOOL WINAPI PlayEnhMetaFileRecord(
     {
 	const EMRBITBLT *pBitBlt = (const EMRBITBLT *)mr;
 
+        if (pBitBlt->offBmiSrc &&
+            !emr_dib_in_record(mr, pBitBlt->offBmiSrc, pBitBlt->cbBmiSrc,
+                               pBitBlt->offBitsSrc, pBitBlt->cbBitsSrc))
+        {
+            ERR("Invalid EMR_BITBLT record\n");
+            break;
+        }
+
         if(pBitBlt->offBmiSrc == 0) { /* Record is a PatBlt */
             PatBlt(hdc, pBitBlt->xDest, pBitBlt->yDest, pBitBlt->cxDest, pBitBlt->cyDest,
                    pBitBlt->dwRop);
@@ -1950,6 +2100,14 @@ BOOL WINAPI PlayEnhMetaFileRecord(
 	       pStretchBlt->xSrc, pStretchBlt->ySrc, pStretchBlt->cxSrc, pStretchBlt->cySrc,
 	       pStretchBlt->xDest, pStretchBlt->yDest, pStretchBlt->cxDest, pStretchBlt->cyDest,
 	       pStretchBlt->dwRop, pStretchBlt->offBitsSrc);
+
+        if (pStretchBlt->offBmiSrc &&
+            !emr_dib_in_record(mr, pStretchBlt->offBmiSrc, pStretchBlt->cbBmiSrc,
+                               pStretchBlt->offBitsSrc, pStretchBlt->cbBitsSrc))
+        {
+            ERR("Invalid EMR_STRETCHBLT record\n");
+            break;
+        }
 
         if(pStretchBlt->offBmiSrc == 0) { /* Record is a PatBlt */
             PatBlt(hdc, pStretchBlt->xDest, pStretchBlt->yDest, pStretchBlt->cxDest, pStretchBlt->cyDest,
@@ -2002,12 +2160,29 @@ BOOL WINAPI PlayEnhMetaFileRecord(
             HBITMAP hBmp = 0, hBmpOld = 0;
             const BITMAPINFO *pbi = (const BITMAPINFO *)((const BYTE *)mr + pAlphaBlend->offBmiSrc);
             void *bits;
+            DIBSECTION ds;
 
             SetGraphicsMode(hdcSrc, GM_ADVANCED);
             SetWorldTransform(hdcSrc, &pAlphaBlend->xformSrc);
 
+            if (!emr_dib_in_record(mr, pAlphaBlend->offBmiSrc, pAlphaBlend->cbBmiSrc,
+                                   pAlphaBlend->offBitsSrc, pAlphaBlend->cbBitsSrc))
+            {
+                ERR("Invalid EMR_ALPHABLEND record\n");
+                DeleteDC(hdcSrc);
+                break;
+            }
+
             hBmp = CreateDIBSection(hdc, pbi, pAlphaBlend->iUsageSrc, &bits, NULL, 0);
-            memcpy(bits, (const BYTE *)mr + pAlphaBlend->offBitsSrc, pAlphaBlend->cbBitsSrc);
+            /* Copy no more than the record has and the section holds */
+            if (!hBmp || !bits || GetObjectW(hBmp, sizeof(ds), &ds) != sizeof(ds))
+            {
+                if (hBmp) DeleteObject(hBmp);
+                DeleteDC(hdcSrc);
+                break;
+            }
+            memcpy(bits, (const BYTE *)mr + pAlphaBlend->offBitsSrc,
+                   min(pAlphaBlend->cbBitsSrc, (DWORD)ds.dsBm.bmWidthBytes * (DWORD)ds.dsBm.bmHeight));
             hBmpOld = SelectObject(hdcSrc, hBmp);
 
             GdiAlphaBlend(hdc, pAlphaBlend->xDest, pAlphaBlend->yDest, pAlphaBlend->cxDest, pAlphaBlend->cyDest,
@@ -2024,10 +2199,20 @@ BOOL WINAPI PlayEnhMetaFileRecord(
     case EMR_MASKBLT:
     {
 	const EMRMASKBLT *pMaskBlt = (const EMRMASKBLT *)mr;
-	HDC hdcSrc = CreateCompatibleDC(hdc);
+	HDC hdcSrc;
 	HBRUSH hBrush, hBrushOld;
 	HBITMAP hBmp, hBmpOld, hBmpMask;
 	const BITMAPINFO *pbi;
+
+        if (!emr_dib_in_record(mr, pMaskBlt->offBmiSrc, pMaskBlt->cbBmiSrc,
+                               pMaskBlt->offBitsSrc, pMaskBlt->cbBitsSrc) ||
+            !emr_dib_in_record(mr, pMaskBlt->offBmiMask, pMaskBlt->cbBmiMask,
+                               pMaskBlt->offBitsMask, pMaskBlt->cbBitsMask))
+        {
+            ERR("Invalid EMR_MASKBLT record\n");
+            break;
+        }
+        hdcSrc = CreateCompatibleDC(hdc);
 
         SetGraphicsMode(hdcSrc, GM_ADVANCED);
 	SetWorldTransform(hdcSrc, &pMaskBlt->xformSrc);
@@ -2072,11 +2257,21 @@ BOOL WINAPI PlayEnhMetaFileRecord(
     case EMR_PLGBLT:
     {
 	const EMRPLGBLT *pPlgBlt = (const EMRPLGBLT *)mr;
-	HDC hdcSrc = CreateCompatibleDC(hdc);
+	HDC hdcSrc;
 	HBRUSH hBrush, hBrushOld;
 	HBITMAP hBmp, hBmpOld, hBmpMask;
 	const BITMAPINFO *pbi;
 	POINT pts[3];
+
+        if (!emr_dib_in_record(mr, pPlgBlt->offBmiSrc, pPlgBlt->cbBmiSrc,
+                               pPlgBlt->offBitsSrc, pPlgBlt->cbBitsSrc) ||
+            !emr_dib_in_record(mr, pPlgBlt->offBmiMask, pPlgBlt->cbBmiMask,
+                               pPlgBlt->offBitsMask, pPlgBlt->cbBitsMask))
+        {
+            ERR("Invalid EMR_PLGBLT record\n");
+            break;
+        }
+        hdcSrc = CreateCompatibleDC(hdc);
 
         SetGraphicsMode(hdcSrc, GM_ADVANCED);
 	SetWorldTransform(hdcSrc, &pPlgBlt->xformSrc);
@@ -2123,6 +2318,15 @@ BOOL WINAPI PlayEnhMetaFileRecord(
     case EMR_SETDIBITSTODEVICE:
     {
 	const EMRSETDIBITSTODEVICE *pSetDIBitsToDevice = (const EMRSETDIBITSTODEVICE *)mr;
+
+        if (!emr_dib_in_record(mr, pSetDIBitsToDevice->offBmiSrc, pSetDIBitsToDevice->cbBmiSrc,
+                               pSetDIBitsToDevice->offBitsSrc, pSetDIBitsToDevice->cbBitsSrc) ||
+            !pSetDIBitsToDevice->offBmiSrc ||
+            !emr_dib_sizeimage_fits(mr, pSetDIBitsToDevice->offBmiSrc, pSetDIBitsToDevice->cbBitsSrc))
+        {
+            ERR("Invalid EMR_SETDIBITSTODEVICE record\n");
+            break;
+        }
 
 	SetDIBitsToDevice(hdc,
 			  pSetDIBitsToDevice->xDest,

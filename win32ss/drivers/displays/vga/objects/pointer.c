@@ -155,6 +155,8 @@ BOOL InitPointer(PPDEV ppdev)
 
     /* Allocate memory for pointer attributes */
     ppdev->pPointerAttributes = EngAllocMem(0, PointerAttributesSize, ALLOC_TAG);
+    if (!ppdev->pPointerAttributes)
+        return FALSE;
 
     ppdev->pPointerAttributes->Flags = 0; /* FIXME: Do this right */
     ppdev->pPointerAttributes->Width = CursorWidth;
@@ -207,43 +209,76 @@ DrvSetPointerShape(
 {
     PPDEV ppdev = (PPDEV)pso->dhpdev;
     ULONG NewWidth, NewHeight;
+    ULONGLONG NewWidth64, PixelsSize64, SavedMemSize64;
     PUCHAR Src, Dest;
     ULONG i;
 
-    if (!psoMask)
+    if (!psoMask || (psoMask->lDelta == 0))
         return SPS_DECLINE;
+
+    /* The mask is the bitmap of an application's cursor and can be of any size. The sizes below
+       are computed in 64 bits (in 32 bits a large mask wrapped them and the copy ran past the
+       buffer), and a shape this driver cannot hold goes to GDI's software pointer: the pixels
+       under the pointer are kept in the off-screen video memory, which has room for a few
+       hundred pixels square only. */
+    NewWidth64 = (ULONGLONG)abs(psoMask->lDelta) << 3;
+    NewHeight = (psoMask->cjBits / abs(psoMask->lDelta)) / 2;
+    PixelsSize64 = (NewWidth64 * NewHeight * 2) >> 3;
+    SavedMemSize64 = ((((NewWidth64 + 7) & ~0x7ULL) + 16) * NewHeight) >> 3;
+    if ((NewHeight == 0) || (NewWidth64 > MAXLONG) ||
+        (PixelsSize64 > MAXLONG - sizeof(VIDEO_POINTER_ATTRIBUTES)) ||
+        (SavedMemSize64 > MAXLONG))
+    {
+        return SPS_DECLINE;
+    }
+    NewWidth = (ULONG)NewWidth64;
 
     /* Hide the cursor */
     VGADDI_HideCursor(ppdev);
 
-    NewWidth = abs(psoMask->lDelta) << 3;
-    NewHeight = (psoMask->cjBits / abs(psoMask->lDelta)) / 2;
-
     /* Reallocate the space for the cursor if necessary. */
     if (ppdev->pPointerAttributes->Width != NewWidth ||
-        ppdev->pPointerAttributes->Height != NewHeight)
+        ppdev->pPointerAttributes->Height != NewHeight ||
+        ppdev->ImageBehindCursor == NULL)
     {
         ULONG PointerAttributesSize;
         PVIDEO_POINTER_ATTRIBUTES NewPointerAttributes;
-        ULONG SavedMemSize;
+        PSAVED_SCREEN_BITS NewImageBehindCursor;
+        ULONG OldSavedMemSize = 0;
 
         /* Determine the size of the pointer attributes */
-        PointerAttributesSize = sizeof(VIDEO_POINTER_ATTRIBUTES) +
-            ((NewWidth * NewHeight * 2) >> 3);
+        PointerAttributesSize = sizeof(VIDEO_POINTER_ATTRIBUTES) + (ULONG)PixelsSize64;
 
         /* Allocate memory for pointer attributes */
         NewPointerAttributes = EngAllocMem(0, PointerAttributesSize, ALLOC_TAG);
+        if (!NewPointerAttributes)
+            return SPS_DECLINE;
+
+        /* Reallocate the space for the saved bits. The old area is freed first (it merges with
+           its free neighbours); when the new size does not fit, the old one is taken back and
+           the old shape stays. */
+        if (ppdev->ImageBehindCursor)
+        {
+            OldSavedMemSize = ppdev->ImageBehindCursor->Size;
+            VGADDI_FreeSavedScreenBits(ppdev->ImageBehindCursor);
+            ppdev->ImageBehindCursor = NULL;
+        }
+        NewImageBehindCursor = VGADDI_AllocSavedScreenBits((ULONG)SavedMemSize64);
+        if (!NewImageBehindCursor)
+        {
+            if (OldSavedMemSize)
+                ppdev->ImageBehindCursor = VGADDI_AllocSavedScreenBits(OldSavedMemSize);
+            EngFreeMem(NewPointerAttributes);
+            return SPS_DECLINE;
+        }
+        ppdev->ImageBehindCursor = NewImageBehindCursor;
+
         *NewPointerAttributes = *ppdev->pPointerAttributes;
         NewPointerAttributes->Width = NewWidth;
         NewPointerAttributes->Height = NewHeight;
         NewPointerAttributes->WidthInBytes = NewWidth >> 3;
         EngFreeMem(ppdev->pPointerAttributes);
         ppdev->pPointerAttributes = NewPointerAttributes;
-
-        /* Reallocate the space for the saved bits. */
-        VGADDI_FreeSavedScreenBits(ppdev->ImageBehindCursor);
-        SavedMemSize = ((((NewWidth + 7) & ~0x7) + 16) * NewHeight) >> 3;
-        ppdev->ImageBehindCursor = VGADDI_AllocSavedScreenBits(SavedMemSize);
     }
 
     Src = (PUCHAR)psoMask->pvScan0;
@@ -327,6 +362,10 @@ VGADDI_ShowCursor(PPDEV ppdev, PRECTL prcl)
     RECTL Rect;
 
     if(ppdev->pPointerAttributes->Enable)
+        return;
+
+    /* Without a place to keep the pixels under it the pointer cannot be drawn (and later removed) */
+    if (!ppdev->ImageBehindCursor)
         return;
 
     /* Mark the cursor as currently displayed. */

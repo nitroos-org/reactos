@@ -208,14 +208,18 @@ static inline int get_dib_image_size( const BITMAPINFO *info )
         * abs( info->bmiHeader.biHeight );
 }
 
-/* only for use on sanitized BITMAPINFO structures */
+/* only for use on sanitized BITMAPINFO structures. The metafile recorders (StretchDIBits and
+   SetDIBitsToDevice on a metafile DC) get the caller's header as it is, so the colour count is
+   limited to the 256 entries a colour table can have: an unlimited biClrUsed made the size wrap
+   and the copy of the table read far behind the header. */
 static inline int get_dib_info_size( const BITMAPINFO *info, UINT coloruse )
 {
+    DWORD colors = min( info->bmiHeader.biClrUsed, 256 );
     if (info->bmiHeader.biCompression == BI_BITFIELDS)
         return sizeof(BITMAPINFOHEADER) + 3 * sizeof(DWORD);
     if (coloruse == DIB_PAL_COLORS)
-        return sizeof(BITMAPINFOHEADER) + info->bmiHeader.biClrUsed * sizeof(WORD);
-    return FIELD_OFFSET( BITMAPINFO, bmiColors[info->bmiHeader.biClrUsed] );
+        return sizeof(BITMAPINFOHEADER) + colors * sizeof(WORD);
+    return FIELD_OFFSET( BITMAPINFO, bmiColors[colors] );
 }
 
 #define GdiWorldSpaceToDeviceSpace  0x204

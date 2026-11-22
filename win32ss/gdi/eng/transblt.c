@@ -11,6 +11,24 @@
 #define NDEBUG
 #include <debug.h>
 
+/* The rectangles come from the caller's coordinates. Their widths and heights are used as LONG
+   factors and divisors when a clipped rectangle is scaled: a rectangle across more than
+   MAXLONG pixels wrapped them (to -1, and INT_MIN / -1 is a divide error) */
+static BOOL
+TransRectSizeFits(_In_ const RECTL *prcl)
+{
+    LONGLONG cx = (LONGLONG)prcl->right - prcl->left;
+    LONGLONG cy = (LONGLONG)prcl->bottom - prcl->top;
+    return (cx >= -MAXLONG) && (cx <= MAXLONG) && (cy >= -MAXLONG) && (cy <= MAXLONG);
+}
+
+/* a * b / c of rectangle sizes that fit a LONG (|a| <= |c| for the clipped parts), in 64 bits */
+static LONG
+TransScale(_In_ LONG a, _In_ LONG b, _In_ LONG c)
+{
+    return (LONG)((LONGLONG)a * b / c);
+}
+
 BOOL
 APIENTRY
 EngTransparentBlt(
@@ -34,6 +52,11 @@ EngTransparentBlt(
     LONG DstWidth;
     LONG SrcHeight;
     LONG SrcWidth;
+
+    if (!TransRectSizeFits(DestRect) || !TransRectSizeFits(SourceRect))
+    {
+        return FALSE;
+    }
 
     InputRect = *SourceRect;
 
@@ -126,10 +149,10 @@ EngTransparentBlt(
             ClipRect.bottom = Clip->rclBounds.bottom + Translate.y;
             if (RECTL_bIntersectRect(&CombinedRect, &OutputRect, &ClipRect))
             {
-                InputToCombinedRect.top = InputRect.top + (CombinedRect.top - OutputRect.top) * SrcHeight / DstHeight;
-                InputToCombinedRect.bottom = InputRect.top + (CombinedRect.bottom - OutputRect.top) * SrcHeight / DstHeight;
-                InputToCombinedRect.left = InputRect.left + (CombinedRect.left - OutputRect.left) * SrcWidth / DstWidth;
-                InputToCombinedRect.right = InputRect.left + (CombinedRect.right - OutputRect.left) * SrcWidth / DstWidth;
+                InputToCombinedRect.top = InputRect.top + TransScale(CombinedRect.top - OutputRect.top, SrcHeight, DstHeight);
+                InputToCombinedRect.bottom = InputRect.top + TransScale(CombinedRect.bottom - OutputRect.top, SrcHeight, DstHeight);
+                InputToCombinedRect.left = InputRect.left + TransScale(CombinedRect.left - OutputRect.left, SrcWidth, DstWidth);
+                InputToCombinedRect.right = InputRect.left + TransScale(CombinedRect.right - OutputRect.left, SrcWidth, DstWidth);
                 Ret = DibFunctionsForBitmapFormat[psoDest->iBitmapFormat].DIB_TransparentBlt(
                           OutputObj, InputObj, &CombinedRect, &InputToCombinedRect, ColorTranslation, iTransColor);
             }
@@ -172,10 +195,10 @@ EngTransparentBlt(
                     ClipRect.bottom = RectEnum.arcl[i].bottom + Translate.y;
                     if (RECTL_bIntersectRect(&CombinedRect, &OutputRect, &ClipRect))
                     {
-                        InputToCombinedRect.top = InputRect.top + (CombinedRect.top - OutputRect.top) * SrcHeight / DstHeight;
-                        InputToCombinedRect.bottom = InputRect.top + (CombinedRect.bottom - OutputRect.top) * SrcHeight / DstHeight;
-                        InputToCombinedRect.left = InputRect.left + (CombinedRect.left - OutputRect.left) * SrcWidth / DstWidth;
-                        InputToCombinedRect.right = InputRect.left + (CombinedRect.right - OutputRect.left) * SrcWidth / DstWidth;
+                        InputToCombinedRect.top = InputRect.top + TransScale(CombinedRect.top - OutputRect.top, SrcHeight, DstHeight);
+                        InputToCombinedRect.bottom = InputRect.top + TransScale(CombinedRect.bottom - OutputRect.top, SrcHeight, DstHeight);
+                        InputToCombinedRect.left = InputRect.left + TransScale(CombinedRect.left - OutputRect.left, SrcWidth, DstWidth);
+                        InputToCombinedRect.right = InputRect.left + TransScale(CombinedRect.right - OutputRect.left, SrcWidth, DstWidth);
 
                         Ret = DibFunctionsForBitmapFormat[psoDest->iBitmapFormat].DIB_TransparentBlt(
                                   OutputObj, InputObj, &CombinedRect, &InputToCombinedRect, ColorTranslation, iTransColor);
@@ -234,6 +257,11 @@ IntEngTransparentBlt(
     /* If no clip object is given, use trivial one */
     if (!Clip) Clip = (CLIPOBJ *)&gxcoTrivial;
 
+    if (!TransRectSizeFits(DestRect) || !TransRectSizeFits(SourceRect))
+    {
+        return FALSE;
+    }
+
     InputClippedRect = *DestRect;
     if (InputClippedRect.right < InputClippedRect.left)
     {
@@ -261,10 +289,10 @@ IntEngTransparentBlt(
         InputWidth = InputRect.right - InputRect.left;
         InputHeight = InputRect.bottom - InputRect.top;
 
-        InputRect.left += (InputWidth * (OutputRect.left - InputClippedRect.left)) / InputClWidth;
-        InputRect.right -= (InputWidth * (InputClippedRect.right - OutputRect.right)) / InputClWidth;
-        InputRect.top += (InputHeight * (OutputRect.top - InputClippedRect.top)) / InputClHeight;
-        InputRect.bottom -= (InputHeight * (InputClippedRect.bottom - OutputRect.bottom)) / InputClHeight;
+        InputRect.left += TransScale(InputWidth, OutputRect.left - InputClippedRect.left, InputClWidth);
+        InputRect.right -= TransScale(InputWidth, InputClippedRect.right - OutputRect.right, InputClWidth);
+        InputRect.top += TransScale(InputHeight, OutputRect.top - InputClippedRect.top, InputClHeight);
+        InputRect.bottom -= TransScale(InputHeight, InputClippedRect.bottom - OutputRect.bottom, InputClHeight);
     }
     else
     {

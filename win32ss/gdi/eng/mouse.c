@@ -661,6 +661,13 @@ EngSetPointerShape(
     if (pxlo == NULL)
         pxlo = &gexloTrivial.xlo;
 
+    /* A monochrome pointer's mask holds the AND and the XOR mask one above the other, so the
+       pointer is half the mask high. A mask of one line (an application's cursor can have one)
+       leaves a pointer of no lines: there is nothing to draw, and a surface of no lines cannot be
+       made (SURFACE_AllocSurface asserts on it). Such a shape hides the pointer. */
+    if (!psoColor && psoMask && (psoMask->sizlBitmap.cy < 2))
+        psoMask = NULL;
+
     /* Do we have any bitmap at all? */
     if (psoColor || psoMask)
     {

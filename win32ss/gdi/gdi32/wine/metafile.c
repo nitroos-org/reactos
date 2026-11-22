@@ -414,12 +414,14 @@ BOOL WINAPI PlayMetaFile( HDC hdc, HMETAFILE hmf )
 
     /* loop through metafile playing records */
     offset = mh->mtHeaderSize * 2;
-    while (offset < mh->mtSize * 2)
+    /* a record header (size and function) must fit before it is read */
+    while ((ULONGLONG)offset + 6 <= (ULONGLONG)mh->mtSize * 2)
     {
         mr = (METARECORD *)((char *)mh + offset);
 	TRACE("offset=%04x,size=%08x\n",
             offset, mr->rdSize);
-	if (mr->rdSize < 3) { /* catch illegal record sizes */
+	if (mr->rdSize < 3 || /* catch illegal record sizes */
+            (ULONGLONG)offset + (ULONGLONG)mr->rdSize * 2 > (ULONGLONG)mh->mtSize * 2) {
             TRACE("Entry got size %d at offset %d, total mf length is %d\n",
                   mr->rdSize,offset,mh->mtSize*2);
             break;
@@ -488,9 +490,16 @@ BOOL WINAPI EnumMetaFile(HDC hdc, HMETAFILE hmf, MFENUMPROC lpEnumFunc, LPARAM l
     /* loop through metafile records */
     offset = mh->mtHeaderSize * 2;
 
-    while (offset < (mh->mtSize * 2))
+    /* a record header (size and function) must fit before it is read */
+    while ((ULONGLONG)offset + 6 <= (ULONGLONG)mh->mtSize * 2)
     {
 	mr = (METARECORD *)((char *)mh + offset);
+	/* the record must be inside the metafile, and a size below 3 never advances */
+	if (mr->rdSize < 3 ||
+            (ULONGLONG)offset + (ULONGLONG)mr->rdSize * 2 > (ULONGLONG)mh->mtSize * 2) {
+	    TRACE("Bad record size %d at offset %d\n", mr->rdSize, offset);
+	    break;
+	}
 	if(mr->rdFunction == META_EOF) {
 	    TRACE("Got META_EOF so stopping\n");
 	    break;
@@ -523,6 +532,66 @@ BOOL WINAPI EnumMetaFile(HDC hdc, HMETAFILE hmf, MFENUMPROC lpEnumFunc, LPARAM l
 
 static BOOL MF_Play_MetaCreateRegion( METARECORD *mr, HRGN hrgn );
 static BOOL MF_Play_MetaExtTextOut(HDC hdc, METARECORD *mr);
+
+/******************************************************************
+ *         MF_dib_in_record
+ *
+ * Returns whether the BITMAPINFO a DIB record carries at info, with its colour table,
+ * lies inside the record (rdSize words). The header and the table sizes come from the
+ * metafile: without this check a short record makes the player read behind it.
+ */
+static BOOL MF_dib_in_record( const METARECORD *mr, const void *info, WORD coloruse )
+{
+    const BITMAPINFOHEADER *bih = info;
+    ULONGLONG cbRecord = (ULONGLONG)mr->rdSize * 2;
+    ULONGLONG offInfo = (const BYTE *)info - (const BYTE *)mr;
+
+    ULONGLONG cbInfo;
+
+    if (offInfo + sizeof(BITMAPCOREHEADER) > cbRecord) return FALSE;
+    if (bih->biSize != sizeof(BITMAPCOREHEADER) &&
+        (bih->biSize < sizeof(BITMAPINFOHEADER) || offInfo + bih->biSize > cbRecord))
+        return FALSE;
+    cbInfo = (ULONGLONG)(unsigned int)bitmap_info_size( info, coloruse );
+    if (offInfo + cbInfo > cbRecord) return FALSE;
+    /* A metafile DC that records the played record (SetWinMetaFileBits, playing into another
+       metafile) copies biSizeImage bytes of bits: when the header gives that size, it must be
+       inside the record too */
+    if (bih->biSize != sizeof(BITMAPCOREHEADER) && offInfo + cbInfo + bih->biSizeImage > cbRecord)
+        return FALSE;
+    return TRUE;
+}
+
+/* MF_dib_in_record, and the image the header describes follows its colour table inside the record
+   (CreateDIBPatternBrushPt takes no size and reads that much) */
+static BOOL MF_dib_bits_in_record( const METARECORD *mr, const void *info, WORD coloruse )
+{
+    const BITMAPINFOHEADER *bih = info;
+    ULONGLONG cbRecord = (ULONGLONG)mr->rdSize * 2, cbImage;
+    ULONGLONG offBits;
+    ULONGLONG width, height, bpp, planes;
+
+    if (!MF_dib_in_record( mr, info, coloruse )) return FALSE;
+    offBits = ((const BYTE *)info - (const BYTE *)mr) + (ULONGLONG)(unsigned int)bitmap_info_size( info, coloruse );
+
+    if (bih->biSize == sizeof(BITMAPCOREHEADER))
+    {
+        const BITMAPCOREHEADER *core = info;
+        width = core->bcWidth; height = core->bcHeight; bpp = core->bcBitCount; planes = core->bcPlanes;
+    }
+    else
+    {
+        if (bih->biCompression != BI_RGB && bih->biCompression != BI_BITFIELDS)
+            return offBits + bih->biSizeImage <= cbRecord;
+        if (bih->biWidth < 0) return FALSE;
+        width = bih->biWidth;
+        height = bih->biHeight < 0 ? -(LONGLONG)bih->biHeight : bih->biHeight;
+        bpp = bih->biBitCount; planes = bih->biPlanes;
+    }
+    cbImage = (((width * planes * bpp + 31) & ~31ULL) >> 3) * height;
+    return cbImage <= cbRecord && offBits + cbImage <= cbRecord;
+}
+
 /******************************************************************
  *         PlayMetaFileRecord   (GDI32.@)
  *
@@ -860,7 +929,9 @@ BOOL WINAPI PlayMetaFileRecord( HDC hdc,  HANDLETABLE *ht, METARECORD *mr, UINT 
     case META_STRETCHDIB:
       {
         LPBITMAPINFO info = (LPBITMAPINFO) &(mr->rdParm[11]);
-        LPSTR bits = (LPSTR)info + bitmap_info_size( info, mr->rdParm[2] );
+        LPSTR bits;
+        if (!MF_dib_in_record( mr, info, mr->rdParm[2] )) break;
+        bits = (LPSTR)info + bitmap_info_size( info, mr->rdParm[2] );
         StretchDIBits( hdc, (SHORT)mr->rdParm[10], (SHORT)mr->rdParm[9], (SHORT)mr->rdParm[8],
                        (SHORT)mr->rdParm[7], (SHORT)mr->rdParm[6], (SHORT)mr->rdParm[5],
                        (SHORT)mr->rdParm[4], (SHORT)mr->rdParm[3], bits, info,
@@ -871,7 +942,9 @@ BOOL WINAPI PlayMetaFileRecord( HDC hdc,  HANDLETABLE *ht, METARECORD *mr, UINT 
     case META_DIBSTRETCHBLT:
       {
         LPBITMAPINFO info = (LPBITMAPINFO) &(mr->rdParm[10]);
-        LPSTR bits = (LPSTR)info + bitmap_info_size( info, DIB_RGB_COLORS );
+        LPSTR bits;
+        if (!MF_dib_in_record( mr, info, DIB_RGB_COLORS )) break;
+        bits = (LPSTR)info + bitmap_info_size( info, DIB_RGB_COLORS );
         StretchDIBits( hdc, (SHORT)mr->rdParm[9], (SHORT)mr->rdParm[8], (SHORT)mr->rdParm[7],
                        (SHORT)mr->rdParm[6], (SHORT)mr->rdParm[5], (SHORT)mr->rdParm[4],
                        (SHORT)mr->rdParm[3], (SHORT)mr->rdParm[2], bits, info,
@@ -954,6 +1027,7 @@ BOOL WINAPI PlayMetaFileRecord( HDC hdc,  HANDLETABLE *ht, METARECORD *mr, UINT 
     case META_DIBCREATEPATTERNBRUSH:
         /*  mr->rdParm[0] may be BS_PATTERN or BS_DIBPATTERN:
             but there's no difference */
+        if (mr->rdSize < 5 || !MF_dib_bits_in_record( mr, mr->rdParm + 2, mr->rdParm[1] )) break;
         MF_AddHandle(ht, handles, CreateDIBPatternBrushPt( mr->rdParm + 2, mr->rdParm[1] ));
         break;
 
@@ -968,7 +1042,9 @@ BOOL WINAPI PlayMetaFileRecord( HDC hdc,  HANDLETABLE *ht, METARECORD *mr, UINT 
 
         if (mr->rdSize > 12) {
             LPBITMAPINFO info = (LPBITMAPINFO) &(mr->rdParm[8]);
-            LPSTR bits = (LPSTR)info + bitmap_info_size(info, mr->rdParm[0]);
+            LPSTR bits;
+            if (!MF_dib_in_record( mr, info, mr->rdParm[0] )) break;
+            bits = (LPSTR)info + bitmap_info_size(info, mr->rdParm[0]);
 
             StretchDIBits(hdc, (SHORT)mr->rdParm[7], (SHORT)mr->rdParm[6], (SHORT)mr->rdParm[5],
                           (SHORT)mr->rdParm[4], (SHORT)mr->rdParm[3], (SHORT)mr->rdParm[2],
@@ -998,7 +1074,9 @@ BOOL WINAPI PlayMetaFileRecord( HDC hdc,  HANDLETABLE *ht, METARECORD *mr, UINT 
     case META_SETDIBTODEV:
         {
             BITMAPINFO *info = (BITMAPINFO *) &(mr->rdParm[9]);
-            char *bits = (char *)info + bitmap_info_size( info, mr->rdParm[0] );
+            char *bits;
+            if (!MF_dib_in_record( mr, info, mr->rdParm[0] )) break;
+            bits = (char *)info + bitmap_info_size( info, mr->rdParm[0] );
             SetDIBitsToDevice(hdc, (SHORT)mr->rdParm[8], (SHORT)mr->rdParm[7],
                               (SHORT)mr->rdParm[6], (SHORT)mr->rdParm[5],
                               (SHORT)mr->rdParm[4], (SHORT)mr->rdParm[3],

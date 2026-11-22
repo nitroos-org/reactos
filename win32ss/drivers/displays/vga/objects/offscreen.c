@@ -151,6 +151,8 @@ VGADDI_AllocSavedScreenBits(ULONG Size)
     else
     {
         New = EngAllocMem(0, sizeof(SAVED_SCREEN_BITS), ALLOC_TAG);
+        if (!New)
+            return NULL;
         New->Free = FALSE;
         New->Offset = Best->Offset + Size;
         New->Size = Size;

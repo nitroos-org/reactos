@@ -388,14 +388,17 @@ EBRUSHOBJ_bRealizeBrush(EBRUSHOBJ *pebo, BOOL bCallDriver)
     ASSERT(psurfPattern);
     ASSERT(psurfPattern->ppal);
 
-    /* DIB brushes with DIB_PAL_COLORS usage need a new palette */
-    if (pbr->flAttrs & BR_IS_DIBPALCOLORS)
+    /* DIB brushes with DIB_PAL_COLORS usage need a new palette. A pattern of more than 8 bpp has
+       no colour indices to translate (its palette has no entries): use it as it is. */
+    if ((pbr->flAttrs & BR_IS_DIBPALCOLORS) && (psurfPattern->ppal->NumColors != 0))
     {
         /* Create a palette with the colors from the DC */
         ppalPattern = FixupDIBBrushPalette(psurfPattern->ppal, pebo->ppalDC);
         if (ppalPattern == NULL)
         {
             ERR("FixupDIBBrushPalette() failed.\n");
+            /* Drop the lock taken above, or the pattern bitmap is never freed */
+            SURFACE_ShareUnlockSurface(psurfPattern);
             return FALSE;
         }
 

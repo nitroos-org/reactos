@@ -1766,8 +1766,16 @@ UserDrawIconEx(
     /* Color bitmap is not mandatory */
     if (hbmColor == NULL)
     {
-        /* But then the mask bitmap must have the information in it's bottom half */
-        ASSERT(psurfMask->SurfObj.sizlBitmap.cy == 2*pIcon->cy);
+        /* But then the mask bitmap must have the information in it's bottom half. user32 makes cy
+           half the mask height, so an odd mask height leaves one spare line (it was an ASSERT on
+           equality); a mask shorter than two icons has no bottom half to draw from. */
+        if ((LONGLONG)psurfMask->SurfObj.sizlBitmap.cy < 2 * (LONGLONG)pIcon->cy)
+        {
+            ERR("Mask of height %ld has no colour half for an icon of height %ld\n",
+                psurfMask->SurfObj.sizlBitmap.cy, (LONG)pIcon->cy);
+            SURFACE_ShareUnlockSurface(psurfMask);
+            return FALSE;
+        }
         psurfColor = NULL;
     }
     else if ((psurfColor = SURFACE_ShareLockSurface(hbmColor)) == NULL)

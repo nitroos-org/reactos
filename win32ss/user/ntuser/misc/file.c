@@ -154,16 +154,23 @@ W32kMapViewOfSection(
     return pvBase;
 }
 
+/* Largest bitmap file UserLoadImage copies into pool (a 32 bpp 7680 x 4320 image is about 127 MB) */
+#define CJ_MAX_IMAGE_FILE (256 * 1024 * 1024)
+
 HBITMAP
 NTAPI
 UserLoadImage(PCWSTR pwszName)
 {
     NTSTATUS Status = STATUS_SUCCESS;
     HANDLE hFile, hSection;
-    BITMAPFILEHEADER *pbmfh;
+    IO_STATUS_BLOCK Iosb;
+    FILE_STANDARD_INFORMATION FileInfo;
+    PVOID pvView;
+    BITMAPFILEHEADER *pbmfh = NULL;
     LPBITMAPINFO pbmi;
     PVOID pvBits;
     HBITMAP hbmp = 0;
+    ULONG cjFile, cjHeader, cjInfo, cBitCount;
 
     DPRINT("Enter UserLoadImage(%ls)\n", pwszName);
 
@@ -174,6 +181,19 @@ UserLoadImage(PCWSTR pwszName)
         return NULL;
     }
 
+    /* Everything below is bounded by the real size of the file, never by the sizes and offsets
+       its header claims */
+    Status = ZwQueryInformationFile(hFile, &Iosb, &FileInfo, sizeof(FileInfo), FileStandardInformation);
+    if (!NT_SUCCESS(Status) ||
+        (FileInfo.EndOfFile.QuadPart < (LONGLONG)(sizeof(BITMAPFILEHEADER) + sizeof(BITMAPCOREHEADER))) ||
+        (FileInfo.EndOfFile.QuadPart > CJ_MAX_IMAGE_FILE))
+    {
+        DPRINT1("Unusable image file size (status 0x%lx)\n", Status);
+        ZwClose(hFile);
+        return NULL;
+    }
+    cjFile = (ULONG)FileInfo.EndOfFile.QuadPart;
+
     /* Create a section */
     hSection = W32kCreateFileSection(hFile, SEC_COMMIT, PAGE_READONLY, 0);
     ZwClose(hFile);
@@ -183,20 +203,24 @@ UserLoadImage(PCWSTR pwszName)
     }
 
     /* Map the section */
-    pbmfh = W32kMapViewOfSection(hSection, PAGE_READONLY, 0);
+    pvView = W32kMapViewOfSection(hSection, PAGE_READONLY, 0);
     ZwClose(hSection);
-    if (!pbmfh)
+    if (!pvView)
     {
         return NULL;
     }
 
-    /* Get a pointer to the BITMAPINFO */
-    pbmi = (LPBITMAPINFO)(pbmfh + 1);
+    /* The view lives in user space, where the process can unmap or change it at any time:
+       take a kernel copy under SEH and use nothing else */
+    pbmfh = ExAllocatePoolWithTag(PagedPool, cjFile, TAG_DIB);
+    if (!pbmfh)
+    {
+        goto leave;
+    }
 
 	_SEH2_TRY
 	{
-		ProbeForRead(&pbmfh->bfSize, sizeof(DWORD), 1);
-		ProbeForRead(pbmfh, pbmfh->bfSize, 1);
+		RtlCopyMemory(pbmfh, pvView, cjFile);
 	}
 	_SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
 	{
@@ -216,6 +240,36 @@ UserLoadImage(PCWSTR pwszName)
 		BITMAPINFO* pConvertedInfo;
 		HDC hdc;
 
+        /* Get a pointer to the BITMAPINFO */
+        pbmi = (LPBITMAPINFO)(pbmfh + 1);
+
+        /* The header and its colour table must be inside the file */
+        cjHeader = pbmi->bmiHeader.biSize;
+        if (cjHeader == sizeof(BITMAPCOREHEADER))
+        {
+            cBitCount = ((PBITMAPCOREHEADER)pbmi)->bcBitCount;
+            cjInfo = sizeof(BITMAPCOREHEADER) + ((cBitCount <= 8) ? (sizeof(RGBTRIPLE) << cBitCount) : 0);
+        }
+        else if ((cjHeader >= sizeof(BITMAPINFOHEADER)) &&
+                 (cjHeader <= cjFile - sizeof(BITMAPFILEHEADER)))
+        {
+            cjInfo = (ULONG)DIB_BitmapInfoSize(pbmi, DIB_RGB_COLORS);
+        }
+        else
+        {
+            DPRINT1("Invalid header size %lu\n", cjHeader);
+            goto leave;
+        }
+
+        if ((cjInfo > cjFile - sizeof(BITMAPFILEHEADER)) ||
+            (pbmfh->bfOffBits < sizeof(BITMAPFILEHEADER) + cjInfo) ||
+            (pbmfh->bfOffBits >= cjFile))
+        {
+            DPRINT1("Header or bits outside of the file (info %lu, offset %lu, file %lu)\n",
+                    cjInfo, pbmfh->bfOffBits, cjFile);
+            goto leave;
+        }
+
 		pvBits = (PVOID)((PCHAR)pbmfh + pbmfh->bfOffBits);
 
 		pConvertedInfo = DIB_ConvertBitmapInfo(pbmi, DIB_RGB_COLORS);
@@ -227,6 +281,7 @@ UserLoadImage(PCWSTR pwszName)
 
 		hdc = IntGdiCreateDC(NULL, NULL, NULL, NULL,FALSE);
 
+        /* The bits are the rest of the file (bfSize is not trusted) */
         hbmp = GreCreateDIBitmapInternal(hdc,
                                          pConvertedInfo->bmiHeader.biWidth,
 				                         pConvertedInfo->bmiHeader.biHeight,
@@ -235,7 +290,7 @@ UserLoadImage(PCWSTR pwszName)
                                          pConvertedInfo,
                                          DIB_RGB_COLORS,
                                          0,
-                                         pbmfh->bfSize - pbmfh->bfOffBits,
+                                         cjFile - pbmfh->bfOffBits,
                                          0);
 
 		NtGdiDeleteObjectApp(hdc);
@@ -247,8 +302,10 @@ UserLoadImage(PCWSTR pwszName)
 	}
 
 leave:
+    if (pbmfh) ExFreePoolWithTag(pbmfh, TAG_DIB);
+
     /* Unmap our section, we don't need it anymore */
-    ZwUnmapViewOfSection(NtCurrentProcess(), pbmfh);
+    ZwUnmapViewOfSection(NtCurrentProcess(), pvView);
 
     DPRINT("Leaving UserLoadImage, hbmp = %p\n", hbmp);
     return hbmp;

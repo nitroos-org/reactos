@@ -115,9 +115,22 @@ GreCreateBitmapEx(
     /* Verify format */
     if (iFormat < BMF_1BPP || iFormat > BMF_PNG) return NULL;
 
+    /* An empty bitmap has no rows to point at; the callers take the sizes from user mode headers */
+    if ((nWidth == 0) || (nHeight == 0))
+    {
+        DPRINT1("Empty bitmap %lu x %lu\n", nWidth, nHeight);
+        return NULL;
+    }
+
     /* The infamous RLE hack */
     if ((iFormat == BMF_4RLE) || (iFormat == BMF_8RLE))
     {
+        /* Run length data needs its size, the decoder reads no further */
+        if ((pvBits != NULL) && (cjSizeImage == 0))
+        {
+            return NULL;
+        }
+
         pvCompressedBits = pvBits;
         pvBits = NULL;
         iFormat = (iFormat == BMF_4RLE) ? BMF_4BPP : BMF_8BPP;
@@ -141,15 +154,15 @@ GreCreateBitmapEx(
     /* The infamous RLE hack */
     if (pvCompressedBits)
     {
-        SIZEL sizl;
-        LONG lDelta;
-
-        sizl.cx = nWidth;
-        sizl.cy = nHeight;
-        lDelta = WIDTH_BYTES_ALIGN32(nWidth, gajBitsPerFormat[iFormat]);
-
-        pvBits = psurf->SurfObj.pvBits;
-        DecompressBitmap(sizl, pvCompressedBits, pvBits, lDelta, iFormat, cjSizeImage);
+        /* Decode into the rows the surface really has: its stride and its size, not a second
+           computation of them. The decoder stays inside psurf->SurfObj.cjBits. */
+        DecompressBitmap(psurf->SurfObj.sizlBitmap,
+                         pvCompressedBits,
+                         psurf->SurfObj.pvBits,
+                         labs(psurf->SurfObj.lDelta),
+                         iFormat,
+                         cjSizeImage,
+                         psurf->SurfObj.cjBits);
     }
 
     /* Get the handle for the bitmap */
@@ -422,7 +435,9 @@ NtGdiCreateCompatibleBitmap(
     PDC Dc;
 
     /* Check parameters */
-    if ((Width <= 0) || (Height <= 0) || ((Width * Height) > 0x3FFFFFFF))
+    /* The product is taken in 64 bits: in 32 bits it wraps (0x40000001 x 4 gave 4) and let a
+       surface through whose rows then wrapped too */
+    if ((Width <= 0) || (Height <= 0) || (((LONGLONG)Width * Height) > 0x3FFFFFFF))
     {
         EngSetLastError(ERROR_INVALID_PARAMETER);
         return NULL;

@@ -399,8 +399,12 @@ DIB_4BPP_BitBlt(PBLTINFO BltInfo)
   UsesPattern = ROP4_USES_PATTERN(BltInfo->Rop4);
 
   SourceY = BltInfo->SourcePoint.y;
+  /* The groups of 8 pixels start after the single pixel an odd left edge takes, so they are
+     counted from there: counted from the left edge itself, the last group ran one pixel past the
+     right edge, reading a source pixel behind the source rectangle (behind the source bits when it
+     ends at the end of the bitmap) and writing one beside the destination rectangle */
   RoundedRight = BltInfo->DestRect.right -
-    ((BltInfo->DestRect.right - BltInfo->DestRect.left) & 0x7);
+    ((BltInfo->DestRect.right - (BltInfo->DestRect.left + (BltInfo->DestRect.left & 0x1))) & 0x7);
 
   if (UsesPattern)
   {

@@ -12,6 +12,24 @@
 #define NDEBUG
 #include <debug.h>
 
+/* The rectangles come from the caller's coordinates. Their widths and heights are used as LONG
+   factors and divisors when a clipped rectangle is scaled: a rectangle across more than MAXLONG
+   pixels wrapped them (to -1, and INT_MIN / -1 is a divide error) */
+static BOOL
+StretchRectSizeFits(_In_ const RECTL *prcl)
+{
+    LONGLONG cx = (LONGLONG)prcl->right - prcl->left;
+    LONGLONG cy = (LONGLONG)prcl->bottom - prcl->top;
+    return (cx >= -MAXLONG) && (cx <= MAXLONG) && (cy >= -MAXLONG) && (cy <= MAXLONG);
+}
+
+/* a * b / c of rectangle sizes that fit a LONG (|a| <= |c| for the clipped parts), in 64 bits */
+static LONG
+StretchScale(_In_ LONG a, _In_ LONG b, _In_ LONG c)
+{
+    return (LONG)((LONGLONG)a * b / c);
+}
+
 /***************************************************************************************************************************
   We want to receive and send the flip state along to existing functions without changing their parameter lists.
   So a way that we can do this is to use the DestRect to carry this information along with it.
@@ -143,6 +161,11 @@ EngStretchBltROP(
     DPRINT("Entering EngStretchBltROP: prclSrc: (%d/%d)-(%d/%d) prclDest: (%d,%d)-(%d,%d)\n",
            prclSrc->left, prclSrc->top, prclSrc->right, prclSrc->bottom,
            prclDest->left, prclDest->top, prclDest->right, prclDest->bottom);
+
+    if (!StretchRectSizeFits(prclDest) || !StretchRectSizeFits(prclSrc))
+    {
+        return FALSE;
+    }
 
     cxSrc = prclSrc->right - prclSrc->left;
     cySrc = prclSrc->bottom - prclSrc->top;
@@ -322,10 +345,10 @@ EngStretchBltROP(
             ClipRect.bottom = ClipRegion->rclBounds.bottom + Translate.y;
             if (RECTL_bIntersectRect(&CombinedRect, &OutputRect, &ClipRect))
             {
-                InputToCombinedRect.top = InputRect.top + (CombinedRect.top - OutputRect.top) * SrcHeight / DstHeight;
-                InputToCombinedRect.bottom = InputRect.top + (CombinedRect.bottom - OutputRect.top) * SrcHeight / DstHeight;
-                InputToCombinedRect.left = InputRect.left + (CombinedRect.left - OutputRect.left) * SrcWidth / DstWidth;
-                InputToCombinedRect.right = InputRect.left + (CombinedRect.right - OutputRect.left) * SrcWidth / DstWidth;
+                InputToCombinedRect.top = InputRect.top + StretchScale(CombinedRect.top - OutputRect.top, SrcHeight, DstHeight);
+                InputToCombinedRect.bottom = InputRect.top + StretchScale(CombinedRect.bottom - OutputRect.top, SrcHeight, DstHeight);
+                InputToCombinedRect.left = InputRect.left + StretchScale(CombinedRect.left - OutputRect.left, SrcWidth, DstWidth);
+                InputToCombinedRect.right = InputRect.left + StretchScale(CombinedRect.right - OutputRect.left, SrcWidth, DstWidth);
 
                 if (bLeftToRight)
                 {
@@ -385,10 +408,10 @@ EngStretchBltROP(
                     ClipRect.bottom = RectEnum.arcl[i].bottom + Translate.y;
                     if (RECTL_bIntersectRect(&CombinedRect, &OutputRect, &ClipRect))
                     {
-                        InputToCombinedRect.top = InputRect.top + (CombinedRect.top - OutputRect.top) * SrcHeight / DstHeight;
-                        InputToCombinedRect.bottom = InputRect.top + (CombinedRect.bottom - OutputRect.top) * SrcHeight / DstHeight;
-                        InputToCombinedRect.left = InputRect.left + (CombinedRect.left - OutputRect.left) * SrcWidth / DstWidth;
-                        InputToCombinedRect.right = InputRect.left + (CombinedRect.right - OutputRect.left) * SrcWidth / DstWidth;
+                        InputToCombinedRect.top = InputRect.top + StretchScale(CombinedRect.top - OutputRect.top, SrcHeight, DstHeight);
+                        InputToCombinedRect.bottom = InputRect.top + StretchScale(CombinedRect.bottom - OutputRect.top, SrcHeight, DstHeight);
+                        InputToCombinedRect.left = InputRect.left + StretchScale(CombinedRect.left - OutputRect.left, SrcWidth, DstWidth);
+                        InputToCombinedRect.right = InputRect.left + StretchScale(CombinedRect.right - OutputRect.left, SrcWidth, DstWidth);
 
                         if (bLeftToRight)
                         {
@@ -506,6 +529,11 @@ IntEngStretchBlt(SURFOBJ *psoDest,
     ASSERT(DestRect);
     ASSERT(SourceRect);
     //ASSERT(!RECTL_bIsEmptyRect(SourceRect)); // FIXME!
+
+    if (!StretchRectSizeFits(DestRect) || !StretchRectSizeFits(SourceRect))
+    {
+        return FALSE;
+    }
 
     /* If no clip object is given, use trivial one */
     if (!ClipRegion)
@@ -763,10 +791,10 @@ IntEngStretchBlt(SURFOBJ *psoDest,
         InputWidth = InputRect.right - InputRect.left;
         InputHeight = InputRect.bottom - InputRect.top;
 
-        InputRect.left += (InputWidth * (OutputRect.left - InputClippedRect.left)) / InputClWidth;
-        InputRect.right -= (InputWidth * (InputClippedRect.right - OutputRect.right)) / InputClWidth;
-        InputRect.top += (InputHeight * (OutputRect.top - InputClippedRect.top)) / InputClHeight;
-        InputRect.bottom -= (InputHeight * (InputClippedRect.bottom - OutputRect.bottom)) / InputClHeight;
+        InputRect.left += StretchScale(InputWidth, OutputRect.left - InputClippedRect.left, InputClWidth);
+        InputRect.right -= StretchScale(InputWidth, InputClippedRect.right - OutputRect.right, InputClWidth);
+        InputRect.top += StretchScale(InputHeight, OutputRect.top - InputClippedRect.top, InputClHeight);
+        InputRect.bottom -= StretchScale(InputHeight, InputClippedRect.bottom - OutputRect.bottom, InputClHeight);
     }
     else
     {
