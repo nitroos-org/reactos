@@ -470,6 +470,55 @@ SepAppendAces(
     }
 }
 
+/*
+ * Maps the generic rights of the ACEs that apply to the object (not inherit-only)
+ * to the object's specific and standard rights, in place. What a set stores on
+ * Windows Server 2022 (NtSetSecurityObject, SetKernelObjectSecurity, RegSetKeySecurity,
+ * SetFileSecurity, SetServiceObjectSecurity on keys, files, directories, events,
+ * mutants, sections, processes, threads, tokens, services; read back): every ACE
+ * that is not inherit-only has its generic rights mapped, those with inheritance
+ * flags too, audit ACEs of a SACL as well; an inherit-only ACE keeps them (it is
+ * mapped when it is inherited); nothing else changes (no ACE is merged, split or
+ * dropped). The access check does not map ACE masks (Windows does not either):
+ * a generic right left in an effective ACE would grant or deny nothing there.
+ * Label ACEs carry no generic rights and are left alone.
+ */
+static
+VOID
+SepMapGenericAcl(
+    _Inout_opt_ PACL Acl,
+    _In_ PGENERIC_MAPPING GenericMapping)
+{
+    PUCHAR End;
+    PACE_HEADER Ace;
+    PACCESS_MASK Mask;
+    ULONG i;
+
+    if (Acl == NULL || GenericMapping == NULL)
+        return;
+
+    End = (PUCHAR)Acl + Acl->AclSize;
+    Ace = (PACE_HEADER)(Acl + 1);
+    for (i = 0; i < Acl->AceCount; i++)
+    {
+        if ((PUCHAR)(Ace + 1) > End || Ace->AceSize < sizeof(ACE_HEADER) + sizeof(ACCESS_MASK) ||
+            (PUCHAR)Ace + Ace->AceSize > End)
+        {
+            break;
+        }
+
+        /* Every ACE type up to the callback object ACEs has its mask right after the header */
+        if (!(Ace->AceFlags & INHERIT_ONLY_ACE) && Ace->AceType <= SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE)
+        {
+            Mask = (PACCESS_MASK)(Ace + 1);
+            if (*Mask & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL))
+                RtlMapGenericMask(Mask, GenericMapping);
+        }
+
+        Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize);
+    }
+}
+
 /**
  * @brief
  * Captures a security descriptor.
@@ -1065,7 +1114,9 @@ SeSetSecurityDescriptorInfo(
  * Pool type for the new security descriptor to allocate.
  *
  * @param[in] GenericMapping
- * The generic mapping of access rights masks.
+ * The generic mapping of the object's type: the generic rights in the
+ * ACEs of the DACL and SACL being set that apply to the object are mapped
+ * with it before the descriptor is stored (see SepMapGenericAcl).
  *
  * @return
  * Returns STATUS_SUCCESS if the operations have been
@@ -1293,6 +1344,12 @@ SeSetSecurityDescriptorInfoEx(
 
     if (MergedSacl)
         ExFreePoolWithTag(MergedSacl, TAG_ACL);
+
+    /* What the caller set is stored with its generic rights mapped (see SepMapGenericAcl) */
+    if ((SecurityInformation & DACL_SECURITY_INFORMATION) && NewSd->Dacl)
+        SepMapGenericAcl((PACL)((PUCHAR)NewSd + NewSd->Dacl), GenericMapping);
+    if ((SecurityInformation & SACL_SECURITY_INFORMATION) && NewSd->Sacl)
+        SepMapGenericAcl((PACL)((PUCHAR)NewSd + NewSd->Sacl), GenericMapping);
 
     NewSd->Control |= Control;
     *ObjectsSecurityDescriptor = NewSd;

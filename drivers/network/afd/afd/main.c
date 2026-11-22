@@ -453,7 +453,7 @@ AfdCreateRawSD(VOID)
     if (NT_SUCCESS(Status))
         Status = RtlCreateAcl(Dacl, DaclSize, ACL_REVISION);
     for (i = 0; NT_SUCCESS(Status) && i < RTL_NUMBER_OF(Sids); i++)
-        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, GENERIC_ALL, Sids[i]);
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, FILE_ALL_ACCESS, Sids[i]);
     if (NT_SUCCESS(Status))
         Status = RtlSetDaclSecurityDescriptor(&AbsSD, TRUE, Dacl, FALSE);
     if (NT_SUCCESS(Status))

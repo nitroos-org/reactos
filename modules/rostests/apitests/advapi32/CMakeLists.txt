@@ -136,6 +136,7 @@ list(APPEND SOURCE
     ServiceVirtualAccount.c
     ServiceNetwork.c
     SetEntriesInAclOld.c
+    SetSecurityGenericMap.c
     SetSecurityInfoKey.c
     SetSecurityInfoKeyInherit.c
     RegistryRestrictedOpen.c

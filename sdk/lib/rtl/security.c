@@ -14,6 +14,49 @@
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
+/*
+ * Maps the generic rights of the ACEs that apply to the object (not inherit-only)
+ * in place, as Windows stores a set descriptor (SetPrivateObjectSecurity(Ex) on
+ * Windows Server 2022: DACL ACEs with or without inheritance flags mapped,
+ * inherit-only ACEs keep their generic rights). The kernel's set path does the
+ * same (SepMapGenericAcl in ntoskrnl/se/sd.c).
+ */
+static
+VOID
+RtlpMapGenericAcl(
+    _Inout_opt_ PACL Acl,
+    _In_opt_ PGENERIC_MAPPING GenericMapping)
+{
+    PUCHAR End;
+    PACE_HEADER Ace;
+    PACCESS_MASK Mask;
+    ULONG i;
+
+    if (Acl == NULL || GenericMapping == NULL)
+        return;
+
+    End = (PUCHAR)Acl + Acl->AclSize;
+    Ace = (PACE_HEADER)(Acl + 1);
+    for (i = 0; i < Acl->AceCount; i++)
+    {
+        if ((PUCHAR)(Ace + 1) > End || Ace->AceSize < sizeof(ACE_HEADER) + sizeof(ACCESS_MASK) ||
+            (PUCHAR)Ace + Ace->AceSize > End)
+        {
+            break;
+        }
+
+        /* Every ACE type up to the callback object ACEs has its mask right after the header */
+        if (!(Ace->AceFlags & INHERIT_ONLY_ACE) && Ace->AceType <= SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE)
+        {
+            Mask = (PACCESS_MASK)(Ace + 1);
+            if (*Mask & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL))
+                RtlMapGenericMask(Mask, GenericMapping);
+        }
+
+        Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize);
+    }
+}
+
 NTSTATUS
 NTAPI
 RtlpSetSecurityObject(IN PVOID Object OPTIONAL,
@@ -158,19 +201,23 @@ RtlpSetSecurityObject(IN PVOID Object OPTIONAL,
 
     pDest = (PUCHAR)((ULONG_PTR)pNewSd + sizeof(SECURITY_DESCRIPTOR_RELATIVE));
 
-    /* Copy the SACL */
+    /* Copy the SACL (one the caller sets: its generic rights mapped) */
     if (pSacl != NULL)
     {
         RtlCopyMemory(pDest, pSacl, ulSaclSize);
         pNewSd->Sacl = (ULONG_PTR)pDest - (ULONG_PTR)pNewSd;
+        if (SecurityInformation & SACL_SECURITY_INFORMATION)
+            RtlpMapGenericAcl((PACL)pDest, GenericMapping);
         pDest = pDest + ROUND_UP(ulSaclSize, sizeof(ULONG));
     }
 
-    /* Copy the DACL */
+    /* Copy the DACL (one the caller sets: its generic rights mapped) */
     if (pDacl != NULL)
     {
         RtlCopyMemory(pDest, pDacl, ulDaclSize);
         pNewSd->Dacl = (ULONG_PTR)pDest - (ULONG_PTR)pNewSd;
+        if (SecurityInformation & DACL_SECURITY_INFORMATION)
+            RtlpMapGenericAcl((PACL)pDest, GenericMapping);
         pDest = pDest + ROUND_UP(ulDaclSize, sizeof(ULONG));
     }
 
