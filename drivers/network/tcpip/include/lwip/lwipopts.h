@@ -187,6 +187,15 @@
 
 #define TCP_MAXRTX                      8
 
+/* NitroOS: give-up on data the peer does not acknowledge, as Windows Server 2022 does (measured 2026-11-21: a
+   connection whose data was dropped is reset 19.0-19.1 s after the first lost send, the retransmissions doubling;
+   the application sees WSAECONNRESET 10054 and Windows sends the reset). lwIP waited for TCP_MAXRTX retransmissions
+   (1, 3, 6 ... 96 s apart: more than 6 minutes). The clock starts when the oldest unacknowledged data was sent and
+   restarts with every acknowledgement that makes progress: a connection that only receives, or survives a link
+   drop of a few seconds, is not affected; zero-window probing and keep-alive keep their own rules. The 500 ms timer
+   of lwIP makes it 19.0-19.5 s. ERR_RST: the owner sees a reset (STATUS_CONNECTION_RESET) */
+#define NITRO_TCP_DATA_GIVEUP_MS        19000
+
 #define TCP_SYNMAXRTX                   4
 
 /* NitroOS: connection setup times as Windows Server 2022 has them (measured 2026-11-20 on a dual-stack link whose

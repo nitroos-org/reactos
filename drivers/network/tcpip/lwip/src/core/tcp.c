@@ -1260,7 +1260,25 @@ tcp_slowtmr_start:
     } else if (pcb->nrtx >= TCP_MAXRTX) {
       ++pcb_remove;
       LWIP_DEBUGF(TCP_DEBUG, ("tcp_slowtmr: max DATA retries reached\n"));
-    } else {
+    }
+#ifdef NITRO_TCP_DATA_GIVEUP_MS
+    /* NitroOS: data that stays unacknowledged for NITRO_TCP_DATA_GIVEUP_MS after it was sent ends the connection
+       with a reset, as on Windows (lwipopts.h); an acknowledgement that makes progress starts the clock again */
+    else if (pcb->giveup_armed && pcb->nrtx > 0 && pcb->state != SYN_SENT && pcb->state != SYN_RCVD &&
+             (pcb->unacked != NULL || pcb->unsent != NULL) &&
+             (u32_t)(tcp_ticks - pcb->giveup_start) >= (u32_t)(NITRO_TCP_DATA_GIVEUP_MS / TCP_SLOW_INTERVAL)) {
+      ++pcb_remove;
+      ++pcb_reset;
+      remove_err = ERR_RST;
+      LWIP_DEBUGF(TCP_DEBUG, ("tcp_slowtmr: unacknowledged data timed out\n"));
+    }
+#endif
+    else {
+#ifdef NITRO_TCP_DATA_GIVEUP_MS
+      if (pcb->nrtx == 0) {
+        pcb->giveup_armed = 0;
+      }
+#endif
       if (pcb->persist_backoff > 0) {
         LWIP_ASSERT("tcp_slowtimr: persist ticking with in-flight data", pcb->unacked == NULL);
         LWIP_ASSERT("tcp_slowtimr: persist ticking with empty send buffer", pcb->unsent != NULL);
@@ -1302,6 +1320,13 @@ tcp_slowtmr_start:
         }
 
         if (pcb->rtime >= pcb->rto) {
+#ifdef NITRO_TCP_DATA_GIVEUP_MS
+          /* NitroOS: the first timeout of unacknowledged data: it was sent rtime ticks ago */
+          if (!pcb->giveup_armed && pcb->state != SYN_SENT && pcb->state != SYN_RCVD) {
+            pcb->giveup_start = tcp_ticks - (u32_t)pcb->rtime;
+            pcb->giveup_armed = 1;
+          }
+#endif
           /* Time for a retransmission. */
           LWIP_DEBUGF(TCP_RTO_DEBUG, ("tcp_slowtmr: rtime %"S16_F
                                       " pcb->rto %"S16_F"\n",

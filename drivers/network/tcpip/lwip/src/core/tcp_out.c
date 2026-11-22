@@ -1301,6 +1301,14 @@ tcp_output(struct tcp_pcb *pcb)
 
   netif = tcp_route(pcb, &pcb->local_ip, &pcb->remote_ip);
   if (netif == NULL) {
+    /* NitroOS: data that cannot go out for lack of a route (the link is down) is treated as sent and lost:
+       start the retransmission timer, so that the retransmission timeout, its backoff and the limits on
+       unacknowledged data (TCP_MAXRTX, NITRO_TCP_DATA_GIVEUP_MS) apply to it as to data lost on the way.
+       Before, a connection that only wrote after the link went down never timed out (tcp_slowtmr handles
+       an RTO with unsent but no unacked data) */
+    if (pcb->rtime < 0) {
+      pcb->rtime = 0;
+    }
     return ERR_RTE;
   }
 
