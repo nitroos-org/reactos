@@ -71,6 +71,7 @@ extern void func_LsaLogonUserS4U(void);
 extern void func_LsaManageSidNameMapping(void);
 extern void func_LsaSecretStorage(void);
 extern void func_NetUserChangePassword(void);
+extern void func_MandatoryLabelOpen(void);
 extern void func_ProcessThreadLabel(void);
 extern void func_QueryServiceConfig(void);
 extern void func_QueryServiceConfig2(void);
@@ -262,6 +263,7 @@ const struct test winetest_testlist[] =
     { "LsaManageSidNameMapping", func_LsaManageSidNameMapping },
     { "LsaSecretStorage", func_LsaSecretStorage },
     { "NetUserChangePassword", func_NetUserChangePassword },
+    { "MandatoryLabelOpen", func_MandatoryLabelOpen },
     { "ProcessThreadLabel", func_ProcessThreadLabel },
     { "QueryServiceConfig", func_QueryServiceConfig },
     { "QueryServiceConfig2", func_QueryServiceConfig2 },
