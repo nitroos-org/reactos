@@ -4004,7 +4004,7 @@ ScmStartDependencyByName(PCWSTR pszName,
 }
 
 /* Tries to start every member of a load ordering group (the disabled ones are left alone); the dependency is met when
-   one member is running afterwards. A group without a member does not stop the service (as before). */
+   one member is running afterwards. A group without any member does not stop the service (as before; not documented). */
 static DWORD
 ScmStartDependencyGroup(PSERVICE Service,
                         PCWSTR pszGroup,
@@ -4036,8 +4036,9 @@ ScmStartDependencyGroup(PSERVICE Service,
         for (ServiceEntry = ServiceListHead.Flink; ServiceEntry != &ServiceListHead; ServiceEntry = ServiceEntry->Flink)
         {
             Member = CONTAINING_RECORD(ServiceEntry, SERVICE, ServiceListEntry);
-            if (Member == Service || Member->lpGroup == NULL || Member->bDeleted ||
-                Member->dwStartType == SERVICE_DISABLED ||
+            /* Disabled members and members marked for deletion are members too: one that is running meets the
+               dependency, one that is stopped is not started (ScmStartDependencyByName) */
+            if (Member == Service || Member->lpGroup == NULL ||
                 _wcsicmp(Member->lpGroup->lpGroupName, pszGroup) != 0)
             {
                 continue;
@@ -4082,6 +4083,43 @@ ScmStartDependencyGroup(PSERVICE Service,
 }
 
 
+/* The System log entry of a service that is not started because of a dependency (the messages of netevent:
+   7001 a service that failed, 7002 a group of which no member started, 7003 a service that is not there) */
+static VOID
+ScmLogDependencyFailure(PSERVICE Service,
+                        PCWSTR pszDependency,
+                        DWORD dwError)
+{
+    LPCWSTR lpLogStrings[3];
+    WCHAR szError[16];
+
+    if (dwError == ERROR_SHUTDOWN_IN_PROGRESS || dwError == ERROR_SERVICE_DATABASE_LOCKED ||
+        Service->dwErrorControl == SERVICE_ERROR_IGNORE)
+    {
+        return;
+    }
+
+    lpLogStrings[0] = Service->lpDisplayName;
+    if (*pszDependency == SC_GROUP_IDENTIFIERW)
+    {
+        lpLogStrings[1] = pszDependency + 1;
+        ScmLogEvent(EVENT_SERVICE_START_FAILED_GROUP, EVENTLOG_ERROR_TYPE, 2, lpLogStrings);
+    }
+    else if (dwError == ERROR_SERVICE_DEPENDENCY_DELETED)
+    {
+        lpLogStrings[1] = pszDependency;
+        ScmLogEvent(EVENT_SERVICE_START_FAILED_NONE, EVENTLOG_ERROR_TYPE, 2, lpLogStrings);
+    }
+    else
+    {
+        StringCchPrintfW(szError, ARRAYSIZE(szError), L"%lu", dwError);
+        lpLogStrings[1] = pszDependency;
+        lpLogStrings[2] = szError;
+        ScmLogEvent(EVENT_SERVICE_START_FAILED_II, EVENTLOG_ERROR_TYPE, 3, lpLogStrings);
+    }
+}
+
+
 /* Starts what the service depends on; ERROR_SERVICE_DEPENDENCY_FAIL when a dependency does not come up */
 static DWORD
 ScmStartDependencies(PSERVICE Service,
@@ -4113,6 +4151,7 @@ ScmStartDependencies(PSERVICE Service,
         if (dwError != ERROR_SUCCESS)
         {
             DPRINT1("Dependency '%S' of '%S' failed (Error %lu)\n", pszDependency, Service->lpServiceName, dwError);
+            ScmLogDependencyFailure(Service, pszDependency, dwError);
             break;
         }
     }
