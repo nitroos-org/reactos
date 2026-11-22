@@ -176,6 +176,33 @@ done:
     DestroyWindow(hwnd);
 }
 
+/* A cursor that was the pointer and has been replaced by the cursor of the window under the pointer
+   can be destroyed (it stayed "current" and its handle was never released) */
+static void DestroyAfterReplaced(PCALL1 pCall)
+{
+    HWND hwnd;
+    HCURSOR hcur;
+    DWORD before, after;
+    int i;
+
+    hwnd = CreateWindowExW(0, L"STATIC", L"AniEmpty", WS_POPUP | WS_VISIBLE, 40, 40, 200, 200,
+                           NULL, NULL, GetModuleHandleW(NULL), NULL);
+    if (!hwnd)
+        return;
+    MoveInto(hwnd, 0);
+    before = GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS);
+    for (i = 0; i < 20; i++)
+    {
+        hcur = (HCURSOR)pCall(FALSE, ROUTINE_CREATEEMPTYCUROBJECT);
+        SetCursor(hcur);
+        MoveInto(hwnd, i);
+        ok(DestroyCursor(hcur), "DestroyCursor of the replaced cursor failed, error %lu\n", GetLastError());
+    }
+    after = GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS);
+    ok(after == before, "%lu USER objects before, %lu after\n", before, after);
+    DestroyWindow(hwnd);
+}
+
 START_TEST(AniEmpty)
 {
     HMODULE hwin32u;
@@ -196,6 +223,7 @@ START_TEST(AniEmpty)
         return;
     }
 
+    DestroyAfterReplaced(pCall);
     ExerciseEmpty(pCall, pSetData, FALSE, FALSE);
     ExerciseEmpty(pCall, pSetData, TRUE, FALSE);
     ExerciseEmpty(pCall, pSetData, TRUE, TRUE);

@@ -231,7 +231,13 @@ IntSystemSetCursor(PCURICON_OBJECT pcurNew)
 {
     PCURICON_OBJECT pcurOld = UserSetCursor(pcurNew, FALSE);
     if (pcurNew) UserReferenceObject(pcurNew);
-    if (pcurOld) UserDereferenceObject(pcurOld);
+    if (pcurOld)
+    {
+        /* It is not the current cursor any more: as it is, DestroyCursor refused it for good */
+        if (pcurOld != pcurNew)
+            pcurOld->CURSORF_flags &= ~CURSORF_CURRENT;
+        UserDereferenceObject(pcurOld);
+    }
     return pcurOld;
 }
 
