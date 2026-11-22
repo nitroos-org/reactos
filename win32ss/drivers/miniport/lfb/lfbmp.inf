@@ -1,0 +1,64 @@
+; lfbmp.inf
+;
+; Installation file for the firmware framebuffer display adapter: the framebuffer
+; the UEFI firmware set up, handed over by the boot loader (one fixed mode)
+;
+[Version]
+Signature  = "$Windows NT$"
+LayoutFile = layout.inf
+Class      = Display
+ClassGUID  = {4D36E968-E325-11CE-BFC1-08002BE10318}
+Provider   = %ReactOS%
+DriverVer  = 11/22/2026,1.00
+
+[DestinationDirs]
+DefaultDestDir = 12
+LfbMp.Display_CopyFiles = 11
+
+[Manufacturer]
+%StdMfg% = StdMfg
+
+[StdMfg]
+%LfbMp.DeviceDesc% = LfbMp,FIRMWARE_FRAMEBUFFER
+
+;---------------------------- FIRMWARE FRAMEBUFFER DRIVER ----------------------------
+
+[LfbMp]
+CopyFiles = LfbMp.Miniport_CopyFiles, LfbMp.Display_CopyFiles
+
+[LfbMp.Miniport_CopyFiles]
+lfbmp.sys
+
+[LfbMp.Display_CopyFiles]
+framebuf.dll
+
+[LfbMp.SoftwareSettings]
+AddReg = LfbMp_SoftwareSettings
+
+[LfbMp_SoftwareSettings]
+HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, framebuf
+HKR,, VgaCompatible,           %REG_DWORD%,    0
+HKR,, NitroFallbackDisplay,    %REG_DWORD%,    1
+
+[LfbMp.Services]
+AddService = lfbmp, 0x00000002, LfbMp_Service
+
+[LfbMp_Service]
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 0
+ServiceBinary = %12%\lfbmp.sys
+LoadOrderGroup = Video
+
+;-------------------------------- STRINGS -------------------------------
+
+[Strings]
+; Non-localizable
+ReactOS = "ReactOS Project"
+
+REG_MULTI_SZ   = 0x00010000
+REG_DWORD      = 0x00010001
+
+; Localizable
+StdMfg = "(Standard display adapters)"
+LfbMp.DeviceDesc = "Firmware Framebuffer Display Adapter"

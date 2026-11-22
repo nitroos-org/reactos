@@ -1,5 +1,6 @@
 
 add_subdirectory(bochs)
+add_subdirectory(lfb)
 add_subdirectory(virtgpu)
 add_subdirectory(vbe)
 add_subdirectory(vga)
