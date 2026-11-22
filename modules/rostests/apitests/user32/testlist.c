@@ -105,6 +105,7 @@ extern void func_OwnDcDestroy(void);
 extern void func_PaintDesktopSwitch(void);
 extern void func_PrintWindow(void);
 extern void func_PrivateExtractIcons(void);
+extern void func_PngIconRows(void);
 extern void func_ProcessConnectTerminate(void);
 extern void func_RawInput(void);
 extern void func_RealGetWindowClass(void);
@@ -280,6 +281,7 @@ const struct test winetest_testlist[] =
     { "PrivateExtractIcons", func_PrivateExtractIcons },
     { "ProcessConnectTerminate", func_ProcessConnectTerminate },
     { "RawInput", func_RawInput },
+    { "PngIconRows", func_PngIconRows },
     { "RealGetWindowClass", func_RealGetWindowClass },
     { "RedirGlassKeep", func_RedirGlassKeep },
     { "RedirPresent", func_RedirPresent },

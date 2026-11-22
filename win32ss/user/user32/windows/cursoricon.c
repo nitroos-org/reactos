@@ -86,7 +86,7 @@ LibPngExists(VOID)
     return bLibPngFound;
 }
 
-static int get_dib_image_size(int width, int height, int depth);
+static ULONGLONG get_dib_image_size64( LONG cx, LONG cLines, WORD cBitCount );
 
 /* Convert PNG raw data to BMP icon data */
 static PBYTE
@@ -147,7 +147,20 @@ CURSORICON_ConvertPngToBmpIcon(
 
     int channels = png_get_channels(png_ptr, info_ptr);
     int rowbytes = png_get_rowbytes(png_ptr, info_ptr);
-    int imageSize = height * rowbytes;
+
+    /* The DIB rows are DWORD aligned; the sizes are made in 64 bits, and an image that does not fit
+       in 31 bits (with its mask and headers) is not converted */
+    ULONGLONG cjStride = ((ULONGLONG)rowbytes + 3) & ~3ULL;
+    ULONGLONG cjImage = cjStride * height;
+    ULONGLONG cjMask = get_dib_image_size64((LONG)width, (LONG)height, 1);
+    if ((width == 0) || (height == 0) || (width > MAXLONG) || (height > MAXLONG / 2) ||
+        (rowbytes <= 0) || (cjImage + cjMask > MAXLONG - 0x1000))
+    {
+        ERR("PNG image of %u x %u is not usable\n", width, height);
+        png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+        return NULL;
+    }
+    int imageSize = (int)cjImage;
     TRACE("rowbytes %d, channels %d, imageSize %d\n", rowbytes, channels, imageSize);
 
     /* Allocate rows data */
@@ -197,7 +210,7 @@ CURSORICON_ConvertPngToBmpIcon(
                 if (channels == 4)
                     *pb++ = row[j + 3]; /* Alpha */
             }
-            pb += (channels * width) % 4;
+            pb += cjStride - (ULONGLONG)channels * width;
         }
     }
 
@@ -217,7 +230,7 @@ CURSORICON_ConvertPngToBmpIcon(
     WORD bpp = (WORD)(bitDepth * channels);
 
     /* The byte size of mask bits */
-    DWORD maskSize = get_dib_image_size(width, height, 1);
+    DWORD maskSize = (DWORD)cjMask;
 
     /* Build BITMAPINFOHEADER */
     BITMAPINFOHEADER info = { sizeof(info) };
@@ -355,11 +368,6 @@ static void *map_fileW( LPCWSTR name, LPDWORD filesize )
         CloseHandle( hFile );
     }
     return ptr;
-}
-
-static int get_dib_image_size( int width, int height, int depth )
-{
-    return (((width * depth + 31) / 8) & ~3) * abs( height );
 }
 
 static BOOL is_dib_monochrome( const BITMAPINFO* info )
@@ -513,6 +521,7 @@ static void stretch_blt_icon(HDC hdc_dst, int dst_width, int dst_height, HBITMAP
     {
         BITMAPINFO *info;
         void *bits;
+        ULONGLONG cjImage;
 
         if (!(info = HeapAlloc( GetProcessHeap(), 0, FIELD_OFFSET( BITMAPINFO, bmiColors[256] )))) return;
         info->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -521,7 +530,14 @@ static void stretch_blt_icon(HDC hdc_dst, int dst_width, int dst_height, HBITMAP
         info->bmiHeader.biPlanes = GetDeviceCaps( hdc_dst, PLANES );
         info->bmiHeader.biBitCount = GetDeviceCaps( hdc_dst, BITSPIXEL );
         info->bmiHeader.biCompression = BI_RGB;
-        info->bmiHeader.biSizeImage = get_dib_image_size( bm.bmWidth, bm.bmHeight, info->bmiHeader.biBitCount );
+        /* A size that does not fit in 31 bits is not made */
+        cjImage = get_dib_image_size64( bm.bmWidth, bm.bmHeight, info->bmiHeader.biBitCount );
+        if (cjImage > MAXLONG)
+        {
+            HeapFree( GetProcessHeap(), 0, info );
+            return;
+        }
+        info->bmiHeader.biSizeImage = (DWORD)cjImage;
         info->bmiHeader.biXPelsPerMeter = 0;
         info->bmiHeader.biYPelsPerMeter = 0;
         info->bmiHeader.biClrUsed = 0;
@@ -577,6 +593,7 @@ create_alpha_bitmap(
     unsigned char *ptr;
     void *bits = NULL;
     ULONG size;
+    ULONGLONG cjSize;
 
     hdcScreen = CreateDCW(DISPLAYW, NULL, NULL, NULL);
     if (!hdcScreen)
@@ -600,7 +617,11 @@ create_alpha_bitmap(
         if (bm.bmBitsPixel != 32)
             goto done;
 
-        size = get_dib_image_size(bm.bmWidth, bm.bmHeight, 32);
+        /* A size that does not fit in 31 bits is not made */
+        cjSize = get_dib_image_size64(bm.bmWidth, bm.bmHeight, 32);
+        if (cjSize > MAXLONG)
+            goto done;
+        size = (ULONG)cjSize;
 
         info = HeapAlloc(GetProcessHeap(), 0, FIELD_OFFSET(BITMAPINFO, bmiColors[256]));
         if(!info)
@@ -664,7 +685,10 @@ create_alpha_bitmap(
         if(bpp != 32)
             goto done;
 
-        size = get_dib_image_size(orig_width, orig_height, bpp);
+        cjSize = get_dib_image_size64(orig_width, orig_height, bpp);
+        if (cjSize > MAXLONG)
+            goto done;
+        size = (ULONG)cjSize;
         bits = HeapAlloc(GetProcessHeap(), 0, size);
         if(!bits)
             goto done;
