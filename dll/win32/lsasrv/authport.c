@@ -339,7 +339,17 @@ AuthPortThreadRoutine(PVOID Param)
                                         (PPORT_MESSAGE)&RequestMsg);
         if (!NT_SUCCESS(Status))
         {
-            TRACE("NtReplyWaitReceivePort() failed (Status %lx)\n", Status);
+            /* The reply could not be delivered: its client thread or process ended while the request was
+             * served (the kernel fails the call before it receives). That is the client's business: drop
+             * the reply and go on serving the port, which ending this thread would leave without a server */
+            if (ReplyMsg != NULL)
+            {
+                ERR("The reply to a client could not be sent (Status 0x%lx), it is dropped\n", Status);
+                ReplyMsg = NULL;
+                continue;
+            }
+
+            ERR("NtReplyWaitReceivePort() failed (Status 0x%lx)\n", Status);
             break;
         }
 
