@@ -82,9 +82,39 @@ IntCreateJobInfo(_In_ PEJOB pEJob)
 }
 
 /*
- * Marks a process and its threads as belonging to a restricted job, so that
- * enforcement is a flag test rather than a walk back to the job. user32 sees
- * the thread flag through the CLIENTINFO.
+ * Whether JOB_OBJECT_UILIMIT_HANDLES applies to a process: its job or a job
+ * above it has the flag. Read from the JOBINFOs, which carry a new limit
+ * already while the kernel is still asking us about it (every job with UI
+ * limits has one).
+ */
+_Requires_exclusive_lock_held_(UserLock)
+static
+BOOL
+IntProcessUnderHandleLimit(_In_ PPROCESSINFO ppi)
+{
+    PEJOB Walk;
+    PJOBINFO pJobInfo;
+
+    if (ppi->peProcess == NULL)
+        return FALSE;
+
+    for (Walk = PsGetProcessJob(ppi->peProcess); Walk != NULL; Walk = Walk->ParentJob)
+    {
+        pJobInfo = IntFindJobInfo(Walk);
+        if (pJobInfo != NULL && (pJobInfo->UIRestrictions & JOB_OBJECT_UILIMIT_HANDLES))
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+/*
+ * Marks a process and its threads as restricted to the USER handles of its job
+ * (JOB_OBJECT_UILIMIT_HANDLES), so that user32 knows when to ask win32k before
+ * it uses a handle (it sees the thread flag through the CLIENTINFO). Only that
+ * limit: with the others the handles user32 validates itself stay usable, and
+ * asking win32k for each of them makes IsWindow, GetWindowLong or SendMessage
+ * many times slower. bRestricted FALSE: the process has left the job.
  */
 _Requires_exclusive_lock_held_(UserLock)
 static
@@ -98,6 +128,9 @@ IntSetProcessRestricted(
     BOOL bAttached = FALSE;
 
     ASSERT(UserIsEnteredExclusive());
+
+    if (bRestricted)
+        bRestricted = IntProcessUnderHandleLimit(ppi);
 
     if (bRestricted)
         ppi->W32PF_flags |= W32PF_JOBRESTRICTED;
@@ -260,6 +293,46 @@ IntAddProcessToJobInfo(
     return STATUS_SUCCESS;
 }
 
+/* Whether the job is the process's own job or one above it. The process must
+   be alive: it keeps its job, and every job keeps its parent. */
+static
+BOOL
+IntIsProcessInJob(
+    _In_ PEPROCESS Process,
+    _In_ PEJOB pEJob)
+{
+    PEJOB Walk;
+
+    for (Walk = PsGetProcessJob(Process); Walk != NULL; Walk = Walk->ParentJob)
+    {
+        if (Walk == pEJob)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+/* The limits of a job changed: refresh the handle-limit flag of the processes
+   in it that USER tracks for a job, also those of jobs nested in it */
+_Requires_exclusive_lock_held_(UserLock)
+static
+VOID
+IntUpdateJobProcesses(_In_ PEJOB pEJob)
+{
+    PPROCESSINFO ppi;
+
+    for (ppi = gppiList; ppi != NULL; ppi = ppi->ppiNext)
+    {
+        if (ppi->peProcess != NULL &&
+            ppi->pW32Job != NULL &&
+            !(ppi->W32PF_flags & W32PF_TERMINATED) &&
+            IntIsProcessInJob(ppi->peProcess, pEJob))
+        {
+            IntSetProcessRestricted(ppi, TRUE);
+        }
+    }
+}
+
 /* Handles PsW32JobCalloutSetInformation */
 static
 NTSTATUS
@@ -270,24 +343,29 @@ IntJobSetRestrictions(
     NTSTATUS Status = STATUS_SUCCESS;
     PJOBINFO pJobInfo;
     BOOL Created = FALSE;
+    ULONG OldRestrictions = 0;
 
     UserEnterExclusive();
 
     pJobInfo = IntFindJobInfo(pEJob);
 
-    /* No restrictions left, so no state to keep */
+    /* No restrictions left. The JOBINFO stays until the job is deleted: a
+       thread of the job may be using its atom table right now, and the
+       kernel calls us for a job that ever had restrictions when it goes.
+       The handle limit of a job above may still apply to its processes. */
     if (UIRestrictions == 0)
     {
         if (pJobInfo != NULL)
-            IntDestroyJobInfo(pJobInfo);
+        {
+            pJobInfo->UIRestrictions = 0;
+            IntUpdateJobProcesses(pEJob);
+        }
 
         goto Quit;
     }
 
     if (pJobInfo == NULL)
     {
-        PPROCESSINFO ppi;
-
         pJobInfo = IntCreateJobInfo(pEJob);
         if (pJobInfo == NULL)
         {
@@ -296,27 +374,53 @@ IntJobSetRestrictions(
         }
 
         Created = TRUE;
+    }
 
-        /* The job may already hold processes that connected to USER before
-           the restrictions were applied */
+    /* The new limits first: IntSetProcessRestricted reads them */
+    OldRestrictions = pJobInfo->UIRestrictions;
+    pJobInfo->UIRestrictions = UIRestrictions;
+
+    /* The job may already hold processes that connected to USER before the
+       restrictions were applied, directly or through a job nested in it, or
+       had them cleared before */
+    {
+        PPROCESSINFO ppi;
+
         for (ppi = gppiList; ppi != NULL; ppi = ppi->ppiNext)
         {
             if (ppi->peProcess != NULL &&
-                PsGetProcessJob(ppi->peProcess) == pEJob)
+                !(ppi->W32PF_flags & W32PF_TERMINATED) &&
+                IntIsProcessInJob(ppi->peProcess, pEJob))
             {
-                Status = IntAddProcessToJobInfo(pJobInfo, ppi);
-                if (!NT_SUCCESS(Status))
-                    goto Quit;
+                if (ppi->pW32Job == NULL)
+                {
+                    Status = IntAddProcessToJobInfo(pJobInfo, ppi);
+                    if (!NT_SUCCESS(Status))
+                        goto Quit;
+                }
+                else
+                {
+                    IntSetProcessRestricted(ppi, TRUE);
+                }
             }
         }
     }
 
-    pJobInfo->UIRestrictions = UIRestrictions;
-
 Quit:
-    /* Undo a job we did not manage to finish building */
-    if (!NT_SUCCESS(Status) && Created)
-        IntDestroyJobInfo(pJobInfo);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Undo a job we did not manage to finish building; the kernel keeps
+           the old limits of one we did */
+        if (Created)
+        {
+            IntDestroyJobInfo(pJobInfo);
+        }
+        else if (pJobInfo != NULL)
+        {
+            pJobInfo->UIRestrictions = OldRestrictions;
+            IntUpdateJobProcesses(pEJob);
+        }
+    }
 
     UserLeave();
     return Status;
@@ -512,22 +616,25 @@ IntJobConnectProcess(_In_ PPROCESSINFO ppi)
 
     ASSERT(UserIsEnteredExclusive());
 
-    pEJob = PsGetProcessJob(ppi->peProcess);
-    if (pEJob == NULL)
-        return STATUS_SUCCESS;
-
-    /* Unrestricted jobs have no state in win32k */
-    if (PsGetJobUIRestrictionsClass(pEJob) == 0)
-        return STATUS_SUCCESS;
-
-    pJobInfo = IntFindJobInfo(pEJob);
-    if (pJobInfo == NULL)
+    /* The innermost job of the process that restricts the UI: its own job, or
+       one above it when UI limits were set on a job after jobs were nested */
+    for (pEJob = PsGetProcessJob(ppi->peProcess); pEJob != NULL; pEJob = pEJob->ParentJob)
     {
-        /* The restrictions have not reached us yet, or are being torn down */
-        return STATUS_SUCCESS;
+        /* Unrestricted jobs have no state in win32k */
+        if (PsGetJobUIRestrictionsClass(pEJob) == 0)
+            continue;
+
+        pJobInfo = IntFindJobInfo(pEJob);
+        if (pJobInfo == NULL)
+        {
+            /* The restrictions have not reached us yet, or are being torn down */
+            continue;
+        }
+
+        return IntAddProcessToJobInfo(pJobInfo, ppi);
     }
 
-    return IntAddProcessToJobInfo(pJobInfo, ppi);
+    return STATUS_SUCCESS;
 }
 
 /* Called when a process disconnects from USER */
@@ -582,6 +689,229 @@ IntCleanupGrantedHandle(_In_ HANDLE hUserHandle)
     }
 }
 
+/* ENFORCEMENT ****************************************************************/
+
+/*
+ * The restrictions are read from the job objects at the time of the call, so a
+ * change of the limits (SetInformationJobObject) applies at once, and no copy
+ * can go stale. Neither the job lock nor the USER lock is taken for it: the
+ * kernel replaces a job's UIRestrictionsClass atomically, and the chain of jobs
+ * of a live process cannot go away under us (the process keeps its job, and
+ * every job keeps its parent; ParentJob never changes once set). So this adds
+ * no lock order to the one the job callouts establish (job lock, then USER).
+ *
+ * A process in no job pays a single pointer read.
+ */
+
+/* The innermost job of the process that sets FLAG, or NULL */
+static
+PEJOB
+IntGetRestrictingJob(
+    _In_ PEPROCESS Process,
+    _In_ ULONG Flag)
+{
+    PEJOB pEJob;
+
+    for (pEJob = PsGetProcessJob(Process); pEJob != NULL; pEJob = pEJob->ParentJob)
+    {
+        if (*(volatile ULONG *)&pEJob->UIRestrictionsClass & Flag)
+            return pEJob;
+    }
+
+    return NULL;
+}
+
+/*
+ * The JOB_OBJECT_UILIMIT_* limits that apply to a live process: those of its
+ * job and of every job above it (a nested job is never less restricted than
+ * its parent, MSDN: Nested Jobs).
+ */
+ULONG
+FASTCALL
+UserGetProcessUIRestrictions(_In_ PEPROCESS Process)
+{
+    PEJOB pEJob;
+    ULONG Restrictions = 0;
+
+    for (pEJob = PsGetProcessJob(Process); pEJob != NULL; pEJob = pEJob->ParentJob)
+        Restrictions |= *(volatile ULONG *)&pEJob->UIRestrictionsClass;
+
+    return Restrictions;
+}
+
+/*
+ * Whether a job of the current process forbids what FLAG stands for. When it
+ * does, the last error is ERROR_ACCESS_DENIED: MSDN
+ * (JOBOBJECT_BASIC_UI_RESTRICTIONS) names the functions that are prevented but
+ * not how they fail.
+ */
+BOOL
+FASTCALL
+UserJobDenies(_In_ ULONG Flag)
+{
+    PEPROCESS Process = PsGetCurrentProcess();
+
+    if (PsGetProcessJob(Process) == NULL)
+        return FALSE;
+
+    if (!(UserGetProcessUIRestrictions(Process) & Flag))
+        return FALSE;
+
+    EngSetLastError(ERROR_ACCESS_DENIED);
+    return TRUE;
+}
+
+/* Same, for the process of THREAD (USER calls made on behalf of a client by CSRSS) */
+BOOL
+FASTCALL
+UserJobDeniesThread(
+    _In_ PETHREAD Thread,
+    _In_ ULONG Flag)
+{
+    PEPROCESS Process = PsGetThreadProcess(Thread);
+
+    if (PsGetProcessJob(Process) == NULL)
+        return FALSE;
+
+    return (UserGetProcessUIRestrictions(Process) & Flag) != 0;
+}
+
+/*
+ * JOB_OBJECT_UILIMIT_HANDLES: whether the current process may use a USER object
+ * that ppiOwner owns (NULL: an object of no process). A process under that limit
+ * uses only the objects of processes in the job that sets it, and those granted
+ * to that job with UserHandleGrantAccess (MSDN: JOBOBJECT_BASIC_UI_RESTRICTIONS).
+ * The objects of CSRSS (the desktop and message windows) and of no process
+ * (monitors, timers, keyboard layouts) stay usable.
+ */
+BOOL
+FASTCALL
+UserJobCanUseObject(
+    _In_opt_ PPROCESSINFO ppiOwner,
+    _In_ HANDLE hObject)
+{
+    PEPROCESS Process = PsGetCurrentProcess();
+    PEPROCESS Owner;
+    PEJOB pEJob, Walk;
+
+    if (PsGetProcessJob(Process) == NULL)
+        return TRUE;
+
+    pEJob = IntGetRestrictingJob(Process, JOB_OBJECT_UILIMIT_HANDLES);
+    if (pEJob == NULL)
+        return TRUE;
+
+    if (ppiOwner == NULL)
+        return TRUE;
+
+    Owner = ppiOwner->peProcess;
+    if (Owner == Process || (Owner != NULL && Owner == gpepCSRSS))
+        return TRUE;
+
+    /* An owner that is going away is still alive until it has left USER */
+    if (Owner != NULL &&
+        !(ppiOwner->W32PF_flags & W32PF_TERMINATED) &&
+        IntIsProcessInJob(Owner, pEJob))
+    {
+        return TRUE;
+    }
+
+    /* The granted lists are protected by the USER lock */
+    if (!UserIsEntered())
+        return FALSE;
+
+    for (Walk = pEJob; Walk != NULL; Walk = Walk->ParentJob)
+    {
+        PJOBINFO pJobInfo = IntFindJobInfo(Walk);
+
+        if (pJobInfo != NULL && IntIsHandleGrantedToJob(pJobInfo, hObject))
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+/*
+ * JOB_OBJECT_UILIMIT_HANDLES and SetWinEventHook(WINEVENT_INCONTEXT): an in-context
+ * event hook loads its DLL into every process it is called for. Under that limit hooks
+ * reach only threads of processes in the job (MSDN: JOBOBJECT_BASIC_UI_RESTRICTIONS),
+ * so the hook must name a process or thread of the job; a hook on every process does
+ * not. A process without the limit is not affected.
+ */
+BOOL
+FASTCALL
+UserJobAllowsInContextEventHook(
+    _In_ DWORD idProcess,
+    _In_ DWORD idThread)
+{
+    PEPROCESS Process = PsGetCurrentProcess();
+    PEPROCESS Target;
+    PETHREAD Thread;
+    PEJOB pEJob;
+    BOOL Ret = TRUE;
+
+    if (PsGetProcessJob(Process) == NULL)
+        return TRUE;
+
+    pEJob = IntGetRestrictingJob(Process, JOB_OBJECT_UILIMIT_HANDLES);
+    if (pEJob == NULL)
+        return TRUE;
+
+    if (idProcess == 0 && idThread == 0)
+        return FALSE;
+
+    if (idProcess != 0)
+    {
+        if (!NT_SUCCESS(PsLookupProcessByProcessId(UlongToHandle(idProcess), &Target)))
+            return FALSE;
+        Ret = (Target == Process) || IntIsProcessInJob(Target, pEJob);
+        ObDereferenceObject(Target);
+    }
+
+    if (Ret && idThread != 0)
+    {
+        if (!NT_SUCCESS(PsLookupThreadByThreadId(UlongToHandle(idThread), &Thread)))
+            return FALSE;
+        Target = PsGetThreadProcess(Thread);
+        Ret = (Target == Process) || IntIsProcessInJob(Target, pEJob);
+        ObDereferenceObject(Thread);
+    }
+
+    return Ret;
+}
+
+/* The private atom table of the job of the current process that has
+   JOB_OBJECT_UILIMIT_GLOBALATOMS, for the kernel's global atom functions.
+   NULL: the process uses the global table. */
+PVOID
+NTAPI
+UserGetJobAtomTable(VOID)
+{
+    PEPROCESS Process = PsGetCurrentProcess();
+    PEJOB pEJob;
+    PJOBINFO pJobInfo;
+    PRTL_ATOM_TABLE pAtomTable = NULL;
+
+    if (PsGetProcessJob(Process) == NULL)
+        return NULL;
+
+    pEJob = IntGetRestrictingJob(Process, JOB_OBJECT_UILIMIT_GLOBALATOMS);
+    if (pEJob == NULL)
+        return NULL;
+
+    /* The table lives as long as the JOBINFO, which lives until the job is
+       deleted, and the job lives as long as this process. A JOBINFO always
+       has one: the kernel only stores limits win32k accepted, and win32k
+       refuses limits it cannot make a JOBINFO with a table for. */
+    UserEnterShared();
+    pJobInfo = IntFindJobInfo(pEJob);
+    if (pJobInfo != NULL)
+        pAtomTable = pJobInfo->pAtomTable;
+    UserLeave();
+
+    return pAtomTable;
+}
+
 BOOL
 APIENTRY
 NtUserUserHandleGrantAccess(
@@ -622,7 +952,23 @@ NtUserUserHandleGrantAccess(
     }
     else
     {
-        Ret = IntGrantHandleToJob(pJobInfo, hUserHandle, bGrant);
+        PPROCESSINFO ppiOwner = UserGetHandleOwner(hUserHandle);
+
+        /* MSDN (UserHandleGrantAccess): it can be called only from a process
+           not associated with the job, and the handle must not be owned by a
+           process or thread associated with the job. A process in the job
+           must not grant itself what its job denies it. */
+        if (IntIsProcessInJob(PsGetCurrentProcess(), pEJob) ||
+            (ppiOwner != NULL && ppiOwner->peProcess != NULL &&
+             !(ppiOwner->W32PF_flags & W32PF_TERMINATED) &&
+             IntIsProcessInJob(ppiOwner->peProcess, pEJob)))
+        {
+            EngSetLastError(ERROR_ACCESS_DENIED);
+        }
+        else
+        {
+            Ret = IntGrantHandleToJob(pJobInfo, hUserHandle, bGrant);
+        }
     }
 
     UserLeave();

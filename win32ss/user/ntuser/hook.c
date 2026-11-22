@@ -1843,6 +1843,14 @@ NtUserSetWindowsHookEx( HINSTANCE Mod,
 
        if (ptiHook->ppi != pti->ppi)
        {
+          /* MSDN (JOBOBJECT_BASIC_UI_RESTRICTIONS): under JOB_OBJECT_UILIMIT_HANDLES,
+             hooks can be installed only on threads of processes in the job */
+          if (!UserJobCanUseObject(ptiHook->ppi, NULL))
+          {
+             EngSetLastError(ERROR_ACCESS_DENIED);
+             goto Cleanup; // Return NULL
+          }
+
           if ( !Mod &&
               (HookId == WH_GETMESSAGE ||
                HookId == WH_CALLWNDPROC ||
@@ -1875,6 +1883,10 @@ NtUserSetWindowsHookEx( HINSTANCE Mod,
     }
     else  /* System-global hook */
     {
+       /* It would reach threads outside the job (see above) */
+       if (UserJobDenies(JOB_OBJECT_UILIMIT_HANDLES))
+          goto Cleanup; // Return NULL
+
        ptiHook = pti; // gptiCurrent;
        /* The hook is linked into the chains of the thread's desktop: without one there is nothing to link it to */
        if (!ptiHook->rpdesk || !ptiHook->rpdesk->pDeskInfo)

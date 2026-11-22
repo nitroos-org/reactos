@@ -372,6 +372,13 @@ NtUserSetWinEventHook(
          EngSetLastError(ERROR_HOOK_NEEDS_HMOD);
          goto SetEventExit;
       }
+      /* Its DLL would be loaded into the processes it is called for: under
+         JOB_OBJECT_UILIMIT_HANDLES only those of the job */
+      if (!UserJobAllowsInContextEventHook(idProcess, idThread))
+      {
+         EngSetLastError(ERROR_ACCESS_DENIED);
+         goto SetEventExit;
+      }
       if (puString == NULL)
       {
          ERR("Dll not found\n");

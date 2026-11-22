@@ -493,7 +493,13 @@ UserDeleteW32Thread(PTHREADINFO pti)
 
    MsqCleanupThreadMsgs(pti);
 
-   ObDereferenceObject(pti->pEThread);
+   /* This runs under the USER lock (the last reference to the THREADINFO can go
+      in any NtUser call). If it is also the last reference to the thread, the
+      thread, then its process, then the process's job go away, and leaving the
+      job takes the job lock, which the job callouts hold while they wait for the
+      USER lock (SetInformationJobObject, AssignProcessToJobObject): a deadlock.
+      Let a worker delete the thread, outside the USER lock. */
+   ObDereferenceObjectDeferDelete(pti->pEThread);
 
    ExFreePoolWithTag(pti, USERTAG_THREADINFO);
 
@@ -1121,7 +1127,7 @@ DriverEntry(
     /* Register Object Manager Callbacks */
     CalloutData.ProcessCallout = Win32kProcessCallback;
     CalloutData.ThreadCallout = Win32kThreadCallback;
-    // CalloutData.GlobalAtomTableCallout = NULL;
+    CalloutData.GlobalAtomTableCallout = UserGetJobAtomTable;
     CalloutData.PowerEventCallout = IntHandlePowerEvent;
     CalloutData.PowerStateCallout = IntHandlePowerState;
     CalloutData.JobCallout = Win32kJobCallout;

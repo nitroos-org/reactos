@@ -31,3 +31,11 @@ VOID FASTCALL IntJobDisconnectProcess(_In_ PPROCESSINFO ppi);
 
 _Requires_exclusive_lock_held_(UserLock)
 VOID FASTCALL IntCleanupGrantedHandle(_In_ HANDLE hUserHandle);
+
+/* Enforcement of the JOB_OBJECT_UILIMIT_* limits, read from the jobs at the time of the call */
+ULONG FASTCALL UserGetProcessUIRestrictions(_In_ PEPROCESS Process);
+BOOL FASTCALL UserJobDenies(_In_ ULONG Flag);
+BOOL FASTCALL UserJobDeniesThread(_In_ PETHREAD Thread, _In_ ULONG Flag);
+BOOL FASTCALL UserJobCanUseObject(_In_opt_ PPROCESSINFO ppiOwner, _In_ HANDLE hObject);
+BOOL FASTCALL UserJobAllowsInContextEventHook(_In_ DWORD idProcess, _In_ DWORD idThread);
+PVOID NTAPI UserGetJobAtomTable(VOID);

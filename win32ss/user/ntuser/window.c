@@ -1621,6 +1621,10 @@ NtUserBuildHwndList(
 {
    NTSTATUS Status;
    ULONG dwCount = 0;
+   /* Let go of after the USER lock: the last reference of a thread can take its process
+      and that process's job with it, and deleting a job with UI limits takes the USER
+      lock exclusively, which this thread must not hold shared then */
+   PETHREAD ThreadToRelease = NULL;
 
    if (pcHwndNeeded == NULL)
        return STATUS_INVALID_PARAMETER;
@@ -1732,9 +1736,9 @@ NtUserBuildHwndList(
          Status = STATUS_INVALID_PARAMETER;
          goto Quit;
       }
+      ThreadToRelease = Thread;
       if (!(W32Thread = (PTHREADINFO)Thread->Tcb.Win32Thread))
       {
-         ObDereferenceObject(Thread);
          TRACE("Tried to enumerate windows of a non gui thread\n");
          Status = STATUS_INVALID_PARAMETER;
          goto Quit;
@@ -1778,8 +1782,6 @@ NtUserBuildHwndList(
          }
          ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
       }
-
-      ObDereferenceObject(Thread);
    }
 
    _SEH2_TRY
@@ -1797,6 +1799,8 @@ NtUserBuildHwndList(
 Quit:
    SetLastNtError(Status);
    UserLeave();
+   if (ThreadToRelease)
+      ObDereferenceObject(ThreadToRelease);
    return Status;
 }
 

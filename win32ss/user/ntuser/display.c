@@ -1066,6 +1066,14 @@ NtUserChangeDisplaySettings(
     /* Acquire global USER lock */
     UserEnterExclusive();
 
+    /* MSDN (JOBOBJECT_BASIC_UI_RESTRICTIONS): JOB_OBJECT_UILIMIT_DISPLAYSETTINGS
+       prevents calling ChangeDisplaySettings; also a CDS_TEST */
+    if (UserJobDenies(JOB_OBJECT_UILIMIT_DISPLAYSETTINGS))
+    {
+        UserLeave();
+        return DISP_CHANGE_FAILED;
+    }
+
     /* Call internal function */
     lRet = UserChangeDisplaySettings(pustrDevice, lpDevMode, dwflags, NULL);
 

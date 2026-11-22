@@ -245,6 +245,32 @@ static const BOOL g_ObjectHeapTypeShared[TYPE_CTYPES] =
 };
 
 //
+// A thread of a process in a job with JOB_OBJECT_UILIMIT_HANDLES does not see the
+// objects of processes outside the job: win32k decides. Other threads pay one test.
+//
+static
+BOOL
+JobRestrictedCanUse(HANDLE handle, UINT uType)
+{
+  if (!(GetWin32ClientInfo()->dwTIFlags & TIF_JOBRESTRICTED))
+    return TRUE;
+
+  switch (uType)
+  {
+    case TYPE_WINDOW:
+    case TYPE_MENU:
+    case TYPE_HOOK:
+    case TYPE_CALLPROC:
+    case TYPE_ACCELTABLE:
+    case TYPE_INPUTCONTEXT:
+      return NtUserValidateHandleSecure(handle);
+
+    default:
+      return TRUE;
+  }
+}
+
+//
 // Validate Handle and return the pointer to the object.
 //
 PVOID
@@ -265,7 +291,8 @@ ValidateHandle(HANDLE handle, UINT uType)
   if ( (!pEntry) ||
         (pEntry->type != uType) ||
         !pEntry->ptr ||
-        (pEntry->flags & HANDLEENTRY_DESTROY) || (pEntry->flags & HANDLEENTRY_INDESTROY) )
+        (pEntry->flags & HANDLEENTRY_DESTROY) || (pEntry->flags & HANDLEENTRY_INDESTROY) ||
+        !JobRestrictedCanUse(handle, uType) )
   {
      switch ( uType )
      {  // Test (with wine too) confirms these results!
@@ -320,7 +347,8 @@ ValidateHandleNoErr(HANDLE handle, UINT uType)
       uType = pEntry->type;
 
 // Must have an entry and must be the same type!
-  if ( (!pEntry) || (pEntry->type != uType) || !pEntry->ptr )
+  if ( (!pEntry) || (pEntry->type != uType) || !pEntry->ptr ||
+       !JobRestrictedCanUse(handle, uType) )
     return NULL;
 
   if (g_ObjectHeapTypeShared[uType])

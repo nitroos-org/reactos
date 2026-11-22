@@ -77,6 +77,7 @@ extern void func_InitializeLpkHooks(void);
 extern void func_IsDialogMessage(void);
 extern void func_IsServerSideWindow(void);
 extern void func_IsWindowArranged(void);
+extern void func_JobUIRestrictions(void);
 extern void func_KbdLayout(void);
 extern void func_keybd_event(void);
 extern void func_MouseHookTransport(void);
@@ -247,6 +248,7 @@ const struct test winetest_testlist[] =
     { "IsDialogMessage", func_IsDialogMessage },
     { "IsServerSideWindow", func_IsServerSideWindow },
     { "IsWindowArranged", func_IsWindowArranged },
+    { "JobUIRestrictions", func_JobUIRestrictions },
     { "KbdLayout", func_KbdLayout },
     { "keybd_event", func_keybd_event },
     { "MouseHookTransport", func_MouseHookTransport },
