@@ -85,6 +85,7 @@ extern void func_MouseHookTransport(void);
 extern void func_MouseWheel(void);
 extern void func_WmCharAnsi(void);
 extern void func_KeyboardLLHook(void);
+extern void func_WallpaperAccess(void);
 extern void func_LoadImage(void);
 extern void func_LoadImageGCC(void);
 extern void func_LoadImagePngIcon(void);
@@ -259,6 +260,7 @@ const struct test winetest_testlist[] =
     { "KeyboardLLHook", func_KeyboardLLHook },
     { "LoadImage", func_LoadImage },
     { "LoadImageGCC", func_LoadImageGCC },
+    { "WallpaperAccess", func_WallpaperAccess },
     { "LoadImagePngIcon", func_LoadImagePngIcon },
     { "LookupIconIdFromDirectoryEx", func_LookupIconIdFromDirectoryEx },
     { "MenuItemData", func_MenuItemData },
