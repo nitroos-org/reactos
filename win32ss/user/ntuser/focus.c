@@ -260,6 +260,33 @@ VOID IntFocusSetInputContext(PWND pWnd, BOOL bActivate, BOOL bCallback)
     UserDerefObjectCo(pImeWnd);
 }
 
+/*
+ * The THREADINFO of a thread of another window, found again after callbacks during which that thread can end
+ * and its THREADINFO be freed: it is used again only while it is still on the thread list of a process (a
+ * THREADINFO leaves it in its thread's exit cleanup, after TIF_INCLEANUP is set, and is freed only after
+ * that), for the same thread id. NULL otherwise. (Not held with IntReferenceThreadInfo across the callbacks:
+ * when the running thread is terminated inside one of them, it never comes back to give the reference back,
+ * and the THREADINFO would never be freed.)
+ */
+static PTHREADINFO FASTCALL
+IntFindThreadInfoAgain(_In_opt_ PTHREADINFO pti, _In_ HANDLE Tid)
+{
+   PPROCESSINFO ppi;
+   PTHREADINFO ptiNode;
+
+   if (!pti || !Tid)
+      return NULL;
+   for (ppi = gppiList; ppi; ppi = ppi->ppiNext)
+   {
+      for (ptiNode = ppi->ptiList; ptiNode; ptiNode = ptiNode->ptiSibling)
+      {
+         if (ptiNode == pti)
+            return (PsGetThreadId(pti->pEThread) == Tid) ? pti : NULL;
+      }
+   }
+   return NULL;
+}
+
 //
 // Deactivating the foreground message queue.
 //
@@ -270,6 +297,7 @@ IntDeactivateWindow(PTHREADINFO pti, HANDLE tid)
 {
    USER_REFERENCE_ENTRY Ref;
    PTHREADINFO ptiPrev;
+   HANDLE TidPrev;
    PWND pwndPrev;
    BOOL InAAPM = FALSE;
    PTHREADINFO ptiCurrent = PsGetCurrentThreadWin32Thread();
@@ -322,6 +350,9 @@ IntDeactivateWindow(PTHREADINFO pti, HANDLE tid)
       pwndPrev = pti->MessageQueue->spwndActive;
       ptiPrev = pwndPrev->head.pti;
 
+      /* The window can belong to another thread of the queue, which can end during the messages below */
+      TidPrev = PsGetThreadId(ptiPrev->pEThread);
+
       if (!co_IntSendDeactivateMessages(UserHMGetHandle(pwndPrev), 0, TRUE))
       {
          if (InAAPM) pti->TIF_flags &= ~TIF_INACTIVATEAPPMSG;
@@ -339,7 +370,8 @@ IntDeactivateWindow(PTHREADINFO pti, HANDLE tid)
           pti->MessageQueue->spwndActive     = NULL;
       }
 
-      if (ptiPrev->TIF_flags & TIF_INCLEANUP) ptiPrev = NULL;
+      ptiPrev = IntFindThreadInfoAgain(ptiPrev, TidPrev);
+      if (ptiPrev && (ptiPrev->TIF_flags & TIF_INCLEANUP)) ptiPrev = NULL;
    }
    else
    {
@@ -529,11 +561,16 @@ co_IntSendActivateMessages(PWND WindowPrev, PWND Window, BOOL MouseActivate, BOO
    USER_REFERENCE_ENTRY Ref, RefPrev, RefCall;
    HANDLE OldTID, NewTID;
    PTHREADINFO pti, ptiOld, ptiNew;
+   HWND hWndPrev;
    BOOL InAAPM = FALSE;
 
    //ERR("SendActivateMessages\n");
 
    pti = PsGetCurrentThreadWin32Thread();
+
+   /* WM_ACTIVATE still passes the handle of the previous window after the reference on it is given
+      back below, when it can be freed */
+   hWndPrev = WindowPrev ? UserHMGetHandle(WindowPrev) : NULL;
 
    if (Window)
    {
@@ -583,17 +620,21 @@ co_IntSendActivateMessages(PWND WindowPrev, PWND Window, BOOL MouseActivate, BOO
          {
             phwndTopLevel = IntWinListChildren(pwndDesktop);
             phwndCurrent = phwndTopLevel;
-            while(*phwndCurrent)
+            while(phwndCurrent && *phwndCurrent)
             {
                 pwndCurrent = UserGetWindowObject(*phwndCurrent);
 
                 if (pwndCurrent && pwndCurrent->spwndOwner == Window )
                 {
+                    /* An owned window can belong to another thread, which can end (and destroy the
+                       window) while it is sent WM_WINDOWPOSCHANGING: hold it for the whole call */
+                    UserRefObjectCo(pwndCurrent, &RefCall);
                     co_WinPosSetWindowPos(pwndCurrent, HWND_TOP, 0, 0, 0, 0, SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE);
+                    UserDerefObjectCo(pwndCurrent);
                 }
                 phwndCurrent++;
             }
-            ExFreePoolWithTag(phwndTopLevel, USERTAG_WINDOWLIST);
+            if (phwndTopLevel) ExFreePoolWithTag(phwndTopLevel, USERTAG_WINDOWLIST);
           }
       }
       ////
@@ -683,7 +724,7 @@ co_IntSendActivateMessages(PWND WindowPrev, PWND Window, BOOL MouseActivate, BOO
       co_IntSendMessage( UserHMGetHandle(Window),
                          WM_ACTIVATE,
                          MAKEWPARAM(MouseActivate ? WA_CLICKACTIVE : WA_ACTIVE, (Window->style & WS_MINIMIZE) != 0),
-                        (LPARAM)(WindowPrev ? UserHMGetHandle(WindowPrev) : 0));
+                        (LPARAM)hWndPrev);
 
       if (Window->style & WS_VISIBLE)
          UpdateShellHook(Window);
@@ -701,13 +742,17 @@ IntSendFocusMessages( PTHREADINFO pti, PWND pWnd)
    PWND pWndPrev;
    PUSER_MESSAGE_QUEUE ThreadQueue = pti->MessageQueue; // Queue can change...
    HWND hwndPrev;
-   USER_REFERENCE_ENTRY Ref;
+   USER_REFERENCE_ENTRY Ref, RefNew;
 
    ThreadQueue->QF_flags &= ~QF_FOCUSNULLSINCEACTIVE;
    if (!pWnd && ThreadQueue->spwndActive)
    {
       ThreadQueue->QF_flags |= QF_FOCUSNULLSINCEACTIVE;
    }
+
+   /* The new focus window is used after WM_KILLFOCUS and the focus event, which call user mode */
+   if (pWnd)
+      UserRefObjectCo(pWnd, &RefNew);
 
    pWndPrev = ThreadQueue->spwndFocus;
    if (pWndPrev)
@@ -757,6 +802,8 @@ IntSendFocusMessages( PTHREADINFO pti, PWND pWnd)
 
    if (pWndPrev)
       UserDerefObjectCo(pWndPrev);
+   if (pWnd)
+      UserDerefObjectCo(pWnd);
 }
 
 BOOL FASTCALL
@@ -857,6 +904,7 @@ co_IntSetForegroundMessageQueue(
    PTHREADINFO ptiChg, ptiPrev;
    PUSER_MESSAGE_QUEUE pumq, pumqChg, pumqPrev;
    BOOL Removed, Ret = TRUE;
+   HANDLE TidPrev;
 
    if (Wnd && !VerifyWnd(Wnd))
    {
@@ -890,6 +938,9 @@ co_IntSetForegroundMessageQueue(
       ptiPrev = NULL;
    else
       ptiPrev = gptiForeground;
+
+   /* ptiPrev is read again after the callbacks below, during which its thread can end: found again by its id */
+   TidPrev = ptiPrev ? PsGetThreadId(ptiPrev->pEThread) : NULL;
 
    if (Wnd)
    {
@@ -1007,6 +1058,7 @@ co_IntSetForegroundMessageQueue(
 
       // Handle same message queue after switch out.
       pumqPrev = NULL;
+      ptiPrev = IntFindThreadInfoAgain(ptiPrev, TidPrev);
       if ( ptiPrev && !(ptiPrev->TIF_flags & TIF_INCLEANUP) )
       {
          pumqPrev = ptiPrev->MessageQueue;
@@ -1408,21 +1460,33 @@ UserSetActiveWindow( _In_opt_ PWND Wnd )
       !(gpqForegroundPrev->spwndActivePrev->state2 & WNDS2_BOTTOMMOST) &&
        (Wnd = VerifyWnd(gpqForegroundPrev->spwndActivePrev)) != NULL )
   {
+     USER_REFERENCE_ENTRY Ref;
+     BOOL Ret;
+
      TRACE("USAW:PAW hwnd %p\n", UserHMGetHandle(Wnd));
-     return IntUserSetActiveWindow(Wnd, FALSE, TRUE, FALSE);
+     /* The window of another queue (thread), which can end during the activation callbacks */
+     UserRefObjectCo(Wnd, &Ref);
+     Ret = IntUserSetActiveWindow(Wnd, FALSE, TRUE, FALSE);
+     UserDerefObjectCo(Wnd);
+     return Ret;
   }
 
   // Activate anyone but the active window.
   if ( pti->MessageQueue->spwndActive &&
       (Wnd = VerifyWnd(pti->MessageQueue->spwndActive)) != NULL )
   {
+      USER_REFERENCE_ENTRY Ref;
+
       //ERR("USAW:AOWM hwnd %p\n", UserHMGetHandle(Wnd));
+      /* co_WinPosActivateOtherWindow reads it after the callbacks of the activation */
+      UserRefObjectCo(Wnd, &Ref);
       if (!ActivateOtherWindowMin(Wnd))
       {
          // Okay, now go find someone else to play with!
          //ERR("USAW: Going to WPAOW\n");
          co_WinPosActivateOtherWindow(Wnd);
       }
+      UserDerefObjectCo(Wnd);
       return TRUE;
   }
 
@@ -1437,6 +1501,7 @@ co_UserSetFocus(PWND Window)
    PWND pwndTop;
    PTHREADINFO pti;
    PUSER_MESSAGE_QUEUE ThreadQueue;
+   HWND hwndTop;
 
    if (Window)
       ASSERT_REFS_CO(Window);
@@ -1480,11 +1545,19 @@ co_UserSetFocus(PWND Window)
          EngSetLastError(ERROR_INVALID_PARAMETER); /* Windows 10 22H2, oracle 2026-11-04 */
          return 0;
       }
+      /* pwndTop is held only through the parent chain of Window, which the hook and the callbacks of
+         the foreground switch can change (and the old parent then be destroyed): it is found again by
+         its handle after them. (Not with a reference: a referenced window that is destroyed meanwhile
+         keeps its handle, which changes the activations of its destruction.) */
+      hwndTop = UserHMGetHandle(pwndTop);
+
       if (co_HOOK_CallHooks( WH_CBT, HCBT_SETFOCUS, (WPARAM)UserHMGetHandle(Window), (LPARAM)hWndPrev))
       {
          ERR("SetFocus 1 WH_CBT Call Hook return!\n");
          return 0;
       }
+      if (!(pwndTop = ValidateHwndNoErr(hwndTop)))
+         return 0;
 
       /* Activate pwndTop if needed. */
       if (pwndTop != ThreadQueue->spwndActive)
@@ -1502,6 +1575,8 @@ co_UserSetFocus(PWND Window)
                ERR("SetFocus: Set Foreground and Focus Failed!\n");
                return 0;
             }
+            if (!(pwndTop = ValidateHwndNoErr(hwndTop)))
+               return 0;
          }
 
          /* Set Active when it is needed. */
@@ -1517,7 +1592,7 @@ co_UserSetFocus(PWND Window)
 
          /* Abort if window destroyed */
          if (Window->state2 & WNDS2_INDESTROY) return 0;
-         /* Do not change focus if the window is no longer active */
+         /* Do not change focus if the window is no longer active (pointers compared only) */
          if (pwndTop != ThreadQueue->spwndActive)
          {
             ERR("SetFocus: Top window did not go active!\n");
