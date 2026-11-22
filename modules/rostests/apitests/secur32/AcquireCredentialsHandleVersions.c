@@ -451,6 +451,19 @@ static void TestCertificates(void)
         ExpectStatus(SECPKG_CRED_OUTBOUND, &Cred4, SEC_E_OK, "v4 certificate");
         ExpectStatus(SECPKG_CRED_INBOUND, &Cred4, SEC_E_OK, "v4 certificate");
 
+        /* the same certificate twice (Windows Server 2022: accepted in both directions) */
+        {
+            PCCERT_CONTEXT Twice[2];
+
+            Twice[0] = Twice[1] = Cert;
+            Cred4.cCreds = 2;
+            Cred4.paCred = Twice;
+            ExpectStatus(SECPKG_CRED_OUTBOUND, &Cred4, SEC_E_OK, "v4 two certificates");
+            ExpectStatus(SECPKG_CRED_INBOUND, &Cred4, SEC_E_OK, "v4 two certificates");
+            Cred4.cCreds = 1;
+            Cred4.paCred = &Cert;
+        }
+
         /* The same certificate without its key provider */
         NoKey = CertCreateCertificateContext(X509_ASN_ENCODING, Cert->pbCertEncoded, Cert->cbCertEncoded);
         ok(NoKey != NULL, "CertCreateCertificateContext failed (%lu)\n", GetLastError());
@@ -462,9 +475,9 @@ static void TestCertificates(void)
             ExpectStatus(SECPKG_CRED_OUTBOUND, &Cred, SEC_E_NO_CREDENTIALS, "v5 certificate without a private key");
             ExpectStatus(SECPKG_CRED_INBOUND, &Cred, SEC_E_NO_CREDENTIALS, "v5 certificate without a private key");
             Cred4.paCred = &NoKey;
-            /* ReactOS keeps SEC_E_UNKNOWN_CREDENTIALS for SCHANNEL_CRED */
-            ExpectStatusAlt(SECPKG_CRED_OUTBOUND, &Cred4, SEC_E_NO_CREDENTIALS, SEC_E_UNKNOWN_CREDENTIALS, "v4 certificate without a private key");
-            ExpectStatusAlt(SECPKG_CRED_INBOUND, &Cred4, SEC_E_NO_CREDENTIALS, SEC_E_UNKNOWN_CREDENTIALS, "v4 certificate without a private key");
+            /* Windows Server 2022, both directions */
+            ExpectStatus(SECPKG_CRED_OUTBOUND, &Cred4, SEC_E_NO_CREDENTIALS, "v4 certificate without a private key");
+            ExpectStatus(SECPKG_CRED_INBOUND, &Cred4, SEC_E_NO_CREDENTIALS, "v4 certificate without a private key");
             CertFreeCertificateContext(NoKey);
         }
         CertFreeCertificateContext(Cert);
@@ -475,11 +488,44 @@ static void TestCertificates(void)
     CryptAcquireContextW(&Prov, ContainerName, MS_ENHANCED_PROV_W, PROV_RSA_FULL, CRYPT_DELETEKEYSET);
 }
 
+static void TestLegacyNoCertificate(void)
+{
+    SCHANNEL_CRED Cred4;
+    DWORD Protocols;
+    PCCERT_CONTEXT NoArray = NULL;
+
+    /* Windows Server 2022: version 3 and 4 credentials without a certificate are accepted in both directions;
+     * an inbound one reports the server protocols, an outbound one the client protocols */
+    ZeroMemory(&Cred4, sizeof(Cred4));
+    Cred4.dwVersion = SCHANNEL_CRED_VERSION;
+    ExpectStatus(SECPKG_CRED_OUTBOUND, &Cred4, SEC_E_OK, "v4 zeroed");
+    ExpectStatus(SECPKG_CRED_INBOUND, &Cred4, SEC_E_OK, "v4 zeroed");
+    ok(Acquire(SECPKG_CRED_INBOUND, &Cred4, &Protocols) == SEC_E_OK, "v4 zeroed inbound\n");
+    ok((Protocols & SERVER_PROTOCOLS) && !(Protocols & CLIENT_PROTOCOLS), "v4 zeroed inbound: protocols 0x%lx\n", Protocols);
+    Cred4.dwVersion = SCH_CRED_V3;
+    ExpectStatus(SECPKG_CRED_OUTBOUND, &Cred4, SEC_E_OK, "v3 zeroed");
+    ExpectStatus(SECPKG_CRED_INBOUND, &Cred4, SEC_E_OK, "v3 zeroed");
+    ok(Acquire(SECPKG_CRED_INBOUND, &Cred4, &Protocols) == SEC_E_OK, "v3 zeroed inbound\n");
+    ok((Protocols & SERVER_PROTOCOLS) && !(Protocols & CLIENT_PROTOCOLS), "v3 zeroed inbound: protocols 0x%lx\n", Protocols);
+
+    /* a count without an array is no certificate (the old code dereferenced the NULL array) */
+    Cred4.dwVersion = SCHANNEL_CRED_VERSION;
+    Cred4.cCreds = 1;
+    Cred4.paCred = NULL;
+    ExpectStatus(SECPKG_CRED_OUTBOUND, &Cred4, SEC_E_OK, "v4 cCreds 1, no array");
+    ExpectStatus(SECPKG_CRED_INBOUND, &Cred4, SEC_E_OK, "v4 cCreds 1, no array");
+    Cred4.cCreds = 2;
+    ExpectStatus(SECPKG_CRED_OUTBOUND, &Cred4, SEC_E_OK, "v4 cCreds 2, no array");
+    ExpectStatus(SECPKG_CRED_INBOUND, &Cred4, SEC_E_OK, "v4 cCreds 2, no array");
+    (void)NoArray;
+}
+
 START_TEST(AcquireCredentialsHandleVersions)
 {
     TestLayout();
     TestVersions();
     TestProtocolMapping();
     TestInvalidParameters();
+    TestLegacyNoCertificate();
     TestCertificates();
 }

@@ -863,6 +863,14 @@ static ALG_ID schannel_get_kx_algid(int ciphersuite_id)
     }
 }
 
+/* Whether the handshake of the session is over: the connection and record parameters exist from then on */
+BOOL schan_imp_handshake_done(schan_imp_session session)
+{
+    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
+
+    return s->ssl.state == MBEDTLS_SSL_HANDSHAKE_OVER;
+}
+
 unsigned int schan_imp_get_session_cipher_block_size(schan_imp_session session)
 {
     MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
