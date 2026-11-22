@@ -26,7 +26,18 @@ typedef struct _PNP_DETECT_IDENTIFIER_MAP
     PWSTR PnPId;
     PPNP_MAPPER_DEVICE_ID PeripheralMap;
     ULONG Counter;
+    ULONG Flags;
 } PNP_DETECT_IDENTIFIER_MAP;
+
+/* Do not give the device the resources of the hardware tree as its boot
+ * configuration (they belong to another device that also claims them) */
+#define PNPMAP_NO_BOOT_CONFIG   0x1
+/* Map the device also when the firmware mapper is disabled (DisableFirmwareMapper,
+ * set by the ACPI HAL): ACPI does not describe it, the boot loader does */
+#define PNPMAP_NOT_IN_ACPI      0x2
+
+/* The firmware mapper is disabled: map only the PNPMAP_NOT_IN_ACPI devices */
+static BOOLEAN IopFirmwareMapperAcpiOnly = FALSE;
 
 /* DATA **********************************************************************/
 
@@ -83,18 +94,37 @@ PNP_MAPPER_DEVICE_ID PointerMap[] =
     { NULL, NULL }
 };
 
+/*
+ * The framebuffer the UEFI firmware set up, described by the UEFI boot loader
+ * (CM_FRAMEBUF_DEVICE_DATA). The device it maps to is driven by lfbmp.sys,
+ * which win32k uses only when no other display device is present.
+ * The display controllers of the BIOS loader are not mapped.
+ * The framebuffer memory is part of the display device's own memory (a PCI
+ * BAR) or memory the firmware reserved, so it is not given to the mapped
+ * device as a boot configuration: that would conflict with the PCI device's
+ * resources. lfbmp.sys reads the description from the hardware tree.
+ */
+DATA_SEG("INITDATA")
+static
+PNP_MAPPER_DEVICE_ID DisplayMap[] =
+{
+    { L"UEFI GOP Framebuffer", L"FIRMWARE_FRAMEBUFFER\0" },
+    { NULL, NULL }
+};
+
 DATA_SEG("INITDATA")
 static
 PNP_DETECT_IDENTIFIER_MAP PnPMap[] =
 {
-    { L"SerialController", L"*PNP0501\0", NULL, 0 },
-    //{ L"KeyboardController", L"*PNP0303\0", NULL, 0 },
-    //{ L"PointerController", L"*PNP0F13\0", NULL, 0 },
-    { L"KeyboardPeripheral", NULL, KeyboardMap, 0 },
-    { L"PointerPeripheral", NULL, PointerMap, 0 },
-    { L"ParallelController", L"*PNP0400\0", NULL, 0 },
-    { L"FloppyDiskPeripheral", L"*PNP0700\0", NULL, 0 },
-    { NULL, NULL, NULL, 0 }
+    { L"SerialController", L"*PNP0501\0", NULL, 0, 0 },
+    //{ L"KeyboardController", L"*PNP0303\0", NULL, 0, 0 },
+    //{ L"PointerController", L"*PNP0F13\0", NULL, 0, 0 },
+    { L"KeyboardPeripheral", NULL, KeyboardMap, 0, 0 },
+    { L"PointerPeripheral", NULL, PointerMap, 0, 0 },
+    { L"ParallelController", L"*PNP0400\0", NULL, 0, 0 },
+    { L"FloppyDiskPeripheral", L"*PNP0700\0", NULL, 0, 0 },
+    { L"DisplayController", NULL, DisplayMap, 0, PNPMAP_NO_BOOT_CONFIG | PNPMAP_NOT_IN_ACPI },
+    { NULL, NULL, NULL, 0, 0 }
 };
 
 /* FUNCTIONS *****************************************************************/
@@ -126,10 +156,13 @@ PWSTR
 IopMapDetectedDeviceId(
     _In_ PUNICODE_STRING DetectId,
     _In_ PUNICODE_STRING Value,
-    _Out_ PULONG DeviceIndex)
+    _Out_ PULONG DeviceIndex,
+    _Out_ PBOOLEAN NoBootConfig)
 {
     ULONG i;
     UNICODE_STRING CmpId;
+
+    *NoBootConfig = FALSE;
 
     if (!DetectId)
         return NULL;
@@ -140,7 +173,12 @@ IopMapDetectedDeviceId(
 
         if (RtlCompareUnicodeString(DetectId, &CmpId, FALSE) == 0)
         {
+            /* ACPI describes the devices of this machine, except the ones the loader adds */
+            if (IopFirmwareMapperAcpiOnly && !(PnPMap[i].Flags & PNPMAP_NOT_IN_ACPI))
+                return NULL;
+
             *DeviceIndex = PnPMap[i].Counter++;
+            *NoBootConfig = !!(PnPMap[i].Flags & PNPMAP_NO_BOOT_CONFIG);
 
             if (PnPMap[i].PeripheralMap)
                 return IopMapPeripheralId(Value, PnPMap[i].PeripheralMap);
@@ -206,6 +244,7 @@ IopEnumerateDetectedDevices(
         UNICODE_STRING HardwareIdKey;
         PWSTR pHardwareId;
         ULONG DeviceIndex = 0;
+        BOOLEAN NoBootConfig;
 
         Status = ZwEnumerateKey(hDevicesKey,
                                 KeyIndex,
@@ -443,7 +482,7 @@ IopEnumerateDetectedDevices(
                 ValueName.Length -= sizeof(WCHAR);
         }
 
-        pHardwareId = IopMapDetectedDeviceId(RelativePath, &ValueName, &DeviceIndex);
+        pHardwareId = IopMapDetectedDeviceId(RelativePath, &ValueName, &DeviceIndex, &NoBootConfig);
         if (!pHardwareId)
         {
             /* Unknown key path */
@@ -523,7 +562,7 @@ IopEnumerateDetectedDevices(
             goto nextdevice;
         }
 
-        if (BootResourcesLength >= sizeof(CM_FULL_RESOURCE_DESCRIPTOR))
+        if (!NoBootConfig && (BootResourcesLength >= sizeof(CM_FULL_RESOURCE_DESCRIPTOR)))
         {
             PUCHAR CmResourceList;
             ULONG ListCount;
@@ -697,30 +736,36 @@ IopUpdateRootKey(VOID)
         return Status;
     }
 
-    if (!IopIsFirmwareMapperDisabled())
+    /*
+     * Disabled (by the ACPI HAL): ACPI enumerates the devices of the machine,
+     * only the devices it cannot know, such as the framebuffer the UEFI firmware
+     * set up and the boot loader handed over, are still mapped.
+     */
+    IopFirmwareMapperAcpiOnly = IopIsFirmwareMapperDisabled();
+
+    Status = IopOpenRegistryKeyEx(&hEnum, NULL, &MultiKeyPathU, KEY_ENUMERATE_SUB_KEYS);
+    if (!NT_SUCCESS(Status))
     {
-        Status = IopOpenRegistryKeyEx(&hEnum, NULL, &MultiKeyPathU, KEY_ENUMERATE_SUB_KEYS);
-        if (!NT_SUCCESS(Status))
-        {
-            /* Nothing to do, don't return with an error status */
-            DPRINT("ZwOpenKey() failed with status 0x%08lx\n", Status);
-            ZwClose(hRoot);
-            return STATUS_SUCCESS;
-        }
-        Status = IopEnumerateDetectedDevices(
-            hEnum,
-            NULL,
-            hRoot,
-            TRUE,
-            NULL,
-            0,
-            NULL,
-            0);
-        ZwClose(hEnum);
+        /* Nothing to do, don't return with an error status */
+        DPRINT("ZwOpenKey() failed with status 0x%08lx\n", Status);
+        ZwClose(hRoot);
+        return STATUS_SUCCESS;
     }
-    else
+    Status = IopEnumerateDetectedDevices(
+        hEnum,
+        NULL,
+        hRoot,
+        TRUE,
+        NULL,
+        0,
+        NULL,
+        0);
+    ZwClose(hEnum);
+
+    /* The restricted pass is an addition: it never fails the PnP initialization */
+    if (IopFirmwareMapperAcpiOnly && !NT_SUCCESS(Status))
     {
-        /* Enumeration is disabled */
+        DPRINT1("Firmware mapper (loader devices only) failed with status 0x%08lx\n", Status);
         Status = STATUS_SUCCESS;
     }
 
