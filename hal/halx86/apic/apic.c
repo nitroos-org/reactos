@@ -818,6 +818,51 @@ ApicInitializeIOApic(VOID)
     ApicWriteIORedirectionEntry(APIC_CLOCK_INDEX, ReDirReg);
 }
 
+/*!
+    \brief Moves the clock vector to another I/O APIC input.
+
+    \param Index
+        The input of the clock source; the clock stays masked until it is
+        enabled, as on the RTC input before.
+
+    Called while the boot processor initializes the clock, with interrupts
+    disabled and the clock input still masked.
+*/
+CODE_SEG("INIT")
+VOID
+NTAPI
+HalpSetClockInput(
+    _In_ UCHAR Index)
+{
+    IOAPIC_REDIRECTION_REGISTER ReDirReg;
+    UCHAR OldIndex = HalpVectorToIndex[APIC_CLOCK_VECTOR];
+
+    ASSERT(Index < APIC_MAX_IRQ);
+
+    /* Free the old input, as ApicInitializeIOApic leaves an unused one */
+    ReDirReg = ApicReadIORedirectionEntry(OldIndex);
+    ReDirReg.Vector = APIC_FREE_VECTOR;
+    ReDirReg.TriggerMode = APIC_TGM_Edge;
+    ReDirReg.Mask = 1;
+    ApicWriteIORedirectionEntry(OldIndex, ReDirReg);
+
+    /* The new input carries the clock vector, edge triggered and active high
+       like any ISA interrupt without an override of its mode */
+    ReDirReg.Vector = APIC_CLOCK_VECTOR;
+    ReDirReg.MessageType = APIC_MT_Fixed;
+    ReDirReg.DestinationMode = APIC_DM_Physical;
+    ReDirReg.DeliveryStatus = 0;
+    ReDirReg.Polarity = 0;
+    ReDirReg.RemoteIRR = 0;
+    ReDirReg.TriggerMode = APIC_TGM_Edge;
+    ReDirReg.Mask = 1;
+    ReDirReg.Reserved = 0;
+    ReDirReg.Destination = ApicGetLocalId();
+    ApicWriteIORedirectionEntry(Index, ReDirReg);
+
+    HalpVectorToIndex[APIC_CLOCK_VECTOR] = Index;
+}
+
 VOID
 NTAPI
 HalpInitializePICs(IN BOOLEAN EnableInterrupts)
@@ -1108,10 +1153,18 @@ HalBeginSystemInterrupt(
         /* Check if it's valid */
         if (Index < APIC_MAX_IRQ)
         {
-            /* Re-request the interrupt to be handled later, with the saved trigger mode:
-               reading the redirection entry here would take the I/O APIC lock and make
-               four uncached register accesses in interrupt context */
-            ApicRequestSelfInterrupt(Vector, HalpIoApicTriggerMode[Index]);
+            /* Re-request an edge-triggered interrupt to be handled later; the trigger mode
+               is saved, as reading the redirection entry here would take the I/O APIC lock
+               and make four uncached register accesses in interrupt context.
+               A level-triggered input that is still asserted is sent again by the I/O APIC
+               when the EOI above clears its remote IRR, and waits in the IRR for the TPR.
+               It must not be re-requested: the trigger mode of a fixed IPI is ignored (Intel
+               SDM vol. 3A, "Interrupt Command Register"), so the self IPI is accepted as edge
+               triggered and clears the vector's TMR bit, and the EOI of the handled interrupt
+               is then not sent to the I/O APIC ("Signaling Interrupt Servicing Completion"):
+               its remote IRR stays set and the input is blocked for good, as on Hyper-V. */
+            if (HalpIoApicTriggerMode[Index] == APIC_TGM_Edge)
+                ApicRequestSelfInterrupt(Vector, APIC_TGM_Edge);
        }
        else
        {

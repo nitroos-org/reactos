@@ -64,6 +64,62 @@ static ULONG HalpClockWindow;
 #define CLOCK_PHASE_WINDOW 32
 static LONG64 HalpClockOffset[CLOCK_PHASE_WINDOW];
 
+/* The clock interrupt comes from the PIT (ISA IRQ 0) instead, at the rate of
+   the RTC clock rate, when the RTC does not run its periodic interrupt: the
+   virtual RTC of Hyper-V generation 1 machines raises the update-ended
+   interrupt but never sets the periodic flag. The time is counted in RTC
+   periods all the same; the PIT period differs from it by less than 200 ppm,
+   which the counting with the TSC absorbs. */
+static BOOLEAN HalpClockUsesPit;
+extern ULONG HalpPicVectorRedirect[16];
+
+static
+VOID
+HalpPitSetClockRate(
+    _In_ ULONG Hz)
+{
+    TIMER_CONTROL_PORT_REGISTER TimerControl;
+    ULONG Count = (PIT_FREQUENCY + Hz / 2) / Hz;
+
+    /* Channel 0, rate generator (mode 2), binary, low byte then high byte */
+    TimerControl.Bits = 0;
+    TimerControl.BcdMode = FALSE;
+    TimerControl.OperatingMode = PitOperatingMode2;
+    TimerControl.AccessMode = PitAccessModeLowHigh;
+    TimerControl.Channel = PitChannel0;
+    __outbyte(TIMER_CONTROL_PORT, TimerControl.Bits);
+    __outbyte(TIMER_CHANNEL0_DATA_PORT, (UCHAR)(Count & 0xFF));
+    __outbyte(TIMER_CHANNEL0_DATA_PORT, (UCHAR)(Count >> 8));
+}
+
+/*!
+    \brief Returns whether the RTC sets its periodic flag.
+
+    The flag (register C bit 6) is set at the end of every period whether or
+    not the interrupt is enabled; reading register C clears it. Waits for it
+    up to four periods of the slowest rate, with interrupts disabled.
+*/
+static
+CODE_SEG("INIT")
+BOOLEAN
+HalpRtcPeriodicFlagSets(VOID)
+{
+    ULONG Waited;
+    UCHAR RegisterC;
+
+    for (Waited = 0; Waited < 4 * 15625; Waited += 1000)
+    {
+        KeStallExecutionProcessor(1000);
+        HalpAcquireCmosSpinLock();
+        RegisterC = HalpReadCmos(RTC_REGISTER_C);
+        HalpReleaseCmosSpinLock();
+        if (RegisterC & RTC_REG_C_PF)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
 /*!
     \brief Converts the CMOS RTC rate into the time increment in 0.1ns intervals.
 
@@ -129,6 +185,12 @@ RtcSetClockRate(UCHAR ClockRate)
     HalpClockMaximumPeriods = 600000000 / HalpCurrentTimeIncrement;
     HalpClockCountsLostInterrupts = (HalpClockPeriodTsc / 8) != 0;
     HalpClockWindow = 0;
+
+    if (HalpClockUsesPit)
+    {
+        HalpPitSetClockRate(RtcHz);
+        return;
+    }
 
     /* Acquire CMOS lock */
     HalpAcquireCmosSpinLock();
@@ -196,6 +258,21 @@ HalpInitializeClock(VOID)
     /* Set initial rate */
     RtcSetClockRate(HalpCurrentClockRate);
 
+    /* Without the periodic interrupt of the RTC, take the clock from the PIT */
+    if (!HalpRtcPeriodicFlagSets() && (HalpPicVectorRedirect[0] < APIC_MAX_IRQ))
+    {
+        HalpAcquireCmosSpinLock();
+        HalpWriteCmos(RTC_REGISTER_B, RegisterB & ~RTC_REG_B_PI);
+        HalpReadCmos(RTC_REGISTER_C);
+        HalpReleaseCmosSpinLock();
+
+        HalpClockUsesPit = TRUE;
+        HalpSetClockInput((UCHAR)HalpPicVectorRedirect[0]);
+        RtcSetClockRate(HalpCurrentClockRate);
+        DPRINT1("The RTC has no periodic interrupt: clock from the PIT, I/O APIC input %lu\n",
+                HalpPicVectorRedirect[0]);
+    }
+
     /* Restore interrupt state */
     __writeeflags(EFlags);
 
@@ -211,9 +288,12 @@ HalpInitializeClock(VOID)
     HalEnableSystemInterrupt(APIC_CLOCK_VECTOR, CLOCK_LEVEL, Latched);
 
     /* The pin is edge triggered */
-    HalpAcquireCmosSpinLock();
-    HalpReadCmos(RTC_REGISTER_C);
-    HalpReleaseCmosSpinLock();
+    if (!HalpClockUsesPit)
+    {
+        HalpAcquireCmosSpinLock();
+        HalpReadCmos(RTC_REGISTER_C);
+        HalpReleaseCmosSpinLock();
+    }
 
     DPRINT1("Clock initialized\n");
 }
@@ -371,9 +451,12 @@ HalpClockInterruptHandler(IN PKTRAP_FRAME TrapFrame)
 
     /* Read register C, so that the next interrupt can happen; under the lock,
        or another processor can select a register between the index write and the read */
-    HalpAcquireCmosSpinLock();
-    HalpReadCmos(RTC_REGISTER_C);
-    HalpReleaseCmosSpinLock();
+    if (!HalpClockUsesPit)
+    {
+        HalpAcquireCmosSpinLock();
+        HalpReadCmos(RTC_REGISTER_C);
+        HalpReleaseCmosSpinLock();
+    }
 
     /* Save increment, one per period that ended since the last interrupt */
     Periods = HalpClockElapsedPeriods(Now);

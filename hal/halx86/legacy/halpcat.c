@@ -27,6 +27,9 @@ PWCHAR HalHardwareIdString = L"e_isa_up";
 PWCHAR HalName = L"PC Compatible Eisa/Isa HAL";
 #endif
 
+/* No interrupt source overrides without ACPI: ISA IRQ n is I/O APIC input n */
+ULONG HalpPicVectorRedirect[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+
 /* PRIVATE FUNCTIONS **********************************************************/
 
 CODE_SEG("INIT")
