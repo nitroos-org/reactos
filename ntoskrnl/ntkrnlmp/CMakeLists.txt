@@ -30,6 +30,7 @@ add_executable(ntkrnlmp
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ntoskrnl.rc
     ${CMAKE_CURRENT_BINARY_DIR}/ntkrnlmp.def)
 set_module_type(ntkrnlmp kernel)
+add_message_rc_deps(${REACTOS_SOURCE_DIR}/ntoskrnl/ntoskrnl.rc bugcodes)
 target_compile_definitions(ntkrnlmp PRIVATE CONFIG_SMP)
 
 # dynamic analysis switches

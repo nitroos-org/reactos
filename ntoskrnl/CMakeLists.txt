@@ -44,6 +44,7 @@ add_executable(ntoskrnl
     ntoskrnl.rc
     ${CMAKE_CURRENT_BINARY_DIR}/ntoskrnl.def)
 set_module_type(ntoskrnl kernel)
+add_message_rc_deps(ntoskrnl.rc bugcodes)
 
 source_group(TREE ${REACTOS_SOURCE_DIR}/ntoskrnl PREFIX "Source Files" FILES ${NTOSKRNL_SOURCE})
 

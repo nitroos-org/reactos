@@ -40,4 +40,5 @@ endif()
 
 add_importlibs(vfd advapi32 user32 gdi32 shell32 comdlg32 comctl32 ole32 version psapi msvcrt kernel32 ntdll)
 add_dependencies(vfd vfdmsg_lib)
+add_message_rc_deps(vfdlib.rc vfdmsg_lib)
 add_cd_file(TARGET vfd DESTINATION reactos/system32 FOR all)

@@ -52,6 +52,7 @@ add_executable(diskpart ${SOURCE} diskpart.rc)
 add_pch(diskpart diskpart.h SOURCE)
 add_message_headers(UNICODE diskpart_msg.mc)
 add_dependencies(diskpart diskpart_msg)
+add_message_rc_deps(diskpart.rc diskpart_msg)
 
 set_module_type(diskpart win32cui UNICODE)
 target_link_libraries(diskpart conutils ${PSEH_LIB})
