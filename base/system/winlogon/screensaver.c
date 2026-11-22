@@ -682,7 +682,9 @@ StartScreenSaver(
          * error report, and the Screen-Saver desktop stays up for that time: with a password protected setting the
          * workstation is locked afterwards, as the saver has run for more than the grace period then (measured on
          * Windows Server 2022: a saver that crashed 2 s after its start ended 14.3 s after it, then the lock; one
-         * that exits with a code, also 1, within the grace period does not lock). Input ends the wait.
+         * that exits with a code, also 1, within the grace period does not lock). Input does not end the wait on
+         * Windows either (measured: input 3 s after the crash, the Screen-Saver desktop stayed 12.9 s and the
+         * session was locked), and a saver that ignores input is not killed by it.
          */
         if (GetExitCodeProcess(ProcessInformation.hProcess, &ExitCode) && (ExitCode & 0xF0000000) == 0xC0000000)
         {
