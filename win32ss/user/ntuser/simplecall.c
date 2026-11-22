@@ -483,6 +483,12 @@ NtUserCallTwoParam(
         case TWOPARAM_ROUTINE_REDRAWTITLE:
         {
             Window = UserGetWindowObject((HWND)Param1);
+            /* An invalid handle (the frame of an MDI client that went, for one) */
+            if (!Window)
+            {
+                Ret = 0;
+                break;
+            }
             Ret = (DWORD_PTR)UserPaintCaption(Window, (INT)Param2);
             break;
         }
@@ -554,32 +560,42 @@ NtUserCallTwoParam(
         {
             HWND hwnd = (HWND)Param1;
             BOOL fAltTab = (BOOL)Param2;
+            USER_REFERENCE_ENTRY Ref;
+
             Ret = 0;
             Window = UserGetWindowObject(hwnd);
             if (!Window)
                 break;
 
+            /* Activation sends messages to the window's thread, which may destroy it meanwhile */
+            UserRefObjectCo(Window, &Ref);
             if (gpqForeground && !fAltTab)
             {
                 PWND pwndActive = gpqForeground->spwndActive;
                 if (pwndActive && !(pwndActive->ExStyle & WS_EX_TOPMOST))
                 {
+                    USER_REFERENCE_ENTRY RefActive;
+
+                    UserRefObjectCo(pwndActive, &RefActive);
                     co_WinPosSetWindowPos(pwndActive, HWND_BOTTOM, 0, 0, 0, 0,
                                           SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE |
                                           SWP_ASYNCWINDOWPOS);
+                    UserDerefObjectCo(pwndActive);
                 }
 
                 UserSetActiveWindow(Window);
-                break;
             }
-
-            co_IntSetForegroundWindowMouse(Window);
-
-            if (fAltTab && (Window->style & WS_MINIMIZE))
+            else
             {
-                MSG msg = { UserHMGetHandle(Window), WM_SYSCOMMAND, SC_RESTORE, 0 };
-                MsqPostMessage(Window->head.pti, &msg, FALSE, QS_POSTMESSAGE, 0, 0);
+                co_IntSetForegroundWindowMouse(Window);
+
+                if (fAltTab && (Window->style & WS_MINIMIZE) && !(Window->state & WNDS_DESTROYED))
+                {
+                    MSG msg = { UserHMGetHandle(Window), WM_SYSCOMMAND, SC_RESTORE, 0 };
+                    MsqPostMessage(Window->head.pti, &msg, FALSE, QS_POSTMESSAGE, 0, 0);
+                }
             }
+            UserDerefObjectCo(Window);
             break;
         }
 

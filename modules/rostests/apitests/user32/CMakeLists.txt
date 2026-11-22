@@ -60,6 +60,7 @@ list(APPEND SOURCE
     HookFamilies.c
     HungWindow.c
     WindowPosChanged.c
+    WindowRgnHandles.c
     PowerSettingNotification.c
     OwnerZOrderNotice.c
     NcPaintLayered.c

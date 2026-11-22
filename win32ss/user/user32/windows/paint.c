@@ -220,6 +220,12 @@ SetWindowRgn(
 
    EndUserApiHook();
 
+   /* MSDN (SetWindowRgn): after a successful call the system owns the region. win32k keeps a copy of its
+      own, so the caller's region goes now, as on the path without a hook: themed windows leaked one region
+      per call, until the process ran out of GDI handles and took the system's with it */
+   if (Ret)
+      DeleteObject(hRgn);
+
    return Ret;
 }
 

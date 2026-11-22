@@ -3941,6 +3941,7 @@ NtUserMinMaximize(
     BOOL Hide)
 {
   PWND pWnd;
+  USER_REFERENCE_ENTRY Ref;
 
   TRACE("Enter NtUserMinMaximize\n");
   UserEnterExclusive();
@@ -3959,7 +3960,10 @@ NtUserMinMaximize(
 
   cmd |= Hide ? SW_HIDE : 0;
 
+  /* ShowWindow sends messages to the window's thread, which may destroy it meanwhile */
+  UserRefObjectCo(pWnd, &Ref);
   co_WinPosShowWindow(pWnd, cmd);
+  UserDerefObjectCo(pWnd);
 
 Exit:
   TRACE("Leave NtUserMinMaximize\n");
@@ -4119,6 +4123,7 @@ NtUserSetWindowRgn(
 {
    HRGN hrgnCopy = NULL;
    PWND Window;
+   USER_REFERENCE_ENTRY Ref;
    /* Setting a window region must not change the Z order (Windows passes SWP_NOZORDER);
       without it HWND_TOP raised the window above its siblings on every call. */
    INT flags = (SWP_NOCLIENTSIZE|SWP_NOCLIENTMOVE|SWP_NOACTIVATE|SWP_FRAMECHANGED|SWP_NOSIZE|SWP_NOMOVE|SWP_NOZORDER);
@@ -4135,28 +4140,47 @@ NtUserSetWindowRgn(
 
    if (hRgn) // The region will be deleted in user32.
    {
-      if (GreIsHandleValid(hRgn))
-      {
-         hrgnCopy = NtGdiCreateRectRgn(0, 0, 0, 0);
-      /* The coordinates of a window's window region are relative to the
-         upper-left corner of the window, not the client area of the window. */
-         NtGdiCombineRgn( hrgnCopy, hRgn, 0, RGN_COPY);
-      }
-      else
+      if (!GreIsHandleValid(hRgn))
          goto Exit; // Return 0
+
+      /* The coordinates of a window's window region are relative to the
+         upper-left corner of the window, not the client area of the window.
+         A copy that could not be made fails the call: it must not take the
+         window's region away instead. */
+      hrgnCopy = NtGdiCreateRectRgn(0, 0, 0, 0);
+      if (!hrgnCopy)
+         goto Exit; // Return 0
+      if (NtGdiCombineRgn(hrgnCopy, hRgn, 0, RGN_COPY) == ERROR)
+      {
+         GreDeleteObject(hrgnCopy);
+         goto Exit; // Return 0
+      }
+
+      /* The window's region belongs to the system from here on, whichever thread
+         (of whichever process) applies, replaces or deletes it: it is made public
+         now, while this process still owns it and can give its user attribute
+         back. A region left owned by a process went with that process and left
+         the window a stale handle. */
+      IntGdiSetRegionOwner(hrgnCopy, GDI_OBJ_HMGR_PUBLIC);
    }
 
    //// HACK 1 : Work around the lack of supporting DeferWindowPos.
-   if (hrgnCopy)
+   /* A region another thread set is still pending if its SetWindowPos is waiting
+      for a message it sent (the USER lock is released meanwhile): this one
+      replaces it, and the replaced one goes */
+   if (Window->hrgnNewFrame > HRGN_WINDOW)
    {
-       Window->hrgnNewFrame = hrgnCopy; // Should be PSMWP->acvr->hrgnClip
+      IntGdiSetRegionOwner(Window->hrgnNewFrame, GDI_OBJ_HMGR_POWNED);
+      GreDeleteObject(Window->hrgnNewFrame);
    }
-   else
-   {
-       Window->hrgnNewFrame = HRGN_WINDOW;
-   }
+   Window->hrgnNewFrame = hrgnCopy ? hrgnCopy : HRGN_WINDOW; // Should be PSMWP->acvr->hrgnClip
+
    //// HACK 2
+   /* SetWindowPos sends messages to the window's thread, which may destroy the
+      window meanwhile: the window must stay valid until the call returns */
+   UserRefObjectCo(Window, &Ref);
    Ret = (INT)co_WinPosSetWindowPos(Window, HWND_TOP, 0, 0, 0, 0, bRedraw ? flags : (flags | SWP_NOREDRAW));
+   UserDerefObjectCo(Window);
 
 Exit:
    TRACE("Leave NtUserSetWindowRgn, ret=%i\n", Ret);

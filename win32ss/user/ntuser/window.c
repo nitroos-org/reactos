@@ -223,11 +223,16 @@ IntEnableWindow( HWND hWnd, BOOL bEnable )
    BOOL Update;
    PWND pWnd;
    UINT bIsDisabled;
+   USER_REFERENCE_ENTRY Ref;
 
    if(!(pWnd = UserGetWindowObject(hWnd)))
    {
       return FALSE;
    }
+
+   /* WM_CANCELMODE and the loss of the focus call the window's thread, which may
+      destroy the window meanwhile */
+   UserRefObjectCo(pWnd, &Ref);
 
    /* check if updating is needed */
    bIsDisabled = !!(pWnd->style & WS_DISABLED);
@@ -249,14 +254,16 @@ IntEnableWindow( HWND hWnd, BOOL bEnable )
           TRACE("IntEnableWindow SF NULL\n");
           co_UserSetFocus(NULL);
        }
-       IntSetStyle( pWnd, WS_DISABLED, 0 );
+       if (!(pWnd->state & WNDS_DESTROYED))
+          IntSetStyle( pWnd, WS_DISABLED, 0 );
     }
 
-    if (Update)
+    if (Update && !(pWnd->state & WNDS_DESTROYED))
     {
         IntNotifyWinEvent(EVENT_OBJECT_STATECHANGE, pWnd, OBJID_WINDOW, CHILDID_SELF, 0);
         co_IntSendMessage(hWnd, WM_ENABLE, (LPARAM)bEnable, 0);
     }
+    UserDerefObjectCo(pWnd);
     // Return nonzero if it was disabled, or zero if it wasn't:
     return bIsDisabled;
 }
@@ -818,6 +825,13 @@ LRESULT co_UserFreeWindow(PWND Window,
       GreDeleteObject(Window->hrgnClip);
       Window->hrgnClip = NULL;
    }
+   /* A region SetWindowRgn had not applied yet (the window went while its SetWindowPos ran) */
+   if (Window->hrgnNewFrame > HRGN_WINDOW)
+   {
+      IntGdiSetRegionOwner(Window->hrgnNewFrame, GDI_OBJ_HMGR_POWNED);
+      GreDeleteObject(Window->hrgnNewFrame);
+   }
+   Window->hrgnNewFrame = NULL;
    Window->head.pti->cWindows--;
 
 //   ASSERT(Window != NULL);
@@ -4119,18 +4133,27 @@ IntIsSystemClassExtra(PWND Window)
             Window->pcls->fnid == FNID_MENU);
 }
 
-static LONG_PTR
-co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULONG Size, BOOL bAlter, BOOL bUserMode)
+/* WM_STYLECHANGING goes to the window's thread, which may destroy the window in it:
+   the caller holds a reference, and nothing of the window is used once it is destroyed */
+static BOOL
+IntStyleChangeWindowGone(PWND Window)
 {
-   PWND Window, Parent;
+   if (!(Window->state & WNDS_DESTROYED))
+      return FALSE;
+
+   EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+   return TRUE;
+}
+
+static LONG_PTR
+co_IntSetWindowLongPtrRef(PWND Window, HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULONG Size, BOOL bAlter, BOOL bUserMode)
+{
+   PWND Parent;
    PWINSTATION_OBJECT WindowStation;
    LONG_PTR OldValue;
    STYLESTRUCT Style;
 
-   if (!(Window = UserGetWindowObject(hWnd)))
-   {
-      return 0;
-   }
+   ASSERT_REFS_CO(Window);
 
    if ((INT)Index >= 0)
    {
@@ -4198,6 +4221,8 @@ co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULO
             Style.styleNew = NewValue;
 
             co_IntSendMessage(hWnd, WM_STYLECHANGING, GWL_EXSTYLE, (LPARAM) &Style);
+            if (IntStyleChangeWindowGone(Window))
+               return 0;
 
             /*
              * Remove extended window style bit WS_EX_TOPMOST for shell windows.
@@ -4239,7 +4264,11 @@ co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULO
             Style.styleNew = NewValue;
 
             if (!bAlter)
+            {
                 co_IntSendMessage(hWnd, WM_STYLECHANGING, GWL_STYLE, (LPARAM) &Style);
+                if (IntStyleChangeWindowGone(Window))
+                   return 0;
+            }
 
             /* WS_CLIPSIBLINGS can't be reset on top-level windows */
             if (UserIsDesktopWindow(Window->spwndParent)) Style.styleNew |= WS_CLIPSIBLINGS;
@@ -4338,6 +4367,26 @@ co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULO
    }
 
    return OldValue;
+}
+
+static LONG_PTR
+co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULONG Size, BOOL bAlter, BOOL bUserMode)
+{
+   PWND Window;
+   LONG_PTR Ret;
+   USER_REFERENCE_ENTRY Ref;
+
+   if (!(Window = UserGetWindowObject(hWnd)))
+   {
+      return 0;
+   }
+
+   /* The style messages are sent to the window's thread, which may destroy it meanwhile */
+   UserRefObjectCo(Window, &Ref);
+   Ret = co_IntSetWindowLongPtrRef(Window, hWnd, Index, NewValue, Ansi, Size, bAlter, bUserMode);
+   UserDerefObjectCo(Window);
+
+   return Ret;
 }
 
 LONG FASTCALL
@@ -5019,6 +5068,7 @@ IntShowOwnedPopups(PWND OwnerWnd, BOOL fShow )
    int count = 0;
    PWND pWnd;
    HWND *win_array;
+   USER_REFERENCE_ENTRY Ref;
 
 //   ASSERT(OwnerWnd);
 
@@ -5036,8 +5086,11 @@ IntShowOwnedPopups(PWND OwnerWnd, BOOL fShow )
    {
       if (!(pWnd = ValidateHwndNoErr( win_array[count] )))
          continue;
-      ASSERT(pWnd->spwndOwner == OwnerWnd);
+      /* The list was taken before the popups were called: one may have another owner by now */
+      if (pWnd->spwndOwner != OwnerWnd)
+         continue;
 
+      /* Each popup is called and may destroy itself (or be destroyed) meanwhile */
       if (fShow)
       {
          if (pWnd->state & WNDS_HIDDENPOPUP)
@@ -5046,8 +5099,11 @@ IntShowOwnedPopups(PWND OwnerWnd, BOOL fShow )
              * WM_SHOWWINDOW messages with SW_PARENTOPENING,
              * regardless of the state of the owner
              */
+            UserRefObjectCo(pWnd, &Ref);
             co_IntSendMessage(win_array[count], WM_SHOWWINDOW, SW_SHOWNORMAL, SW_PARENTOPENING);
-            pWnd->state &= ~WNDS_HIDDENPOPUP;
+            if (!(pWnd->state & WNDS_DESTROYED))
+               pWnd->state &= ~WNDS_HIDDENPOPUP;
+            UserDerefObjectCo(pWnd);
             continue;
          }
       }
@@ -5059,8 +5115,11 @@ IntShowOwnedPopups(PWND OwnerWnd, BOOL fShow )
              * WM_SHOWWINDOW messages with SW_PARENTCLOSING,
              * regardless of the state of the owner
              */
+            UserRefObjectCo(pWnd, &Ref);
             co_IntSendMessage(win_array[count], WM_SHOWWINDOW, SW_HIDE, SW_PARENTCLOSING);
-            pWnd->state |= WNDS_HIDDENPOPUP;
+            if (!(pWnd->state & WNDS_DESTROYED))
+               pWnd->state |= WNDS_HIDDENPOPUP;
+            UserDerefObjectCo(pWnd);
             continue;
          }
       }
