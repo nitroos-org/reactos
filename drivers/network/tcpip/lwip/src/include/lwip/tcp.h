@@ -309,6 +309,12 @@ struct tcp_pcb {
 
   s16_t rto;    /* retransmission time-out (in ticks of TCP_SLOW_INTERVAL) */
   u8_t nrtx;    /* number of retransmissions */
+#ifdef NITRO_TCP_DATA_GIVEUP_MS
+  /* NitroOS: when the oldest unacknowledged data was sent (tcp_ticks), valid while giveup_armed: set by the first
+     retransmission timeout, cleared when an acknowledgement makes progress (nrtx back to 0) */
+  u8_t giveup_armed;
+  u32_t giveup_start;
+#endif
 
   /* fast retransmit/recovery */
   u8_t dupacks;
