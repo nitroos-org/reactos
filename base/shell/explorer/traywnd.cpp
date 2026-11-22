@@ -393,6 +393,7 @@ class CTrayWindow :
     HFONT m_Font;
 
     HWND m_DesktopWnd;
+    HWND m_hwndPrevForeground; // the window that was active when a click activated the taskbar
     HWND m_Rebar;
     HWND m_TaskSwitch;
     HWND m_TrayNotify;
@@ -441,6 +442,7 @@ public:
         m_Theme(NULL),
         m_Font(NULL),
         m_DesktopWnd(NULL),
+        m_hwndPrevForeground(NULL),
         m_Rebar(NULL),
         m_TaskSwitch(NULL),
         m_TrayNotify(NULL),
@@ -3449,6 +3451,19 @@ HandleTrayContextMenu:
         return 0;
     }
 
+    // WM_MOUSEACTIVATE: a click on the taskbar (the Start button) is about to make it the active window;
+    // remember the window that is active now, to give it the activation back when the Start menu closes
+    LRESULT OnMouseActivate(INT code, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        HWND hwndFore = ::GetForegroundWindow();
+        if (hwndFore && hwndFore != m_hWnd && ::GetWindowThreadProcessId(hwndFore, NULL) != ::GetCurrentThreadId())
+            m_hwndPrevForeground = hwndFore;
+        else
+            m_hwndPrevForeground = NULL;
+        bHandled = FALSE;
+        return 0;
+    }
+
     // WM_ACTIVATE
     LRESULT OnActivate(INT code, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
     {
@@ -3603,6 +3618,7 @@ HandleTrayContextMenu:
         MESSAGE_HANDLER(WM_COPYDATA, OnCopyData)
         MESSAGE_HANDLER(WM_NCPAINT, OnNcPaint)
         MESSAGE_HANDLER(WM_NCACTIVATE, OnNcActivate)
+        MESSAGE_HANDLER(WM_MOUSEACTIVATE, OnMouseActivate)
         MESSAGE_HANDLER(WM_CTLCOLORBTN, OnCtlColorBtn)
         MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnSysColorChange)
         MESSAGE_HANDLER(WM_MOVING, OnMoving)
@@ -3732,6 +3748,17 @@ HandleTrayContextMenu:
     virtual HRESULT RaiseStartButton()
     {
         m_StartButton.SendMessageW(BM_SETSTATE, FALSE, 0);
+
+        /* The Start menu is closed. When the click on the Start button took the activation from a window, that window
+         * gets it back, as long as nothing else was activated meanwhile (the taskbar, or nothing, is active) */
+        HWND hwndPrev = m_hwndPrevForeground;
+        m_hwndPrevForeground = NULL;
+        if (hwndPrev && ::IsWindow(hwndPrev) && ::IsWindowVisible(hwndPrev) && !::IsIconic(hwndPrev))
+        {
+            HWND hwndFore = ::GetForegroundWindow();
+            if (!hwndFore || hwndFore == m_hWnd || ::GetWindowThreadProcessId(hwndFore, NULL) == ::GetCurrentThreadId())
+                ::SetForegroundWindow(hwndPrev);
+        }
         return S_OK;
     }
 
