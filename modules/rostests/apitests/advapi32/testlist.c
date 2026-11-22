@@ -10,6 +10,8 @@ extern void func_AccessCheckMandatory(void);
 extern void func_AccessCheckNoAccess(void);
 extern void func_AccessCheckObjectTypeList(void);
 extern void func_AddMandatoryAce(void);
+extern void func_RegSaveKeyExFormat(void);
+extern void func_RegSaveKeyBigValue(void);
 extern void func_SddlNullAcl(void);
 extern void func_AuditCategories(void);
 extern void func_CveEventWrite(void);
@@ -32,6 +34,8 @@ extern void func_EncryptFile(void);
 extern void func_eventlog_supp(void);
 extern void func_eventlog_full(void);
 extern void func_EventLogSecurityAccess(void);
+extern void func_AnonymousLocalServers(void);
+extern void func_AnonymousTokenRows(void);
 extern void func_EventRegister(void);
 extern void func_EventProvider(void);
 extern void func_EventSetInformation(void);
@@ -186,6 +190,8 @@ const struct test winetest_testlist[] =
     { "AccessCheckNoAccess", func_AccessCheckNoAccess },
     { "AccessCheckObjectTypeList", func_AccessCheckObjectTypeList },
     { "AddMandatoryAce", func_AddMandatoryAce },
+    { "RegSaveKeyExFormat", func_RegSaveKeyExFormat },
+    { "RegSaveKeyBigValue", func_RegSaveKeyBigValue },
     { "SddlNullAcl", func_SddlNullAcl },
     { "AuditCategories", func_AuditCategories },
     { "CveEventWrite", func_CveEventWrite },
@@ -218,6 +224,8 @@ const struct test winetest_testlist[] =
     { "eventlog_supp", func_eventlog_supp },
     { "eventlog_full", func_eventlog_full },
     { "EventLogSecurityAccess", func_EventLogSecurityAccess },
+    { "AnonymousLocalServers", func_AnonymousLocalServers },
+    { "AnonymousTokenRows", func_AnonymousTokenRows },
     { "EventRegister", func_EventRegister },
     { "EventProvider", func_EventProvider },
     { "EventSetInformation", func_EventSetInformation },

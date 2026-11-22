@@ -14,6 +14,8 @@
 
 #include <ntlsa.h>
 
+extern LUID SeAnonymousAuthenticationId;
+
 /* INFORMATION CLASSES ********************************************************/
 
 static const INFORMATION_CLASS_INFO SeTokenInformationClass[] = {
@@ -1290,6 +1292,14 @@ NtQueryInformationToken(
                         to->OriginatingLogonSession = RtlIsZeroLuid(&Token->OriginatingLogonSession) ?
                                                       Token->AuthenticationId :
                                                       Token->OriginatingLogonSession;
+
+                        /* The anonymous logon has no origin: 0:0 (measured on Windows Server 2022) */
+                        if (RtlIsZeroLuid(&Token->OriginatingLogonSession) &&
+                            RtlEqualLuid(&Token->AuthenticationId, &SeAnonymousAuthenticationId))
+                        {
+                            to->OriginatingLogonSession.LowPart = 0;
+                            to->OriginatingLogonSession.HighPart = 0;
+                        }
                     }
                     else
                     {

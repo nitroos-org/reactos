@@ -243,14 +243,15 @@ SepInitDACLs(VOID)
                  AclLength,
                  ACL_REVISION);
 
+    /* Everyone and ANONYMOUS LOGON: 0x000F01FF, measured as the default DACL of the anonymous logon token of Windows Server 2022 */
     RtlAddAccessAllowedAce(SeSystemAnonymousLogonDacl,
                            ACL_REVISION,
-                           GENERIC_ALL,
+                           0x000F01FF,
                            SeWorldSid);
 
     RtlAddAccessAllowedAce(SeSystemAnonymousLogonDacl,
                            ACL_REVISION,
-                           GENERIC_ALL,
+                           0x000F01FF,
                            SeAnonymousLogonSid);
 
     return TRUE;

@@ -856,7 +856,17 @@ CmpCopyValue(IN PHHIVE SourceHive,
     }
     else
     {
-        if (CmpIsBigValueData(SourceHive, Value->Data, DataSize) ||
+        if (DataSize > CM_MAX_ONE_CELL_DATA && !CmpIsKeyValueBig(DestinationHive, DataSize))
+        {
+            /*
+             * The destination is a hive older than 1.4: it holds the data in one cell, and a cell of 1 MiB
+             * or more does not exist there. Windows refuses to write such a value into a hive of that
+             * format (ERROR_NO_SYSTEM_RESOURCES, measured for RegSaveKeyEx with the standard format of a
+             * value of 1048573 bytes or more); the file it would make is not readable by Windows.
+             */
+            NewDataCell = HCELL_NIL;
+        }
+        else if (CmpIsBigValueData(SourceHive, Value->Data, DataSize) ||
             CmpIsKeyValueBig(DestinationHive, DataSize))
         {
             /*

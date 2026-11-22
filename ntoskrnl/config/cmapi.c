@@ -3405,6 +3405,13 @@ CmSaveKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
                                CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES);
     if (!NT_SUCCESS(Status)) goto Cleanup;
 
+    /* REG_LATEST_FORMAT: a hive of format 1.5 (big data, hash leaves), as Windows writes it; the standard format stays 1.3 */
+    if (Flags == REG_LATEST_FORMAT)
+    {
+        KeyHive->Hive.Version = HSYS_WHISTLER;
+        KeyHive->Hive.BaseBlock->Minor = HSYS_WHISTLER;
+    }
+
     /*
      * The copy reads every key and value below this one without their KCB
      * locks, and a writer of any of them holds only its own KCB lock and the

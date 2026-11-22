@@ -25,6 +25,9 @@
 #include <wine/debug.h>
 WINE_DEFAULT_DEBUG_CHANNEL(spoolsv);
 
+// init.c
+BOOL SplCallerIsAnonymous(VOID);
+
 // rpcserver.c
 DWORD WINAPI LrpcThreadProc(LPVOID lpParameter);
 

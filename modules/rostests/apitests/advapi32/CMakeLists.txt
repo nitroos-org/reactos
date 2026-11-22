@@ -8,6 +8,8 @@ list(APPEND SOURCE
     AccessCheckNoAccess.c
     AccessCheckObjectTypeList.c
     AddMandatoryAce.c
+    RegSaveKeyExFormat.c
+    RegSaveKeyBigValue.c
     SddlNullAcl.c
     AuditCategories.c
     CveEventWrite.c
@@ -36,6 +38,8 @@ list(APPEND SOURCE
     eventlog.c
     eventlog_full.c
     EventLogSecurityAccess.c
+    AnonymousLocalServers.c
+    AnonymousTokenRows.c
     EventRegister.c
     EventProvider.c
     EventSetInformation.c
