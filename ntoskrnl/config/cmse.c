@@ -16,9 +16,11 @@
 
 /*
  * The descriptor every key had before keys had their own (owner and group
- * Everyone, a DACL that grants Everyone GENERIC_ALL, a NULL SACL): what the
+ * Everyone, a DACL that grants Everyone all key rights, a NULL SACL): what the
  * open decision is still made against (CmpCheckKeyOpenAccess) until key
- * access is enforced, and what a key reports in legacy mode.
+ * access is enforced, and what a key reports in legacy mode. KEY_ALL_ACCESS
+ * (what GENERIC_ALL maps to for keys), not GENERIC_ALL: the access check does
+ * not map generic rights inside an ACE (Windows does not).
  */
 typedef struct _CMP_LEGACY_KEY_SD
 {
@@ -49,7 +51,7 @@ static CMP_LEGACY_KEY_SD CmpLegacyKeySd =
     { ACL_REVISION, 0, sizeof(ACL) + sizeof(((CMP_LEGACY_KEY_SD *)0)->Ace), 1, 0 },
     {
         { ACCESS_ALLOWED_ACE_TYPE, 0, sizeof(((CMP_LEGACY_KEY_SD *)0)->Ace) },
-        GENERIC_ALL,
+        KEY_ALL_ACCESS,
         { SID_REVISION, 1, {SECURITY_WORLD_SID_AUTHORITY}, {SECURITY_WORLD_RID} }
     }
 };
@@ -352,7 +354,7 @@ CmpQuerySecurityDescriptor(IN PCM_KEY_CONTROL_BLOCK Kcb,
         {
             Status = RtlAddAccessAllowedAce((PACL)((PUCHAR)RelSd + Dacl),
                                             ACL_REVISION,
-                                            GENERIC_ALL,
+                                            KEY_ALL_ACCESS,
                                             SeWorldSid);
         }
     }
