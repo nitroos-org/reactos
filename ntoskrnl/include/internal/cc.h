@@ -235,6 +235,19 @@ typedef struct _ROS_SHARED_CACHE_MAP
      */
     LONG LazyWriteActive;
     struct { LONGLONG Start; LONGLONG End; BOOLEAN Used; } LazyClaim[2];
+    /*
+     * Views of this map on their way out that are still mapped: taken off CacheMapVacbListHead (trim, a purge, a view
+     * freed for address space) or parked (a close), they are unmapped by a thread after it dropped the master lock, and
+     * until then their pages keep a share in the segment.  RetiringVacbListHead (linked through CacheMapVacbListEntry)
+     * holds those a trim took off and nobody unmaps yet: a purge takes those of its range over and unmaps them itself, a
+     * deletion of the map all of them (CcRosTakeRetiringViewsLocked).  RetiringVacbs counts the views whose unmap a thread
+     * has claimed and not finished (CcRosBeginRetire, CcRosEndRetire), parked views included: a purge waits for those
+     * (CcRosWaitForRetiringViews), and the map is not freed before the count is 0.  Master lock.  RetireEvent
+     * (notification) is set exactly when RetiringVacbs is 0; both change only under the master lock.
+     */
+    ULONG RetiringVacbs;
+    KEVENT RetireEvent;
+    LIST_ENTRY RetiringVacbListHead;
 #if DBG
     BOOLEAN Trace; /* enable extra trace output for this cache map and it's VACBs */
 #endif
@@ -509,6 +522,35 @@ CcRosReferenceSharedCacheMap(
 VOID
 CcRosDereferenceSharedCacheMap(
     _In_ PROS_SHARED_CACHE_MAP SharedCacheMap);
+
+VOID
+CcRosBeginRetire(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap);
+
+VOID
+CcRosEndRetire(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap);
+
+BOOLEAN
+CcRosWaitForRetiringViews(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap);
+
+VOID
+CcRosFreeRetiredVacbs(
+    _Inout_ PLIST_ENTRY FreeList);
+
+VOID
+CcRosTakeRetiringViewsLocked(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap,
+    _In_ LONGLONG Start,
+    _In_ LONGLONG End,
+    _Inout_ PLIST_ENTRY FreeList);
+
+BOOLEAN
+CcRosRetireViewsForPurge(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap,
+    _In_ LONGLONG Start,
+    _In_ LONGLONG End);
 
 VOID
 NTAPI
