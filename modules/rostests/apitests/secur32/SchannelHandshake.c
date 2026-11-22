@@ -15,6 +15,10 @@
 #include <sspi.h>
 #include <schannel.h>
 
+#ifndef SECBUFFER_APPLICATION_PROTOCOLS
+#define SECBUFFER_APPLICATION_PROTOCOLS 18
+#endif
+
 #define SNI_HOST L"schannel-sni.reactos.test"
 
 #define REQ_FLAGS (ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT | ISC_REQ_CONFIDENTIALITY | \
@@ -433,6 +437,10 @@ static void Disconnect(CONNECTION *Conn)
     ZeroMemory(Conn, sizeof(*Conn));
 }
 
+/* An ALPN list (names with a length byte each) for the first call, NULL for none */
+static const BYTE *g_AlpnList;
+static USHORT g_AlpnSize;
+
 static SECURITY_STATUS Handshake(CONNECTION *Conn, PCWSTR Target, PVOID Auth)
 {
     TimeStamp Expiry;
@@ -466,8 +474,20 @@ static SECURITY_STATUS Handshake(CONNECTION *Conn, PCWSTR Target, PVOID Auth)
         OutDesc.cBuffers = 1;
         OutDesc.pBuffers = OutBuf;
 
+        if (!Conn->HaveCtx && g_AlpnList)
+        {
+            static BYTE AlpnBuffer[sizeof(ULONG) + sizeof(ULONG) + sizeof(USHORT) + 64];
+
+            *(ULONG *)AlpnBuffer = sizeof(ULONG) + sizeof(USHORT) + g_AlpnSize;
+            *(ULONG *)(AlpnBuffer + 4) = SecApplicationProtocolNegotiationExt_ALPN;
+            *(USHORT *)(AlpnBuffer + 8) = g_AlpnSize;
+            memcpy(AlpnBuffer + 10, g_AlpnList, g_AlpnSize);
+            InBuf[0].BufferType = SECBUFFER_APPLICATION_PROTOCOLS;
+            InBuf[0].cbBuffer = 10 + g_AlpnSize;
+            InBuf[0].pvBuffer = AlpnBuffer;
+        }
         Status = InitializeSecurityContextW(&Conn->Cred, Conn->HaveCtx ? &Conn->Ctx : NULL, (SEC_WCHAR *)Target, REQ_FLAGS,
-                                            0, 0, Conn->HaveCtx ? &InDesc : NULL, 0, &Conn->Ctx, &OutDesc, &Attr, &Expiry);
+                                            0, 0, (Conn->HaveCtx || g_AlpnList) ? &InDesc : NULL, 0, &Conn->Ctx, &OutDesc, &Attr, &Expiry);
         if (!Conn->HaveCtx && (Status == SEC_E_OK || Status == SEC_I_CONTINUE_NEEDED))
             Conn->HaveCtx = TRUE;
         if (OutBuf[0].pvBuffer)
@@ -1000,6 +1020,58 @@ static BOOL EnvEnabled(PCSTR Name)
     return Length && Length < sizeof(Value) && strcmp(Value, "0");
 }
 
+static void TestAlpnOnline(PCSTR Host, PCWSTR WideHost, PCSTR Offered, BOOL ExpectNegotiated)
+{
+    static const BYTE H2Http11[] = { 2, 'h', '2', 8, 'h', 't', 't', 'p', '/', '1', '.', '1' };
+    static const BYTE Foo[] = { 5, 'f', 'o', 'o', '/', '1' };
+    CONNECTION Conn;
+    SecPkgContext_ApplicationProtocol Protocol;
+    SECURITY_STATUS Status;
+
+    ZeroMemory(&Conn, sizeof(Conn));
+    Conn.Socket = INVALID_SOCKET;
+    if (!Connect(&Conn, Host, "443"))
+    {
+        skip("cannot connect to %s\n", Host);
+        Disconnect(&Conn);
+        return;
+    }
+    if (!strcmp(Offered, "h2,http/1.1"))
+    {
+        g_AlpnList = H2Http11;
+        g_AlpnSize = sizeof(H2Http11);
+    }
+    else
+    {
+        g_AlpnList = Foo;
+        g_AlpnSize = sizeof(Foo);
+    }
+    Status = Handshake(&Conn, WideHost, &(SCHANNEL_CRED){ .dwVersion = SCHANNEL_CRED_VERSION,
+                                                          .dwFlags = SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS });
+    g_AlpnList = NULL;
+    ok(Status == SEC_E_OK, "ALPN %s to %s: handshake 0x%08lx\n", Offered, Host, (ULONG)Status);
+    if (Status == SEC_E_OK)
+    {
+        ZeroMemory(&Protocol, sizeof(Protocol));
+        Status = QueryContextAttributesW(&Conn.Ctx, SECPKG_ATTR_APPLICATION_PROTOCOL, &Protocol);
+        ok(Status == SEC_E_OK, "APPLICATION_PROTOCOL 0x%08lx\n", (ULONG)Status);
+        if (ExpectNegotiated)
+        {
+            ok(Protocol.ProtoNegoStatus == SecApplicationProtocolNegotiationStatus_Success &&
+               Protocol.ProtoNegoExt == SecApplicationProtocolNegotiationExt_ALPN,
+               "%s offering %s: status %d ext %d\n", Host, Offered, Protocol.ProtoNegoStatus, Protocol.ProtoNegoExt);
+            ok(Protocol.ProtocolIdSize == 2 || Protocol.ProtocolIdSize == 8, "protocol id size %u\n", Protocol.ProtocolIdSize);
+        }
+        else
+        {
+            /* the server declines a protocol it does not know (Windows: status none, extension none) */
+            ok(Protocol.ProtoNegoStatus == SecApplicationProtocolNegotiationStatus_None,
+               "%s offering %s: status %d, expected none\n", Host, Offered, Protocol.ProtoNegoStatus);
+        }
+    }
+    Disconnect(&Conn);
+}
+
 static void TestOnline(void)
 {
     const DWORD Manual = SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS | SCH_USE_STRONG_CRYPTO;
@@ -1010,6 +1082,8 @@ static void TestOnline(void)
     TestServer("github.com", "443", L"github.com", Manual, ~(DWORD)(SP_PROT_TLS1_2_CLIENT | SP_PROT_TLS1_2_SERVER), SEC_E_OK,
                SP_PROT_TLS1_2_CLIENT, FALSE);
     TestServer("example.com", "443", L"example.com", Manual, 0, SEC_E_OK, 0, TRUE);
+    TestAlpnOnline("github.com", L"github.com", "h2,http/1.1", TRUE);
+    TestAlpnOnline("github.com", L"github.com", "foo/1", FALSE);
     TestControlToken(SCHANNEL_SHUTDOWN);
     TestControlToken(SCHANNEL_ALERT);
     /* A server that refuses every offered version (protocol_version alert) */

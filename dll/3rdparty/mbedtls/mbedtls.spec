@@ -16,6 +16,8 @@
 @ cdecl mbedtls_ssl_init(ptr)
 @ cdecl mbedtls_ssl_read(ptr ptr long)
 @ cdecl mbedtls_ssl_conf_authmode(ptr long)
+@ cdecl mbedtls_ssl_conf_alpn_protocols(ptr ptr)
+@ cdecl mbedtls_ssl_get_alpn_protocol(ptr)
 @ cdecl mbedtls_ssl_set_bio(ptr ptr ptr ptr)
 @ cdecl mbedtls_ssl_conf_endpoint(ptr long)
 @ cdecl mbedtls_ssl_set_hostname(ptr str)

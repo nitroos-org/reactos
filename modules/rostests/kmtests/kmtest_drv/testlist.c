@@ -82,6 +82,7 @@ KMT_TESTFUNC Test_IoWMINotification;
 KMT_TESTFUNC Test_IoPnpEventQueue;
 KMT_TESTFUNC Test_IoVolume;
 KMT_TESTFUNC Test_KdSystemDebugControl;
+KMT_TESTFUNC Test_KdSystemDebugControlInternal;
 KMT_TESTFUNC Test_KeApc;
 KMT_TESTFUNC Test_KeApcDelivery;
 KMT_TESTFUNC Test_KeBugCheckCallback;
@@ -261,6 +262,7 @@ const KMT_TEST TestList[] =
     { "IoPnpEventQueue",                    Test_IoPnpEventQueue },
     { "IoVolume",                           Test_IoVolume },
     { "KdSystemDebugControl",               Test_KdSystemDebugControl },
+    { "KdSystemDebugControlInternal",       Test_KdSystemDebugControlInternal },
     { "KeApc",                              Test_KeApc },
     { "KeApcDelivery",                      Test_KeApcDelivery },
     { "-KeBugCheckCallback",                Test_KeBugCheckCallback },

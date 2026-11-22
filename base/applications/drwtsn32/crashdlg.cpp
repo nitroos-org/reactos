@@ -64,14 +64,30 @@ static bool IsUiDisabled()
     return false;
 }
 
-/* No one could answer a dialog on a window station without a display (services) */
+/*
+ * A screen saver runs on the "Screen-Saver" desktop that winlogon makes: the user cannot answer a dialog there, and
+ * winlogon waits for the saver to end (on Windows a saver that crashes shows nothing on that desktop and ends, measured
+ * on Windows Server 2022: the desktop stays black until the process is gone).
+ */
+static bool IsScreenSaverDesktop()
+{
+    HDESK hDesk = GetThreadDesktop(GetCurrentThreadId());
+    WCHAR Name[64];
+    DWORD Needed;
+    return hDesk &&
+           GetUserObjectInformationW(hDesk, UOI_NAME, Name, sizeof(Name), &Needed) &&
+           !_wcsicmp(Name, L"Screen-Saver");
+}
+
+/* No one could answer a dialog on a window station without a display (services) or on the screen saver desktop */
 static bool IsInteractive()
 {
     USEROBJECTFLAGS Flags;
     HWINSTA hWinSta = GetProcessWindowStation();
     return hWinSta &&
            GetUserObjectInformationW(hWinSta, UOI_FLAGS, &Flags, sizeof(Flags), NULL) &&
-           (Flags.dwFlags & WSF_VISIBLE);
+           (Flags.dwFlags & WSF_VISIBLE) &&
+           !IsScreenSaverDesktop();
 }
 
 /* Whether a dialog could be answered: not turned off, and a window station with a display */
