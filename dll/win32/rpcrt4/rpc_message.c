@@ -1059,16 +1059,15 @@ RPC_STATUS RPCRT4_ServerConnectionAuth(RpcConnection* conn,
             {
                 /* The transport authenticates the caller (no SSP, as LRPC on
                  * Windows), so the service need not be registered; but it must
-                 * be one that a client can name: an unknown number is refused
-                 * as Windows does */
+                 * be one that a client can name: on Windows only NTLM (and the
+                 * default, which is NTLM): Negotiate, Kerberos and schannel are
+                 * refused, as is an unknown number */
                 SecInvalidateHandle(&cred);
                 memset(&exp, 0, sizeof(exp));
                 max_token = 0;
                 switch (auth_data_in->auth_type)
                 {
                 case RPC_C_AUTHN_WINNT:
-                case RPC_C_AUTHN_GSS_NEGOTIATE:
-                case RPC_C_AUTHN_GSS_KERBEROS:
                     status = RPC_S_OK;
                     break;
                 default:

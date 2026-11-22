@@ -1292,9 +1292,8 @@ static BOOL rpcrt4_authn_svc_known(ULONG AuthnSvc)
 /*
  * ncalrpc authenticates the caller in the transport: rpcrt4_ncalrpc_authorize and
  * rpcrt4_ncalrpc_secure_packet do not call an SSP, as LRPC does not on Windows.
- * Windows always has the NTLM, Negotiate and Kerberos packages, so security on a
- * local binding with one of them succeeds there; it must not depend on an SSP that
- * is missing here (Kerberos), or on one that is present (NTLM): the SSP is not used.
+ * Only NTLM and the default service are taken on a local binding (as on Windows);
+ * it must not depend on whether the NTLM package is present: the SSP is not used.
  */
 static BOOL is_lrpc_authn_svc(const RpcBinding *bind, ULONG AuthnSvc)
 {
@@ -1812,6 +1811,11 @@ RpcBindingSetAuthInfoExA( RPC_BINDING_HANDLE Binding, RPC_CSTR ServerPrincName,
   {
     if (!rpcrt4_authn_svc_known(AuthnSvc))
       return RPC_S_UNKNOWN_AUTHN_SERVICE;
+    /* ncalrpc takes NTLM and the default service only (Windows Server 2022, measured): Negotiate, Kerberos
+     * and schannel are unknown services there at every level */
+    if (bind->Protseq && !strcmp(bind->Protseq, "ncalrpc") && AuthnSvc != RPC_C_AUTHN_WINNT &&
+        AuthnSvc != RPC_C_AUTHN_DEFAULT)
+      return RPC_S_UNKNOWN_AUTHN_SERVICE;
     if (AuthnSvc == RPC_C_AUTHN_GSS_KERBEROS && !ServerPrincName && !AuthIdentity &&
         !(bind->Protseq && !strcmp(bind->Protseq, "ncalrpc")))
       return RPC_S_INVALID_AUTH_IDENTITY;
@@ -1968,6 +1972,11 @@ RpcBindingSetAuthInfoExW( RPC_BINDING_HANDLE Binding, RPC_WSTR ServerPrincName, 
   if (AuthnSvc != RPC_C_AUTHN_NONE)
   {
     if (!rpcrt4_authn_svc_known(AuthnSvc))
+      return RPC_S_UNKNOWN_AUTHN_SERVICE;
+    /* ncalrpc takes NTLM and the default service only (Windows Server 2022, measured): Negotiate, Kerberos
+     * and schannel are unknown services there at every level */
+    if (bind->Protseq && !strcmp(bind->Protseq, "ncalrpc") && AuthnSvc != RPC_C_AUTHN_WINNT &&
+        AuthnSvc != RPC_C_AUTHN_DEFAULT)
       return RPC_S_UNKNOWN_AUTHN_SERVICE;
     if (AuthnSvc == RPC_C_AUTHN_GSS_KERBEROS && !ServerPrincName && !AuthIdentity &&
         !(bind->Protseq && !strcmp(bind->Protseq, "ncalrpc")))
