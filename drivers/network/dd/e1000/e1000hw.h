@@ -172,6 +172,10 @@ C_ASSERT(sizeof(E1000_TRANSMIT_DESCRIPTOR) == 16);
 #define E1000_EERD_DONE             (1U << 4)   /* Read Done */
 #define E1000_EERD_ADDR_SHIFT       8
 #define E1000_EERD_DATA_SHIFT       16
+/* The 82574 family (PCI Express) has another layout: address from bit 2, done bit 1 */
+#define E1000_EERD_START_82574      (1U << 0)
+#define E1000_EERD_DONE_82574       (1U << 1)
+#define E1000_EERD_ADDR_SHIFT_82574 2
 
 
 /* E1000_REG_MDIC */
