@@ -1544,6 +1544,50 @@ SeIsTokenSibling(
 
 /**
  * @brief
+ * Whether a token has a higher integrity level than the primary token of
+ * the current process.
+ *
+ * @remarks
+ * A child or a sibling of the caller's token may be assigned as a primary
+ * token without SeAssignPrimaryTokenPrivilege, but not one of a higher
+ * level: measured on Windows Server 2022, a Low or Untrusted process that
+ * duplicates the token of its High or Medium parent (a sibling of its own)
+ * gets ERROR_PRIVILEGE_NOT_HELD from CreateProcessAsUser, while a duplicate
+ * lowered to its own level starts. A token at the caller's level or below
+ * stays assignable.
+ *
+ * @param[in] Token
+ * The token to compare.
+ *
+ * @return
+ * TRUE if the token's integrity level is above the process token's.
+ */
+BOOLEAN
+NTAPI
+SeIsTokenAboveProcessIntegrity(
+    _In_ PTOKEN Token)
+{
+    PTOKEN ProcessToken;
+    ULONG ProcessLevel, TokenLevel;
+
+    ProcessToken = PsReferencePrimaryToken(PsGetCurrentProcess());
+    if (!ProcessToken)
+        return TRUE;
+
+    SepAcquireTokenLockShared(ProcessToken);
+    ProcessLevel = ProcessToken->IntegrityLevel;
+    SepReleaseTokenLock(ProcessToken);
+    ObFastDereferenceObject(&PsGetCurrentProcess()->Token, ProcessToken);
+
+    SepAcquireTokenLockShared(Token);
+    TokenLevel = Token->IntegrityLevel;
+    SepReleaseTokenLock(Token);
+
+    return TokenLevel > ProcessLevel;
+}
+
+/**
+ * @brief
  * Copies an existing access token (technically duplicating a new one).
  *
  * @param[in] Token

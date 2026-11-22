@@ -274,6 +274,14 @@ PspSetPrimaryToken(IN PEPROCESS Process,
         }
     }
 
+    /*
+     * A child or sibling of a higher integrity level than the caller's token
+     * counts as an independent token (V12, measured on Windows Server 2022:
+     * ERROR_PRIVILEGE_NOT_HELD without SeAssignPrimaryTokenPrivilege)
+     */
+    if (IsChildOrSibling && SeIsTokenAboveProcessIntegrity(NewToken))
+        IsChildOrSibling = FALSE;
+
     /* Check if this was an independent token */
     if (!IsChildOrSibling)
     {

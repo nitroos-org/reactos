@@ -603,6 +603,11 @@ SeIsTokenSibling(
     _In_ PTOKEN Token,
     _Out_ PBOOLEAN IsSibling);
 
+BOOLEAN
+NTAPI
+SeIsTokenAboveProcessIntegrity(
+    _In_ PTOKEN Token);
+
 NTSTATUS
 NTAPI
 SeExchangePrimaryToken(
