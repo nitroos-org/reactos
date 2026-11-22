@@ -1966,6 +1966,39 @@ SepGetDescriptorLabel(
 }
 
 /*
+ * Whether a descriptor holds a label of the object itself (not inherit-only)
+ * above Level. The caller has validated the labels (SepGetDescriptorLabel).
+ */
+BOOLEAN
+NTAPI
+SepDescriptorHasObjectLabelAbove(
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _In_ ULONG Level)
+{
+    BOOLEAN Present, Defaulted;
+    PACE_HEADER Entry;
+    PACL Sacl = NULL;
+    ULONG Rid, i;
+
+    if (!NT_SUCCESS(RtlGetSaclSecurityDescriptor(SecurityDescriptor, &Present, &Sacl, &Defaulted)) ||
+        !Present || !Sacl)
+    {
+        return FALSE;
+    }
+
+    for (i = 0; i < Sacl->AceCount; i++)
+    {
+        if (!NT_SUCCESS(RtlGetAce(Sacl, i, (PVOID*)&Entry)))
+            break;
+        if (Entry->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE || (Entry->AceFlags & INHERIT_ONLY_ACE))
+            continue;
+        if (NT_SUCCESS(SepValidateLabelAce(Entry, &Rid)) && Rid > Level)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/*
  * A caller may set a mandatory label up to its own level; above that it
  * needs SeRelabelPrivilege, as on NT 6. Checked for every label in a
  * descriptor that is about to be set with LABEL_SECURITY_INFORMATION (the

@@ -480,6 +480,12 @@ SepGetDescriptorLabel(
     _Out_opt_ PULONG LabelLevel,
     _Out_opt_ PACCESS_MASK LabelPolicy);
 
+BOOLEAN
+NTAPI
+SepDescriptorHasObjectLabelAbove(
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _In_ ULONG Level);
+
 NTSTATUS
 NTAPI
 SeCheckLabelChange(

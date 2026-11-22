@@ -1802,8 +1802,21 @@ SepAssignSecurity(
         if (HasLabel && ExplicitLevel > Token->IntegrityLevel &&
             !SepPrivilegeCheck(Token, &Relabel, 1, PRIVILEGE_SET_ALL_NECESSARY, UserMode))
         {
+            /*
+             * Measured on Windows Server 2022 (V13): a creator below Medium
+             * whose only labels above its level are inherit-only gets
+             * ERROR_INVALID_LABEL (CreateDirectory of a Low process with
+             * S:(ML;OICIIO;NW;;;HI)); every other case (an object label
+             * above the creator, or a Medium creator) ERROR_PRIVILEGE_NOT_HELD
+             */
+            Status = STATUS_PRIVILEGE_NOT_HELD;
+            if (Token->IntegrityLevel < SECURITY_MANDATORY_MEDIUM_RID &&
+                !SepDescriptorHasObjectLabelAbove(ExplicitDescriptor, Token->IntegrityLevel))
+            {
+                Status = STATUS_INVALID_LABEL;
+            }
             SeUnlockSubjectContext(SubjectContext);
-            return STATUS_PRIVILEGE_NOT_HELD;
+            return Status;
         }
     }
 
