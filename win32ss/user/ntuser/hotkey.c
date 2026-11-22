@@ -188,6 +188,79 @@ IsHotKey(UINT fsModifiers, WORD wVk)
  *
  * Sends WM_HOTKEY message if given keys are hotkey
  */
+/*
+ * Which hot keys can fire while a desktop has the input (measured on Windows Server 2022, rows V4, W-H1,
+ * W-H2 and the InputDesktopRouting apitest run there):
+ * - those of the programs of the desktop that has the input;
+ * - while an ordinary desktop (CreateDesktop + SwitchDesktop) has it, also those of a program on another
+ *   desktop whose process has a thread on the desktop that has the input (the program that made and
+ *   switched to that desktop): its hot keys fire and take the key. The hot keys of any other program of
+ *   another desktop do not fire, and the key goes where it would go without them;
+ * - while a desktop of the logon process has it (logon or unlock dialog, Security screen, screen saver):
+ *   only those of that desktop. A program of the application desktop must not take, or learn, keys
+ *   typed there (no WM_HOTKEY on the credential UI, row W-H1).
+ * Winlogon's own keys (Ctrl+Alt+Del, Ctrl+Shift+Esc, Win+L, Win+U on its SAS window) work on every
+ * desktop, the system's own (negative ids) are checked where handled.
+ */
+static BOOL FASTCALL
+IntHotKeyOwnerCanFire(PTHREADINFO ptiOwner, PDESKTOP pdeskOwner)
+{
+    PDESKTOP pdeskInput = IntGetActiveDesktop();
+    PTHREADINFO pti;
+
+    if (!pdeskOwner || !ptiOwner || !pdeskInput)
+        return FALSE;
+    if (pdeskOwner == pdeskInput)
+        return TRUE;
+    if (IntIsLogonDesktopInput() || !ptiOwner->ppi)
+        return FALSE;
+    for (pti = ptiOwner->ppi->ptiList; pti; pti = pti->ptiSibling)
+    {
+        if (pti->rpdesk == pdeskInput && !(pti->TIF_flags & TIF_INCLEANUP))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL FASTCALL
+IntHotKeyOnInputDesktop(PHOT_KEY pHotKey)
+{
+    if (pHotKey->pWnd && pHotKey->pWnd != PWND_BOTTOM)
+    {
+        if (hwndSAS && UserHMGetHandle(pHotKey->pWnd) == hwndSAS)
+            return TRUE;
+        /* WM_SETHOTKEY activates its window through the input desktop's active window: only a window
+           of the input desktop (not measured on Windows across desktops: kept as before) */
+        if (IsWindowHotKey(pHotKey))
+            return pHotKey->pWnd->head.rpdesk && pHotKey->pWnd->head.rpdesk == IntGetActiveDesktop();
+        return IntHotKeyOwnerCanFire(pHotKey->pWnd->head.pti, pHotKey->pWnd->head.rpdesk);
+    }
+
+    if (pHotKey->id < 0 && pHotKey->id != IDHK_WNDKEY)
+        return TRUE;
+
+    return pHotKey->pti && IntHotKeyOwnerCanFire(pHotKey->pti, pHotKey->pti->rpdesk);
+}
+
+/* The hot key that this key press triggers, of those that can fire now */
+static PHOT_KEY FASTCALL
+IsInputHotKey(UINT fsModifiers, WORD wVk)
+{
+    PHOT_KEY pHotKey;
+
+    for (pHotKey = gphkFirst; pHotKey; pHotKey = pHotKey->pNext)
+    {
+        if (pHotKey->fsModifiers == fsModifiers &&
+            pHotKey->vk == wVk &&
+            IntHotKeyOnInputDesktop(pHotKey))
+        {
+            return pHotKey;
+        }
+    }
+
+    return NULL;
+}
+
 BOOL NTAPI
 co_UserProcessHotKeys(WORD wVk, BOOL bIsDown)
 {
@@ -217,7 +290,7 @@ co_UserProcessHotKeys(WORD wVk, BOOL bIsDown)
         else
         {
             /* Regular key down -- check for hotkey, and reset mod candidates */
-            pHotKey = IsHotKey(fModifiers, wVk);
+            pHotKey = IsInputHotKey(fModifiers, wVk);
             gfsModOnlyCandidate = 0;
         }
     }
@@ -226,7 +299,7 @@ co_UserProcessHotKeys(WORD wVk, BOOL bIsDown)
         if (IsModifier)
         {
             /* Modifier key up -- modifier-only keys are triggered here */
-            pHotKey = IsHotKey(gfsModOnlyCandidate, 0);
+            pHotKey = IsInputHotKey(gfsModOnlyCandidate, 0);
             gfsModOnlyCandidate = 0;
         }
         else
@@ -263,13 +336,18 @@ co_UserProcessHotKeys(WORD wVk, BOOL bIsDown)
         {
             ASSERT(!bIsDown);
             pWnd = ValidateHwndNoErr(InputWindowStation->ShellWindow);
-            if (pWnd)
+            /* The shell's Start menu only while the shell's desktop has the input */
+            if (pWnd && pWnd->head.rpdesk == IntGetActiveDesktop())
             {
                TRACE("System Hot key Id %d Key %u\n", pHotKey->id, wVk );
                UserPostMessage(UserHMGetHandle(pWnd), WM_SYSCOMMAND, SC_TASKLIST, 0);
                co_IntShellHookNotify(HSHELL_TASKMAN, 0, 0);
                return FALSE;
             }
+            /* The shell is on a desktop without the input (the lock screen is up): the key goes on to the
+               input desktop as an ordinary key, not as a WM_HOTKEY to its focus window with its release eaten */
+            if (pWnd)
+               return FALSE;
         }
         
         if (pHotKey->id == IDHK_SNAP_LEFT ||

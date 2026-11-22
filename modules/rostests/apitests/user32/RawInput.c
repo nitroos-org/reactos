@@ -1528,8 +1528,8 @@ static void test_other_desktop_sinks(void)
         ok(n == 0, "INPUTSINK on another desktop: %d packets\n", n);
 
     /* A process with the focus on the input desktop keeps getting its input at a registered
-       window on another desktop (measured on Windows 7 and 10, also for INPUTSINK, where
-       ReactOS delivers nothing: recorded gap); only a background process is cut off */
+       window on another desktop (measured on Windows 7 and 10, also for INPUTSINK; Windows
+       Server 2022 row W-S1); only a background process is cut off */
     n = run_desk_child("deskfg0");
     if (desk_setup_ok(n, "deskfg0"))
         ok(n >= 5 && n <= 200, "foreground process, target on another desktop, flags 0: %d packets\n", n);
@@ -1538,7 +1538,7 @@ static void test_other_desktop_sinks(void)
         ok(n >= 5 && n <= 200, "foreground process, target on another desktop, EXINPUTSINK: %d packets\n", n);
     n = run_desk_child("deskfgsink");
     if (desk_setup_ok(n, "deskfgsink"))
-        trace("foreground process, target on another desktop, INPUTSINK: %d packets\n", n);
+        ok(n >= 5 && n <= 200, "foreground process, target on another desktop, INPUTSINK: %d packets\n", n);
 }
 
 struct hook_ctx

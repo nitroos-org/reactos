@@ -77,6 +77,8 @@ list(APPEND SOURCE
     WmMenuDragIme.c
     WmPointerMessages.c
     InitializeLpkHooks.c
+    InputDesktopDeleted.c
+    InputDesktopRouting.c
     IsDialogMessage.c
     IsServerSideWindow.c
     IsWindowArranged.c

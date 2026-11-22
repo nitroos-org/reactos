@@ -475,6 +475,12 @@ IntLeaveInputDesktop(IN PDESKTOP pdesk)
     }
 
     gpdeskInputDesktop = pdeskNew;
+    /* As NtUserSwitchDesktop: the global foreground becomes the one of the desktop that has the input
+       now (no foreground when there is none), the "pressed since" bits and the key state of the queues
+       of the desktop that gets the input start again */
+    IntForegroundFollowsInputDesktop();
+    UserResetAsyncKeyStateRecent();
+    UserResetDesktopKeyStates(NULL);
     UserSpbDropAll();
     /* Window redirection: no composed pixels of the old input desktop are kept */
     UserRedirFreeFrameBuffer();
@@ -537,6 +543,23 @@ IntDesktopObjectDelete(
     /* The input desktop holds no reference: when the last handle of a process that
        switched to its own desktop goes away, input must not stay on a freed desktop */
     IntLeaveInputDesktop(pdesk);
+
+    /* A foreground queue still remembered for this desktop (no thread runs on it any more: only the queue of
+       the desktop window thread, which serves every desktop, can be left here) stops pointing at it and gives
+       its reference back: the queue would keep a pointer to the freed desktop */
+    {
+        PUSER_MESSAGE_QUEUE Queue = InterlockedExchangePointer((PVOID*)&pdesk->ActiveMessageQueue, NULL);
+        if (Queue)
+        {
+            ERR("Deleted desktop %p still had the foreground queue %p\n", pdesk, Queue);
+            if (InterlockedCompareExchangePointer((PVOID*)&Queue->Desktop, NULL, pdesk) == pdesk)
+            {
+                if (gpqForeground == Queue)
+                    gpqForeground = NULL;
+                IntDereferenceMessageQueue(Queue);
+            }
+        }
+    }
 
     if (pdesk->pDeskInfo &&
         pdesk->pDeskInfo->spwnd)
@@ -1757,22 +1780,61 @@ IntGetFocusMessageQueue(VOID)
     return (PUSER_MESSAGE_QUEUE)pdo->ActiveMessageQueue;
 }
 
-VOID FASTCALL
-IntSetFocusMessageQueue(PUSER_MESSAGE_QUEUE NewQueue)
+/*
+ * Is the thread on the desktop that has the input (the one on the screen, that keys and mouse go to)?
+ */
+BOOL FASTCALL
+IntIsThreadOnInputDesktop(PTHREADINFO pti)
 {
-    PUSER_MESSAGE_QUEUE Old;
+    return pti && pti->rpdesk && pti->rpdesk == gpdeskInputDesktop;
+}
+
+/*
+ * Does a desktop of the logon process have the input (the logon or unlock dialog, the Security screen,
+ * the screen saver)? Then a program of another desktop learns nothing of the keys: no hot key of it
+ * fires. With an ordinary second desktop (CreateDesktop + SwitchDesktop) Windows lets the hot keys of
+ * the other desktops fire (measured on Windows Server 2022, rows V4 / W-H1 / W-H2).
+ */
+BOOL FASTCALL
+IntIsLogonDesktopInput(VOID)
+{
+    return gpdeskInputDesktop && (gpdeskInputDesktop->dwDTFlags & DF_LOGONDESKTOP);
+}
+
+/*
+ * Every desktop has its own foreground queue (ActiveMessageQueue), always a queue of a thread
+ * of that desktop. The foreground queue of the INPUT desktop is the global foreground
+ * (gpqForeground): it routes the keyboard and the mouse capture. The others are kept for the
+ * time their desktop is switched to again (NtUserSwitchDesktop).
+ *
+ * Makes the queue of ptiNew the foreground queue of the input desktop, NULL clears it. A
+ * thread of another desktop is refused: its program would receive what is typed on a desktop
+ * it cannot see (the lock screen, the Security screen, a screen saver).
+ */
+BOOL FASTCALL
+IntSetFocusMessageQueue(PTHREADINFO ptiNew)
+{
+    PUSER_MESSAGE_QUEUE Old, NewQueue = NULL;
     PDESKTOP pdo = IntGetActiveDesktop();
     if (!pdo)
     {
         TRACE("No active desktop\n");
-        return;
+        return FALSE;
     }
-    if (NewQueue != NULL)
+    if (ptiNew != NULL)
     {
+        NewQueue = ptiNew->MessageQueue;
+        /* The desktop window thread serves the desktop windows of every desktop: the caller checked
+           the window's desktop (SetForegroundWindow(GetDesktopWindow()) leaves no foreground window) */
+        if (!NewQueue || (ptiNew->rpdesk != pdo && ptiNew != gptiDesktopThread))
+        {
+            WARN("Thread 0x%p is not on the input desktop 0x%p: it does not get the foreground\n", ptiNew, pdo);
+            return FALSE;
+        }
         if (NewQueue->Desktop != NULL)
         {
-            TRACE("Message Queue already attached to another desktop!\n");
-            return;
+            TRACE("Message Queue already attached to a desktop!\n");
+            return NewQueue->Desktop == pdo;
         }
         IntReferenceMessageQueue(NewQueue);
         (void)InterlockedExchangePointer((PVOID*)&NewQueue->Desktop, pdo);
@@ -1794,6 +1856,71 @@ IntSetFocusMessageQueue(PUSER_MESSAGE_QUEUE NewQueue)
         gpqForeground = NULL;
         ERR("ptiLastInput is CLEARED!!\n");
         ptiLastInput = NULL; // ReactOS hacks... should check for process death.
+    }
+    return TRUE;
+}
+
+/*
+ * The foreground queue of a given desktop becomes the queue of ptiNew, a thread of that desktop.
+ * For the input desktop this is IntSetFocusMessageQueue; for another desktop only its own
+ * foreground changes (the one it gets back when it is switched to), never the global one.
+ */
+BOOL FASTCALL
+IntSetDesktopFocusMessageQueue(PDESKTOP pdesk, PTHREADINFO ptiNew)
+{
+    PUSER_MESSAGE_QUEUE Old, NewQueue;
+
+    if (pdesk == IntGetActiveDesktop())
+        return IntSetFocusMessageQueue(ptiNew);
+
+    NewQueue = ptiNew->MessageQueue;
+    if (!pdesk || !NewQueue || ptiNew->rpdesk != pdesk)
+        return FALSE;
+    if (NewQueue->Desktop != NULL)
+        return NewQueue->Desktop == pdesk;
+
+    IntReferenceMessageQueue(NewQueue);
+    (void)InterlockedExchangePointer((PVOID*)&NewQueue->Desktop, pdesk);
+    Old = (PUSER_MESSAGE_QUEUE)InterlockedExchangePointer((PVOID*)&pdesk->ActiveMessageQueue, NewQueue);
+    if (Old != NULL)
+    {
+        (void)InterlockedExchangePointer((PVOID*)&Old->Desktop, 0);
+        IntDereferenceMessageQueue(Old);
+    }
+    return TRUE;
+}
+
+/*
+ * The queue stops being the foreground queue of the desktop it is the foreground queue of,
+ * whichever desktop that is (a queue that goes away or whose thread leaves the desktop). Only
+ * when that is the input desktop does the global foreground change: a program of a desktop
+ * without the input never clears the foreground of the one that has it.
+ */
+VOID FASTCALL
+IntRemoveFocusMessageQueue(PUSER_MESSAGE_QUEUE Queue)
+{
+    PDESKTOP pdesk = Queue->Desktop;
+
+    if (pdesk == NULL)
+    {
+        if (gpqForeground == Queue)
+        {
+            gpqForeground = NULL;
+            ptiLastInput = NULL;
+        }
+        return;
+    }
+
+    if (pdesk == IntGetActiveDesktop())
+    {
+        IntSetFocusMessageQueue(NULL);
+        return;
+    }
+
+    if (InterlockedCompareExchangePointer((PVOID*)&pdesk->ActiveMessageQueue, NULL, Queue) == Queue)
+    {
+        (void)InterlockedExchangePointer((PVOID*)&Queue->Desktop, 0);
+        IntDereferenceMessageQueue(Queue);
     }
 }
 
@@ -3112,6 +3239,19 @@ IntCreateDesktop(
         goto Quit;
     }
 
+    /* The desktops the logon process makes for itself (the Winlogon desktop: logon, lock, Security screen;
+       the Screen-Saver desktop) get the secure treatment while they have the input: nothing of what is typed
+       there reaches a program of another desktop, not even through the hot keys and raw input that Windows
+       leaves open between ordinary desktops. Decided once, here, from who creates the desktop: only the
+       process registered by CSRSS as the logon process can be that creator (a desktop of the same name made by
+       anyone else is an ordinary desktop, and the flag never changes afterwards). The application desktop
+       "Default" is made by the logon process too and is the ordinary desktop of the session. */
+    if (gpidLogon && PsGetCurrentProcessId() == gpidLogon && pdesk->pDeskInfo &&
+        _wcsicmp(pdesk->pDeskInfo->szDesktopName, L"Default") != 0)
+    {
+        pdesk->dwDTFlags |= DF_LOGONDESKTOP;
+    }
+
     /* Get the desktop window class. The thread desktop does not belong to any desktop
      * so the classes created there (including the desktop class) are allocated in the shared heap
      * It would cause problems if we used a class that belongs to the caller
@@ -3641,10 +3781,40 @@ Quit:
  *    @unimplemented
  */
 
+/* The first visible top-level window of the input desktop that can be activated becomes its foreground window */
+static VOID FASTCALL
+IntActivateTopWindowOfInputDesktop(PDESKTOP pdesk)
+{
+    PWND pwnd;
+    USER_REFERENCE_ENTRY Ref;
+
+    if (!pdesk->pDeskInfo || !pdesk->pDeskInfo->spwnd)
+        return;
+    for (pwnd = pdesk->pDeskInfo->spwnd->spwndChild; pwnd; pwnd = pwnd->spwndNext)
+    {
+        if ((pwnd->style & (WS_VISIBLE | WS_DISABLED)) != WS_VISIBLE ||
+            (pwnd->ExStyle & (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)) ||
+            (pwnd->state & WNDS_DESTROYED) ||
+            !pwnd->head.pti || pwnd->head.pti == gptiDesktopThread ||
+            (pwnd->head.pti->TIF_flags & TIF_INCLEANUP) ||
+            pwnd->head.rpdesk != pdesk)
+        {
+            continue;
+        }
+        break;
+    }
+    if (!pwnd)
+        return;
+
+    UserRefObjectCo(pwnd, &Ref);
+    co_IntSetForegroundMessageQueue(pwnd, PsGetCurrentThreadWin32Thread(), FALSE, 0);
+    UserDerefObjectCo(pwnd);
+}
+
 BOOL APIENTRY
 NtUserSwitchDesktop(HDESK hdesk)
 {
-    PDESKTOP pdesk;
+    PDESKTOP pdesk, pdeskOldInput;
     NTSTATUS Status;
     BOOL bRedrawDesktop;
     BOOL Ret = FALSE;
@@ -3721,7 +3891,13 @@ NtUserSwitchDesktop(HDESK hdesk)
     InputWindowStation->ActiveDesktop = pdesk;
 
     /* Set the global state */
+    pdeskOldInput = gpdeskInputDesktop;
     gpdeskInputDesktop = pdesk;
+    /* The keyboard follows: the foreground becomes the one of the new input desktop (the one it had when
+       it was last switched away from), the desktop left keeps its own for the switch back */
+    IntForegroundFollowsInputDesktop();
+    UserResetAsyncKeyStateRecent();
+    UserResetDesktopKeyStates(pdeskOldInput);
     UserSpbDropAll();
     /* Window redirection: no composed pixels of the old input desktop are kept */
     UserRedirFreeFrameBuffer();
@@ -3738,6 +3914,13 @@ NtUserSwitchDesktop(HDESK hdesk)
 #if (_WIN32_WINNT >= _WIN32_WINNT_VISTA)
     IntNotifyWinEvent(EVENT_SYSTEM_DESKTOPSWITCH, NULL, OBJID_WINDOW, CHILDID_SELF, 0);
 #endif
+
+    /* A desktop that has no foreground yet (switched to for the first time) gets one: its top-level window
+       is activated, as on Windows (Server 2022, user32 apitest InputDesktopRouting row R0: the only window
+       of a new desktop is its foreground window right after SwitchDesktop). The window's own thread
+       activates it (an event posted to it); the desktop may have changed during the callbacks above. */
+    if (gpdeskInputDesktop == pdesk && !gpqForeground)
+        IntActivateTopWindowOfInputDesktop(pdesk);
 
     TRACE("SwitchDesktop gpdeskInputDesktop 0x%p\n", gpdeskInputDesktop);
     ObDereferenceObject(pdesk);
@@ -4070,11 +4253,30 @@ IntSetThreadDesktop(IN HDESK hDesktop,
         return FALSE;
     }
 
-    /* Desktop is being re-set so clear out foreground. */
-    if (pti->rpdesk != pdesk && pti->MessageQueue == gpqForeground)
+    /* A queue shared with other threads (AttachThreadInput) must not serve two desktops: the foreground
+       queue of one desktop would route the keys to a thread of another. The thread leaves its attachments
+       and takes its own queue with it, as on Windows (Server 2022, row W-T1: SetThreadDesktop of an attached
+       thread returns TRUE, and AttachThreadInput(FALSE) afterwards fails: the attachment is gone) */
+    if (pdesk && pti->rpdesk && pti->rpdesk != pdesk &&
+        pti->MessageQueue && pti->MessageQueue->cThreads > 1)
+    {
+        IsRemoveAttachThread(pti);
+        if (pti->MessageQueue && pti->MessageQueue->cThreads > 1)
+        {
+            /* Still shared through attachments between other threads of the queue */
+            ObDereferenceObject(pdesk);
+            ERR("Attempted to change thread desktop although the thread shares its input queue!\n");
+            EngSetLastError(ERROR_BUSY);
+            return FALSE;
+        }
+    }
+
+    /* Desktop is being re-set so clear out foreground: the queue stops being the foreground
+       queue of the desktop it leaves, whichever desktop that is */
+    if (pti->rpdesk != pdesk && pti->MessageQueue && pti->MessageQueue->Desktop)
     {
         // Like above, there shouldn't be any windows, hooks or anything active on this threads desktop!
-        IntSetFocusMessageQueue(NULL);
+        IntRemoveFocusMessageQueue(pti->MessageQueue);
     }
 
     /* Before doing the switch, map the new desktop heap and allocate the new pcti */
@@ -4179,6 +4381,11 @@ IntSetThreadDesktop(IN HDESK hDesktop,
             pci->fsHooks = pti->fsHooks;
             pci->dwTIFlags = pti->TIF_flags;
         }
+
+        /* The queue took the key state of the keyboard when it was made: on a desktop without
+           the input it must not show what is held down on the one that has it */
+        if (pti->MessageQueue && pti->MessageQueue->cThreads <= 1 && pdesk != gpdeskInputDesktop)
+            UserCopyAsyncKeyState(pti->MessageQueue->afKeyState, FALSE);
     }
     else
     {

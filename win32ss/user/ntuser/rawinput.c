@@ -747,10 +747,21 @@ UserRawInputDeliver(
         pti = pWnd->head.pti;
         if (Reg->dwFlags & RIDEV_INPUTSINK)
         {
-            /* Sinks only reach windows of the input desktop */
-            if (!pti->rpdesk || !IntIsActiveDesktop(pti->rpdesk))
-                continue;
-            wParam = (ppi == ppiFocus) ? RIM_INPUT : RIM_INPUTSINK;
+            if (ppi == ppiFocus)
+            {
+                /* The foreground process gets its input at the registered window wherever that is, as
+                   without the flag (measured on Windows 7 and 10, RawInput apitest "deskfgsink"; Windows
+                   Server 2022: the sink of the process whose window on a second desktop has the input
+                   receives its keys, row W-S1) */
+                wParam = RIM_INPUT;
+            }
+            else
+            {
+                /* Background sinks only reach windows of the input desktop */
+                if (!pti->rpdesk || !IntIsActiveDesktop(pti->rpdesk))
+                    continue;
+                wParam = RIM_INPUTSINK;
+            }
         }
         else if (ppi == ppiFocus)
         {
