@@ -115,6 +115,7 @@ VOID NTAPI UserProcessKeyboardInput(PINPUT_DEVICE_INFO pDeviceInfo, PKEYBOARD_IN
 BOOL NTAPI UserSendKeyboardInput(KEYBDINPUT *pKbdInput, BOOL bInjected);
 VOID FASTCALL UserCopyAsyncKeyState(PBYTE afKeyState, BOOL bInputDesktop);
 VOID FASTCALL UserResetAsyncKeyStateRecent(VOID);
+VOID FASTCALL UserResetDesktopKeyStates(struct _DESKTOP *pdeskOld);
 PKL NTAPI UserHklToKbl(HKL hKl);
 BOOL NTAPI UserSetDefaultInputLang(HKL hKl);
 extern DWORD gdwLanguageToggleKey;

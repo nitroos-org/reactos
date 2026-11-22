@@ -705,28 +705,108 @@ NtUserGetAsyncKeyState(INT Key)
     return wRet;
 }
 
+/* Shift, Ctrl, Alt and the Windows keys */
+static const BYTE gModKeys[] = { VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_CONTROL, VK_LCONTROL, VK_RCONTROL,
+                                 VK_MENU, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN };
+
 /*
- * UserCopyAsyncKeyState
- *
- * The key state a queue starts from (a new queue, AttachThreadInput). On a desktop without the
- * input only the toggles of Caps Lock, Num Lock and Scroll Lock are taken: the up/down state and
- * the toggle bit of every other key would tell which keys are being typed on the input desktop.
+ * The reduced key state of a queue that is not on the desktop that has the input: the toggles of
+ * Caps Lock, Num Lock and Scroll Lock (Windows Server 2022, row V6: a new thread takes over the Caps
+ * Lock toggle, not a held letter) and, with bModifiers, the state (down and toggle) of Shift, Ctrl,
+ * Alt and the Windows keys (row W-S1 NEWTHREAD: Shift held on the other desktop shows 0x81 in a new
+ * thread). Every other key reads up and untoggled: its state would tell which keys are typed there.
  */
-VOID FASTCALL
-UserCopyAsyncKeyState(PBYTE afKeyState, BOOL bInputDesktop)
+static VOID FASTCALL
+UserCopyReducedKeyState(PBYTE afKeyState, BOOL bModifiers)
 {
     static const BYTE LockKeys[] = { VK_CAPITAL, VK_NUMLOCK, VK_SCROLL };
     UINT i;
 
+    RtlZeroMemory(afKeyState, sizeof(gafAsyncKeyState));
+    for (i = 0; i < _countof(LockKeys); i++)
+        SET_KEY_LOCKED(afKeyState, LockKeys[i], IS_KEY_LOCKED(gafAsyncKeyState, LockKeys[i]));
+    if (!bModifiers)
+        return;
+    for (i = 0; i < _countof(gModKeys); i++)
+    {
+        SET_KEY_DOWN(afKeyState, gModKeys[i], IS_KEY_DOWN(gafAsyncKeyState, gModKeys[i]));
+        SET_KEY_LOCKED(afKeyState, gModKeys[i], IS_KEY_LOCKED(gafAsyncKeyState, gModKeys[i]));
+    }
+}
+
+/*
+ * UserCopyAsyncKeyState
+ *
+ * The key state a queue starts from (a new queue, AttachThreadInput, SetThreadDesktop). On the input
+ * desktop the whole state of the keyboard. On a desktop without the input the reduced state: with the
+ * modifiers while an ordinary desktop has the input (as Windows), only the lock-key toggles while a
+ * desktop of the logon process has it (Shift down while a password is typed would show which of its
+ * characters are capitals).
+ */
+VOID FASTCALL
+UserCopyAsyncKeyState(PBYTE afKeyState, BOOL bInputDesktop)
+{
     if (bInputDesktop)
     {
         RtlCopyMemory(afKeyState, gafAsyncKeyState, sizeof(gafAsyncKeyState));
         return;
     }
 
-    RtlZeroMemory(afKeyState, sizeof(gafAsyncKeyState));
-    for (i = 0; i < _countof(LockKeys); i++)
-        SET_KEY_LOCKED(afKeyState, LockKeys[i], IS_KEY_LOCKED(gafAsyncKeyState, LockKeys[i]));
+    UserCopyReducedKeyState(afKeyState, !IntIsLogonDesktopInput());
+}
+
+/*
+ * UserResetDesktopKeyStates
+ *
+ * The input moves from pdeskOld to the input desktop (SwitchDesktop, the input desktop deleted). The
+ * queues of the threads of both desktops start again from the reduced key state, as on Windows: the
+ * desktop left keeps the lock-key toggles and the modifier keys held at the switch, with the toggle bits
+ * of its modifiers as the queue had them, and the state of the other keys is cleared (row V5: GetKeyState
+ * of letters typed on the lock screen goes from 0x0001 to 0 when the Winlogon desktop takes the input;
+ * row W-S1: nothing of the keys typed on the other desktop shows in the key state of the desktop left,
+ * not even the toggle bit of a Shift typed there); the desktop that gets the input takes over the
+ * lock-key toggles changed meanwhile (row V6: Caps Lock turned on on the other desktop reads 0x0001
+ * after the switch back) and nothing else (row W-L1: the modifiers of the queue are 0 again).
+ */
+static VOID FASTCALL
+UserResetDesktopQueues(PDESKTOP pdesk, BOOL bModifiers)
+{
+    PLIST_ENTRY Entry;
+
+    if (!pdesk)
+        return;
+    for (Entry = pdesk->PtiList.Flink; Entry != &pdesk->PtiList; Entry = Entry->Flink)
+    {
+        PTHREADINFO pti = CONTAINING_RECORD(Entry, THREADINFO, PtiLink);
+
+        if (pti->MessageQueue && !(pti->TIF_flags & TIF_INCLEANUP))
+        {
+            PBYTE afKeyState = pti->MessageQueue->afKeyState;
+            BYTE afOld[sizeof(gafAsyncKeyState)];
+            UINT i;
+
+            RtlCopyMemory(afOld, afKeyState, sizeof(afOld));
+            UserCopyReducedKeyState(afKeyState, bModifiers);
+            if (bModifiers)
+            {
+                /* The toggle bit of a modifier stays the queue's own: the global one also counts the presses
+                   made on the other desktop */
+                for (i = 0; i < _countof(gModKeys); i++)
+                    SET_KEY_LOCKED(afKeyState, gModKeys[i], IS_KEY_LOCKED(afOld, gModKeys[i]));
+            }
+        }
+    }
+}
+
+VOID FASTCALL
+UserResetDesktopKeyStates(PDESKTOP pdeskOld)
+{
+    PDESKTOP pdeskNew = IntGetActiveDesktop();
+
+    if (pdeskOld == pdeskNew)
+        return;
+    UserResetDesktopQueues(pdeskOld, TRUE);
+    UserResetDesktopQueues(pdeskNew, FALSE);
 }
 
 /*

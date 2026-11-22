@@ -476,9 +476,11 @@ IntLeaveInputDesktop(IN PDESKTOP pdesk)
 
     gpdeskInputDesktop = pdeskNew;
     /* As NtUserSwitchDesktop: the global foreground becomes the one of the desktop that has the input
-       now (no foreground when there is none), and the "pressed since" bits start again */
+       now (no foreground when there is none), the "pressed since" bits and the key state of the queues
+       of the desktop that gets the input start again */
     IntForegroundFollowsInputDesktop();
     UserResetAsyncKeyStateRecent();
+    UserResetDesktopKeyStates(NULL);
     UserSpbDropAll();
     /* Window redirection: no composed pixels of the old input desktop are kept */
     UserRedirFreeFrameBuffer();
@@ -3782,7 +3784,7 @@ Quit:
 BOOL APIENTRY
 NtUserSwitchDesktop(HDESK hdesk)
 {
-    PDESKTOP pdesk;
+    PDESKTOP pdesk, pdeskOldInput;
     NTSTATUS Status;
     BOOL bRedrawDesktop;
     BOOL Ret = FALSE;
@@ -3859,11 +3861,13 @@ NtUserSwitchDesktop(HDESK hdesk)
     InputWindowStation->ActiveDesktop = pdesk;
 
     /* Set the global state */
+    pdeskOldInput = gpdeskInputDesktop;
     gpdeskInputDesktop = pdesk;
     /* The keyboard follows: the foreground becomes the one of the new input desktop (the one it had when
        it was last switched away from), the desktop left keeps its own for the switch back */
     IntForegroundFollowsInputDesktop();
     UserResetAsyncKeyStateRecent();
+    UserResetDesktopKeyStates(pdeskOldInput);
     UserSpbDropAll();
     /* Window redirection: no composed pixels of the old input desktop are kept */
     UserRedirFreeFrameBuffer();
