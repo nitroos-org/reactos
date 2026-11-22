@@ -706,12 +706,17 @@ LsapCallAuthenticationPackage(PLSA_API_MSG RequestMsg,
     PVOID LocalBuffer = NULL;
     ULONG PackageId;
     NTSTATUS Status;
+    /* The reply overlays the request (the package writes the reply fields): read the request once */
+    PVOID ClientSubmitBuffer;
+    ULONG SubmitBufferLength;
 
     TRACE("(%p %p)\n", RequestMsg, LogonContext);
 
     LogonContext->RequestClientId = RequestMsg->h.ClientId;
 
     PackageId = RequestMsg->CallAuthenticationPackage.Request.AuthenticationPackage;
+    ClientSubmitBuffer = RequestMsg->CallAuthenticationPackage.Request.ProtocolSubmitBuffer;
+    SubmitBufferLength = RequestMsg->CallAuthenticationPackage.Request.SubmitBufferLength;
 
     /* Get the right authentication package */
     Package = LsapGetAuthenticationPackage(PackageId);
@@ -721,24 +726,25 @@ LsapCallAuthenticationPackage(PLSA_API_MSG RequestMsg,
         return STATUS_NO_SUCH_PACKAGE;
     }
 
-    if (RequestMsg->CallAuthenticationPackage.Request.SubmitBufferLength > 0)
+    if (SubmitBufferLength > 0)
     {
         LocalBuffer = RtlAllocateHeap(RtlGetProcessHeap(),
                                       HEAP_ZERO_MEMORY,
-                                      RequestMsg->CallAuthenticationPackage.Request.SubmitBufferLength);
+                                      SubmitBufferLength);
         if (LocalBuffer == NULL)
         {
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         Status = NtReadVirtualMemory(LogonContext->ClientProcessHandle,
-                                     RequestMsg->CallAuthenticationPackage.Request.ProtocolSubmitBuffer,
+                                     ClientSubmitBuffer,
                                      LocalBuffer,
-                                     RequestMsg->CallAuthenticationPackage.Request.SubmitBufferLength,
+                                     SubmitBufferLength,
                                      NULL);
         if (!NT_SUCCESS(Status))
         {
             TRACE("NtReadVirtualMemory() failed (Status 0x%08lx)\n", Status);
+            RtlSecureZeroMemory(LocalBuffer, SubmitBufferLength);
             RtlFreeHeap(RtlGetProcessHeap(), 0, LocalBuffer);
             return Status;
         }
@@ -747,16 +753,16 @@ LsapCallAuthenticationPackage(PLSA_API_MSG RequestMsg,
     if (LogonContext->TrustedCaller)
         Status = Package->LsaApCallPackage((PLSA_CLIENT_REQUEST)LogonContext,
                                            LocalBuffer,
-                                           RequestMsg->CallAuthenticationPackage.Request.ProtocolSubmitBuffer,
-                                           RequestMsg->CallAuthenticationPackage.Request.SubmitBufferLength,
+                                           ClientSubmitBuffer,
+                                           SubmitBufferLength,
                                            &RequestMsg->CallAuthenticationPackage.Reply.ProtocolReturnBuffer,
                                            &RequestMsg->CallAuthenticationPackage.Reply.ReturnBufferLength,
                                            &RequestMsg->CallAuthenticationPackage.Reply.ProtocolStatus);
     else
         Status = Package->LsaApCallPackageUntrusted((PLSA_CLIENT_REQUEST)LogonContext,
                                                     LocalBuffer,
-                                                    RequestMsg->CallAuthenticationPackage.Request.ProtocolSubmitBuffer,
-                                                    RequestMsg->CallAuthenticationPackage.Request.SubmitBufferLength,
+                                                    ClientSubmitBuffer,
+                                                    SubmitBufferLength,
                                                     &RequestMsg->CallAuthenticationPackage.Reply.ProtocolReturnBuffer,
                                                     &RequestMsg->CallAuthenticationPackage.Reply.ReturnBufferLength,
                                                     &RequestMsg->CallAuthenticationPackage.Reply.ProtocolStatus);
@@ -765,8 +771,12 @@ LsapCallAuthenticationPackage(PLSA_API_MSG RequestMsg,
         TRACE("Package->LsaApCallPackage() failed (Status 0x%08lx)\n", Status);
     }
 
+    /* The submit buffer can hold passwords (MsV1_0ChangePassword: the old and the new one) */
     if (LocalBuffer != NULL)
+    {
+        RtlSecureZeroMemory(LocalBuffer, SubmitBufferLength);
         RtlFreeHeap(RtlGetProcessHeap(), 0, LocalBuffer);
+    }
 
     return Status;
 }
@@ -2644,9 +2654,13 @@ done:
         RtlFreeHeap(RtlGetProcessHeap(), 0, LocalGroups);
     }
 
-    /* Free the local authentication info buffer */
+    /* Free the local authentication info buffer (it can hold the plain password: the package erases the
+     * one it used, not the one of a request it refused before it decoded it) */
     if (LocalAuthInfo != NULL)
+    {
+        RtlSecureZeroMemory(LocalAuthInfo, AuthInfoLength);
         RtlFreeHeap(RtlGetProcessHeap(), 0, LocalAuthInfo);
+    }
 
     /* Free the token information */
     if (TokenInformation != NULL)
