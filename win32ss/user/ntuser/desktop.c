@@ -542,6 +542,23 @@ IntDesktopObjectDelete(
        switched to its own desktop goes away, input must not stay on a freed desktop */
     IntLeaveInputDesktop(pdesk);
 
+    /* A foreground queue still remembered for this desktop (no thread runs on it any more: only the queue of
+       the desktop window thread, which serves every desktop, can be left here) stops pointing at it and gives
+       its reference back: the queue would keep a pointer to the freed desktop */
+    {
+        PUSER_MESSAGE_QUEUE Queue = InterlockedExchangePointer((PVOID*)&pdesk->ActiveMessageQueue, NULL);
+        if (Queue)
+        {
+            ERR("Deleted desktop %p still had the foreground queue %p\n", pdesk, Queue);
+            if (InterlockedCompareExchangePointer((PVOID*)&Queue->Desktop, NULL, pdesk) == pdesk)
+            {
+                if (gpqForeground == Queue)
+                    gpqForeground = NULL;
+                IntDereferenceMessageQueue(Queue);
+            }
+        }
+    }
+
     if (pdesk->pDeskInfo &&
         pdesk->pDeskInfo->spwnd)
     {
