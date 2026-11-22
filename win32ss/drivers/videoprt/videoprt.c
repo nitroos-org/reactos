@@ -781,6 +781,31 @@ IntDetachFromCSRSS(
         KeUnstackDetachProcess(ApcState);
 }
 
+/*
+ * Did the system start through UEFI firmware? (SystemBootEnvironmentInformation,
+ * the value GetFirmwareType returns.) Only the firmware type of the record is
+ * read; the structure and FIRMWARE_TYPE are Vista definitions.
+ */
+static
+BOOLEAN
+IntIsUefiBoot(VOID)
+{
+    struct
+    {
+        GUID BootIdentifier;
+        ULONG FirmwareType;     /* FIRMWARE_TYPE: 1 BIOS, 2 UEFI */
+        ULONGLONG BootFlags;
+    } BootInfo;
+    NTSTATUS Status;
+
+    RtlZeroMemory(&BootInfo, sizeof(BootInfo));
+    Status = ZwQuerySystemInformation(SystemBootEnvironmentInformation,
+                                      &BootInfo,
+                                      sizeof(BootInfo),
+                                      NULL);
+    return NT_SUCCESS(Status) && (BootInfo.FirmwareType == 2);
+}
+
 VOID
 FASTCALL
 IntLoadRegistryParameters(VOID)
@@ -792,6 +817,18 @@ IntLoadRegistryParameters(VOID)
     OBJECT_ATTRIBUTES ObjectAttributes;
     PKEY_VALUE_PARTIAL_INFORMATION KeyInfo;
     ULONG Length, NewLength;
+
+    /*
+     * A UEFI boot has no VGA BIOS (with a CSM the BIOS loader runs instead):
+     * a VESA BIOS call (INT 10h through the x86 emulator) would run whatever
+     * is in low memory and can reprogram the display hardware the firmware
+     * set up, under the firmware framebuffer driver (lfbmp).
+     */
+    if (IntIsUefiBoot())
+    {
+        INFO_(VIDEOPRT, "UEFI boot: no VESA BIOS\n");
+        VpNoVesa = TRUE;
+    }
 
     /* Check if we need to use new registry */
     RtlInitUnicodeString(&KeyPath, L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\GraphicsDrivers\\UseNewKey");
