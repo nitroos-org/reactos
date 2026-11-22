@@ -25,6 +25,7 @@ HKR, , Icon,           0, "-27"
 %GenericMfg% = GenericMfg
 %IntelMfg% = IntelMfg
 %NecMfg% = NecMfg
+%MicrosoftMfg% = MicrosoftMfg
 %nVidiaMfg% = nVidiaMfg
 %RedHatMfg% = RedHatMfg
 %VirtualBoxMfg% = VirtualBoxMfg
@@ -74,6 +75,10 @@ HKR, , Icon,           0, "-27"
 %PCI\VEN_8086&DEV_7180.DeviceDesc% = NO_DRV,PCI\VEN_8086&DEV_7180
 %PCI\VEN_8086&DEV_7190.DeviceDesc% = NO_DRV,PCI\VEN_8086&DEV_7190
 %PCI\VEN_8086&DEV_7192.DeviceDesc% = NO_DRV,PCI\VEN_8086&DEV_7192
+
+[MicrosoftMfg]
+%ACPI\VMBUS.DeviceDesc% = NO_DRV,ACPI\VMBUS
+%ACPI\HYPER_V_GEN_COUNTER_V1.DeviceDesc% = NO_DRV,ACPI\HYPER_V_GEN_COUNTER_V1
 
 [NecMfg]
 %NecCb.DeviceDesc% = PCI_ISA_Inst,PCI\VEN_1033&DEV_0001
@@ -179,6 +184,7 @@ ReactOS = "ReactOS Project"
 
 IntelMfg = "Intel"
 NecMfg = "NEC"
+MicrosoftMfg = "Microsoft"
 nVidiaMfg = "nVidia"
 RedHatMfg = "Red Hat"
 VirtualBoxMfg = "Oracle"
@@ -245,6 +251,9 @@ PCI\VEN_1AF4&DEV_1002.DeviceDesc = "VirtIO Balloon Device"
 PCI\VEN_1AF4&DEV_1045.DeviceDesc = "VirtIO Balloon Device"
 
 PCI\VEN_80EE&DEV_CAFE.DeviceDesc = "VirtualBox Guest Device"
+
+ACPI\VMBUS.DeviceDesc = "Hyper-V Virtual Machine Bus"
+ACPI\HYPER_V_GEN_COUNTER_V1.DeviceDesc = "Hyper-V Generation Counter"
 
 [Strings.0404]
 GenericMfg = "(標準系統裝置)"
