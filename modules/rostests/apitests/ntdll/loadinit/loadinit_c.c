@@ -25,6 +25,16 @@ DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
         DisableThreadLibraryCalls(hinstDLL);
         LoadInitLog("C+");
         Initialized = 1;
+        if (LoadInitEnvIs("NTDLL_LOADINIT_MODE", "cll"))
+        {
+            /* the module that imports C, while C's DllMain runs (mode cll) */
+            HMODULE hModule;
+
+            LoadInitLog("C:LL(B)");
+            hModule = LoadLibraryW(L"ntdll_loadinit_b.dll");
+            LoadInitLog(hModule ? "C:LL(B)=ok" : "C:LL(B)=NULL");
+            if (hModule) FreeLibrary(hModule);
+        }
     }
     return TRUE;
 }
