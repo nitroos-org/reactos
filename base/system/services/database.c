@@ -3820,6 +3820,7 @@ ScmLoadService(PSERVICE Service,
 #define SCM_MAX_DEPENDENCY_DEPTH    16
 #define SCM_DEPENDENCY_MIN_WAIT     30000   /* ms a dependency may take between two checkpoints, at least */
 #define SCM_DEPENDENCY_CALL_LIMIT   120000  /* ms one StartService call may spend waiting for its dependencies */
+#define SCM_DEPENDENCY_STARTER_GRACE 5000   /* ms the call that started a dependency waits longer than the others */
 
 typedef struct _SCM_START_CHAIN
 {
@@ -3846,10 +3847,15 @@ ScmIsDependencyErrorKept(DWORD dwError)
 
 /* Waits until the service has reached the running states (bStopped FALSE) or has stopped (bStopped TRUE). A wait
    that sees no progress (the checkpoint) for the service's wait hint, at least SCM_DEPENDENCY_MIN_WAIT, or that
-   reaches the limit of the call, gives up. No lock is held while waiting. */
+   reaches the limit of the call, gives up. No lock is held while waiting.
+   The call that started the service waits SCM_DEPENDENCY_STARTER_GRACE longer than calls that found it pending: when
+   the service's own start code starts a service that depends on it (and so waits for itself, which the documentation
+   of ServiceMain warns against: the call blocks), that inner call gives up first, the service goes on, and the call
+   that started it still sees it running, instead of both giving up at the same moment. */
 static DWORD
 ScmWaitForServiceState(PSERVICE Service,
                        BOOL bStopped,
+                       BOOL bStarter,
                        PSCM_START_CHAIN Chain)
 {
     DWORD dwState, dwCheckPoint, dwWaitHint, dwNow;
@@ -3896,6 +3902,8 @@ ScmWaitForServiceState(PSERVICE Service,
         {
             dwProgressTime = dwNow;
             dwAllowed = max(dwWaitHint, SCM_DEPENDENCY_MIN_WAIT);
+            if (bStarter)
+                dwAllowed += SCM_DEPENDENCY_STARTER_GRACE;
             dwLastCheckPoint = dwCheckPoint;
         }
 
@@ -3927,6 +3935,7 @@ ScmStartDependencyByName(PCWSTR pszName,
     DWORD dwState;
     DWORD dwStartType;
     BOOL bDeleted;
+    BOOL bStarter;
     int nTry;
 
     ScmLockDatabaseShared();
@@ -3949,13 +3958,13 @@ ScmStartDependencyByName(PCWSTR pszName,
         if (dwState == SERVICE_START_PENDING)
         {
             /* Started by somebody else: wait for it, without a lock */
-            dwError = ScmWaitForServiceState(Dependency, FALSE, Chain);
+            dwError = ScmWaitForServiceState(Dependency, FALSE, FALSE, Chain);
             break;
         }
         else if (dwState == SERVICE_STOP_PENDING)
         {
             /* Let the stop finish, then start it again */
-            dwError = ScmWaitForServiceState(Dependency, TRUE, Chain);
+            dwError = ScmWaitForServiceState(Dependency, TRUE, FALSE, Chain);
             if (dwError != ERROR_SUCCESS)
                 break;
         }
@@ -3980,6 +3989,7 @@ ScmStartDependencyByName(PCWSTR pszName,
 
             /* Two callers may get here for the same dependency: the second one is told it is running already */
             dwError = ScmStartServiceInChain(Dependency, 0, NULL, Chain);
+            bStarter = (dwError == ERROR_SUCCESS);
             if (dwError == ERROR_SERVICE_ALREADY_RUNNING)
                 dwError = ERROR_SUCCESS;
             else if (dwError != ERROR_SUCCESS && !ScmIsDependencyErrorKept(dwError))
@@ -3988,7 +3998,7 @@ ScmStartDependencyByName(PCWSTR pszName,
             /* A user-mode service must have reported its running state before the next one is started; the start
                above has released its locks, so this wait holds none */
             if (dwError == ERROR_SUCCESS)
-                dwError = ScmWaitForServiceState(Dependency, FALSE, Chain);
+                dwError = ScmWaitForServiceState(Dependency, FALSE, bStarter, Chain);
             break;
         }
     }
