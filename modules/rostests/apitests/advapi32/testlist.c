@@ -35,6 +35,7 @@ extern void func_eventlog_supp(void);
 extern void func_eventlog_full(void);
 extern void func_EventLogSecurityAccess(void);
 extern void func_AnonymousLocalServers(void);
+extern void func_AnonymousTokenRows(void);
 extern void func_EventRegister(void);
 extern void func_EventProvider(void);
 extern void func_EventSetInformation(void);
@@ -224,6 +225,7 @@ const struct test winetest_testlist[] =
     { "eventlog_full", func_eventlog_full },
     { "EventLogSecurityAccess", func_EventLogSecurityAccess },
     { "AnonymousLocalServers", func_AnonymousLocalServers },
+    { "AnonymousTokenRows", func_AnonymousTokenRows },
     { "EventRegister", func_EventRegister },
     { "EventProvider", func_EventProvider },
     { "EventSetInformation", func_EventSetInformation },
