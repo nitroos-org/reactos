@@ -88,6 +88,7 @@ list(APPEND SOURCE
     MouseWheel.c
     WmCharAnsi.c
     KeyboardLLHook.c
+    WallpaperAccess.c
     LayeredCompose.c
     LoadImage.c
     LoadImageGCC.c

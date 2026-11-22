@@ -52,9 +52,13 @@ W32kOpenFile(PCWSTR pwszFileName, DWORD dwDesiredAccess)
 
     RtlInitUnicodeString(&ustrFile, pwszFileName);
 
+    /* The name comes from the calling process (SPI_SETDESKWALLPAPER): the file is opened with the
+       caller's own rights. OBJ_FORCE_ACCESS_CHECK makes the open check access (the directories on
+       the way and the file) for the thread's token although the call comes from kernel mode, so a
+       file the caller cannot read cannot be put on their desktop either. */
     InitializeObjectAttributes(&ObjectAttributes,
                                &ustrFile,
-                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_FORCE_ACCESS_CHECK,
                                NULL,
                                NULL);
 
