@@ -16,6 +16,7 @@ list(APPEND SOURCE
     SspiAuthIdentityExports.c
     SspiInitRace.c
     SchannelStaleContext.c
+    SchannelAlpn.c
     QueryContextAttributesEx.c
     NtlmConcurrent.c
     NtlmFailedContext.c
