@@ -172,7 +172,20 @@ static ULONG_PTR SendInput32(ULONG *a)
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
         _SEH2_END;
         /* A fault delivers the readable prefix first, as the native loop does. */
-        if (Done) Total += NtUserSendInput(Done, Native, sizeof(INPUT));
+        if (Done)
+        {
+            ULONG Saved = RtlGetLastWin32Error();
+            UINT Sent;
+
+            RtlSetLastWin32Error(ERROR_SUCCESS);
+            Sent = NtUserSendInput(Done, Native, sizeof(INPUT));
+            if (Sent || RtlGetLastWin32Error() == ERROR_SUCCESS) RtlSetLastWin32Error(Saved);
+            /* Refused because the thread's desktop does not have the input: a 32-bit program on Windows
+               (WOW64) gets the number of inputs back, with the last error ERROR_ACCESS_DENIED that the native
+               call set, and nothing is sent (Windows Server 2022, row V7: SendInput of 2 keys returns 2) */
+            if (!Sent && RtlGetLastWin32Error() == ERROR_ACCESS_DENIED) Sent = Done;
+            Total += Sent;
+        }
         if (Done < Chunk) break;
         Start += Chunk * sizeof(INPUT32);
         Left -= Chunk;
