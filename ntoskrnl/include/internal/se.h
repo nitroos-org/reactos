@@ -969,6 +969,13 @@ SepSetAccessCheckResults(
     _In_ ACCESS_MASK GrantedAccess,
     _In_ NTSTATUS AccessStatus);
 
+BOOLEAN
+SepMandatoryAccessDenied(
+    _In_ PTOKEN Token,
+    _In_ PSECURITY_DESCRIPTOR CapturedSecurityDescriptor,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ PGENERIC_MAPPING GenericMapping);
+
 VOID
 SepAccessCheckCaptured(
     _In_ PSECURITY_DESCRIPTOR CapturedSecurityDescriptor,

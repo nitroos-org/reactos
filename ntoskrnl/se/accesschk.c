@@ -246,6 +246,144 @@ SepTokenGetsImplicitOwnerRights(
 }
 
 /*
+ * Mandatory integrity in the access check services (NtAccessCheck,
+ * NtAccessCheckByType, NtAccessCheckByTypeResultList and their audit alarm
+ * forms). Measured on Windows Server 2022 with impersonation tokens of every
+ * level (Untrusted to System, the anonymous logon token, Low restricted and
+ * write restricted tokens, a standard user at Medium and Low), descriptors
+ * without a label and with labels of every level and policy, three generic
+ * mappings, 17 requests and object type lists (101,000 compared results):
+ * - The label of the object is the first mandatory label ACE of its SACL
+ *   that is not INHERIT_ONLY; one without has an implicit Medium label.
+ * - A token at or above the level of the label is not restricted by it.
+ * - A token below it is granted at most the read rights (GenericRead of the
+ *   mapping and READ_CONTROL) unless the label has NO_READ_UP, and the
+ *   execute rights (GenericExecute and SYNCHRONIZE) unless it has
+ *   NO_EXECUTE_UP; never any other right: there is no write up, also when
+ *   the label does not have NO_WRITE_UP.
+ * - A request for any other right (also ACCESS_SYSTEM_SECURITY, WRITE_OWNER
+ *   and the WRITE_DAC the owner would get implicitly) is denied before the
+ *   privileges and the DACL are looked at; MAXIMUM_ALLOWED gets what the DACL
+ *   grants within those rights.
+ * The object opens of the kernel (SeAccessCheck) do not apply labels yet;
+ * the registry applies its own (CmpAclMandatoryAllowed).
+ */
+
+/**
+ * @brief
+ * Works out the rights the mandatory label of a descriptor leaves a token.
+ *
+ * @param[in] Token
+ * The token the access check is for. The caller holds its lock.
+ *
+ * @param[in] SecurityDescriptor
+ * A captured (validated) security descriptor.
+ *
+ * @param[in] GenericMapping
+ * The generic mapping of the object.
+ *
+ * @return
+ * The rights the token may be granted at most, or MAXULONG when the label
+ * does not restrict the token.
+ */
+static
+ACCESS_MASK
+SepMandatoryAllowedAccess(
+    _In_ PTOKEN Token,
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _In_ PGENERIC_MAPPING GenericMapping)
+{
+    ULONG Level = SECURITY_MANDATORY_MEDIUM_RID;
+    ACCESS_MASK Policy = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
+    ACCESS_MASK Allowed = 0;
+    BOOLEAN Present, Defaulted;
+    PACL Sacl = NULL;
+    PACE_HEADER Ace;
+    PISID LabelSid;
+    ULONG AceIndex;
+    ULONG Rid;
+
+    PAGED_CODE();
+
+    if (NT_SUCCESS(RtlGetSaclSecurityDescriptor(SecurityDescriptor, &Present, &Sacl, &Defaulted)) &&
+        Present && Sacl != NULL)
+    {
+        for (AceIndex = 0; AceIndex < Sacl->AceCount; AceIndex++)
+        {
+            if (!NT_SUCCESS(RtlGetAce(Sacl, AceIndex, (PVOID*)&Ace)))
+                break;
+
+            if (Ace->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE || (Ace->AceFlags & INHERIT_ONLY_ACE))
+                continue;
+
+            /* The ACE must hold a whole mandatory label SID; another one is passed over */
+            LabelSid = (PISID)&((PSYSTEM_MANDATORY_LABEL_ACE)Ace)->SidStart;
+            if (Ace->AceSize < FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) + FIELD_OFFSET(SID, SubAuthority) ||
+                Ace->AceSize < FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) +
+                               RtlLengthRequiredSid(LabelSid->SubAuthorityCount) ||
+                !SepIsMandatoryLabelSid((PSID)LabelSid, &Rid))
+            {
+                continue;
+            }
+
+            Level = Rid;
+            Policy = ((PSYSTEM_MANDATORY_LABEL_ACE)Ace)->Mask;
+            break;
+        }
+    }
+
+    if (Token->IntegrityLevel >= Level)
+        return MAXULONG;
+
+    if (!(Policy & SYSTEM_MANDATORY_LABEL_NO_READ_UP))
+        Allowed |= GenericMapping->GenericRead | READ_CONTROL;
+    if (!(Policy & SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP))
+        Allowed |= GenericMapping->GenericExecute | SYNCHRONIZE;
+
+    return Allowed;
+}
+
+/**
+ * @brief
+ * Tells whether the mandatory label of a descriptor denies a token some of
+ * the rights it asks for (the precedence of the label over a missing
+ * privilege: an Untrusted or Low client asking for ACCESS_SYSTEM_SECURITY
+ * without SeSecurityPrivilege is denied access, measured).
+ *
+ * @param[in] Token
+ * The client token. The function takes its lock.
+ *
+ * @param[in] CapturedSecurityDescriptor
+ * A captured (validated) security descriptor.
+ *
+ * @param[in] DesiredAccess
+ * The rights asked for, without generic rights; MAXIMUM_ALLOWED is ignored.
+ *
+ * @param[in] GenericMapping
+ * The generic mapping of the object.
+ *
+ * @return
+ * TRUE if the label denies some of the rights.
+ */
+BOOLEAN
+SepMandatoryAccessDenied(
+    _In_ PTOKEN Token,
+    _In_ PSECURITY_DESCRIPTOR CapturedSecurityDescriptor,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ PGENERIC_MAPPING GenericMapping)
+{
+    ACCESS_MASK Allowed;
+
+    PAGED_CODE();
+
+    SepAcquireTokenLockShared(Token);
+    Allowed = SepMandatoryAllowedAccess(Token, CapturedSecurityDescriptor, GenericMapping);
+    SepReleaseTokenLock(Token);
+
+    return Allowed != MAXULONG && (DesiredAccess & ~(MAXIMUM_ALLOWED | Allowed)) != 0;
+}
+
+/*
  * Object type lists (NtAccessCheckByType and NtAccessCheckByTypeResultList).
  *
  * The list is a tree in pre-order: the object itself (the root, level 0) and its property sets and
@@ -1499,6 +1637,9 @@ SepAccessCheckCaptured(
     _Out_writes_(UseResultList ? ObjectTypeListLength : 1) PACCESS_MASK GrantedAccessList,
     _Out_writes_(UseResultList ? ObjectTypeListLength : 1) PNTSTATUS AccessStatusList)
 {
+    ACCESS_MASK MandatoryAllowed;
+    ULONG ResultIndex;
+
     PAGED_CODE();
 
     ASSERT(CapturedSecurityDescriptor != NULL);
@@ -1507,6 +1648,25 @@ SepAccessCheckCaptured(
 
     /* Lock the token */
     SepAcquireTokenLockShared(Token);
+
+    /*
+     * The mandatory label first: a client below the level of the object is
+     * denied every right it asks for that the label does not leave it, also
+     * one a privilege granted, whatever the DACL says
+     */
+    MandatoryAllowed = SepMandatoryAllowedAccess(Token, CapturedSecurityDescriptor, CapturedGenericMapping);
+    if (MandatoryAllowed != MAXULONG &&
+        ((DesiredAccess | PreviouslyGrantedAccess) & ~(MAXIMUM_ALLOWED | MandatoryAllowed)) != 0)
+    {
+        SepSetAccessCheckResults(GrantedAccessList,
+                                 AccessStatusList,
+                                 UseResultList,
+                                 ObjectTypeListLength,
+                                 0,
+                                 STATUS_ACCESS_DENIED);
+        SepReleaseTokenLock(Token);
+        return;
+    }
 
     /*
      * Check if the token is the owner and grant WRITE_DAC and READ_CONTROL rights,
@@ -1555,6 +1715,17 @@ SepAccessCheckCaptured(
                              NULL,
                              GrantedAccessList,
                              AccessStatusList);
+    }
+
+    /* MAXIMUM_ALLOWED: what the DACL grants, within what the label leaves */
+    if (MandatoryAllowed != MAXULONG && (DesiredAccess & MAXIMUM_ALLOWED))
+    {
+        for (ResultIndex = 0; ResultIndex < (UseResultList ? ObjectTypeListLength : 1); ResultIndex++)
+        {
+            GrantedAccessList[ResultIndex] &= MandatoryAllowed;
+            if (AccessStatusList[ResultIndex] == STATUS_SUCCESS && GrantedAccessList[ResultIndex] == 0)
+                AccessStatusList[ResultIndex] = STATUS_ACCESS_DENIED;
+        }
     }
 
     /* Unlock the token */
@@ -1845,6 +2016,31 @@ SepAccessCheck(
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("SePrivilegePolicyCheck failed (Status 0x%08lx)\n", Status);
+
+        /*
+         * A client below the integrity level of the object is denied access
+         * before its privileges count (ACCESS_SYSTEM_SECURITY without
+         * SeSecurityPrivilege: access denied, measured). The descriptor is
+         * captured for that only; when it cannot be, the result stays as it was.
+         */
+        if (Status == STATUS_PRIVILEGE_NOT_HELD &&
+            NT_SUCCESS(SeCaptureSecurityDescriptor(SecurityDescriptor,
+                                                   PreviousMode,
+                                                   PagedPool,
+                                                   FALSE,
+                                                   &CapturedSecurityDescriptor)))
+        {
+            if (CapturedSecurityDescriptor != NULL &&
+                SepMandatoryAccessDenied(Token,
+                                         CapturedSecurityDescriptor,
+                                         DesiredAccess,
+                                         &CapturedGenericMapping))
+            {
+                Status = STATUS_ACCESS_DENIED;
+            }
+
+            /* Cleanup releases it */
+        }
 
         /*
          * The caller does not have the required access to do an access check.
