@@ -267,6 +267,33 @@ SmpConfigureAllowProtectedRenames(IN PWSTR ValueName,
     return STATUS_SUCCESS;
 }
 
+/*
+ * \RPC Control carries a Low mandatory label (NO_WRITE_UP, not inheritable),
+ * measured on Windows Server 2022 (S:AI(ML;;NW;;;LW)): a Low process can
+ * create the LPC/ALPC ports of its RPC endpoints there, as in the named object
+ * directories; an unlabelled directory counts as Medium and would refuse it.
+ */
+typedef struct _SMP_LABEL_SACL
+{
+    ACL Acl;
+    struct
+    {
+        ACE_HEADER Header;
+        ACCESS_MASK Mask;
+        SID Sid;
+    } Label;
+} SMP_LABEL_SACL;
+
+static SMP_LABEL_SACL SmpRpcControlLabel =
+{
+    { ACL_REVISION, 0, sizeof(SMP_LABEL_SACL), 1, 0 },
+    {
+        { SYSTEM_MANDATORY_LABEL_ACE_TYPE, 0, sizeof(((SMP_LABEL_SACL *)0)->Label) },
+        SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        { SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY}, {SECURITY_MANDATORY_LOW_RID} }
+    }
+};
+
 NTSTATUS
 NTAPI
 SmpConfigureObjectDirectories(IN PWSTR ValueName,
@@ -277,6 +304,7 @@ SmpConfigureObjectDirectories(IN PWSTR ValueName,
                               IN PVOID EntryContext)
 {
     PISECURITY_DESCRIPTOR SecDescriptor;
+    SECURITY_DESCRIPTOR RpcDescriptor;
     NTSTATUS Status;
     OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE DirHandle;
@@ -299,6 +327,15 @@ SmpConfigureObjectDirectories(IN PWSTR ValueName,
             (RtlEqualUnicodeString(&SearchString, &WindowsString, TRUE)))
         {
             SecDescriptor = SmpLiberalSecurityDescriptor;
+
+            /* \RPC Control: the liberal descriptor with the Low label */
+            if (RtlEqualUnicodeString(&SearchString, &RpcString, TRUE))
+            {
+                RpcDescriptor = *SmpLiberalSecurityDescriptor;
+                Status = RtlSetSaclSecurityDescriptor(&RpcDescriptor, TRUE, &SmpRpcControlLabel.Acl, FALSE);
+                if (NT_SUCCESS(Status))
+                    SecDescriptor = (PISECURITY_DESCRIPTOR)&RpcDescriptor;
+            }
         }
 
         /* Create the requested directory with the requested descriptor */
