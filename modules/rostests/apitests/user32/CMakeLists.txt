@@ -5,6 +5,7 @@ add_subdirectory(wevhook)
 list(APPEND SOURCE
     AttachThreadInput.c
     AttachThreadInputQueue.c
+    AniEmpty.c
     AniMalformed.c
     AutoRotation.c
     BroadcastHung.c
