@@ -4508,14 +4508,21 @@ BootLoaderHardDiskPage(PINPUT_RECORD Ir)
     {
         /* Another system's loader is at \EFI\BOOT\BOOTX64.EFI: ours is only in its own directory */
         SetupLogFormat("The boot loader of another system was found at \\EFI\\BOOT and kept; "
-                       BRAND_PRODUCT_NAME " was installed to \\EFI\\NITROOS: add that file to the firmware boot menu");
+                       BRAND_PRODUCT_NAME " was installed to \\EFI\\NITROOS: leave the installation disc in the drive "
+                       "for the restart (the disc starts the installed system, which then adds its firmware boot entry); "
+                       "if the other system starts, start from the disc once and press no key, or add that file to the "
+                       "firmware boot menu");
         if (!IsUnattendedSetup)
         {
             PopupError("The EFI system partition holds the boot loader of another\n"
                        "operating system in \\EFI\\BOOT, which was left as it is.\n"
-                       BRAND_PRODUCT_NAME " was installed to \\EFI\\NITROOS: add the file\n"
-                       "BOOTX64.EFI there as a boot option in the firmware menu of\n"
-                       "your computer to start it.\n"
+                       BRAND_PRODUCT_NAME " was installed to \\EFI\\NITROOS.\n"
+                       "Leave the installation disc in the drive for the restart:\n"
+                       "the disc starts the installed system, which then adds itself\n"
+                       "to the boot menu of the firmware. If the other system starts\n"
+                       "instead, start the computer from the disc once and press no\n"
+                       "key, or add \\EFI\\NITROOS\\BOOTX64.EFI as a boot option in\n"
+                       "the firmware menu of your computer.\n"
                        "Press ENTER to continue.",
                        MUIGetString(STRING_CONTINUE),
                        Ir, POPUP_WAIT_ENTER);
