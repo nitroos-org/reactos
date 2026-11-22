@@ -2746,6 +2746,24 @@ SeTokenCanImpersonate(
         goto Quit;
     }
 
+    /*
+     * A process may not impersonate a token of a higher integrity level than
+     * its own: "Windows Integrity Mechanism Design" (How Windows assigns a
+     * mandatory label to objects): the labels of process, thread, token and
+     * job objects keep processes of the same user at lower integrity levels
+     * from "impersonating a higher-level access token". A token object's
+     * label only refuses the write rights, and TOKEN_DUPLICATE is not one of
+     * them: the level is compared here, and the caller (PsImpersonateClient)
+     * then gets an identification-level copy of the token instead.
+     */
+    if (TokenToImpersonate->IntegrityLevel > ProcessToken->IntegrityLevel)
+    {
+        DPRINT1("Cannot impersonate a token of a higher integrity level (0x%lx > 0x%lx)\n",
+                TokenToImpersonate->IntegrityLevel, ProcessToken->IntegrityLevel);
+        CanImpersonate = FALSE;
+        goto Quit;
+    }
+
     /* Allow impersonation for the process server if it's granted the impersonation privilege */
     if ((ProcessToken->TokenFlags & TOKEN_HAS_IMPERSONATE_PRIVILEGE) != 0)
     {
