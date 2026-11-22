@@ -732,6 +732,14 @@ LoadReactOSSetup(
     /* Close the inf file */
     InfCloseFile(InfHandle);
 
+#ifdef UEFIBOOT
+    /*
+     * The first stage of Setup ends with a restart: the firmware then starts
+     * this disc again, whose loader hands over to the installed system.
+     */
+    UefiBootThisMediumNext();
+#endif
+
     UiDrawStatusText("The Setup program is starting...");
 
     /* Finish loading */

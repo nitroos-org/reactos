@@ -9,6 +9,9 @@
 #include <drivers/acpi/acpi.h>
 
 VOID
+UefiBootEntryInit(VOID);
+
+VOID
 UefiConsPutChar(int Ch);
 
 BOOLEAN

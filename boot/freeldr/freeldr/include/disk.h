@@ -74,6 +74,10 @@ UefiResolveSystemPath(
     _In_ SIZE_T BootPathSize,
     _Out_writes_(MessageSize) PCHAR Message,
     _In_ SIZE_T MessageSize);
+
+/* Setup starts from an optical disc: have the firmware start the disc at the next boot (arch/uefi/uefiboot.c) */
+VOID
+UefiBootThisMediumNext(VOID);
 #endif
 
 
