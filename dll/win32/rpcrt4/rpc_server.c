@@ -1186,14 +1186,15 @@ RPC_STATUS WINAPI RpcServerUseProtseqW(RPC_WSTR Protseq, unsigned int MaxCalls, 
 void RPCRT4_destroy_all_protseqs(void)
 {
     RpcServerProtseq *cps, *cursor2;
+    BOOL listening = listen_count != 0 || std_listen;
 
-    if (listen_count != 0)
+    if (listening)
         std_listen = FALSE;
 
     EnterCriticalSection(&server_cs);
     LIST_FOR_EACH_ENTRY_SAFE(cps, cursor2, &protseqs, RpcServerProtseq, entry)
     {
-        if (listen_count != 0)
+        if (listening)
             RPCRT4_sync_with_server_thread(cps);
         destroy_serverprotoseq(cps);
     }
@@ -1297,6 +1298,7 @@ RPC_STATUS WINAPI RpcServerUnregisterIf( RPC_IF_HANDLE IfSpec, UUID* MgrTypeUuid
   HANDLE event = NULL;
   BOOL found = FALSE;
   BOOL completed = TRUE;
+  BOOL auto_listen = FALSE;
   RpcServerInterface *cif;
   RPC_STATUS status;
 
@@ -1310,6 +1312,7 @@ RPC_STATUS WINAPI RpcServerUnregisterIf( RPC_IF_HANDLE IfSpec, UUID* MgrTypeUuid
         UuidEqual(MgrTypeUuid, &cif->MgrTypeUuid, &status)) {
       list_remove(&cif->entry);
       TRACE("unregistering cif %p\n", cif);
+      auto_listen = (cif->Flags & RPC_IF_AUTOLISTEN) != 0;
       if (cif->CurrentCalls) {
         completed = FALSE;
         cif->Delete = TRUE;
@@ -1325,6 +1328,17 @@ RPC_STATUS WINAPI RpcServerUnregisterIf( RPC_IF_HANDLE IfSpec, UUID* MgrTypeUuid
   if (!found) {
     ERR("not found for object %s\n", debugstr_guid(MgrTypeUuid));
     return RPC_S_UNKNOWN_IF;
+  }
+
+  if (auto_listen)
+  {
+      /* The registration of the interface counted as a listener: give the count back, so that a later
+       * RpcMgmtStopServerListening of a manual listener ends the listening (measured: it does).
+       * The listening itself goes on when the last holder is gone, as before. */
+      EnterCriticalSection(&listen_cs);
+      if (listen_count != 0)
+          listen_count--;
+      LeaveCriticalSection(&listen_cs);
   }
 
   if (completed)
