@@ -83,6 +83,7 @@ typedef struct _GRAPHICS_DEVICE
     PVIDEO_MONITOR_DEVICE pvMonDev;
     PFILE_OBJECT     FileObject;
     DWORD            ProtocolType;
+    BOOLEAN          bFallbackDevice;                /* Used only without another device (NitroFallbackDisplay) */
 } GRAPHICS_DEVICE, *PGRAPHICS_DEVICE;
 
 typedef struct _PDEVOBJ
