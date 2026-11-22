@@ -961,8 +961,10 @@ NvHandOffToInstalledSystem(VOID)
     {
         Status = BootServices->StartImage(Image, NULL, NULL);
         /* It returns only if it failed before taking over */
-        BootServices->UnloadImage(Image);
     }
+    /* EFI_SECURITY_VIOLATION (Secure Boot) leaves a loaded image too (UEFI 2.10, 7.4 LoadImage) */
+    if (Image)
+        BootServices->UnloadImage(Image);
     ERR("UEFI hand-off: the installed system's loader failed (0x%lx), booting from the medium\n", (ULONG)Status);
     GlobalSystemTable->ConOut->OutputString(GlobalSystemTable->ConOut,
         L"The installed system could not be started: booting from the medium.\r\n");
@@ -1006,6 +1008,13 @@ UefiBootThisMediumNext(VOID)
     Current = (UINT16)(Data[0] | (Data[1] << 8));
     NvFree(Data);
 
+    /* Only an option that exists and is active: some firmware boots its menu entries through temporary numbers */
+    if (!(NvOptionAttributes(Current) & LOAD_OPTION_ACTIVE))
+    {
+        ERR("UEFI boot entry: BootCurrent %04X is not an active option, BootNext not set\n", Current);
+        return;
+    }
+
     /* The first option the firmware starts: active, not hidden, of the boot category */
     if (!EFI_ERROR(NvGetVariable(L"BootOrder", &NvGlobalVariableGuid, &Data, &Size)))
     {
@@ -1028,6 +1037,8 @@ UefiBootThisMediumNext(VOID)
         ERR("UEFI boot entry: Boot%04X (this disc) comes first in BootOrder, BootNext not needed\n", Current);
         return;
     }
+    if (!NvStoreHasRoom(sizeof(Current) + NV_HEADER_BYTES))
+        return;
 
     Status = NvSetVariable(L"BootNext", &NvGlobalVariableGuid, "BootNext", &Current, sizeof(Current));
     if (EFI_ERROR(Status))
