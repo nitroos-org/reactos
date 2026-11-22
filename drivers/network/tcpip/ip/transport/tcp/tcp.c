@@ -234,6 +234,12 @@ NTSTATUS TCPStartup(VOID)
     TCPReadIpv6Switch();
     if (TCPIpv6Enabled)
         TCP6ReadIdentifierSettings();
+    /* the key of the connection numbers (after the identifier settings: it comes from their secret), and with it
+       RFC 6056: the ephemeral ports of a start begin at a random port of the dynamic range, not at TCP_EPHEMERAL_FIRST
+       in every start (NextPort is a host-order port, ports.c) */
+    TCPConnectionKeyInit();
+    TCPPorts.NextPort = TCP_EPHEMERAL_FIRST + TCPConnectionRandom() % (TCP_EPHEMERAL_LAST - TCP_EPHEMERAL_FIRST + 1);
+
     /* the lock of the persistent IPv6 configuration, which interfaces read when they start */
     TCP6PersistInit();
 

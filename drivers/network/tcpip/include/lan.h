@@ -37,6 +37,11 @@ typedef struct ETH_HEADER {
 /* Max packets queued for a single adapter */
 #define IP_MAX_RECV_BACKLOG 0x20
 
+/* TCP segments that may wait in an adapter's receive queue (lan.c says why so many, and what else bounds the queue).
+   The NDIS packet descriptors of main.c are sized after it: one per segment, plus what the send path and the
+   frames other than TCP use */
+#define LAN_RECEIVE_QUEUE_LIMIT 8192
+
 /* Per adapter information */
 typedef struct LAN_ADAPTER {
     LIST_ENTRY ListEntry;                   /* Entry on list */
@@ -71,6 +76,7 @@ typedef struct LAN_ADAPTER {
     UINT PacketFilter;                      /* Packet filter for this adapter */
     CHEW_SERIAL_QUEUE ReceiveQueue;         /* Received packets, in arrival order */
     LONG HeldPackets;                       /* Miniport packets waiting in ReceiveQueue */
+    volatile LONG ReceiveQueuedBytes;       /* What the segments waiting in ReceiveQueue are charged with (lan.c) */
     volatile LONG ReceiveWorkItems;         /* Received frames queued as work items of their own */
     /* Multicast reception (LanSetMulticast; only IPv6 asks for it). Under ReconfigureLock: */
     BOOLEAN McastWanted;                    /* A list was asked for (McastCount/McastList hold it) */

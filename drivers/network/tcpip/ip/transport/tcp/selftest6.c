@@ -374,9 +374,10 @@ StTransferEx(const char *Name, const ip_addr_t *ListenAddr, const ip_addr_t *Des
         Ok = !T.Failed && T.Got == Bytes && T.Sum == StExpectedSum(Bytes);
     else
         Ok = !T.Failed && StServer.Got == Bytes && StServer.Sum == StExpectedSum(Bytes);
-    /* A connection to a closed port fails at once with a reset (ERR_RST), not by its timeout */
+    /* A connection to a closed port fails with a reset (ERR_RST), not by its timeout: after the SYN was sent
+       again for each of the first resets, about 2 s (NITRO_TCP_SYN_RST_RETRIES, lwipopts.h) */
     if (ExpectRefused)
-        Ok = T.Failed && !T.Connected && T.Error == ERR_RST && Us < 1000000;
+        Ok = T.Failed && !T.Connected && T.Error == ERR_RST && Us < 4000000;
     _snprintf(Detail, sizeof(Detail), "connected=%d sent=%lu got=%lu accepted=%lu in %lu us (err %d)",
               (int)T.Connected, T.Sent, Echo ? T.Got : StServer.Got, StServer.Accepted, Us, (int)T.Error);
     StResult(Ok, Name, Detail);

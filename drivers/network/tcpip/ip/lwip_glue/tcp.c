@@ -912,7 +912,17 @@ LibTCPFullListenerSyn(struct pbuf *p, struct netif *inp, const ip4_addr_t *Src, 
     Loopback = ip4_addr_isloopback(Dest) || ip4_addr_eq(Src, Dest);
     if (Loopback)
     {
-        if (LibTCPTakeDroppedSyn(Src, SrcPort, DestPort, Now))
+#ifdef NITRO_TCP_SYN_RST_RETRIES
+        /* The connecting side sends the SYN again after each reset and gives up after the last one (lwipopts.h):
+           refused at once, the attempt fails after about 2 s as on Windows (a connect that finds room during its
+           retries is accepted). Dropping the first SYN as well made the attempt alternate between a dropped SYN
+           and a reset, and run into the connect timeout (21 s, WSAETIMEDOUT) */
+        BOOLEAN Refuse = TRUE;
+#else
+        BOOLEAN Refuse = LibTCPTakeDroppedSyn(Src, SrcPort, DestPort, Now);
+#endif
+
+        if (Refuse)
         {
             ip_addr_t SrcAddr, DestAddr;
 
@@ -1068,16 +1078,38 @@ LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp)
     return 0;
 }
 
-/* LWIP_HOOK_TCP_ISN: lwIP's own generator, raised for an open of a reopened 4-tuple */
+/* LWIP_HOOK_TCP_ISN: RFC 6528, a clock that counts every 4 microseconds (the system time: it goes on over a
+   restart) plus a keyed hash of the four values of the connection (a secret key, iid6.c), raised
+   for every connection that is opened or accepted. lwIP's own generator added tcp_ticks to a static 6510 and
+   began at 6510 at every start; a peer that held a connection of the start before in TIME-WAIT dropped the SYN.
+   An open of a reopened 4-tuple of ours is raised above the old connection (Reopen) */
 u32_t
 LibTCPNextIss(const ip_addr_t *LocalIp, u16_t LocalPort, const ip_addr_t *RemoteIp, u16_t RemotePort)
 {
-    static u32_t Iss = 6510;
+    static BOOLEAN ClockStarted;
+    static LONGLONG StartTime;
+    static LARGE_INTEGER StartCounter, CounterFrequency;
     PTIME_WAIT_REOPEN Reopen;
+    LARGE_INTEGER Now, Counter;
+    LONGLONG Elapsed;
     u32_t Next, Floor;
 
-    Iss += tcp_ticks;
-    Next = Iss;
+    /* The clock: the system time at the first use plus the performance counter since then. The system time alone
+       moves once per clock tick (10-15 ms): two connections of one 4-tuple within a tick got the same number, and
+       a SYN that is not above the old connection's is dropped by the peer in TIME-WAIT (the TIME-WAIT of our own
+       listener included: ws2_32 timewait). The caller holds the core lock */
+    if (!ClockStarted)
+    {
+        KeQuerySystemTime(&Now);
+        StartTime = Now.QuadPart;
+        StartCounter = KeQueryPerformanceCounter(&CounterFrequency);
+        ClockStarted = TRUE;
+    }
+    Counter = KeQueryPerformanceCounter(NULL);
+    Elapsed = Counter.QuadPart - StartCounter.QuadPart;
+    Elapsed = (Elapsed / CounterFrequency.QuadPart) * 10000000 +
+              (Elapsed % CounterFrequency.QuadPart) * 10000000 / CounterFrequency.QuadPart;
+    Next = (u32_t)((StartTime + Elapsed) / 40) + TCPConnectionHash(LocalIp, LocalPort, RemoteIp, RemotePort);
     if (IP_IS_V4(LocalIp) && IP_IS_V4(RemoteIp))
     {
         Reopen = LibTCPFindReopen(ip_2_ip4(LocalIp), LocalPort, ip_2_ip4(RemoteIp), RemotePort);

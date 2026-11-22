@@ -224,6 +224,14 @@
 #define TCP_OOSEQ_BYTES_LIMIT(pcb)      ((u32_t)TCP_WND_MAX(pcb))
 #define TCP_OOSEQ_PBUFS_LIMIT(pcb)      ((u16_t)LWIP_MIN(32768U, LWIP_MAX(64U, (u32_t)TCP_WND_MAX(pcb) / 512U)))
 
+/* NitroOS: a reset to the SYN does not end the attempt at once. Windows Server 2022 (measured 2026-11-21, IPv4 and
+   IPv6, 8 connects to a closed port of a peer on the link) sends the SYN again about 0.5 s after each reset, 5 SYNs
+   in all, and connect() fails with WSAECONNREFUSED after 2.01-2.03 s. Here: 4 more SYNs, each 500 ms after the
+   reset before it (a timeout of lwIP's, not the 500 ms slow timer); the fifth reset ends the attempt with ERR_RST.
+   This makes every refused connection take about 2 s, as on Windows, loopback included */
+#define NITRO_TCP_SYN_RST_RETRIES       4
+#define NITRO_TCP_SYN_RST_RETRY_MS      500
+
 #define TCP_LISTEN_BACKLOG              1
 
 /* thousands of connections sit in TIME-WAIT while a client loop runs: find them by hash, not by walking the list */

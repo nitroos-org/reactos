@@ -97,6 +97,32 @@ static void tcp_timewait_input(struct tcp_pcb *pcb);
 
 static int tcp_input_delayed_close(struct tcp_pcb *pcb);
 
+#ifdef NITRO_TCP_SYN_RST_RETRIES
+#include "lwip/timeouts.h"
+/* NitroOS: sends the SYN of a connection attempt again after a reset (tcp_process). The PCB may have gone in
+   the meantime: it is used only if it is still an active PCB in SYN_SENT with a retry pending. The SYN keeps its
+   retransmission count and timeout: the resets are not losses */
+static void
+tcp_syn_rst_retry(void *arg)
+{
+  struct tcp_pcb *pcb;
+
+  for (pcb = tcp_active_pcbs; pcb != NULL; pcb = pcb->next) {
+    if (pcb == (struct tcp_pcb *)arg) {
+      break;
+    }
+  }
+  if (pcb == NULL || pcb->state != SYN_SENT || !pcb->syn_rst_pending) {
+    return;
+  }
+  pcb->syn_rst_pending = 0;
+  if (tcp_rexmit_rto_prepare(pcb) == ERR_OK) {
+    pcb->rtime = 0;
+    tcp_output(pcb);
+  }
+}
+#endif
+
 #if LWIP_TCP_SACK_OUT
 static void tcp_add_sack(struct tcp_pcb *pcb, u32_t left, u32_t right);
 static void tcp_remove_sacks_lt(struct tcp_pcb *pcb, u32_t seq);
@@ -879,6 +905,18 @@ tcp_process(struct tcp_pcb *pcb)
       }
     }
 
+#ifdef NITRO_TCP_SYN_RST_RETRIES
+    /* NitroOS: a reset to our SYN is taken as final only after NITRO_TCP_SYN_RST_RETRIES more attempts, the SYN
+       being sent again NITRO_TCP_SYN_RST_RETRY_MS after each reset (lwipopts.h) */
+    if (acceptable && pcb->state == SYN_SENT && pcb->syn_rst_count < NITRO_TCP_SYN_RST_RETRIES) {
+      if (!pcb->syn_rst_pending) {
+        pcb->syn_rst_count++;
+        pcb->syn_rst_pending = 1;
+        sys_timeout(NITRO_TCP_SYN_RST_RETRY_MS, tcp_syn_rst_retry, pcb);
+      }
+      return ERR_OK;
+    }
+#endif
     if (acceptable) {
       LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_process: Connection RESET\n"));
       LWIP_ASSERT("tcp_input: pcb->state != CLOSED", pcb->state != CLOSED);
