@@ -112,6 +112,7 @@ list(APPEND SOURCE
     TextTransform.c
     ThreadContextGdi.c
     TransformPointsBadPointer.c
+    TransformPointsIdentityHistory.c
     TranslateCharsetInfo.c
     UniscribeForwarders.c
     WidePen.c
