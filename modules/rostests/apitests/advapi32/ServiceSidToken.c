@@ -10,7 +10,7 @@
  * D:(A;;GA;;;SY)(A;;RC;;;OW)(A;;GA;;;<service SID>); a required-privileges list removes every other
  * privilege except SeChangeNotifyPrivilege and keeps the attributes of the listed ones; a listed
  * privilege the account lacks fails the start with ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE. A LocalSystem service
- * has the service SID as well (type none: not). Type RESTRICTED (LocalService, NetworkService, LocalSystem): also the
+ * has the service SID as well (type none: not), and its privileges are filtered the same way. Type RESTRICTED (LocalService, NetworkService, LocalSystem): also the
  * group NT AUTHORITY\WRITE RESTRICTED (S-1-5-33, 0x7), IsTokenRestricted = 1 and the restricting SIDs, in this order, the
  * service SID, Everyone, the logon session SID and S-1-5-33 (all 0x7); writes to an object need an ACE for one of them
  * (an object that grants only the account: write refused with 5, a new file in a directory that grants only the
@@ -424,6 +424,8 @@ StopAndDelete(SC_HANDLE hService)
  * the API cannot make); returns the StartService error. The controller reads the value when the service starts. Measured
  * on Windows Server 2022 after a reload of its database: REG_SZ and REG_BINARY 87, only unknown names 87, known and unknown
  * names 13, an empty or zero length REG_MULTI_SZ no filter. */
+static PCSTR RawAccount = "NT AUTHORITY\\LocalService";   /* the account of StartWithRawPrivileges; NULL: LocalSystem */
+
 static DWORD
 StartWithRawPrivileges(SC_HANDLE hScm, PCSTR Name, DWORD Type, const VOID *Data, DWORD Size)
 {
@@ -439,7 +441,7 @@ StartWithRawPrivileges(SC_HANDLE hScm, PCSTR Name, DWORD Type, const VOID *Data,
     StringCbPrintfA(Command, sizeof(Command), "\"%s\" ServiceSidToken service %s \"%s\"", Exe, Name, File);
     hService = CreateServiceA(hScm, Name, Name, SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
                               SERVICE_DEMAND_START, SERVICE_ERROR_IGNORE, Command, NULL, NULL, NULL,
-                              "NT AUTHORITY\\LocalService", "");
+                              RawAccount, RawAccount ? "" : NULL);
     ok(hService != NULL, "%s: CreateService failed with %lu\n", Name, GetLastError());
     if (!hService)
         return GetLastError();
@@ -1088,6 +1090,74 @@ START_TEST(ServiceSidToken)
         }
         if (Acls)
             RemoveWriteTargets(Name);
+
+        /* 9b. LocalSystem with RequiredPrivileges: only the listed privileges and SeChangeNotifyPrivilege, as for the
+         * other accounts (Windows Server 2022 applies the filter to LocalSystem own-process services too); with and
+         * without a service SID, and restricted. A malformed list stops the start with the same errors. */
+        StringCbPrintfA(Name, sizeof(Name), "%so", Base);
+        Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_NONE, "SeImpersonatePrivilege", &Dump);
+        ok(Error == ERROR_SUCCESS, "system priv: StartService failed with %lu\n", Error);
+        ok(Dump.Valid, "system priv: no dump\n");
+        if (Dump.Valid)
+        {
+            ok(!strcmp(Dump.User, "S-1-5-18"), "system priv: user %s\n", Dump.User);
+            ok(FindServiceGroup(&Dump) < 0, "system priv: unexpected service SID\n");
+            CheckNotRestricted(Name, &Dump);
+            ok(Dump.PrivCount == 2, "system priv: %lu privileges, expected 2\n", Dump.PrivCount);
+            ok(FindPriv(&Dump, "SeImpersonatePrivilege") >= 0, "system priv: no SeImpersonatePrivilege\n");
+            ok(FindPriv(&Dump, "SeChangeNotifyPrivilege") >= 0, "system priv: no SeChangeNotifyPrivilege\n");
+            ok(FindPriv(&Dump, "SeTcbPrivilege") < 0, "system priv: SeTcbPrivilege kept\n");
+            ok(FindPriv(&Dump, "SeDebugPrivilege") < 0, "system priv: SeDebugPrivilege kept\n");
+            if (System.Valid)
+                ok(!strcmp(Dump.Dacl, System.Dacl), "system priv: default DACL %s, without a list %s\n", Dump.Dacl, System.Dacl);
+        }
+
+        StringCbPrintfA(Name, sizeof(Name), "%sp", Base);
+        Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_UNRESTRICTED, "SeTcbPrivilege,SeImpersonatePrivilege", &Dump);
+        ok(Error == ERROR_SUCCESS, "system sid+priv: StartService failed with %lu\n", Error);
+        ok(Dump.Valid, "system sid+priv: no dump\n");
+        if (Dump.Valid)
+        {
+            ok(FindServiceGroup(&Dump) >= 0, "system sid+priv: no service SID\n");
+            CheckNotRestricted(Name, &Dump);
+            ok(Dump.PrivCount == 3, "system sid+priv: %lu privileges, expected 3\n", Dump.PrivCount);
+            ok(FindPriv(&Dump, "SeTcbPrivilege") >= 0, "system sid+priv: no SeTcbPrivilege\n");
+            ok(FindPriv(&Dump, "SeImpersonatePrivilege") >= 0, "system sid+priv: no SeImpersonatePrivilege\n");
+            ok(FindPriv(&Dump, "SeChangeNotifyPrivilege") >= 0, "system sid+priv: no SeChangeNotifyPrivilege\n");
+            ok(FindPriv(&Dump, "SeDebugPrivilege") < 0, "system sid+priv: SeDebugPrivilege kept\n");
+        }
+
+        StringCbPrintfA(Name, sizeof(Name), "%sq", Base);
+        Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_RESTRICTED, "SeImpersonatePrivilege", &Dump);
+        ok(Error == ERROR_SUCCESS, "system restricted+priv: StartService failed with %lu\n", Error);
+        ok(Dump.Valid, "system restricted+priv: no dump\n");
+        if (Dump.Valid)
+        {
+            ok(FindServiceGroup(&Dump) >= 0, "system restricted+priv: no service SID\n");
+            CheckRestrictedToken(Name, &Dump, FALSE);
+            ok(Dump.PrivCount == 2, "system restricted+priv: %lu privileges, expected 2\n", Dump.PrivCount);
+            ok(FindPriv(&Dump, "SeImpersonatePrivilege") >= 0, "system restricted+priv: no SeImpersonatePrivilege\n");
+        }
+
+        {
+            static const CHAR Mixed[] = "SeImpersonatePrivilege\0SeNoSuchPrivilege\0";
+            static const CHAR Empty[] = "\0";
+
+            RawAccount = NULL;
+            StringCbPrintfA(Name, sizeof(Name), "%sr", Base);
+            Error = StartWithRawPrivileges(hScm, Name, REG_SZ, "SeImpersonatePrivilege", 23);
+            ok(Error == ERROR_INVALID_PARAMETER, "system REG_SZ: StartService error %lu, expected %d\n", Error, ERROR_INVALID_PARAMETER);
+            /* a name of its own for each row: a service that did start may still be marked for delete */
+            StringCbPrintfA(Name, sizeof(Name), "%ss", Base);
+            Error = StartWithRawPrivileges(hScm, Name, REG_MULTI_SZ, Mixed, sizeof(Mixed) + 1);
+            ok(Error == ERROR_INVALID_DATA, "system known and unknown names: StartService error %lu, expected %d\n",
+               Error, ERROR_INVALID_DATA);
+            /* an empty list is no list: the service starts */
+            StringCbPrintfA(Name, sizeof(Name), "%st", Base);
+            Error = StartWithRawPrivileges(hScm, Name, REG_MULTI_SZ, Empty, sizeof(Empty));
+            ok(Error == ERROR_SUCCESS, "system empty list: StartService error %lu, expected 0\n", Error);
+            RawAccount = "NT AUTHORITY\\LocalService";
+        }
     }
 
     /* 10. NT SERVICE\<name> names and SIDs of an existing service */
