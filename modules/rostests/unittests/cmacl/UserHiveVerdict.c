@@ -246,6 +246,95 @@ done:
     return Relative;
 }
 
+/*
+ * The owner's full control, then an ACE of only a header (4 bytes: no room for
+ * an access mask) of the given type, the last thing in the ACL
+ */
+static PSECURITY_DESCRIPTOR BuildShortAce(UCHAR AceType, PSID Own)
+{
+    UCHAR AclBuffer[128];
+    SECURITY_DESCRIPTOR Absolute;
+    PACL Acl = (PACL)AclBuffer;
+    PACE_HEADER Ace;
+    PSECURITY_DESCRIPTOR Relative = NULL;
+    ULONG Length = 0, Used;
+
+    ZeroMemory(AclBuffer, sizeof(AclBuffer));
+    InitializeAcl(Acl, sizeof(AclBuffer), ACL_REVISION);
+    AddAccessAllowedAceEx(Acl, ACL_REVISION, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS, Own);
+    Used = sizeof(ACL) + ((PACE_HEADER)(Acl + 1))->AceSize;
+    Ace = (PACE_HEADER)(AclBuffer + Used);
+    Ace->AceType = AceType;
+    Ace->AceFlags = 0;
+    Ace->AceSize = sizeof(ACE_HEADER);
+    Acl->AceCount++;
+    /* The ACL ends right after the short ACE (2 more bytes: the minimum the validation wants after a header) */
+    Acl->AclSize = (USHORT)(Used + sizeof(ACE_HEADER) + 2);
+
+    InitializeSecurityDescriptor(&Absolute, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorOwner(&Absolute, Own, FALSE);
+    SetSecurityDescriptorDacl(&Absolute, TRUE, Acl, FALSE);
+    MakeSelfRelativeSD(&Absolute, NULL, &Length);
+    Relative = HeapAlloc(GetProcessHeap(), 0, Length);
+    if (Relative && !MakeSelfRelativeSD(&Absolute, Relative, &Length))
+    {
+        HeapFree(GetProcessHeap(), 0, Relative);
+        Relative = NULL;
+    }
+    return Relative;
+}
+
+/* A DACL as large as an ACL gets (64 KB): 3 270 read grants of 20 bytes to other SIDs, then Everyone full */
+static PSECURITY_DESCRIPTOR BuildFullAcl(PSID Own, PULONG Aces)
+{
+    static SID_IDENTIFIER_AUTHORITY Null = {SECURITY_NULL_SID_AUTHORITY}, World = {SECURITY_WORLD_SID_AUTHORITY};
+    SECURITY_DESCRIPTOR Absolute;
+    PSECURITY_DESCRIPTOR Relative = NULL;
+    PACL Acl;
+    PSID Sid, Everyone = NULL;
+    ULONG Length = 0, i;
+
+    *Aces = 0;
+    Acl = HeapAlloc(GetProcessHeap(), 0, 0xFFFC);
+    if (!Acl || !AllocateAndInitializeSid(&World, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &Everyone))
+        goto done;
+    InitializeAcl(Acl, 0xFFFC, ACL_REVISION);
+    for (i = 0; ; i++)
+    {
+        if (!AllocateAndInitializeSid(&Null, 1, 1000 + i, 0, 0, 0, 0, 0, 0, 0, &Sid))
+            break;
+        if (!AddAccessAllowedAce(Acl, ACL_REVISION, KEY_READ, Sid))
+        {
+            FreeSid(Sid);
+            break;
+        }
+        FreeSid(Sid);
+    }
+    *Aces = i;
+    /* Room for the last one: drop grants until it fits */
+    while (!AddAccessAllowedAce(Acl, ACL_REVISION, KEY_ALL_ACCESS, Everyone) && Acl->AceCount)
+    {
+        DeleteAce(Acl, Acl->AceCount - 1);
+        (*Aces)--;
+    }
+    InitializeSecurityDescriptor(&Absolute, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorOwner(&Absolute, Own, FALSE);
+    SetSecurityDescriptorDacl(&Absolute, TRUE, Acl, FALSE);
+    MakeSelfRelativeSD(&Absolute, NULL, &Length);
+    Relative = HeapAlloc(GetProcessHeap(), 0, Length);
+    if (Relative && !MakeSelfRelativeSD(&Absolute, Relative, &Length))
+    {
+        HeapFree(GetProcessHeap(), 0, Relative);
+        Relative = NULL;
+    }
+done:
+    if (Everyone)
+        FreeSid(Everyone);
+    if (Acl)
+        HeapFree(GetProcessHeap(), 0, Acl);
+    return Relative;
+}
+
 static void Judge(PCSTR What, PSECURITY_DESCRIPTOR Sd, PSID Own, ULONG Place, ULONG Expected)
 {
     ULONG Verdict, Length;
@@ -342,6 +431,30 @@ START_TEST(UserHiveVerdict)
     {
         Judge("deny object ACE (SID not where a plain ACE has it: taken as hurting)", Sd, Own, 0, CMP_ACL_UH_DENY);
         HeapFree(GetProcessHeap(), 0, Sd);
+    }
+
+    /* An ACE with no room for its access mask: malformed, its mask is not read past its end */
+    Sd = BuildShortAce(ACCESS_DENIED_CALLBACK_ACE_TYPE, Own);
+    ok(Sd != NULL, "short ACE not built\n");
+    if (Sd)
+    {
+        Judge("deny callback ACE of 4 bytes (no mask)", Sd, Own, 0, CMP_ACL_UH_ACETYPE);
+        HeapFree(GetProcessHeap(), 0, Sd);
+    }
+
+    /* The largest ACL: judged in one pass over its ACEs (the last one, Everyone full, is found) */
+    {
+        ULONG Aces, Start;
+        Sd = BuildFullAcl(Own, &Aces);
+        ok(Sd != NULL && Aces > 3000, "full ACL not built (%lu ACEs)\n", Aces);
+        if (Sd)
+        {
+            Start = GetTickCount();
+            Judge("64 KB DACL: 3 000+ read grants to other SIDs, then Everyone full", Sd, Own, 0,
+                  CMP_ACL_UH_READ | CMP_ACL_UH_WRITE);
+            trace("64 KB DACL (%lu ACEs): judged 2x in %lu ms\n", Aces + 1, GetTickCount() - Start);
+            HeapFree(GetProcessHeap(), 0, Sd);
+        }
     }
     LocalFree(Own);
     LocalFree(Other);

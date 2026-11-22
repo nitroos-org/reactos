@@ -198,6 +198,32 @@ CmpAclUhAceSid(
 }
 
 /*
+ * The ACE at Cursor in Acl, or NULL if it does not fit in the ACL or is
+ * shorter than its header and access mask. The ACEs are walked one after the
+ * other with this: RtlGetAce starts again from the first ACE for every index,
+ * which makes a loop over all of them quadratic, and an ACL of 64 KB in a
+ * hive file its user wrote holds thousands of ACEs.
+ */
+static
+PACE_HEADER
+CmpAclUhAceAt(
+    _In_ PACL Acl,
+    _In_ PUCHAR Cursor)
+{
+    PUCHAR End = (PUCHAR)Acl + Acl->AclSize;
+    PACE_HEADER Ace = (PACE_HEADER)Cursor;
+
+    if (Cursor < (PUCHAR)(Acl + 1) || Cursor > End ||
+        (ULONG)(End - Cursor) < sizeof(ACE_HEADER) + sizeof(ACCESS_MASK) ||
+        Ace->AceSize < sizeof(ACE_HEADER) + sizeof(ACCESS_MASK) ||
+        Ace->AceSize > (ULONG)(End - Cursor))
+    {
+        return NULL;
+    }
+    return Ace;
+}
+
+/*
  * The verdict on a stored descriptor of a key in a user hive: 0 (keep it), or
  * the CMP_ACL_UH_* reasons to replace it.
  *
@@ -226,6 +252,7 @@ CmpAclUserHiveSdVerdict(
     PSID OwnerSid = NULL, Sid;
     PACL Acl;
     PACE_HEADER Ace;
+    PUCHAR Cursor;
     ACCESS_MASK Mask;
     ULONG Reasons = 0, i;
 
@@ -249,10 +276,12 @@ CmpAclUserHiveSdVerdict(
     }
     else
     {
-        for (i = 0; i < Acl->AceCount; i++)
+        for (i = 0, Cursor = (PUCHAR)(Acl + 1); i < Acl->AceCount; i++, Cursor += Ace->AceSize)
         {
-            if (!NT_SUCCESS(RtlGetAce(Acl, i, (PVOID *)&Ace)))
+            Ace = CmpAclUhAceAt(Acl, Cursor);
+            if (!Ace)
             {
+                /* Not an ACE the access check could read either: the descriptor is replaced */
                 Reasons |= CMP_ACL_UH_ACETYPE;
                 break;
             }
@@ -320,9 +349,10 @@ CmpAclUserHiveSdVerdict(
     Acl = NULL;
     if (NT_SUCCESS(RtlGetSaclSecurityDescriptor(Sd, &Present, &Acl, &Defaulted)) && Present && Acl)
     {
-        for (i = 0; i < Acl->AceCount; i++)
+        for (i = 0, Cursor = (PUCHAR)(Acl + 1); i < Acl->AceCount; i++, Cursor += Ace->AceSize)
         {
-            if (!NT_SUCCESS(RtlGetAce(Acl, i, (PVOID *)&Ace)))
+            Ace = CmpAclUhAceAt(Acl, Cursor);
+            if (!Ace)
                 break;
             if (Ace->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
                 continue;
