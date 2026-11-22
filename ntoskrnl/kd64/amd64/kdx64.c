@@ -175,6 +175,9 @@ KdpSysWriteBusData(
     return STATUS_UNSUCCESSFUL;
 }
 
+/* Size of the special registers block as the debugger reads it */
+#define KD_AMD64_KSPECIAL_WIRE_SIZE 0xE0
+
 NTSTATUS
 NTAPI
 KdpSysReadControlSpace(
@@ -223,6 +226,22 @@ KdpSysReadControlSpace(
     /* Copy the memory */
     RtlCopyMemory(Buffer, ControlStart, min(Length, *ActualLength));
 
+    /* Current debuggers read the special registers in a 0xE0 byte block
+       (one ULONG64 more than our KSPECIAL_REGISTERS) and treat a shorter
+       reply as a failure to read the register state. Give them the extra
+       quadword as zero. */
+    if ((BaseAddress == AMD64_DEBUG_CONTROL_SPACE_KSPECIAL) &&
+        (Length > *ActualLength))
+    {
+        ULONG Padded = min(Length, KD_AMD64_KSPECIAL_WIRE_SIZE);
+
+        if (Padded > *ActualLength)
+        {
+            RtlZeroMemory((PUCHAR)Buffer + *ActualLength, Padded - *ActualLength);
+            *ActualLength = Padded;
+        }
+    }
+
     /* Finish up */
     return STATUS_SUCCESS;
 }
@@ -255,6 +274,13 @@ KdpSysWriteControlSpace(
 
     /* Copy the memory */
     RtlCopyMemory(ControlStart, Buffer, min(Length, *ActualLength));
+
+    /* The debugger writes back the block it read: 0xE0 bytes, of which the
+       last quadword has no counterpart here (see KdpSysReadControlSpace). */
+    if (Length > *ActualLength)
+    {
+        *ActualLength = min(Length, KD_AMD64_KSPECIAL_WIRE_SIZE);
+    }
 
     return STATUS_SUCCESS;
 }
