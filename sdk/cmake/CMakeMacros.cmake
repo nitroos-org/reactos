@@ -50,6 +50,25 @@ function(add_message_headers _type)
             ${CMAKE_CURRENT_BINARY_DIR}/${_file_name}.h ${CMAKE_CURRENT_BINARY_DIR}/${_file_name}.rc
             PROPERTIES GENERATED TRUE)
         add_custom_target(${_file_name} ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${_file_name}.h ${CMAKE_CURRENT_BINARY_DIR}/${_file_name}.rc)
+        # remember where the generated resource script is, for add_message_rc_deps()
+        set_property(GLOBAL PROPERTY MESSAGE_RC_${_file_name} ${CMAKE_CURRENT_BINARY_DIR}/${_file_name}.rc)
+    endforeach()
+endfunction()
+
+# add_message_rc_deps(<rc file> <message table name>...)
+#
+# Call it for a resource script that includes the resource script of a message table made by add_message_headers()
+# (#include <bugcodes.rc>). The compile depends on the generated script: when the .mc changes, mc writes the script
+# and the message binaries again and the resource is compiled again in the same build. Without it, the include is
+# known to ninja only from the dependency file of the last compile, by a path that is not the one of the generated
+# file, so the new text reaches the module one build late, or never when nothing else changes it.
+function(add_message_rc_deps _target_rc)
+    foreach(_name ${ARGN})
+        get_property(_message_rc GLOBAL PROPERTY MESSAGE_RC_${_name})
+        if(NOT _message_rc)
+            message(FATAL_ERROR "add_message_rc_deps: no message table named ${_name} (add_message_headers comes first)")
+        endif()
+        set_property(SOURCE ${_target_rc} APPEND PROPERTY OBJECT_DEPENDS ${_message_rc})
     endforeach()
 endfunction()
 

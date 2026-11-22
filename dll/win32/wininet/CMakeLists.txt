@@ -44,6 +44,7 @@ endif()
 set_module_type(wininet win32dll)
 add_message_headers(UNICODE winineterror.mc)
 add_dependencies(wininet winineterror)
+add_message_rc_deps(rsrc.rc winineterror)
 target_link_libraries(wininet wine ${PSEH_LIB} oldnames)
 
 add_delay_importlibs(wininet secur32 cryptui iphlpapi dhcpcsvc)
