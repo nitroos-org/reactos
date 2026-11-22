@@ -313,6 +313,10 @@ co_UserProcessHotKeys(WORD wVk, BOOL bIsDown)
                co_IntShellHookNotify(HSHELL_TASKMAN, 0, 0);
                return FALSE;
             }
+            /* The shell is on a desktop without the input (the lock screen is up): the key goes on to the
+               input desktop as an ordinary key, not as a WM_HOTKEY to its focus window with its release eaten */
+            if (pWnd)
+               return FALSE;
         }
         
         if (pHotKey->id == IDHK_SNAP_LEFT ||
