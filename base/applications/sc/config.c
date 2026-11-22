@@ -201,12 +201,38 @@ BOOL SetConfig(LPCTSTR *ServiceArgs, INT ArgCount)
     SC_HANDLE hManager = NULL;
     SC_HANDLE hService = NULL;
     BOOL bResult = TRUE;
+    INT i;
+    INT Length;
+    LPTSTR lpBuffer = NULL;
     SERVICE_CREATE_INFO ServiceInfo;
 
     if (!ParseCreateConfigArguments(ServiceArgs, ArgCount, TRUE, &ServiceInfo))
     {
         SetConfigUsage();
         return FALSE;
+    }
+
+    /* The dependencies are separated by '/': a list of strings that ends with an empty one ("/" alone: none) */
+    if (ServiceInfo.lpDependencies)
+    {
+        Length = lstrlen(ServiceInfo.lpDependencies);
+
+        lpBuffer = HeapAlloc(GetProcessHeap(),
+                             0,
+                            (Length + 2) * sizeof(TCHAR));
+        if (lpBuffer == NULL)
+            return FALSE;
+
+        for (i = 0; i < Length; i++)
+            if (ServiceInfo.lpDependencies[i] == _T('/'))
+                lpBuffer[i] = 0;
+            else
+                lpBuffer[i] = ServiceInfo.lpDependencies[i];
+
+        lpBuffer[Length] = 0;
+        lpBuffer[Length + 1] = 0;
+
+        ServiceInfo.lpDependencies = lpBuffer;
     }
 
 #ifdef SCDBG
@@ -265,6 +291,9 @@ BOOL SetConfig(LPCTSTR *ServiceArgs, INT ArgCount)
 done:
     if (bResult == FALSE)
         ReportLastError();
+
+    if (lpBuffer)
+        HeapFree(GetProcessHeap(), 0, lpBuffer);
 
     if (hService)
         CloseServiceHandle(hService);

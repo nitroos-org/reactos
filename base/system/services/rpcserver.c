@@ -2586,6 +2586,13 @@ RChangeServiceConfigW(
     if (dwError != ERROR_SUCCESS)
         goto done;
 
+    /* A dependency list that leads back to this service is refused, nothing is written */
+    dwError = ScmCheckDependencyCycle(lpService->lpServiceName,
+                                      lpLoadOrderGroup,
+                                      (LPCWSTR)lpDependencies);
+    if (dwError != ERROR_SUCCESS)
+        goto done;
+
     /* Write service data to the registry */
 
     /* Set the display name */
@@ -2726,8 +2733,8 @@ RChangeServiceConfigW(
         *lpdwTagId = lpService->dwTag;
     }
 
-    /* Write dependencies */
-    if (lpDependencies != NULL && *lpDependencies != 0)
+    /* Write dependencies (an empty list takes them all away) */
+    if (lpDependencies != NULL)
     {
         dwError = ScmWriteDependencies(hServiceKey,
                                        (LPWSTR)lpDependencies,
@@ -2962,6 +2969,17 @@ RCreateServiceW(
         ScmUnlockDatabase();
 
         return ERROR_DUPLICATE_SERVICE_NAME;
+    }
+
+    dwError = ScmCheckDependencyCycle(lpServiceName,
+                                      lpLoadOrderGroup,
+                                      (LPCWSTR)lpDependencies);
+    if (dwError != ERROR_SUCCESS)
+    {
+        /* Unlock the service database */
+        ScmUnlockDatabase();
+
+        return dwError;
     }
 
     if (dwServiceType & SERVICE_DRIVER)

@@ -145,6 +145,10 @@ DWORD ScmWriteDependencies(HKEY hServiceKey,
                            LPCWSTR lpDependencies,
                            DWORD dwDependenciesLength);
 
+DWORD ScmCheckDependencyCycle(LPCWSTR lpServiceName,
+                              LPCWSTR lpLoadOrderGroup,
+                              LPCWSTR lpDependencies);
+
 DWORD ScmMarkServiceForDelete(PSERVICE pService);
 BOOL ScmIsDeleteFlagSet(HKEY hServiceKey);
 
