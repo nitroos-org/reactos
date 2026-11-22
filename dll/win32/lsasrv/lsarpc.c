@@ -3767,6 +3767,36 @@ LsarDeleteTrustedDomain(
 }
 
 
+/*
+ * A secret made by LsarStorePrivateData gets the descriptor of a secret made by LsarCreateSecret
+ * (measured: an administrator opens either one with LsaOpenSecret); a secret that already has one keeps it.
+ */
+static
+NTSTATUS
+LsapEnsureSecretSd(
+    IN PLSA_DB_OBJECT SecretObject)
+{
+    PSECURITY_DESCRIPTOR SecretSd = NULL;
+    ULONG SecretSdSize = 0;
+    NTSTATUS Status;
+
+    Status = LsapGetObjectAttribute(SecretObject, L"SecDesc", NULL, &SecretSdSize);
+    if ((Status == STATUS_BUFFER_OVERFLOW || NT_SUCCESS(Status)) && SecretSdSize != 0)
+        return STATUS_SUCCESS;
+
+    Status = LsapCreateSecretSd(&SecretSd, &SecretSdSize);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = LsapSetObjectAttribute(SecretObject,
+                                    L"SecDesc",
+                                    SecretSd,
+                                    SecretSdSize);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, SecretSd);
+    return Status;
+}
+
+
 /* Function 42 */
 NTSTATUS
 WINAPI
@@ -3856,6 +3886,13 @@ LsarStorePrivateData(
         if (!NT_SUCCESS(Status))
         {
             ERR("LsapCreateDbObject failed (Status 0x%08lx)\n", Status);
+            goto done;
+        }
+
+        Status = LsapEnsureSecretSd(SecretObject);
+        if (!NT_SUCCESS(Status))
+        {
+            ERR("LsapEnsureSecretSd failed (Status 0x%08lx)\n", Status);
             goto done;
         }
 

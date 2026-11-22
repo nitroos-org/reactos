@@ -295,17 +295,31 @@ static VOID TestName(PCWSTR Name)
     ExpectNotPlaintext("replace", Name, L"CurrentValue", Values[0]);
 
     /*
-     * The secret LsaStorePrivateData made, opened as an object: the status is printed, not checked (the object
-     * gets no descriptor that way and the open is refused; a separate issue)
+     * The secret LsaStorePrivateData made, opened as an object: an administrator may open it with every right
+     * (Windows Server 2022: it has the descriptor of a secret made by LsaCreateSecret)
      */
     Policy = OpenPolicy(POLICY_ALL_ACCESS);
     if (!Policy)
         return;
     InitString(&Key, Name);
-    Status = LsaOpenSecret(Policy, &Key, SECRET_ALL_ACCESS, &Secret);
-    trace("open the stored %ls as an object: 0x%08lx\n", Name, Status);
-    if (NT_SUCCESS(Status))
-        LsaClose(Secret);
+    {
+        static const ACCESS_MASK Masks[] =
+        {
+            SECRET_SET_VALUE, SECRET_QUERY_VALUE, DELETE, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+            SECRET_ALL_ACCESS, MAXIMUM_ALLOWED, 0
+        };
+        ULONG i;
+
+        for (i = 0; i < RTL_NUMBER_OF(Masks); i++)
+        {
+            Secret = NULL;
+            Status = LsaOpenSecret(Policy, &Key, Masks[i], &Secret);
+            ok(Status == STATUS_SUCCESS, "open the stored %ls as an object with 0x%08lx: 0x%08lx\n",
+               Name, Masks[i], Status);
+            if (NT_SUCCESS(Status))
+                LsaClose(Secret);
+        }
+    }
     Secret = NULL;
 
     /* Delete */
