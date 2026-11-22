@@ -140,11 +140,12 @@ UserSetCursor(
             if(NewCursor->CURSORF_flags & CURSORF_ACON)
             {
                 FIXME("Should animate the cursor, using only the first frame now.\n");
-                CursorFrame = ((PACON)NewCursor)->aspcur[0];
+                /* The bitmaps are the frame's: the animated cursor itself has none */
+                CursorFrame = ((PACON)NewCursor)->aspcur[((PACON)NewCursor)->aicur[0]];
             }
             GreSetPointerShape(hdcScreen,
-                               CursorFrame->hbmAlpha ? NULL : NewCursor->hbmMask,
-                               CursorFrame->hbmAlpha ? NewCursor->hbmAlpha : NewCursor->hbmColor,
+                               CursorFrame->hbmAlpha ? NULL : CursorFrame->hbmMask,
+                               CursorFrame->hbmAlpha ? CursorFrame->hbmAlpha : CursorFrame->hbmColor,
                                CursorFrame->xHotspot,
                                CursorFrame->yHotspot,
                                gpsi->ptCursor.x,
@@ -800,17 +801,22 @@ co_MsqInsertMouseMessageEx(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Ho
                /* Check if shape has changed */
                if(CurInfo->CurrentCursorObject != MessageQueue->CursorObject)
                {
+                   /* An animated cursor has its bitmaps in the frames */
+                   PCURICON_OBJECT CursorFrame = MessageQueue->CursorObject;
+                   if (CursorFrame->CURSORF_flags & CURSORF_ACON)
+                       CursorFrame = ((PACON)CursorFrame)->aspcur[((PACON)CursorFrame)->aicur[0]];
+
                    /* Call GDI to set the new screen cursor */
                     GreSetPointerShape(hdcScreen,
-                                       MessageQueue->CursorObject->hbmAlpha ?
-                                           NULL : MessageQueue->CursorObject->hbmMask,
-                                       MessageQueue->CursorObject->hbmAlpha ?
-                                           MessageQueue->CursorObject->hbmAlpha : MessageQueue->CursorObject->hbmColor,
-                                       MessageQueue->CursorObject->xHotspot,
-                                       MessageQueue->CursorObject->yHotspot,
+                                       CursorFrame->hbmAlpha ?
+                                           NULL : CursorFrame->hbmMask,
+                                       CursorFrame->hbmAlpha ?
+                                           CursorFrame->hbmAlpha : CursorFrame->hbmColor,
+                                       CursorFrame->xHotspot,
+                                       CursorFrame->yHotspot,
                                        gpsi->ptCursor.x,
                                        gpsi->ptCursor.y,
-                                       MessageQueue->CursorObject->hbmAlpha ? SPS_ALPHA : 0);
+                                       CursorFrame->hbmAlpha ? SPS_ALPHA : 0);
 
                } else
                    GreMovePointer(hdcScreen, Msg->pt.x, Msg->pt.y);
