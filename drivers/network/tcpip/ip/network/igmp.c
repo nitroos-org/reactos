@@ -13,9 +13,9 @@
  * - IGMPv3 reports to 224.0.0.22, IP TTL 1, TOS 0, no DF, Router Alert option (RFC 2113), from the interface's address
  *   (0.0.0.0 without one, RFC 3376 4.2.13).
  * - A change of a group's filter (join, leave, a source filter) is a state change report sent at once and once more
- *   within a second (robustness 2; Windows: 0.1 to 0.5 s later): TO_EX{} or TO_IN{S}; the groups that change together
- *   share a report. (Windows sends ALLOW/BLOCK records for a source change inside INCLUDE mode; this sends TO_IN with
- *   the new set, which routers handle as the same change.)
+ *   within a second (robustness 2; Windows: 0.1 to 0.5 s later): TO_EX{} or TO_IN{S}, and for a source change inside
+ *   INCLUDE mode (also the last source going) ALLOW{gained} / BLOCK{lost}; the groups that change together share
+ *   a report. A change that comes while the reports of the last one are going out is sent as TO_IN / TO_EX.
  * - A general query is answered per group, each after its own random delay within the query's maximum response time,
  *   one group record per report (Windows does so; RFC 3376 allows a single report); a group-specific query by that
  *   group's record; a group-and-source-specific query by IS_IN with the asked sources the group takes.
@@ -53,6 +53,8 @@
 #define IGMP_REC_IS_EX          2
 #define IGMP_REC_TO_IN          3
 #define IGMP_REC_TO_EX          4
+#define IGMP_REC_ALLOW          5
+#define IGMP_REC_BLOCK          6
 
 #define IGMP_ALL_SYSTEMS        DH2N(0xE0000001)    /* 224.0.0.1 */
 #define IGMP_ALL_ROUTERS        DH2N(0xE0000002)    /* 224.0.0.2 */
@@ -82,6 +84,11 @@ typedef struct _IGMP_GROUP
     USHORT NumQuery;
     ULONG Sources[IGMP_MAX_SOURCES];    /* sorted, network order */
     ULONG Query[IGMP_MAX_SOURCES];      /* the sources asked about */
+    BOOLEAN Delta;                  /* the state change reports in flight are ALLOW / BLOCK records (INCLUDE to INCLUDE) */
+    USHORT NumAllow;
+    USHORT NumBlock;
+    ULONG Allow[IGMP_MAX_SOURCES];      /* the sources the filter gained / lost */
+    ULONG Block[IGMP_MAX_SOURCES];
 } IGMP_GROUP, *PIGMP_GROUP;
 
 typedef struct _IGMP_INTERFACE
@@ -298,6 +305,8 @@ IgmpChangeSent(PIGMP_INTERFACE IF, PIGMP_GROUP G, UCHAR Version, ULONGLONG Now)
     if (Version != 3 && !G->Member)
         G->ChangeLeft = 0;
     G->ChangeDue = G->ChangeLeft ? Now + MS(1) + IgmpDelay(IGMP_UNSOLICITED_MS) : 0;
+    if (!G->ChangeLeft)
+        G->Delta = FALSE;
     if (!G->Member && !G->ChangeLeft)
         IgmpFreeGroup(IF, G);
 }
@@ -335,8 +344,15 @@ IgmpNextDue(PIGMP_SEND S, ULONGLONG Now)
                         IgmpStartV3(S, IF->IfIndex);
                         Started = TRUE;
                     }
-                    if (!IgmpAddRecord(S, Type, G->Group, G->Sources,
-                                       (G->Mode == IGMP_MODE_INCLUDE) ? G->NumSources : 0))
+                    if (G->Delta)
+                    {
+                        /* a source change inside INCLUDE mode: ALLOW the new sources, BLOCK the dropped ones */
+                        if ((G->NumAllow && !IgmpAddRecord(S, IGMP_REC_ALLOW, G->Group, G->Allow, G->NumAllow)) ||
+                            (G->NumBlock && !IgmpAddRecord(S, IGMP_REC_BLOCK, G->Group, G->Block, G->NumBlock)))
+                            break;
+                    }
+                    else if (!IgmpAddRecord(S, Type, G->Group, G->Sources,
+                                            (G->Mode == IGMP_MODE_INCLUDE) ? G->NumSources : 0))
                         break;      /* the report is full: the rest goes in the next one */
                     IgmpChangeSent(IF, G, Version, Now);
                     continue;
@@ -600,6 +616,30 @@ IGMPSetGroupState(ULONG IfIndex, ULONG Group, UCHAR Mode, const ULONG *Sources, 
         goto Done;      /* nothing changed */
     }
 
+    /* INCLUDE to INCLUDE with no change report in flight: the gained sources are ALLOWed, the lost ones BLOCKed
+       (RFC 3376 5.1; Windows Server 2022 sends them, also when the last source goes). Any other change, or one
+       that comes while the reports of the last are still going out, is reported by TO_IN / TO_EX */
+    G->Delta = FALSE;
+    G->NumAllow = G->NumBlock = 0;
+    if (Mode == IGMP_MODE_INCLUDE && G->Mode == IGMP_MODE_INCLUDE && !G->ChangeLeft)
+    {
+        ULONG i, j;
+
+        for (i = 0; i < NumSources; i++)
+        {
+            for (j = 0; j < G->NumSources && G->Sources[j] != Sources[i]; j++);
+            if (j == G->NumSources)
+                G->Allow[G->NumAllow++] = Sources[i];
+        }
+        for (j = 0; j < G->NumSources; j++)
+        {
+            for (i = 0; i < NumSources && Sources[i] != G->Sources[j]; i++);
+            if (i == NumSources)
+                G->Block[G->NumBlock++] = G->Sources[j];
+        }
+        G->Delta = (G->NumAllow || G->NumBlock);
+    }
+
     G->Member = Member;
     G->Mode = Mode;
     G->NumSources = (USHORT)NumSources;
@@ -638,6 +678,7 @@ IGMPInterfaceRefresh(ULONG IfIndex)
             continue;
         G->ChangeLeft = IGMP_ROBUSTNESS;
         G->ChangeDue = Now;
+        G->Delta = FALSE;       /* the whole state is announced again */
     }
     if (IF)
         IgmpArm();
