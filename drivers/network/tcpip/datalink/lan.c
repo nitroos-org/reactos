@@ -723,7 +723,7 @@ BOOLEAN LanSubmitReceiveWork(
         /* A full queue drops the segment (the receive worker is behind): the interface counts it as a
            discarded packet (GetIfEntry dwInDiscards), as the drops were invisible otherwise */
         if (!Queued && Adapter->Context)
-            ((PIP_INTERFACE)Adapter->Context)->Stats.InDiscarded++;
+            InterlockedIncrement((PLONG)&((PIP_INTERFACE)Adapter->Context)->Stats.InDiscarded);
     } else {
         if (InterlockedIncrement(&Adapter->ReceiveWorkItems) > LAN_MAX_PENDING_FRAMES) {
             Queued = FALSE;
