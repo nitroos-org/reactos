@@ -654,10 +654,9 @@ SetScreenSaver(HWND hwndDlg, PDATA pData)
         }
         else
         {
-            /* Windows deletes the value if no screensaver is set */
+            /* Windows deletes the value if no screensaver is set and leaves ScreenSaveActive as it is (measured on
+             * Windows Server 2022: "1" stays "1", "0" stays "0"; with a saver chosen it becomes "1") */
             RegDeleteValue(regKey, _T("SCRNSAVE.EXE"));
-
-            SystemParametersInfo(SPI_SETSCREENSAVEACTIVE, FALSE, 0, SPIF_UPDATEINIFILE);
         }
 
         /* Set the secure value (not when a policy fixes it) */

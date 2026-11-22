@@ -61,6 +61,7 @@ extern void func_HungWindow(void);
 extern void func_WindowPosChanged(void);
 extern void func_WindowRgnHandles(void);
 extern void func_PowerSettingNotification(void);
+extern void func_ScreenSaverSecurePolicy(void);
 extern void func_OwnerZOrderNotice(void);
 extern void func_NcPaintLayered(void);
 extern void func_SetWindowPosFlags(void);
@@ -232,6 +233,7 @@ const struct test winetest_testlist[] =
     { "WindowPosChanged", func_WindowPosChanged },
     { "WindowRgnHandles", func_WindowRgnHandles },
     { "PowerSettingNotification", func_PowerSettingNotification },
+    { "ScreenSaverSecurePolicy", func_ScreenSaverSecurePolicy },
     { "OwnerZOrderNotice", func_OwnerZOrderNotice },
     { "NcPaintLayered", func_NcPaintLayered },
     { "SetWindowPosFlags", func_SetWindowPosFlags },
