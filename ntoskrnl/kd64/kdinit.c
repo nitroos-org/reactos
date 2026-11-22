@@ -104,6 +104,46 @@ KdpPrintBanner(VOID)
     }
 }
 
+#if !defined(_WIN64) && (defined(__GNUC__) || defined(__clang__))
+/**
+ * @brief
+ * Sign-extends the 32-bit kernel addresses stored in the 64-bit fields of the
+ * debugger data block, from field First to field Last included.
+ *
+ * A debugger expects 32-bit kernel addresses sign-extended in these fields,
+ * as in the version block. GCC cannot sign-extend an address in a static
+ * initializer (see PtrToUL64 in kddata.c), so they start out zero-extended.
+ **/
+static
+VOID
+KdpSignExtendDataBlockFields(
+    _In_ ULONG First,
+    _In_ ULONG Last)
+{
+    PULONG64 Field = (PULONG64)((ULONG_PTR)&KdDebuggerDataBlock + First);
+    PULONG64 End = (PULONG64)((ULONG_PTR)&KdDebuggerDataBlock + Last);
+
+    for (; Field <= End; Field++)
+        *Field = (ULONG64)(LONG64)(LONG)(ULONG)*Field;
+}
+
+static
+VOID
+KdpSignExtendDataBlock(VOID)
+{
+    /* KeUserCallbackDispatcher and MmPageSize in this range are not
+     * kernel addresses, their high bit is clear: they do not change */
+    KdpSignExtendDataBlockFields(FIELD_OFFSET(KDDEBUGGER_DATA64, BreakpointWithStatus),
+                                 FIELD_OFFSET(KDDEBUGGER_DATA64, BreakpointWithStatus));
+    KdpSignExtendDataBlockFields(FIELD_OFFSET(KDDEBUGGER_DATA64, KiCallUserMode),
+                                 FIELD_OFFSET(KDDEBUGGER_DATA64, MmVirtualTranslationBase));
+    KdpSignExtendDataBlockFields(FIELD_OFFSET(KDDEBUGGER_DATA64, KdPrintCircularBufferPtr),
+                                 FIELD_OFFSET(KDDEBUGGER_DATA64, KeLoaderBlock));
+    KdpSignExtendDataBlockFields(FIELD_OFFSET(KDDEBUGGER_DATA64, IopNumTriageDumpDataBlocks),
+                                 FIELD_OFFSET(KDDEBUGGER_DATA64, IopTriageDumpDataBlocks));
+}
+#endif
+
 /* FUNCTIONS *****************************************************************/
 
 VOID
@@ -192,6 +232,11 @@ KdInitSystem(
     {
         /* It wasn't...Initialize the KD Data Listhead */
         InitializeListHead(&KdpDebuggerDataListHead);
+
+#if !defined(_WIN64) && (defined(__GNUC__) || defined(__clang__))
+        /* Give the debugger data block's addresses their 64-bit form */
+        KdpSignExtendDataBlock();
+#endif
 
         /* Register the Debugger Data Block */
         KdRegisterDebuggerDataBlock(KDBG_TAG,
@@ -361,7 +406,7 @@ KdInitSystem(
     }
 
     /* Set the Kernel Base in the Data Block */
-    KdDebuggerDataBlock.KernBase = (ULONG_PTR)KdVersionBlock.KernBase;
+    KdDebuggerDataBlock.KernBase = KdVersionBlock.KernBase;
 
     /* Initialize the debugger if requested */
     if (EnableKd && (NT_SUCCESS(KdDebuggerInitialize0(LoaderBlock))))
