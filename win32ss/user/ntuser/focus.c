@@ -744,6 +744,11 @@ IntSendFocusMessages( PTHREADINFO pti, PWND pWnd)
    HWND hwndPrev;
    USER_REFERENCE_ENTRY Ref, RefNew;
 
+   /* A window whose storage is gone (co_UserFreeWindow) is not made the focus: nothing would clear the
+      queue's pointer to it again, and it is freed once its last reference goes */
+   if (pWnd && (pWnd->state & WNDS_DESTROYED))
+      return;
+
    ThreadQueue->QF_flags &= ~QF_FOCUSNULLSINCEACTIVE;
    if (!pWnd && ThreadQueue->spwndActive)
    {
@@ -773,7 +778,9 @@ IntSendFocusMessages( PTHREADINFO pti, PWND pWnd)
             IntFocusSetInputContext(pWndPrev, FALSE, FALSE);
          }
       }
-      if (ThreadQueue->spwndFocus == pWnd)
+      /* AttachThreadInput during the callback above can give this thread another queue and free the old
+         one (MsqDestroyMessageQueue): the queue is read only while it is still the thread's */
+      if (ThreadQueue == pti->MessageQueue && ThreadQueue->spwndFocus == pWnd)
       {
          if (IS_IMM_MODE())
          {
@@ -1501,7 +1508,7 @@ co_UserSetFocus(PWND Window)
    PWND pwndTop;
    PTHREADINFO pti;
    PUSER_MESSAGE_QUEUE ThreadQueue;
-   HWND hwndTop;
+   HWND hwndTop, hWnd;
 
    if (Window)
       ASSERT_REFS_CO(Window);
@@ -1550,12 +1557,18 @@ co_UserSetFocus(PWND Window)
          its handle after them. (Not with a reference: a referenced window that is destroyed meanwhile
          keeps its handle, which changes the activations of its destruction.) */
       hwndTop = UserHMGetHandle(pwndTop);
+      /* So is Window when the caller passes a parent (co_UserSetFocus(Window->spwndParent)); and a window
+         destroyed by the callbacks must not become the focus. AttachThreadInput during them can free the
+         queue of this thread (MsqDestroyMessageQueue). All three are checked after every callback. */
+      hWnd = UserHMGetHandle(Window);
 
-      if (co_HOOK_CallHooks( WH_CBT, HCBT_SETFOCUS, (WPARAM)UserHMGetHandle(Window), (LPARAM)hWndPrev))
+      if (co_HOOK_CallHooks( WH_CBT, HCBT_SETFOCUS, (WPARAM)hWnd, (LPARAM)hWndPrev))
       {
          ERR("SetFocus 1 WH_CBT Call Hook return!\n");
          return 0;
       }
+      if (ThreadQueue != pti->MessageQueue || ValidateHwndNoErr(hWnd) != Window)
+         return 0;
       if (!(pwndTop = ValidateHwndNoErr(hwndTop)))
          return 0;
 
@@ -1575,6 +1588,8 @@ co_UserSetFocus(PWND Window)
                ERR("SetFocus: Set Foreground and Focus Failed!\n");
                return 0;
             }
+            if (ThreadQueue != pti->MessageQueue || ValidateHwndNoErr(hWnd) != Window)
+               return 0;
             if (!(pwndTop = ValidateHwndNoErr(hwndTop)))
                return 0;
          }
@@ -1590,6 +1605,8 @@ co_UserSetFocus(PWND Window)
             }
          }
 
+         if (ThreadQueue != pti->MessageQueue || ValidateHwndNoErr(hWnd) != Window)
+            return 0;
          /* Abort if window destroyed */
          if (Window->state2 & WNDS2_INDESTROY) return 0;
          /* Do not change focus if the window is no longer active (pointers compared only) */
