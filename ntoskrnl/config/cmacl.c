@@ -86,6 +86,7 @@
 #include "ntoskrnl.h"
 #define NDEBUG
 #include "debug.h"
+#include "cmaclsd.h"
 
 /* DEFINITIONS ***************************************************************/
 
@@ -140,13 +141,14 @@ typedef enum _CMP_ACL_RULE
     CmpAclRuleUser,
     CmpAclRuleUserUnknown,
     CmpAclRuleOther,
+    CmpAclRuleUserUnchecked,    /* a user hive whose check failed: only its account and the system (CmpAclDecide) */
     CmpAclRuleMax
 } CMP_ACL_RULE;
 
 static const PCSTR CmpAclRuleNames[CmpAclRuleMax] =
 {
     "cell", "inherited", "master", "hardware", "hive-root", "sam-security",
-    "taskcache", "eventlog", "default", "user", "user-unknown", "other"
+    "taskcache", "eventlog", "default", "user", "user-unknown", "other", "user-unchecked"
 };
 
 static const PCSTR CmpAclOpNames[] = { "open", "create", "createlink", "linknode", "followlink", "restamp", "keptgrant" };
@@ -354,6 +356,7 @@ typedef struct _CMP_ACL_ENTRY
     BOOLEAN Restricted;
     BOOLEAN Impersonating;
     LONG WrittenCount;
+    ULONG Count;            /* restamp of a user hive in audit mode: the descriptors that would be replaced */
     LARGE_INTEGER Time;
     USHORT KeyChars;
     USHORT ChildChars;
@@ -2040,6 +2043,31 @@ static ULONG CmpAclTransitionState;
 static ULONG CmpAclTransitionMs;     /* how long the check took (boot time it cost) */
 
 /*
+ * One check of a user hive at its load (CmpAclCheckUserHive): the walk of the
+ * transition with the user-hive verdict (CmpAclUserHiveSdVerdict) instead of
+ * the machine one, and counters of its own (the transition's decide whether
+ * its marker is written).
+ */
+typedef struct _CMP_ACL_USER_CHECK
+{
+    PSID OwnSid;                    /* the hive's account, from the name it is loaded at */
+    PHHIVE Hive;
+    HCELL_INDEX RootCell;
+    BOOLEAN Classes;                /* loaded at <SID>_Classes: the classes tree is its root */
+    LONG Replaced;
+    LONG Failed;                    /* replacements or link deletions that failed */
+    LONG Incomplete;                /* keys or subtrees the walk could not look at */
+} CMP_ACL_USER_CHECK, *PCMP_ACL_USER_CHECK;
+
+/* Counters of the user-hive checks (AuditStats) */
+static LONG CmpAclUserHivesChecked;     /* checked at their load (enforce mode) */
+static LONG CmpAclUserHivesSkipped;     /* a valid record: checked since the transition */
+static LONG CmpAclUserHivesFlagged;     /* audit mode: a load that would replace descriptors */
+static LONG CmpAclUserHiveRestamped;    /* descriptors replaced, links deleted */
+static LONG CmpAclUserHiveFailed;       /* checks that could not be completed (hive marked unchecked) */
+static ULONG CmpAclUserHiveMs;          /* how long the last check took */
+
+/*
  * Principals a standard user cannot be or become: SYSTEM, LocalService,
  * NetworkService, the SERVICE group, the builtin groups only administrators can
  * add members to (all of S-1-5-32 but Users, Guests and Remote Desktop Users),
@@ -2183,7 +2211,11 @@ CmpAclSdPlanted(
 /*
  * Record a key whose stored descriptor was replaced (Operation
  * CM_REGACL_OP_RESTAMP), or kept although it lets others than administrators
- * change the key (CM_REGACL_OP_KEPTGRANT): counted, printed (capped) and logged
+ * change the key (CM_REGACL_OP_KEPTGRANT): counted, printed (capped) and logged.
+ * User: a key of a user hive checked at its load (counted there, logged with
+ * "hive":"user","applied":1). Without User, AuditCount > 0: a user hive loaded
+ * in audit mode (KeyName its root) that has AuditCount descriptors the check
+ * would replace under enforcement; nothing was changed ("applied":0).
  */
 static
 VOID
@@ -2192,7 +2224,9 @@ CmpAclRecordRestamp(
     _In_ PCUNICODE_STRING KeyName,
     _In_ ULONG Reasons,
     _In_opt_ PSID OldOwner,
-    _In_ NTSTATUS Status)
+    _In_ NTSTATUS Status,
+    _Inout_opt_ PCMP_ACL_USER_CHECK User,
+    _In_ ULONG AuditCount)
 {
     PCMP_ACL_ENTRY Entry;
     UNICODE_STRING Owner = {0};
@@ -2200,23 +2234,53 @@ CmpAclRecordRestamp(
     USHORT KeyChars;
     PWCHAR p;
 
-    if (Operation == CM_REGACL_OP_KEPTGRANT)
+    if (User)
+    {
+        if (NT_SUCCESS(Status))
+        {
+            InterlockedIncrement(&User->Replaced);
+            InterlockedIncrement(&CmpAclUserHiveRestamped);
+        }
+        else
+        {
+            InterlockedIncrement(&User->Failed);
+        }
+    }
+    else if (AuditCount)
+    {
+        /* Counted by the caller */
+    }
+    else if (Operation == CM_REGACL_OP_KEPTGRANT)
+    {
         InterlockedIncrement(&CmpAclKeptGrants);
+    }
     else if (NT_SUCCESS(Status))
+    {
         InterlockedIncrement(&CmpAclRestamped);
+    }
     else
+    {
         InterlockedIncrement(&CmpAclRestampFailed);
-    if (Operation == CM_REGACL_OP_RESTAMP && (Reasons & CMP_ACL_PLANTED_OWNER))
+    }
+    if (!User && !AuditCount && Operation == CM_REGACL_OP_RESTAMP && (Reasons & CMP_ACL_PLANTED_OWNER))
         InterlockedIncrement(&CmpAclRestampUserOwned);
 
     RtlInitEmptyUnicodeString(&Owner, OwnerBuffer, sizeof(OwnerBuffer));
     if (!OldOwner || !NT_SUCCESS(RtlConvertSidToUnicodeString(&Owner, OldOwner, FALSE)))
         Owner.Length = 0;
 
-    if (InterlockedIncrement(&CmpAclRestampPrinted) <= CMP_ACL_RESTAMP_PRINT_MAX)
+    if (AuditCount)
     {
         DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL,
-                   "CM-ACL: %wZ: stored descriptor %s (reasons 0x%lx, owner %wZ): 0x%lx\n",
+                   "CM-ACL-AUDIT: user hive %wZ: %lu stored descriptors would be replaced under enforcement "
+                   "(reasons 0x%lx), nothing changed\n",
+                   KeyName, AuditCount, Reasons);
+    }
+    else if (InterlockedIncrement(&CmpAclRestampPrinted) <= CMP_ACL_RESTAMP_PRINT_MAX)
+    {
+        DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL,
+                   "CM-ACL: %s%wZ: stored descriptor %s (reasons 0x%lx, owner %wZ): 0x%lx\n",
+                   User ? "user hive key " : "",
                    KeyName, Operation == CM_REGACL_OP_KEPTGRANT ? "kept, others may change the key" : "replaced",
                    Reasons, &Owner, Status);
     }
@@ -2242,7 +2306,10 @@ CmpAclRecordRestamp(
     Entry->Id = (ULONG)InterlockedIncrement(&CmpAclNextId);
     Entry->Slot = MAXULONG;
     Entry->Operation = Operation;
-    Entry->Rule = CmpAclRuleCell;
+    /* A user hive's entry: rule "user", Granted 1 when the descriptor was replaced */
+    Entry->Rule = (User || AuditCount) ? CmpAclRuleUser : CmpAclRuleCell;
+    Entry->Granted = User ? 1 : 0;
+    Entry->Count = AuditCount;
     Entry->Desired = Reasons;
     Entry->ShadowStatus = Status;
     KeQuerySystemTime(&Entry->Time);
@@ -2323,13 +2390,87 @@ CmpAclDefaultKeySd(
  * lets users write (some programs grant that on their own keys on purpose). A
  * key without a stored descriptor is left alone (it inherits). Returns the
  * reasons found (0: nothing done).
+ *
+ * User: a key of a user hive being checked at its load. The verdict is then
+ * CmpAclUserHiveSdVerdict's for the hive's account and the key's place, Force
+ * and OwnerOnly are not used, and a link owned by anyone outside the trusted
+ * set of that hive is deleted, as in the machine hives.
  */
+C_ASSERT(CMP_ACL_UH_OWNER == CMP_ACL_PLANTED_OWNER && CMP_ACL_UH_WRITE == CMP_ACL_PLANTED_WRITE);
+C_ASSERT(((CMP_ACL_UH_READ | CMP_ACL_UH_DENY | CMP_ACL_UH_LABEL) &
+          (CMP_ACL_PLANTED_SYSTEM | CMP_ACL_PLANTED_INHERIT | CMP_ACL_PLANTED_LINK | CMP_ACL_LINK_DELETED)) == 0);
+
+/* Is the KCB's name Upper (as CmpAclNameMatches), one level of a path */
+static
+BOOLEAN
+CmpAclUserHivePathIs(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_ ULONG Depth,
+    _In_ ULONG Level,
+    _In_ PCSTR Upper)
+{
+    ULONG i;
+
+    /* The ancestor of Kcb (Depth levels below the hive root) that is Level levels below it */
+    for (i = Depth; i > Level && Kcb; i--)
+        Kcb = Kcb->ParentKcb;
+    return CmpAclNameMatches(Kcb, Upper, FALSE);
+}
+
+/*
+ * Where a key of the user hive being checked is (CMP_ACL_UH_PLACE_*): the
+ * hive's root, or below AppContainer\Storage or \Mappings of the classes tree
+ * (HKCU\Software\Classes, or the root of a <SID>_Classes hive), where the
+ * profile code grants package SIDs their storage. The caller holds the
+ * registry lock (names and parents do not change).
+ */
+static
+ULONG
+CmpAclUserHivePlace(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_ PCMP_ACL_USER_CHECK User)
+{
+    static const PCSTR Path[] =
+    {
+        "SOFTWARE", "CLASSES", "LOCAL SETTINGS", "SOFTWARE", "MICROSOFT", "WINDOWS", "CURRENTVERSION",
+        "APPCONTAINER"
+    };
+    PCM_KEY_CONTROL_BLOCK Walk;
+    ULONG Depth = 0, First, Level, i;
+
+    if (Kcb->KeyHive == User->Hive && Kcb->KeyCell == User->RootCell)
+        return CMP_ACL_UH_PLACE_ROOT;
+
+    /* Levels below the hive root (the parse makes no KCB deeper than 512 levels) */
+    for (Walk = Kcb; Walk && !(Walk->KeyHive == User->Hive && Walk->KeyCell == User->RootCell); Walk = Walk->ParentKcb)
+    {
+        if (++Depth > CMP_ACL_WALK_MAX_DEPTH)
+            return 0;
+    }
+    if (!Walk)
+        return 0;
+
+    /* <Path>\Storage|Mappings\<something>: a classes hive starts at "Local Settings" */
+    First = User->Classes ? 2 : 0;
+    if (Depth < RTL_NUMBER_OF(Path) - First + 2)
+        return 0;
+    for (i = First, Level = 1; i < RTL_NUMBER_OF(Path); i++, Level++)
+    {
+        if (!CmpAclUserHivePathIs(Kcb, Depth, Level, Path[i]))
+            return 0;
+    }
+    if (!CmpAclUserHivePathIs(Kcb, Depth, Level, "STORAGE") && !CmpAclUserHivePathIs(Kcb, Depth, Level, "MAPPINGS"))
+        return 0;
+    return CMP_ACL_UH_PLACE_APPCONTAINER;
+}
+
 static
 ULONG
 CmpAclCheckStoredKey(
     _In_ HANDLE Key,
     _In_ BOOLEAN Force,
-    _In_ BOOLEAN OwnerOnly)
+    _In_ BOOLEAN OwnerOnly,
+    _Inout_opt_ PCMP_ACL_USER_CHECK User)
 {
     ULONG Buffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
     ULONG OwnerBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
@@ -2353,7 +2494,21 @@ CmpAclCheckStoredKey(
         CmpAcquireKcbLockShared(Kcb);
         Link = (Kcb->Flags & KEY_SYM_LINK) != 0;
         Sd = CmpAclCopyStoredSd(Kcb, Buffer, sizeof(Buffer), &PoolCopy, FALSE);
-        if (Sd)
+        if (Sd && User)
+        {
+            Reasons = CmpAclUserHiveSdVerdict(Sd, User->OwnSid, CmpAclUserHivePlace(Kcb, User),
+                                              &CmpKeyObjectType->TypeInfo.GenericMapping, &Owner);
+            if (Owner && RtlLengthSid(Owner) <= sizeof(OwnerBuffer))
+            {
+                RtlCopySid(sizeof(OwnerBuffer), (PSID)OwnerBuffer, Owner);
+                Owner = (PSID)OwnerBuffer;
+            }
+            else
+            {
+                Owner = NULL;
+            }
+        }
+        else if (Sd)
         {
             Reasons = CmpAclSdPlanted(Sd, &Owner);
             if (OwnerOnly && !(Reasons & CMP_ACL_PLANTED_OWNER))
@@ -2411,7 +2566,7 @@ CmpAclCheckStoredKey(
     {
         if (Name)
         {
-            CmpAclRecordRestamp(CM_REGACL_OP_KEPTGRANT, Name, Kept, Owner, STATUS_SUCCESS);
+            CmpAclRecordRestamp(CM_REGACL_OP_KEPTGRANT, Name, Kept, Owner, STATUS_SUCCESS, NULL, 0);
             CmpFree(Name, 0);
         }
         return 0;
@@ -2426,8 +2581,12 @@ CmpAclCheckStoredKey(
             Reasons |= CMP_ACL_LINK_DELETED;
             if (Name)
             {
-                CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons & ~CMP_ACL_LINK_DELETED, Owner, Status);
+                CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons & ~CMP_ACL_LINK_DELETED, Owner, Status, User, 0);
                 CmpFree(Name, 0);
+            }
+            else if (User)
+            {
+                InterlockedIncrement(&User->Replaced);
             }
             return Reasons;
         }
@@ -2437,7 +2596,9 @@ CmpAclCheckStoredKey(
          * key there gets, so that its owner can no longer change its target.
          */
         if (Name)
-            CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons, Owner, Status);
+            CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons, Owner, Status, User, 0);
+        else if (User)
+            InterlockedIncrement(&User->Failed);
         Reasons &= ~CMP_ACL_PLANTED_LINK;
         if (NT_SUCCESS(ObReferenceObjectByHandle(Key, 0, CmpKeyObjectType, KernelMode, (PVOID *)&KeyBody, NULL)))
         {
@@ -2461,8 +2622,16 @@ CmpAclCheckStoredKey(
     }
     if (Name)
     {
-        CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons, Owner, Status);
+        CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons, Owner, Status, User, 0);
         CmpFree(Name, 0);
+    }
+    else if (User)
+    {
+        /* Not logged (no memory for the name), but counted: a failure leaves the hive unchecked */
+        if (NT_SUCCESS(Status))
+            InterlockedIncrement(&User->Replaced);
+        else
+            InterlockedIncrement(&User->Failed);
     }
     return Reasons;
 }
@@ -2477,13 +2646,31 @@ CmpAclCheckStoredKey(
  * (their own descriptor) but not followed; one a non-administrator owns is
  * deleted (CmpAclCheckStoredKey). OwnerOnly: only keys a non-administrator
  * owns count (see CmpAclCheckStoredKey). Boot only; kernel handles.
+ *
+ * User: the check of a user hive at its load (CmpAclCheckUserHive), Path its
+ * root: the user-hive verdict, and the keys left unchecked are counted in
+ * User (only the loading thread can reach the hive then, so a subkey that
+ * cannot be opened by the name it was enumerated with is not "gone": it is
+ * counted too).
  */
+static
+VOID
+CmpAclWalkIncompleteOne(
+    _Inout_opt_ PCMP_ACL_USER_CHECK User)
+{
+    if (User)
+        InterlockedIncrement(&User->Incomplete);
+    else
+        InterlockedIncrement(&CmpAclWalkIncomplete);
+}
+
 static
 VOID
 CmpAclWalk(
     _In_ PCWSTR Path,
     _In_ BOOLEAN Subtree,
-    _In_ BOOLEAN OwnerOnly)
+    _In_ BOOLEAN OwnerOnly,
+    _Inout_opt_ PCMP_ACL_USER_CHECK User)
 {
     typedef struct _CMP_ACL_WALK_LEVEL
     {
@@ -2503,7 +2690,7 @@ CmpAclWalk(
     if (!Stack)
     {
         InterlockedIncrement(&CmpAclErrors);
-        InterlockedIncrement(&CmpAclWalkIncomplete);
+        CmpAclWalkIncompleteOne(User);
         return;
     }
 
@@ -2513,12 +2700,12 @@ CmpAclWalk(
     if (!NT_SUCCESS(Status))
     {
         /* A listed key that does not exist (Wow6432Node on a 32-bit system) has nothing to check */
-        if (Status != STATUS_OBJECT_NAME_NOT_FOUND && Status != STATUS_OBJECT_PATH_NOT_FOUND)
-            InterlockedIncrement(&CmpAclWalkIncomplete);
+        if (User || (Status != STATUS_OBJECT_NAME_NOT_FOUND && Status != STATUS_OBJECT_PATH_NOT_FOUND))
+            CmpAclWalkIncompleteOne(User);
         ExFreePoolWithTag(Stack, TAG_CM_ACL);
         return;
     }
-    CmpAclCheckStoredKey(Stack[0].Key, FALSE, OwnerOnly);
+    CmpAclCheckStoredKey(Stack[0].Key, FALSE, OwnerOnly, User);
     Stack[0].Index = 0;
     if (!Subtree)
     {
@@ -2539,7 +2726,7 @@ CmpAclWalk(
              * leaves the rest unchecked: counted, so that the marker is not written.
              */
             if (Status != STATUS_NO_MORE_ENTRIES)
-                InterlockedIncrement(&CmpAclWalkIncomplete);
+                CmpAclWalkIncompleteOne(User);
             ZwClose(Stack[Depth].Key);
             if (Depth == 0)
                 break;
@@ -2556,11 +2743,11 @@ CmpAclWalk(
         if (!NT_SUCCESS(Status))
         {
             /* Gone meanwhile (a kernel-mode writer at boot) is fine; anything else leaves the subtree unchecked */
-            if (Status != STATUS_OBJECT_NAME_NOT_FOUND)
-                InterlockedIncrement(&CmpAclWalkIncomplete);
+            if (User || Status != STATUS_OBJECT_NAME_NOT_FOUND)
+                CmpAclWalkIncompleteOne(User);
             continue;
         }
-        if (CmpAclCheckStoredKey(Child, FALSE, OwnerOnly) & CMP_ACL_LINK_DELETED)
+        if (CmpAclCheckStoredKey(Child, FALSE, OwnerOnly, User) & CMP_ACL_LINK_DELETED)
         {
             /* A deleted link: the next subkey now has its index */
             ZwClose(Child);
@@ -2569,6 +2756,9 @@ CmpAclWalk(
         }
         if (Depth + 1 >= CMP_ACL_WALK_MAX_DEPTH)
         {
+            /* Cannot happen (no KCB below 512 levels); for a user hive it would be a key not looked at */
+            if (User)
+                CmpAclWalkIncompleteOne(User);
             ZwClose(Child);
             continue;
         }
@@ -2637,7 +2827,8 @@ CmpAclStampPolicySd(
     ZwClose(Key);
     if (Name)
     {
-        CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, CMP_ACL_PLANTED_SYSTEM | CMP_ACL_PLANTED_INHERIT, NULL, Status);
+        CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, CMP_ACL_PLANTED_SYSTEM | CMP_ACL_PLANTED_INHERIT, NULL, Status,
+                            NULL, 0);
         CmpFree(Name, 0);
     }
 }
@@ -2693,7 +2884,7 @@ CmpAclForceDefault(
     InitializeObjectAttributes(&Attributes, Name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_OPENLINK, NULL, NULL);
     if (!NT_SUCCESS(ZwOpenKey(&Key, CMP_ACL_RESET_ACCESS, &Attributes)))
         return FALSE;
-    Reasons = CmpAclCheckStoredKey(Key, TRUE, FALSE);
+    Reasons = CmpAclCheckStoredKey(Key, TRUE, FALSE, NULL);
     ZwClose(Key);
     return Reasons != 0;
 }
@@ -2899,11 +3090,91 @@ CmpAclMarkerDelete(VOID)
     ZwDeleteFile(&Attributes);
 }
 
+/*
+ * The marker also names the transition it stands for: a random number drawn
+ * when it is written (line "Generation: <16 hex digits>"). A user hive is
+ * recorded as checked with this number (CmpAclCheckUserHive), so a record
+ * made before the transition (or under an earlier one, or planted while
+ * nothing was enforced) never counts. 0: none known.
+ */
+static ULONG64 CmpAclGeneration;
+
+#define CMP_ACL_GENERATION_TAG      "Generation: "
+#define CMP_ACL_MARKER_MAX_READ     512
+
+static
+ULONG64
+CmpAclNewGeneration(VOID)
+{
+    LARGE_INTEGER Counter, Time;
+    ULONG64 Value;
+    ULONG Seed, i;
+
+    Counter = KeQueryPerformanceCounter(NULL);
+    KeQuerySystemTime(&Time);
+    Seed = Counter.LowPart ^ Time.LowPart ^ (ULONG)KeQueryInterruptTime();
+    Value = (ULONG64)Counter.QuadPart ^ ((ULONG64)Time.QuadPart << 17) ^ KeQueryInterruptTime();
+    /* splitmix64 rounds over the mix, with two draws of the boot's seed */
+    for (i = 0; i < 2; i++)
+    {
+        Value ^= ((ULONG64)RtlRandomEx(&Seed) << 32) | RtlRandomEx(&Seed);
+        Value += 0x9E3779B97F4A7C15ULL;
+        Value = (Value ^ (Value >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        Value = (Value ^ (Value >> 27)) * 0x94D049BB133111EBULL;
+        Value ^= Value >> 31;
+    }
+    return Value ? Value : 1;
+}
+
+/* The generation written in the marker (a trusted one: CmpAclMarkerPresent), or 0 */
+static
+ULONG64
+CmpAclMarkerGeneration(VOID)
+{
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Iosb;
+    CHAR Text[CMP_ACL_MARKER_MAX_READ + 1];
+    PCHAR Found;
+    ULONG64 Value = 0;
+    ULONG i, Digit;
+    HANDLE File;
+    NTSTATUS Status;
+
+    InitializeObjectAttributes(&Attributes, &CmpAclMarkerName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = ZwOpenFile(&File, FILE_READ_DATA | SYNCHRONIZE, &Attributes, &Iosb, FILE_SHARE_READ,
+                        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!NT_SUCCESS(Status))
+        return 0;
+    Status = ZwReadFile(File, NULL, NULL, NULL, &Iosb, Text, CMP_ACL_MARKER_MAX_READ, NULL, NULL);
+    ZwClose(File);
+    if (!NT_SUCCESS(Status) || Iosb.Information > CMP_ACL_MARKER_MAX_READ)
+        return 0;
+    Text[Iosb.Information] = ANSI_NULL;
+
+    Found = strstr(Text, CMP_ACL_GENERATION_TAG);
+    if (!Found)
+        return 0;
+    Found += sizeof(CMP_ACL_GENERATION_TAG) - 1;
+    for (i = 0; i < 16; i++)
+    {
+        if (Found[i] >= '0' && Found[i] <= '9')
+            Digit = Found[i] - '0';
+        else if (Found[i] >= 'A' && Found[i] <= 'F')
+            Digit = Found[i] - 'A' + 10;
+        else
+            return 0;
+        Value = (Value << 4) | Digit;
+    }
+    return Value;
+}
+
 static
 BOOLEAN
-CmpAclMarkerWrite(VOID)
+CmpAclMarkerWrite(
+    _In_ ULONG64 Generation)
 {
     static const CHAR Text[] = "Registry key security was enforced on the machine hives since this file was written.\r\n";
+    CHAR Line[sizeof(CMP_ACL_GENERATION_TAG) + 16 + 2];
     CMP_ACL_SD_SPEC Spec =
     {
         CmpAclSidSystem, CmpAclSidSystem, SE_DACL_PROTECTED, 2,
@@ -2930,10 +3201,14 @@ CmpAclMarkerWrite(VOID)
     if (!NT_SUCCESS(Status))
         return FALSE;
     ZwWriteFile(File, NULL, NULL, NULL, &Iosb, (PVOID)Text, sizeof(Text) - 1, NULL, NULL);
+    _snprintf(Line, sizeof(Line), CMP_ACL_GENERATION_TAG "%08lX%08lX\r\n",
+              (ULONG)(Generation >> 32), (ULONG)Generation);
+    Line[sizeof(Line) - 1] = ANSI_NULL;
+    ZwWriteFile(File, NULL, NULL, NULL, &Iosb, Line, (ULONG)strlen(Line), NULL, NULL);
     ZwClose(File);
 
-    /* It counts only if the volume kept the descriptor */
-    return CmpAclMarkerPresent();
+    /* It counts only if the volume kept the descriptor, and the generation is the one written */
+    return CmpAclMarkerPresent() && CmpAclMarkerGeneration() == Generation;
 }
 
 /*
@@ -2959,6 +3234,459 @@ CmpAclFlushHives(VOID)
     Status = ZwFlushKey(Key);
     ZwClose(Key);
     return Status;
+}
+
+/*
+ * PER-USER HIVES. The transition checks the machine hives; a user hive (an
+ * account's NTUSER.DAT, the service accounts' hives, a classes hive) is
+ * checked at its first load after it, by CmpAclCheckUserHive, called by
+ * CmLoadKey while only the loading thread can reach the hive. The verdict
+ * per descriptor is CmpAclUserHiveSdVerdict's (cmaclsd.c). A hive checked
+ * gets a record (below), so later loads cost nothing.
+ *
+ * Records: one REG_BINARY value per name the hive was loaded at, in a key
+ * only the kernel writes (SYSTEM full control, administrators read), with
+ * the generation of the marker (a record of an earlier transition, or one
+ * planted while nothing was enforced, never counts) and the time stamp of
+ * the hive's base block when the check ended: a load of an older copy of the
+ * file (a restored profile) is checked again.
+ */
+#define CMP_ACL_USER_RECORDS_PATH   L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\RegAclUserHives"
+#define CMP_ACL_USER_RECORD_VERSION 1
+
+typedef struct _CMP_ACL_USER_RECORD
+{
+    ULONG Version;
+    ULONG Replaced;             /* descriptors replaced and links deleted by the check */
+    ULONG64 Generation;         /* CmpAclGeneration at the check */
+    LARGE_INTEGER HiveTime;     /* the hive's base block time stamp when the check ended */
+    LARGE_INTEGER CheckTime;    /* when the check ended */
+} CMP_ACL_USER_RECORD;
+
+/* Longest hive name a record is kept for (a SID of 15 subauthorities and _Classes fit) */
+#define CMP_ACL_USER_NAME_MAX       240
+
+static
+BOOLEAN
+CmpAclUserRecordsTrusted(VOID)
+{
+    UNICODE_STRING Path = RTL_CONSTANT_STRING(CMP_ACL_USER_RECORDS_PATH);
+
+    return CmpAclKeyAdminWriteOnly(&Path);
+}
+
+/* Delete the records key (the transition, and every boot that does not enforce) */
+static
+VOID
+CmpAclUserRecordsDelete(VOID)
+{
+    UNICODE_STRING Path = RTL_CONSTANT_STRING(CMP_ACL_USER_RECORDS_PATH);
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE Key;
+
+    InitializeObjectAttributes(&Attributes, &Path, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_OPENLINK, NULL, NULL);
+    if (NT_SUCCESS(ZwOpenKey(&Key, DELETE, &Attributes)))
+    {
+        ZwDeleteKey(Key);
+        ZwClose(Key);
+    }
+}
+
+/* The name of the hive key (\REGISTRY\USER\<name>) in upper case, as the record's value name */
+static
+BOOLEAN
+CmpAclUserHiveName(
+    _In_ PCM_KEY_CONTROL_BLOCK HiveKcb,
+    _Out_writes_(CMP_ACL_USER_NAME_MAX) PWCHAR Buffer,
+    _Out_ PUNICODE_STRING Name)
+{
+    ULONG Chars = CmpAclNameChars(HiveKcb), i;
+
+    if (Chars == 0 || Chars > CMP_ACL_USER_NAME_MAX)
+        return FALSE;
+    for (i = 0; i < Chars; i++)
+        Buffer[i] = RtlUpcaseUnicodeChar(CmpAclNameChar(HiveKcb, i));
+    Name->Buffer = Buffer;
+    Name->Length = Name->MaximumLength = (USHORT)(Chars * sizeof(WCHAR));
+    return TRUE;
+}
+
+/* Was the hive loaded at Name checked under this transition, and is its file not older than then? */
+static
+BOOLEAN
+CmpAclUserRecordValid(
+    _In_ PCUNICODE_STRING Name,
+    _In_ LARGE_INTEGER HiveTime)
+{
+    UNICODE_STRING Path = RTL_CONSTANT_STRING(CMP_ACL_USER_RECORDS_PATH);
+    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(CMP_ACL_USER_RECORD)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    CMP_ACL_USER_RECORD Record;
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE Key;
+    ULONG Length;
+    NTSTATUS Status;
+
+    if (!CmpAclGeneration || !CmpAclUserRecordsTrusted())
+        return FALSE;
+
+    InitializeObjectAttributes(&Attributes, &Path, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_OPENLINK, NULL, NULL);
+    if (!NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))
+        return FALSE;
+    Status = ZwQueryValueKey(Key, (PUNICODE_STRING)Name, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
+    ZwClose(Key);
+    if (!NT_SUCCESS(Status) || Info->Type != REG_BINARY || Info->DataLength != sizeof(Record))
+        return FALSE;
+    RtlCopyMemory(&Record, Info->Data, sizeof(Record));
+    return Record.Version == CMP_ACL_USER_RECORD_VERSION &&
+           Record.Generation == CmpAclGeneration &&
+           HiveTime.QuadPart >= Record.HiveTime.QuadPart;
+}
+
+static
+VOID
+CmpAclUserRecordWrite(
+    _In_ PCUNICODE_STRING Name,
+    _In_ LARGE_INTEGER HiveTime,
+    _In_ ULONG Replaced)
+{
+    static const CMP_ACL_SD_SPEC Spec =
+    {
+        CmpAclSidSystem, CmpAclSidSystem, SE_DACL_PROTECTED, 2,
+        {
+            { 0, CmpAclSidSystem, KEY_ALL_ACCESS },
+            { 0, CmpAclSidAdmins, KEY_READ },
+        }
+    };
+    UNICODE_STRING Path = RTL_CONSTANT_STRING(CMP_ACL_USER_RECORDS_PATH);
+    UCHAR SdBuffer[CMP_ACL_SD_BUFFER];
+    CMP_ACL_USER_RECORD Record;
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE Key;
+    ULONG Disposition, Try;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+
+    if (!CmpAclGeneration || !CmpAclBuildSd(&Spec, NULL, SdBuffer, sizeof(SdBuffer)))
+        return;
+
+    for (Try = 0; Try < 2; Try++)
+    {
+        InitializeObjectAttributes(&Attributes, &Path, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_OPENLINK,
+                                   NULL, SdBuffer);
+        Status = ZwCreateKey(&Key, KEY_SET_VALUE | DELETE, &Attributes, 0, NULL, REG_OPTION_NON_VOLATILE,
+                             &Disposition);
+        if (!NT_SUCCESS(Status))
+            return;
+        if (Disposition == REG_CREATED_NEW_KEY || CmpAclUserRecordsTrusted())
+            break;
+        /* A key of that name that others may change (made while nothing was enforced): replaced */
+        ZwDeleteKey(Key);
+        ZwClose(Key);
+        Status = STATUS_UNSUCCESSFUL;
+    }
+    if (!NT_SUCCESS(Status))
+        return;
+
+    RtlZeroMemory(&Record, sizeof(Record));
+    Record.Version = CMP_ACL_USER_RECORD_VERSION;
+    Record.Replaced = Replaced;
+    Record.Generation = CmpAclGeneration;
+    Record.HiveTime = HiveTime;
+    KeQuerySystemTime(&Record.CheckTime);
+    ZwSetValueKey(Key, (PUNICODE_STRING)Name, 0, REG_BINARY, &Record, sizeof(Record));
+    ZwClose(Key);
+}
+
+/*
+ * Is the hive key a user hive the check is for: \REGISTRY\USER\<SID> or
+ * \REGISTRY\USER\<SID>_Classes, not the DEFAULT hive (.DEFAULT, S-1-5-18:
+ * checked by the transition). *Classes: the _Classes form.
+ */
+static
+BOOLEAN
+CmpAclUserHiveTarget(
+    _In_ PCM_KEY_CONTROL_BLOCK HiveKcb,
+    _Out_writes_bytes_(SECURITY_MAX_SID_SIZE) PSID Sid,
+    _Out_ PBOOLEAN Classes)
+{
+    static const CHAR Suffix[] = "_CLASSES";
+    PCM_KEY_CONTROL_BLOCK Parent = HiveKcb->ParentKcb;
+    ULONG Chars, i;
+
+    *Classes = FALSE;
+    if (!Parent || !Parent->ParentKcb || Parent->ParentKcb->ParentKcb ||
+        !CmpAclNameMatches(Parent, "USER", FALSE) ||
+        CmpAclNameMatches(HiveKcb, ".DEFAULT", FALSE) ||
+        CmpAclNameMatches(HiveKcb, "S-1-5-18", FALSE))
+    {
+        return FALSE;
+    }
+    if (!CmpAclParseUserSid(HiveKcb, Sid))
+        return FALSE;
+    Chars = CmpAclNameChars(HiveKcb);
+    if (Chars > sizeof(Suffix) - 1)
+    {
+        for (i = 0; i < sizeof(Suffix) - 1; i++)
+        {
+            if (RtlUpcaseUnicodeChar(CmpAclNameChar(HiveKcb, Chars - (sizeof(Suffix) - 1) + i)) != (WCHAR)Suffix[i])
+                break;
+        }
+        *Classes = (i == sizeof(Suffix) - 1);
+    }
+    return TRUE;
+}
+
+/*
+ * Pass 1: the verdict on every descriptor the hive stores (its security
+ * cache holds each 'sk' cell once, whatever the number of keys that share
+ * it). *Flagged: descriptors that would be replaced where a key may have
+ * them (the root's own cell, used by the root alone, is judged as the
+ * root's: the load recounted the references); *Reasons their reasons;
+ * *Certain: those of them that are wrong at any place (not a package grant
+ * that is right below AppContainer\Storage, which only the walk can tell);
+ * *Unjudged: cells that could not be copied (no memory). A cache that does
+ * not hold every cell of the hive counts as one unjudged cell. The hive is
+ * reachable by the loading thread only.
+ */
+static
+VOID
+CmpAclUserHivePass1(
+    _In_ PCMHIVE CmHive,
+    _In_ PSID OwnSid,
+    _Out_ PULONG Flagged,
+    _Out_ PULONG Reasons,
+    _Out_ PULONG Unjudged,
+    _Out_ PULONG Certain)
+{
+    ULONG Buffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
+    PHHIVE Hive = &CmHive->Hive;
+    PCM_KEY_NODE Root;
+    PCM_KEY_SECURITY Security;
+    PCM_KEY_SECURITY_CACHE Entry;
+    PLIST_ENTRY Head, List;
+    PSECURITY_DESCRIPTOR Copy;
+    HCELL_INDEX RootSecurity = HCELL_NIL;
+    ULONG i, Length, Verdict, Seen = 0;
+    PVOID Pool;
+    BOOLEAN Acquired;
+
+    *Flagged = *Reasons = *Unjudged = *Certain = 0;
+
+    Root = (PCM_KEY_NODE)HvGetCell(Hive, Hive->BaseBlock->RootCell);
+    if (Root)
+    {
+        if (Root->Signature == CM_KEY_NODE_SIGNATURE)
+            RootSecurity = Root->Security;
+        HvReleaseCell(Hive, Hive->BaseBlock->RootCell);
+    }
+
+    /* The cache's hash lists, under the hive's security lock for the whole pass (nothing else uses the hive) */
+    Acquired = CmpAcquireHiveSecurityLock(Hive);
+    if (CmHive->Flags & CMHIVE_FLAG_SECURITY_CACHE_SHORT)
+        (*Unjudged)++;
+    for (i = 0; i < CMP_SECURITY_HASH_LISTS; i++)
+    {
+        Head = &CmHive->SecurityHash[i];
+        if (!Head->Flink)
+        {
+            /* A cache that was never set up holds nothing to judge */
+            (*Unjudged)++;
+            break;
+        }
+        for (List = Head->Flink; List != Head; List = List->Flink)
+        {
+            Entry = CONTAINING_RECORD(List, CM_KEY_SECURITY_CACHE, List);
+            Seen++;
+            Security = CmpGetCheckedSecurityCell(Hive, Entry->Cell, NULL);
+            if (!Security ||
+                Security->DescriptorLength < sizeof(SECURITY_DESCRIPTOR_RELATIVE) ||
+                Security->DescriptorLength > CMP_MAX_STORED_SD_LENGTH)
+            {
+                /* Not a descriptor a key could be judged by (CmpAclCopyStoredSd: the key inherits) */
+                continue;
+            }
+            Length = Security->DescriptorLength;
+            Pool = NULL;
+            if (Length <= sizeof(Buffer))
+                Copy = Buffer;
+            else
+                Copy = Pool = ExAllocatePoolWithTag(PagedPool, Length, TAG_CM_ACL);
+            if (!Copy)
+            {
+                (*Unjudged)++;
+                continue;
+            }
+            RtlCopyMemory(Copy, &Security->Descriptor, Length);
+
+            /* Validated as CmpAclCopyStoredSd does: a descriptor that is not sound counts as none (the key inherits) */
+            if (RtlValidRelativeSecurityDescriptor(Copy, Length, 0) &&
+                RtlLengthSecurityDescriptor(Copy) <= Length &&
+                RtlValidRelativeSecurityDescriptor(Copy, RtlLengthSecurityDescriptor(Copy), 0))
+            {
+                Verdict = CmpAclUserHiveSdVerdict(Copy, OwnSid, 0, &CmpKeyObjectType->TypeInfo.GenericMapping, NULL);
+                if (Verdict && Entry->Cell == RootSecurity && Security->ReferenceCount == 1)
+                {
+                    Verdict = CmpAclUserHiveSdVerdict(Copy, OwnSid, CMP_ACL_UH_PLACE_ROOT,
+                                                      &CmpKeyObjectType->TypeInfo.GenericMapping, NULL);
+                }
+                if (Verdict)
+                {
+                    /* Also a package grant that is right below AppContainer\Storage: only the keys can tell */
+                    (*Flagged)++;
+                    *Reasons |= Verdict;
+                    /* Wrong wherever it is (not only where it may be right): what audit mode reports */
+                    if (CmpAclUserHiveSdVerdict(Copy, OwnSid, CMP_ACL_UH_PLACE_ROOT | CMP_ACL_UH_PLACE_APPCONTAINER,
+                                                &CmpKeyObjectType->TypeInfo.GenericMapping, NULL))
+                    {
+                        (*Certain)++;
+                    }
+                }
+            }
+            if (Pool)
+                ExFreePoolWithTag(Pool, TAG_CM_ACL);
+        }
+    }
+    CmpReleaseHiveSecurityLock(Hive, Acquired);
+
+    /* The count of cells the cache says it holds, and the lists, must agree */
+    if (Seen != CmHive->SecurityCount)
+        (*Unjudged)++;
+}
+
+/*
+ * Check a user hive just linked (see PER-USER HIVES above). Called by
+ * CmLoadKey with the registry lock held shared and the load lock held, while
+ * the hive is marked HIVE_IS_UNLOADING with the loading thread as its
+ * CreatorOwner: no other thread can open a key of it (CmpDoOpen) or make a
+ * KCB for one, so nobody sees a half-checked hive. Never fails the load.
+ *
+ * Enforce mode, no valid record: pass 1 (the stored descriptors), and only
+ * if it found something, pass 2 (the walk of the keys, replacing top-down),
+ * the hive written to its file, then the record. A check that could not be
+ * completed marks the hive unchecked (CMHIVE_FLAG_ACL_UNCHECKED: only its
+ * account and the system get in, see CmpAclDecide) and writes no record.
+ * Audit mode: pass 1, one log entry when it found something, nothing
+ * changed, no record. Legacy mode and setup: nothing.
+ */
+VOID
+NTAPI
+CmpAclCheckUserHive(
+    _In_ PCMHIVE CmHive,
+    _In_ PCM_KEY_CONTROL_BLOCK RootKcb)
+{
+    ULONG SidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    WCHAR NameBuffer[CMP_ACL_USER_NAME_MAX];
+    UNICODE_STRING Name;
+    CMP_ACL_USER_CHECK User;
+    LARGE_INTEGER Start, End, Frequency, HiveTime;
+    PUNICODE_STRING RootName = NULL;
+    PWCHAR RootPath = NULL;
+    ULONG Flagged, Reasons, Unjudged, Certain, Cells;
+    BOOLEAN Classes, Synced = TRUE, Complete;
+
+    if (!CmpAclReady || CmpAclSetupRunning || CmpRegistryAclEffectiveMode == CM_REGACL_MODE_LEGACY ||
+        !CmHive || !RootKcb || (CmHive->Hive.HiveFlags & HIVE_VOLATILE))
+    {
+        return;
+    }
+    if (!CmpAclUserHiveTarget(RootKcb, (PSID)SidBuffer, &Classes) ||
+        !CmpAclUserHiveName(RootKcb, NameBuffer, &Name))
+    {
+        return;
+    }
+
+    /*
+     * A record only says that the file loaded at that name was checked and is
+     * not older: it cannot tell another file with a later time stamp (a copy
+     * from another machine, a file the account never used). The profile
+     * service loads the account's own file, the one recorded. A load by
+     * anyone else (an administrator's reg load HKU\<SID> <file>, which does
+     * not get the root stamp either) is checked whatever the record says.
+     */
+    HiveTime = CmHive->Hive.BaseBlock->TimeStamp;
+    if (CmpRegistryAclEffectiveMode == CM_REGACL_MODE_ENFORCE &&
+        !(CmHive->Flags & CMHIVE_FLAG_NO_ROOT_STAMP) &&
+        CmpAclUserRecordValid(&Name, HiveTime))
+    {
+        InterlockedIncrement(&CmpAclUserHivesSkipped);
+        return;
+    }
+
+    Start = KeQueryPerformanceCounter(&Frequency);
+    CmpAclUserHivePass1(CmHive, (PSID)SidBuffer, &Flagged, &Reasons, &Unjudged, &Certain);
+    Cells = CmHive->SecurityCount;
+    RootName = CmpConstructName(RootKcb);
+
+    if (CmpRegistryAclEffectiveMode != CM_REGACL_MODE_ENFORCE)
+    {
+        /* Audit: what enforcement would replace, nothing changed */
+        if (Certain && RootName)
+        {
+            InterlockedIncrement(&CmpAclUserHivesFlagged);
+            CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, RootName, Reasons, NULL, STATUS_SUCCESS, NULL, Certain);
+        }
+        if (RootName)
+            CmpFree(RootName, 0);
+        return;
+    }
+
+    InterlockedIncrement(&CmpAclUserHivesChecked);
+    RtlZeroMemory(&User, sizeof(User));
+    User.OwnSid = (PSID)SidBuffer;
+    User.Hive = &CmHive->Hive;
+    User.RootCell = RootKcb->KeyCell;
+    User.Classes = Classes;
+
+    if (Flagged || Unjudged)
+    {
+        /* Pass 2: the keys, by their kernel path (a null-terminated copy) */
+        if (RootName)
+            RootPath = ExAllocatePoolWithTag(PagedPool, RootName->Length + sizeof(WCHAR), TAG_CM_ACL);
+        if (RootPath)
+        {
+            RtlCopyMemory(RootPath, RootName->Buffer, RootName->Length);
+            RootPath[RootName->Length / sizeof(WCHAR)] = UNICODE_NULL;
+            CmpAclWalk(RootPath, TRUE, FALSE, &User);
+            ExFreePoolWithTag(RootPath, TAG_CM_ACL);
+        }
+        else
+        {
+            User.Incomplete++;
+        }
+
+        /* The new descriptors go to the file before the record says the hive was checked */
+        if (User.Replaced)
+        {
+            CmpLockHiveFlusherExclusive(CmHive);
+            Synced = HvSyncHive(&CmHive->Hive);
+            CmpUnlockHiveFlusher(CmHive);
+        }
+    }
+
+    Complete = (User.Failed == 0 && User.Incomplete == 0);
+    if (!Complete)
+    {
+        /* Fail closed for others, open for the account (CmpAclDecide); the next load checks again */
+        CmHive->Flags |= CMHIVE_FLAG_ACL_UNCHECKED;
+        InterlockedIncrement(&CmpAclUserHiveFailed);
+    }
+    else if (Synced)
+    {
+        CmpAclUserRecordWrite(&Name, CmHive->Hive.BaseBlock->TimeStamp, (ULONG)User.Replaced);
+    }
+
+    End = KeQueryPerformanceCounter(NULL);
+    CmpAclUserHiveMs = Frequency.QuadPart ? (ULONG)((End.QuadPart - Start.QuadPart) * 1000 / Frequency.QuadPart) : 0;
+    DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL,
+               "CM-ACL: user hive %wZ: %lu of %lu stored descriptors to replace (reasons 0x%lx), %ld keys replaced, "
+               "%ld failed, %ld not checked, written 0x%x, %lu ms, %s\n",
+               &Name, Flagged, Cells, Reasons, User.Replaced, User.Failed, User.Incomplete,
+               Synced, CmpAclUserHiveMs,
+               !Complete ? "UNCHECKED (others refused while loaded)" :
+               (!Synced || !CmpAclGeneration) ? "checked, not recorded" : "checked, recorded");
+    if (RootName)
+        CmpFree(RootName, 0);
+    CmpAclArmTimer();
 }
 
 /*
@@ -3040,10 +3768,10 @@ CmpAclTransition(VOID)
     ULONG i;
 
     for (i = 0; i < RTL_NUMBER_OF(Keys); i++)
-        CmpAclWalk(Keys[i].Path, Keys[i].Subtree, FALSE);
+        CmpAclWalk(Keys[i].Path, Keys[i].Subtree, FALSE, NULL);
 
     /* The rest of SOFTWARE (and again the parts above, which have nothing left to find): keys a non-administrator owns */
-    CmpAclWalk(L"\\Registry\\Machine\\SOFTWARE", TRUE, TRUE);
+    CmpAclWalk(L"\\Registry\\Machine\\SOFTWARE", TRUE, TRUE, NULL);
 }
 
 /*
@@ -3106,6 +3834,7 @@ CmpAclBootHivesLoaded(
     {
         /* Legacy or audit: users may change keys from now on, the next enforcing boot checks again */
         CmpAclMarkerDelete();
+        CmpAclUserRecordsDelete();
         CmpAclTransitionState = CMP_ACL_TRANSITION_NONE;
         if (!CmpAclReady)
             return;
@@ -3117,12 +3846,33 @@ CmpAclBootHivesLoaded(
     else if (CmpAclMarkerPresent())
     {
         CmpAclTransitionState = CMP_ACL_TRANSITION_TRUSTED;
+
+        /*
+         * A marker without a generation (written by a kernel that did not check
+         * user hives) still stands for the machine hives; it gets one now, which
+         * no record carries: every user hive is checked at its next load.
+         */
+        CmpAclGeneration = CmpAclMarkerGeneration();
+        if (!CmpAclGeneration)
+        {
+            CmpAclUserRecordsDelete();
+            CmpAclGeneration = CmpAclNewGeneration();
+            if (!CmpAclMarkerWrite(CmpAclGeneration))
+            {
+                /* The marker is gone (the next boot runs the transition): no records this boot */
+                CmpAclGeneration = 0;
+                CmpAclTransitionState = CMP_ACL_TRANSITION_NOMARKER;
+            }
+        }
     }
     else
     {
         LARGE_INTEGER Start, End;
-
+        ULONG64 Generation;
         NTSTATUS FlushStatus;
+
+        /* Records of user hives checked before: anyone could write them meanwhile, and their hives */
+        CmpAclUserRecordsDelete();
 
         KeQuerySystemTime(&Start);
         CmpAclTransition();
@@ -3139,10 +3889,12 @@ CmpAclBootHivesLoaded(
          * did not check again).
          */
         FlushStatus = CmpAclFlushHives();
+        Generation = CmpAclNewGeneration();
         if (CmpAclRestampFailed == 0 && CmpAclWalkIncomplete == 0 && NT_SUCCESS(FlushStatus) &&
-            CmpAclMarkerWrite())
+            CmpAclMarkerWrite(Generation))
         {
             CmpAclTransitionState = CMP_ACL_TRANSITION_WALKED;
+            CmpAclGeneration = Generation;
         }
         else
         {
@@ -3438,6 +4190,12 @@ CmpAclPublish(VOID)
     CmpAclSetDword(Key, L"RestampFailed", (ULONG)CmpAclRestampFailed);
     CmpAclSetDword(Key, L"TransitionIncomplete", (ULONG)CmpAclWalkIncomplete);
     CmpAclSetDword(Key, L"KeptGrants", (ULONG)CmpAclKeptGrants);
+    CmpAclSetDword(Key, L"UserHivesChecked", (ULONG)CmpAclUserHivesChecked);
+    CmpAclSetDword(Key, L"UserHivesSkipped", (ULONG)CmpAclUserHivesSkipped);
+    CmpAclSetDword(Key, L"UserHivesFlagged", (ULONG)CmpAclUserHivesFlagged);
+    CmpAclSetDword(Key, L"UserHiveRestamped", (ULONG)CmpAclUserHiveRestamped);
+    CmpAclSetDword(Key, L"UserHiveFailed", (ULONG)CmpAclUserHiveFailed);
+    CmpAclSetDword(Key, L"UserHiveMs", CmpAclUserHiveMs);
     CmpAclSetDword(Key, L"Checks", (ULONG)CmpAclChecks);
     CmpAclSetDword(Key, L"Denials", (ULONG)CmpAclDenials);
     CmpAclSetDword(Key, L"Entries", (ULONG)CmpAclEntryCount);
@@ -3468,6 +4226,13 @@ CmpAclFormatEntry(
         CmpAclLineFormat(Line, ",\"reasons\":\"0x%lx\",\"status\":\"0x%08lx\",\"oldowner\":",
                          Entry->Desired, (ULONG)Entry->ShadowStatus);
         CmpAclLineString(Line, p, Entry->UserChars, CMP_ACL_LINE_USER_BYTES);
+        if (Entry->Rule == CmpAclRuleUser)
+        {
+            /* A user hive checked at its load: replaced (applied 1), or only found in audit mode */
+            CmpAclLineFormat(Line, ",\"hive\":\"user\",\"applied\":%lu", Entry->Granted);
+            if (!Entry->Granted)
+                CmpAclLineFormat(Line, ",\"descriptors\":%lu", Entry->Count);
+        }
         CmpAclLineFormat(Line, ",\"mode\":\"%s\"}\n", CmpAclModeNames[CmpRegistryAclMode]);
         return;
     }
@@ -3910,6 +4675,7 @@ CmpAclInitialize(VOID)
             case CmpAclRuleEventLog: Spec = &CmpAclSdEventLog; break;
             case CmpAclRuleDefault: Spec = &CmpAclSdDefault; break;
             case CmpAclRuleUser: continue; /* per key */
+            case CmpAclRuleUserUnchecked: continue; /* a log name only */
             default: Spec = &CmpAclSdMaster; break; /* master, hardware, user-unknown, other */
         }
         Copy = NULL;
@@ -4159,6 +4925,52 @@ CmpAclMandatoryAllowed(
 }
 
 /*
+ * May the subject (its context locked) reach a key of a user hive whose check
+ * after the transition could not be completed (CMHIVE_FLAG_ACL_UNCHECKED)?
+ * Only the hive's own account (from the name it is loaded at), SYSTEM, and a
+ * token with Administrators enabled; their access is then decided by the
+ * descriptor as always. Everyone else is refused whatever the descriptor says:
+ * it may be one another account planted.
+ */
+static
+BOOLEAN
+CmpAclUncheckedHiveAllows(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_ PSECURITY_SUBJECT_CONTEXT Subject)
+{
+    ULONG SidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    PCM_KEY_CONTROL_BLOCK Walk, HiveKey;
+    PTOKEN Token;
+    ULONG Depth = 0, i;
+
+    Token = (PTOKEN)SeQuerySubjectContextToken(Subject);
+    if (!Token || !Token->UserAndGroups || Token->UserAndGroupCount == 0)
+        return FALSE;
+    if (RtlEqualSid(Token->UserAndGroups[0].Sid, SeLocalSystemSid))
+        return TRUE;
+    for (i = 1; i < Token->UserAndGroupCount; i++)
+    {
+        if ((Token->UserAndGroups[i].Attributes & SE_GROUP_ENABLED) &&
+            !(Token->UserAndGroups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) &&
+            RtlEqualSid(Token->UserAndGroups[i].Sid, SeAliasAdminsSid))
+        {
+            return TRUE;
+        }
+    }
+
+    /* The hive's account: \REGISTRY\USER\<SID>[_Classes] above the key */
+    for (Walk = Kcb; Walk; Walk = Walk->ParentKcb)
+        Depth++;
+    if (Depth < 3)
+        return FALSE;
+    HiveKey = Kcb;
+    for (i = Depth; i > 3; i--)
+        HiveKey = HiveKey->ParentKcb;
+    return CmpAclParseUserSid(HiveKey, (PSID)SidBuffer) &&
+           RtlEqualSid(Token->UserAndGroups[0].Sid, (PSID)SidBuffer);
+}
+
+/*
  * The access decision on a key's own descriptor, the one function behind
  * both the audit (mode 1: the result is only recorded) and enforcement
  * (mode 2: the result stands), so that the audit log lists exactly what
@@ -4260,8 +5072,19 @@ CmpAclDecide(
 
     /* The integrity label first: rights it does not allow are not granted, whatever the DACL says */
     MandatoryAllowed = CmpAclMandatoryAllowed(Sd, &AccessState->SubjectSecurityContext);
-    if (MandatoryAllowed != MAXULONG &&
-        (Desired & ~(MAXIMUM_ALLOWED | ACCESS_SYSTEM_SECURITY) & ~MandatoryAllowed))
+    if (Kcb->KeyHive &&
+        (CONTAINING_RECORD(Kcb->KeyHive, CMHIVE, Hive)->Flags & CMHIVE_FLAG_ACL_UNCHECKED) &&
+        CmpRegistryAclEffectiveMode == CM_REGACL_MODE_ENFORCE &&
+        !CmpAclUncheckedHiveAllows(Kcb, &AccessState->SubjectSecurityContext))
+    {
+        /* A user hive whose check failed: others than its account and the system stay out */
+        Result = FALSE;
+        *Granted = 0;
+        *AccessStatus = STATUS_ACCESS_DENIED;
+        Rule = CmpAclRuleUserUnchecked;
+    }
+    else if (MandatoryAllowed != MAXULONG &&
+             (Desired & ~(MAXIMUM_ALLOWED | ACCESS_SYSTEM_SECURITY) & ~MandatoryAllowed))
     {
         Result = FALSE;
         *Granted = 0;

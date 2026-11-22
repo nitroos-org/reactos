@@ -343,9 +343,15 @@ CmpCacheSecurityRings(
     CMP_SK_TALLY Visited;
     ULONG i;
 
-    CmpBuildSecurityCache((PCMHIVE)Hive);
+    if (!CmpBuildSecurityCache((PCMHIVE)Hive))
+        ((PCMHIVE)Hive)->Flags |= CMHIVE_FLAG_SECURITY_CACHE_SHORT;
     if (Tally->Failed || !Tally->Table)
+    {
+        /* The cells keys name in rings the root is not in were not counted: they may be missing */
+        if (Tally->Failed)
+            ((PCMHIVE)Hive)->Flags |= CMHIVE_FLAG_SECURITY_CACHE_SHORT;
         return;
+    }
     RtlZeroMemory(&Visited, sizeof(Visited));
     for (i = 0; i < Tally->Capacity; i++)
     {
@@ -353,6 +359,7 @@ CmpCacheSecurityRings(
             !CmpAddSecurityRingToCache((PCMHIVE)Hive, Tally->Table[i].Cell, CmpSkMarkSeen, &Visited))
         {
             DPRINT1("Hive 0x%p: no room to walk the security rings, the cache is short\n", Hive);
+            ((PCMHIVE)Hive)->Flags |= CMHIVE_FLAG_SECURITY_CACHE_SHORT;
             break;
         }
     }

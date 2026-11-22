@@ -423,6 +423,14 @@ typedef struct _CMHIVE
 #endif
 } CMHIVE, *PCMHIVE;
 
+/*
+ * CMHIVE::Flags: the security cache does not hold every 'sk' cell of the hive
+ * (no memory for the walk of the rings or for an entry, a ring that did not
+ * close, a full hash bucket): a check that looks at the cache alone (the
+ * per-user hive check in ntoskrnl config/cmacl.c) must look at the keys instead.
+ */
+#define CMHIVE_FLAG_SECURITY_CACHE_SHORT 0x40000000
+
 typedef struct _HV_HIVE_CELL_PAIR
 {
     PHHIVE Hive;

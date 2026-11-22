@@ -2541,6 +2541,14 @@ CmLoadKey(IN POBJECT_ATTRIBUTES TargetKey,
             CmpUnlockHiveFlusher(CmHive);
         }
 
+        /*
+         * A user hive's descriptors that another account may have planted while
+         * key access was not enforced are checked now, while the hive is still
+         * reachable by this thread only (HIVE_IS_UNLOADING, CreatorOwner)
+         */
+        if (CmHive->RootKeyBody)
+            CmpAclCheckUserHive(CmHive, ((PCM_KEY_BODY)CmHive->RootKeyBody)->KeyControlBlock);
+
         /* Release the hive */
         CmHive->Hive.HiveFlags &= ~HIVE_IS_UNLOADING;
         CmHive->CreatorOwner = NULL;
