@@ -143,6 +143,15 @@ rpcrt4_create_pipe_security(PSECURITY_DESCRIPTOR *SecDesc)
     DWORD UserInfoLength = 0;
     static SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
     static SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    static SID_IDENTIFIER_AUTHORITY LabelAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
+    /* A label ACE: the layout of an access allowed ACE with a one sub-authority SID */
+    struct
+    {
+        ACE_HEADER Header;
+        ACCESS_MASK Mask;
+        SID Sid;
+    } Label;
+    ULONG SaclBuffer[(sizeof(ACL) + sizeof(Label)) / sizeof(ULONG) + 1];
 
     if (!AllocateAndInitializeSid(&WorldAuthority,
                                   1,
@@ -280,6 +289,30 @@ rpcrt4_create_pipe_security(PSECURITY_DESCRIPTOR *SecDesc)
     {
         ErrCode = GetLastError();
         ERR("rpcrt4_create_pipe_security(): Failed to set DACL to absolute SD (error %lu)\n", ErrCode);
+        goto Quit;
+    }
+
+    /*
+     * A mandatory label at the Untrusted level: the DACL decides who may connect. Without a label the pipe is
+     * Medium, and a client below Medium (the anonymous logon token is Untrusted, a sandboxed process Low) would be
+     * refused the write rights a connection needs before the DACL is looked at. Measured on Windows Server 2022:
+     * a client impersonating the anonymous token, and one lowered to Low, reach the service control manager over
+     * its pipe (OpenSCManager is refused by the SCM itself, error 5; enumerating services works at Low).
+     */
+    Label.Header.AceType = SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+    Label.Header.AceFlags = 0;
+    Label.Header.AceSize = sizeof(Label);
+    Label.Mask = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
+    Label.Sid.Revision = SID_REVISION;
+    Label.Sid.SubAuthorityCount = 1;
+    Label.Sid.IdentifierAuthority = LabelAuthority;
+    Label.Sid.SubAuthority[0] = SECURITY_MANDATORY_UNTRUSTED_RID;
+    if (!InitializeAcl((PACL)SaclBuffer, sizeof(SaclBuffer), ACL_REVISION) ||
+        !AddAce((PACL)SaclBuffer, ACL_REVISION, MAXDWORD, &Label, sizeof(Label)) ||
+        !SetSecurityDescriptorSacl(AbsSD, TRUE, (PACL)SaclBuffer, FALSE))
+    {
+        ErrCode = GetLastError();
+        ERR("rpcrt4_create_pipe_security(): Failed to set the label (error %lu)\n", ErrCode);
         goto Quit;
     }
 
