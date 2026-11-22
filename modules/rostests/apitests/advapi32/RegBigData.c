@@ -625,15 +625,16 @@ START_TEST(RegBigData)
     if (Now)
         HeapFree(GetProcessHeap(), 0, Now);
 
-    /* 4. format 1.3 (what ReactOS makes): 20 KB and 2 MB are one cell each, no big data */
+    /* 4. format 1.3 (what ReactOS makes): 20 KB and 1048568 bytes are one cell each, no big data (the largest value of a
+          1.3 hive is 1048572 bytes: Windows refuses a bigger one, see RegSaveKeyBigValue) */
     Error = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\ReactOSBigData13", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Key, NULL);
     ok(Error == ERROR_SUCCESS, "create the 1.3 key: %ld\n", Error);
     if (Error == ERROR_SUCCESS)
     {
         SetData(Key, L"20k", 20 * 1024, 70);
-        SetData(Key, L"2m", 2 * 1024 * 1024, 71);
+        SetData(Key, L"2m", 1048568, 71);
         CheckData(Key, L"20k", 20 * 1024, 70);
-        CheckData(Key, L"2m", 2 * 1024 * 1024, 71);
+        CheckData(Key, L"2m", 1048568, 71);
         DeleteFileW(Old);
         Error = RegSaveKeyW(Key, Old, NULL);
         ok(Error == ERROR_SUCCESS, "RegSaveKeyW(1.3): %ld\n", Error);
@@ -655,7 +656,7 @@ START_TEST(RegBigData)
             if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, MOUNT2, 0, KEY_READ, &Key) == ERROR_SUCCESS)
             {
                 CheckData(Key, L"20k", 20 * 1024, 70);
-                CheckData(Key, L"2m", 2 * 1024 * 1024, 71);
+                CheckData(Key, L"2m", 1048568, 71);
                 RegCloseKey(Key);
             }
             RegUnLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT2);
