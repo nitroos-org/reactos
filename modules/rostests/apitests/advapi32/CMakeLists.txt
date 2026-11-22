@@ -68,6 +68,7 @@ list(APPEND SOURCE
     LsassServerLeak.c
     LsaLogonUserFailure.c
     LsaLogonUserLocalGroups.c
+    LsaPortClients.c
     LsaLogonUserS4U.c
     LsaTrustedClientToken.c
     LsaManageSidNameMapping.c
