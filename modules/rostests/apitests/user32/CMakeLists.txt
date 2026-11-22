@@ -106,6 +106,7 @@ list(APPEND SOURCE
     PaintDesktopSwitch.c
     PrivateExtractIcons.c
     ProcessConnectTerminate.c
+    PngIconRows.c
     RawInput.c
     RealGetWindowClass.c
     RedirGlassKeep.c
