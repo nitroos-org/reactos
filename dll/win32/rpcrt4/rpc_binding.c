@@ -1083,9 +1083,9 @@ RPC_STATUS WINAPI RpcRevertToSelfEx(RPC_BINDING_HANDLE BindingHandle)
     return RPC_S_WRONG_KIND_OF_BINDING;
 }
 
-static inline BOOL has_nt_auth_identity(ULONG AuthnLevel)
+static inline BOOL has_nt_auth_identity(ULONG AuthnSvc)
 {
-    switch (AuthnLevel)
+    switch (AuthnSvc)
     {
     case RPC_C_AUTHN_GSS_NEGOTIATE:
     case RPC_C_AUTHN_WINNT:
@@ -1254,6 +1254,39 @@ BOOL RpcAuthInfo_IsEqual(const RpcAuthInfo *AuthInfo1, const RpcAuthInfo *AuthIn
         return FALSE;
 
     return TRUE;
+}
+
+/*
+ * Whether the number is an authentication service of Windows (RPC_C_AUTHN_*) or one of the security packages that
+ * this system lists. Only the services that matter at the level none need no package enumeration.
+ */
+static BOOL rpcrt4_authn_svc_known(ULONG AuthnSvc)
+{
+    ULONG count, i;
+    PSecPkgInfoW packages;
+    BOOL known = FALSE;
+
+    switch (AuthnSvc)
+    {
+    case RPC_C_AUTHN_WINNT:
+    case RPC_C_AUTHN_GSS_NEGOTIATE:
+    case RPC_C_AUTHN_GSS_KERBEROS:
+    case RPC_C_AUTHN_GSS_SCHANNEL:
+        return TRUE;
+    }
+
+    if (EnumerateSecurityPackagesW(&count, &packages) != SEC_E_OK)
+        return FALSE;
+    for (i = 0; i < count; i++)
+    {
+        if (packages[i].wRPCID == AuthnSvc)
+        {
+            known = TRUE;
+            break;
+        }
+    }
+    FreeContextBuffer(packages);
+    return known;
 }
 
 /*
@@ -1766,17 +1799,33 @@ RpcBindingSetAuthInfoExA( RPC_BINDING_HANDLE Binding, RPC_CSTR ServerPrincName,
   if (AuthnLevel == RPC_C_AUTHN_LEVEL_DEFAULT)
     AuthnLevel = RPC_C_AUTHN_LEVEL_NONE;
 
+  /* Windows Server 2022 (measured on bindings of every protocol sequence): a level above packet privacy is
+   * unknown whatever the service is; no service goes with the level none only; an unknown service is refused
+   * at every level, also at none; Kerberos needs a principal name or an identity. */
+  if (AuthnLevel > RPC_C_AUTHN_LEVEL_PKT_PRIVACY)
+  {
+    FIXME("unknown AuthnLevel %lu\n", AuthnLevel);
+    return RPC_S_UNKNOWN_AUTHN_LEVEL;
+  }
+
+  if (AuthnSvc != RPC_C_AUTHN_NONE)
+  {
+    if (!rpcrt4_authn_svc_known(AuthnSvc))
+      return RPC_S_UNKNOWN_AUTHN_SERVICE;
+    if (AuthnSvc == RPC_C_AUTHN_GSS_KERBEROS && !ServerPrincName && !AuthIdentity &&
+        !(bind->Protseq && !strcmp(bind->Protseq, "ncalrpc")))
+      return RPC_S_INVALID_AUTH_IDENTITY;
+  }
+  else if (AuthnLevel != RPC_C_AUTHN_LEVEL_NONE)
+  {
+    return RPC_S_UNKNOWN_AUTHN_LEVEL;
+  }
+
   if ((AuthnLevel == RPC_C_AUTHN_LEVEL_NONE) || (AuthnSvc == RPC_C_AUTHN_NONE))
   {
     if (bind->AuthInfo) RpcAuthInfo_Release(bind->AuthInfo);
     bind->AuthInfo = NULL;
     return RPC_S_OK;
-  }
-
-  if (AuthnLevel > RPC_C_AUTHN_LEVEL_PKT_PRIVACY)
-  {
-    FIXME("unknown AuthnLevel %lu\n", AuthnLevel);
-    return RPC_S_UNKNOWN_AUTHN_LEVEL;
   }
 
   /* RPC_C_AUTHN_WINNT ignores the AuthzSvr parameter */
@@ -1907,17 +1956,33 @@ RpcBindingSetAuthInfoExW( RPC_BINDING_HANDLE Binding, RPC_WSTR ServerPrincName, 
   if (AuthnLevel == RPC_C_AUTHN_LEVEL_DEFAULT)
     AuthnLevel = RPC_C_AUTHN_LEVEL_NONE;
 
+  /* Windows Server 2022 (measured on bindings of every protocol sequence): a level above packet privacy is
+   * unknown whatever the service is; no service goes with the level none only; an unknown service is refused
+   * at every level, also at none; Kerberos needs a principal name or an identity. */
+  if (AuthnLevel > RPC_C_AUTHN_LEVEL_PKT_PRIVACY)
+  {
+    FIXME("unknown AuthnLevel %lu\n", AuthnLevel);
+    return RPC_S_UNKNOWN_AUTHN_LEVEL;
+  }
+
+  if (AuthnSvc != RPC_C_AUTHN_NONE)
+  {
+    if (!rpcrt4_authn_svc_known(AuthnSvc))
+      return RPC_S_UNKNOWN_AUTHN_SERVICE;
+    if (AuthnSvc == RPC_C_AUTHN_GSS_KERBEROS && !ServerPrincName && !AuthIdentity &&
+        !(bind->Protseq && !strcmp(bind->Protseq, "ncalrpc")))
+      return RPC_S_INVALID_AUTH_IDENTITY;
+  }
+  else if (AuthnLevel != RPC_C_AUTHN_LEVEL_NONE)
+  {
+    return RPC_S_UNKNOWN_AUTHN_LEVEL;
+  }
+
   if ((AuthnLevel == RPC_C_AUTHN_LEVEL_NONE) || (AuthnSvc == RPC_C_AUTHN_NONE))
   {
     if (bind->AuthInfo) RpcAuthInfo_Release(bind->AuthInfo);
     bind->AuthInfo = NULL;
     return RPC_S_OK;
-  }
-
-  if (AuthnLevel > RPC_C_AUTHN_LEVEL_PKT_PRIVACY)
-  {
-    FIXME("unknown AuthnLevel %lu\n", AuthnLevel);
-    return RPC_S_UNKNOWN_AUTHN_LEVEL;
   }
 
   /* RPC_C_AUTHN_WINNT ignores the AuthzSvr parameter */
