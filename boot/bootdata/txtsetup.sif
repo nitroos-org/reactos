@@ -102,6 +102,7 @@ buslogic.sys = 1,,,,,,x,4,,,,1,4
 stornvme.sys = 1,,,,,,x,4,,,,1,4
 vioscsi.sys = 1,,,,,,x,4,,,,1,4
 viostor.sys = 1,,,,,,x,4,,,,1,4
+pvscsi.sys = 1,,,,,,x,4,,,,1,4
 blue.sys     = 1,,,,,,x,4,,,,1,4
 vgafonts.cab = 1,,,,,,,1,,,,1,1
 bootvid.dll  = 1,,,,,,,2,,,,1,2
@@ -188,6 +189,7 @@ PCI\VEN_1AF4&DEV_1004 = vioscsi
 PCI\VEN_1AF4&DEV_1048 = vioscsi
 PCI\VEN_1AF4&DEV_1001 = viostor
 PCI\VEN_1AF4&DEV_1042 = viostor
+PCI\VEN_15AD&DEV_07C0 = pvscsi
 ;*PNP0600 = uniata
 *PNP0600 = atapi
 USB\CLASS_09 = usbhub
@@ -238,6 +240,7 @@ storahci = storahci.sys
 stornvme = stornvme.sys
 vioscsi = vioscsi.sys
 viostor = viostor.sys
+pvscsi = pvscsi.sys
 disk = disk.sys
 
 [MouseDrivers.Load]
