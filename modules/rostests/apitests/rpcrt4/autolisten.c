@@ -7,9 +7,9 @@
  *                the listening of the process with the last auto-listen interface must keep this working: the server
  *                thread of a stopped listening is only taken away by RpcMgmtWaitServerListen, a listening that is
  *                started again before that gets no thread and the calls hang,
- *              - known deviation: the listener count of the registration of an auto-listen interface is not taken
- *                back when the interface is unregistered, so with a manual listener in the same process
- *                RpcMgmtStopServerListening does not end the listening (todo).
+ *              - the listener count of the registration of an auto-listen interface is taken back when the
+ *                interface is unregistered, so with a manual listener in the same process RpcMgmtStopServerListening
+ *                ends the listening (Windows Server 2022: RpcMgmtIsServerListening is RPC_S_NOT_LISTENING then).
  *
  * The interface is the one of primitive_handle.c, the server lives in this process, over ncalrpc.
  */
@@ -94,7 +94,6 @@ START_TEST(autolisten)
     status = RpcMgmtStopServerListening(NULL);
     ok(status == RPC_S_OK, "RpcMgmtStopServerListening: %ld\n", status);
     status = RpcMgmtIsServerListening(NULL);
-    todo_ros
     ok(status == RPC_S_NOT_LISTENING, "still listening after the manual stop (a count of the unregistered interface is left): %ld\n", status);
     status = RpcMgmtWaitServerListen();
     ok(status == RPC_S_OK, "RpcMgmtWaitServerListen: %ld\n", status);

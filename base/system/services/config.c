@@ -219,6 +219,88 @@ ScmWriteDependencies(HKEY hServiceKey,
 }
 
 
+/*
+ * CreateService and ChangeServiceConfig refuse a dependency list that leads back to the service
+ * (ERROR_CIRCULAR_DEPENDENCY), as measured on Windows Server 2022:
+ * - the service names of the list are followed through the DependOnService values of the services
+ *   they name (names compare without case; a name that is no service ends the path);
+ * - a group is not followed, except that a list holding the group the service is put into by the
+ *   same call refuses it.
+ */
+#define SCM_MAX_DEPENDENCY_PATH 256
+
+DWORD
+ScmCheckDependencyCycle(LPCWSTR lpServiceName,
+                        LPCWSTR lpLoadOrderGroup,
+                        LPCWSTR lpDependencies)
+{
+    LPCWSTR lpNames[SCM_MAX_DEPENDENCY_PATH];
+    LPWSTR lpOwned[SCM_MAX_DEPENDENCY_PATH];
+    LPWSTR lpValue;
+    LPCWSTR lpSrc;
+    DWORD dwCount = 0, dwOwned = 0, dwDone, i;
+    DWORD dwError = ERROR_SUCCESS;
+    HKEY hKey;
+
+    if (lpDependencies == NULL || *lpDependencies == UNICODE_NULL)
+        return ERROR_SUCCESS;
+
+    for (lpSrc = lpDependencies; *lpSrc != UNICODE_NULL; lpSrc += wcslen(lpSrc) + 1)
+    {
+        if (*lpSrc == SC_GROUP_IDENTIFIERW)
+        {
+            /* The group of this call */
+            if (lpLoadOrderGroup != NULL && *lpLoadOrderGroup != UNICODE_NULL &&
+                _wcsicmp(lpSrc + 1, lpLoadOrderGroup) == 0)
+                return ERROR_CIRCULAR_DEPENDENCY;
+        }
+        else if (dwCount < SCM_MAX_DEPENDENCY_PATH)
+        {
+            lpNames[dwCount++] = lpSrc;
+        }
+    }
+
+    /* Breadth first; every name once; a path that is too long is not followed any further */
+    for (dwDone = 0; dwDone < dwCount && dwError == ERROR_SUCCESS; dwDone++)
+    {
+        if (_wcsicmp(lpNames[dwDone], lpServiceName) == 0)
+        {
+            dwError = ERROR_CIRCULAR_DEPENDENCY;
+            break;
+        }
+
+        if (ScmOpenServiceKey((LPWSTR)lpNames[dwDone], KEY_READ, &hKey) != ERROR_SUCCESS)
+            continue;
+
+        lpValue = NULL;
+        ScmReadString(hKey, L"DependOnService", &lpValue);
+        RegCloseKey(hKey);
+        if (lpValue == NULL)
+            continue;
+
+        lpOwned[dwOwned++] = lpValue;
+        for (lpSrc = lpValue; *lpSrc != UNICODE_NULL && dwCount < SCM_MAX_DEPENDENCY_PATH; lpSrc += wcslen(lpSrc) + 1)
+        {
+            for (i = 0; i < dwCount; i++)
+            {
+                if (_wcsicmp(lpNames[i], lpSrc) == 0)
+                    break;
+            }
+            if (i == dwCount)
+                lpNames[dwCount++] = lpSrc;
+        }
+
+        if (dwOwned == SCM_MAX_DEPENDENCY_PATH)
+            break;
+    }
+
+    while (dwOwned != 0)
+        HeapFree(GetProcessHeap(), 0, lpOwned[--dwOwned]);
+
+    return dwError;
+}
+
+
 DWORD
 ScmMarkServiceForDelete(PSERVICE pService)
 {

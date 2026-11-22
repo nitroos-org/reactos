@@ -612,6 +612,172 @@ cleanup:
     remove_test_service(b);
 }
 
+static BOOL
+change_deps(SC_HANDLE service, PCWSTR group, PCWSTR deps)
+{
+    return ChangeServiceConfigW(service, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE,
+                                NULL, group, NULL, deps, NULL, NULL, NULL);
+}
+
+static void
+expect_deps(SC_HANDLE service, PCWSTR expected, PCSTR what)
+{
+    BYTE buffer[1024];
+    LPQUERY_SERVICE_CONFIGW config = (LPQUERY_SERVICE_CONFIGW)buffer;
+    DWORD needed;
+    PCWSTR actual;
+
+    if (!QueryServiceConfigW(service, config, sizeof(buffer), &needed))
+    {
+        ok(0, "%s: QueryServiceConfig failed: %lu\n", what, GetLastError());
+        return;
+    }
+    actual = config->lpDependencies ? config->lpDependencies : L"";
+    ok(!_wcsicmp(actual, expected), "%s: dependencies '%ls', expected '%ls'\n", what, actual, expected);
+}
+
+/*
+ * What a dependency list that leads back to the service does at configuration, measured on Windows Server 2022:
+ * CreateService and ChangeServiceConfig fail with ERROR_CIRCULAR_DEPENDENCY and change nothing, for the service
+ * itself (any case), for a path of service names of any length; a group is not followed (a service that is in the
+ * group it depends on, in another call, is accepted) except that a list with the group the same call puts the
+ * service into is refused; a dependency that is not installed is accepted.
+ */
+static void
+test_cycle_config(void)
+{
+    WCHAR aname[64], bname[64], ename[64], gname[64], deps[160], upper[64], group[64];
+    SC_HANDLE a, b, e, c;
+    DWORD error;
+    SIZE_T len;
+    BOOL ret;
+
+    build_name(aname, _countof(aname), L"CfA");
+    build_name(bname, _countof(bname), L"CfB");
+    build_name(ename, _countof(ename), L"CfE");
+    build_name(gname, _countof(gname), L"CfC");
+    StringCchPrintfW(group, _countof(group), L"RosDepGroupCfg%ls", test_suffix);
+    a = create_test_service(L"CfA", "run", NULL, NULL, SERVICE_DEMAND_START);
+    b = create_test_service(L"CfB", "run", NULL, NULL, SERVICE_DEMAND_START);
+    e = create_test_service(L"CfE", "run", NULL, NULL, SERVICE_DEMAND_START);
+    if (!a || !b || !e)
+        goto cleanup;
+
+#define SET1(name) do { StringCchCopyW(deps, _countof(deps), (name)); deps[wcslen(deps) + 1] = UNICODE_NULL; } while (0)
+
+    /* a -> b is fine; b -> a is refused and b keeps its (empty) list */
+    SET1(bname);
+    ok(change_deps(a, NULL, deps), "a -> b failed: %lu\n", GetLastError());
+    SET1(aname);
+    SetLastError(0xdeadbeef);
+    ret = change_deps(b, NULL, deps);
+    error = GetLastError();
+    ok(!ret && error == ERROR_CIRCULAR_DEPENDENCY, "b -> a: %d, error %lu\n", ret, error);
+    expect_deps(b, L"", "b after the refused change");
+
+    /* itself, in any case */
+    StringCchCopyW(upper, _countof(upper), aname);
+    _wcsupr(upper);
+    SET1(upper);
+    SetLastError(0xdeadbeef);
+    ret = change_deps(a, NULL, deps);
+    error = GetLastError();
+    ok(!ret && error == ERROR_CIRCULAR_DEPENDENCY, "a -> A: %d, error %lu\n", ret, error);
+    expect_deps(a, bname, "a after the refused change");
+
+    /* a path of three: a -> b -> e, e -> a */
+    SET1(ename);
+    ok(change_deps(b, NULL, deps), "b -> e failed: %lu\n", GetLastError());
+    SET1(aname);
+    SetLastError(0xdeadbeef);
+    ret = change_deps(e, NULL, deps);
+    error = GetLastError();
+    ok(!ret && error == ERROR_CIRCULAR_DEPENDENCY, "e -> a: %d, error %lu\n", ret, error);
+    expect_deps(e, L"", "e after the refused change");
+
+    /* a dependency that is not installed */
+    StringCchPrintfW(deps, _countof(deps), L"RosDepNone%ls", test_suffix);
+    deps[wcslen(deps) + 1] = UNICODE_NULL;
+    ok(change_deps(e, NULL, deps), "e -> none failed: %lu\n", GetLastError());
+
+    /* groups: b is in the group, a depends on it, b depends on a: accepted */
+    SET1(bname);
+    ok(change_deps(a, NULL, deps), "a -> b (again) failed: %lu\n", GetLastError());
+    deps[0] = UNICODE_NULL;
+    len = 0;
+    deps[len++] = SC_GROUP_IDENTIFIERW;
+    StringCchCopyW(deps + len, _countof(deps) - len, group);
+    len += wcslen(deps + len) + 1;
+    deps[len] = UNICODE_NULL;
+    ok(change_deps(b, group, NULL), "b into the group failed: %lu\n", GetLastError());
+    ok(change_deps(a, NULL, deps), "a -> +group failed: %lu\n", GetLastError());
+    SET1(aname);
+    ok(change_deps(b, NULL, deps), "b -> a (b is in the group a depends on) failed: %lu\n", GetLastError());
+
+    /* the group of the call: refused when the list holds it, also when the service is in it already */
+    len = 0;
+    deps[len++] = SC_GROUP_IDENTIFIERW;
+    StringCchCopyW(deps + len, _countof(deps) - len, group);
+    len += wcslen(deps + len) + 1;
+    deps[len] = UNICODE_NULL;
+    SetLastError(0xdeadbeef);
+    ret = change_deps(e, group, deps);
+    error = GetLastError();
+    ok(!ret && error == ERROR_CIRCULAR_DEPENDENCY, "e: group and +group in one call: %d, error %lu\n", ret, error);
+    ok(change_deps(e, group, NULL), "e into the group failed: %lu\n", GetLastError());
+    ok(change_deps(e, NULL, deps), "e -> +group, in the group already, failed: %lu\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    ret = change_deps(e, group, deps);
+    error = GetLastError();
+    ok(!ret && error == ERROR_CIRCULAR_DEPENDENCY, "e: group and +group in one call, in it already: %d, error %lu\n",
+       ret, error);
+
+    /* an empty list takes the dependencies away (Windows Server 2022: "sc config a depend= /") */
+    StringCchPrintfW(upper, _countof(upper), L"%lc%ls", SC_GROUP_IDENTIFIERW, group);
+    expect_deps(a, upper, "a before the empty list");
+    ok(change_deps(a, NULL, L""),"a -> empty failed: %lu\n", GetLastError());
+    expect_deps(a, L"", "a after the empty list");
+
+    /* CreateService with itself, or with its own group, in the list: refused, nothing is created */
+    SET1(gname);
+    SetLastError(0xdeadbeef);
+    c = CreateServiceW(hSC, gname, gname, SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
+                       SERVICE_ERROR_IGNORE, L"%SystemRoot%\\system32\\svchost.exe", NULL, NULL, deps, NULL, NULL);
+    error = GetLastError();
+    ok(c == NULL && error == ERROR_CIRCULAR_DEPENDENCY, "create with itself: %p, error %lu\n", c, error);
+    if (c)
+    {
+        DeleteService(c);
+        CloseServiceHandle(c);
+    }
+    c = OpenServiceW(hSC, gname, SERVICE_QUERY_CONFIG);
+    ok(c == NULL, "the refused service exists\n");
+    if (c)
+        CloseServiceHandle(c);
+
+    len = 0;
+    deps[len++] = SC_GROUP_IDENTIFIERW;
+    StringCchCopyW(deps + len, _countof(deps) - len, group);
+    len += wcslen(deps + len) + 1;
+    deps[len] = UNICODE_NULL;
+    SetLastError(0xdeadbeef);
+    c = CreateServiceW(hSC, gname, gname, SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
+                       SERVICE_ERROR_IGNORE, L"%SystemRoot%\\system32\\svchost.exe", group, NULL, deps, NULL, NULL);
+    error = GetLastError();
+    ok(c == NULL && error == ERROR_CIRCULAR_DEPENDENCY, "create with its own group: %p, error %lu\n", c, error);
+    if (c)
+    {
+        DeleteService(c);
+        CloseServiceHandle(c);
+    }
+
+#undef SET1
+cleanup:
+    remove_test_service(a);
+    remove_test_service(b);
+    remove_test_service(e);
+}
+
 static void
 test_reentrant_start(void)
 {
@@ -924,6 +1090,7 @@ START_TEST(ServiceDependency)
     test_start_parameters();
     test_disabled_group();
     test_cycles();
+    test_cycle_config();
     test_concurrent_starts();
     test_reentrant_start();
     test_dependency_never_running();

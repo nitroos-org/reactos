@@ -299,17 +299,7 @@ DeletePartition(
     {
         if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr */
-            DPRINT("NOERR\n");
-            return RefuseUnsupportedOption(L"NOERR");
-        }
-    }
-
-    for (i = 2; i < argc; i++)
-    {
-        if (_wcsicmp(argv[i], L"noerr") == 0)
-        {
-            /* noerr - Already handled above */
+            /* noerr: a failure does not stop the script; this command never sets an error level */
         }
         else if (_wcsicmp(argv[i], L"override") == 0)
         {

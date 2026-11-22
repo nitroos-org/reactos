@@ -37,16 +37,6 @@ setid_main(
 
     for (i = 1; i < argc; i++)
     {
-        if (_wcsicmp(argv[i], L"noerr") == 0)
-        {
-            /* noerr */
-            DPRINT("NOERR\n");
-            return RefuseUnsupportedOption(L"NOERR");
-        }
-    }
-
-    for (i = 1; i < argc; i++)
-    {
         if (HasPrefix(argv[i], L"id=", &pszSuffix))
         {
             /* id=<Byte>|<GUID> */
@@ -55,7 +45,7 @@ setid_main(
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr - Already handled above */
+            /* noerr: a failure does not stop the script; this command never sets an error level */
         }
         else if (_wcsicmp(argv[i], L"override") == 0)
         {
@@ -101,14 +91,15 @@ setid_main(
             return EXIT_SUCCESS;
         }
 
-        if (length > 2)
+        if (length > 2 || !IsHexString(pszId))
         {
             ConResPuts(StdErr, IDS_SETID_INVALID_FORMAT);
             return EXIT_SUCCESS;
         }
 
         PartitionType = (UCHAR)wcstoul(pszSuffix, NULL, 16);
-        if ((PartitionType == 0) && (errno == ERANGE))
+        /* type 0 is the unused entry of the table: not a type (measured: 0 and 00 are refused as a format error) */
+        if (PartitionType == 0)
         {
             ConResPuts(StdErr, IDS_SETID_INVALID_FORMAT);
             return EXIT_SUCCESS;
