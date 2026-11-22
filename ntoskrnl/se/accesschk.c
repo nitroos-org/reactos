@@ -1688,15 +1688,23 @@ SepAccessCheckCaptured(
     if (DesiredAccess == 0)
     {
         /*
-         * Propagate the access and status for the whole hierarchy
-         * of the list or just to single target object.
+         * Nothing is left to check: the rights granted already (privileges,
+         * the implicit owner rights) are the result, for the whole hierarchy
+         * of the list or just the target object. A request for no rights at
+         * all grants nothing and is denied, as SeAccessCheck does: measured on
+         * Windows Server 2022, NtAccessCheck, NtAccessCheckByType and
+         * NtAccessCheckByTypeResultList and their audit alarm forms with a
+         * DesiredAccess of 0 succeed with the access status
+         * STATUS_ACCESS_DENIED and nothing granted, for every descriptor and
+         * client token (2,240 rows), and every object open with an access of
+         * 0 (NtOpenEvent, NtOpenKey, NtOpenFile and the others) is refused.
          */
         SepSetAccessCheckResults(GrantedAccessList,
                                  AccessStatusList,
                                  UseResultList,
                                  ObjectTypeListLength,
                                  PreviouslyGrantedAccess,
-                                 STATUS_SUCCESS);
+                                 PreviouslyGrantedAccess ? STATUS_SUCCESS : STATUS_ACCESS_DENIED);
     }
     else
     {
