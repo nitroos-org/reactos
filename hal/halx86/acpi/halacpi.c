@@ -801,6 +801,43 @@ HaliAcpiTimerInit(IN ULONG TimerPort,
     //HalaAcpiTimerInit(TimerPort, TimerValExt);
 }
 
+/*
+ * System reset through the FADT reset register (ACPI specification: RESET_REG, RESET_VALUE, flag RESET_REG_SUP).
+ * The register is an I/O port (0xCF9 on QEMU pc and q35) or a memory location. It is written first; whoever
+ * returns from here tries the keyboard controller and the chipset register next.
+ */
+#define HAL_FADT_RESET_REG_SUP  (1 << 10)
+
+static
+VOID
+NTAPI
+HalpAcpiResetThroughFadt(VOID)
+{
+    const GEN_ADDR *Register = &HalpFixedAcpiDescTable.reset_reg;
+    UCHAR Value = HalpFixedAcpiDescTable.reset_val;
+
+    DPRINT1("HAL: system reset through the FADT reset register (space %u, address %I64x, value %02x)\n",
+            Register->AddressSpaceID, Register->Address.QuadPart, Value);
+
+    if (Register->AddressSpaceID == 1)
+    {
+        /* System I/O */
+        if (Register->Address.HighPart == 0 && Register->Address.LowPart <= 0xFFFF)
+            WRITE_PORT_UCHAR((PUCHAR)(ULONG_PTR)Register->Address.LowPart, Value);
+    }
+    else if (Register->AddressSpaceID == 0)
+    {
+        /* System memory */
+        PHYSICAL_ADDRESS Page;
+        PUCHAR Mapping;
+
+        Page.QuadPart = Register->Address.QuadPart & ~(ULONGLONG)(PAGE_SIZE - 1);
+        Mapping = HalpMapPhysicalMemory64(Page, 1);
+        if (Mapping)
+            WRITE_REGISTER_UCHAR(Mapping + (Register->Address.QuadPart & (PAGE_SIZE - 1)), Value);
+    }
+}
+
 CODE_SEG("INIT")
 NTSTATUS
 NTAPI
@@ -836,6 +873,22 @@ HalpSetupAcpiPhase0(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
 
     /* Anything special this HAL needs to do? */
     HalpAcpiDetectMachineSpecificActions(LoaderBlock, &HalpFixedAcpiDescTable);
+
+    DPRINT1("HAL: FADT revision %u, length %lu, flags %08lx, reset register %s (space %u, width %u, address %I64x, value %02x)\n",
+            Fadt->Header.Revision, Fadt->Header.Length, HalpFixedAcpiDescTable.flags,
+            (HalpFixedAcpiDescTable.flags & HAL_FADT_RESET_REG_SUP) ? "present" : "absent",
+            HalpFixedAcpiDescTable.reset_reg.AddressSpaceID, HalpFixedAcpiDescTable.reset_reg.BitWidth,
+            HalpFixedAcpiDescTable.reset_reg.Address.QuadPart, HalpFixedAcpiDescTable.reset_val);
+
+    /* A reset register that the table is long enough to hold, of 8 bits in an I/O port or a memory location */
+    if ((TableLength >= FIELD_OFFSET(FADT, reset_val) + sizeof(UCHAR)) &&
+        (HalpFixedAcpiDescTable.flags & HAL_FADT_RESET_REG_SUP) &&
+        (HalpFixedAcpiDescTable.reset_reg.AddressSpaceID <= 1) &&
+        (HalpFixedAcpiDescTable.reset_reg.BitWidth == 8 || HalpFixedAcpiDescTable.reset_reg.BitWidth == 0) &&
+        (HalpFixedAcpiDescTable.reset_reg.Address.QuadPart != 0))
+    {
+        HalpAcpiResetRoutine = HalpAcpiResetThroughFadt;
+    }
 
     /* Get the debug table for KD */
     HalpDebugPortTable = HalAcpiGetTable(LoaderBlock, DBGP_SIGNATURE);

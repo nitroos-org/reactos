@@ -635,3 +635,6 @@ extern IDTUsageFlags HalpIDTUsageFlags[MAXIMUM_IDTVECTOR+1];
 
 extern BOOLEAN HalBootViaEfi;
 extern const USHORT HalpBuildType;
+
+/* The reset routine that an ACPI HAL sets when the FADT has a reset register (generic/reboot.c) */
+extern VOID (NTAPI *HalpAcpiResetRoutine)(VOID);

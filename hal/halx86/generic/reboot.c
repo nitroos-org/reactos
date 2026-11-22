@@ -11,12 +11,26 @@
 
 #include <hal.h>
 
+/* GLOBALS *******************************************************************/
+
+/* Set by the ACPI HAL when the FADT describes a reset register (ACPI spec, FADT RESET_REG / RESET_VALUE) */
+VOID (NTAPI *HalpAcpiResetRoutine)(VOID) = NULL;
+
 /* PRIVATE FUNCTIONS *********************************************************/
 
 static VOID
 HalpWriteResetCommand(VOID)
 {
     ULONG i;
+
+    /* The mechanism that the firmware names comes first (it is an I/O port or a memory register that is not
+       the same on every machine), the keyboard controller and the chipset register stay as fallbacks */
+    if (HalpAcpiResetRoutine)
+    {
+        HalpAcpiResetRoutine();
+        for (i = 0; i < 20; i++)
+            KeStallExecutionProcessor(1000);
+    }
 
     /* Generate RESET signal via keyboard controller */
     WRITE_PORT_UCHAR((PUCHAR)0x64, 0xFE);
