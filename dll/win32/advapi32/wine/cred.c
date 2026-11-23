@@ -661,13 +661,22 @@ static DWORD get_cred_mgr_encryption_key(HKEY hkeyMgr, BYTE key_data[KEY_SIZE])
     if (ret != ERROR_FILE_NOT_FOUND)
         return ret;
 
-    GetSystemTimeAsFileTime(&ft);
-    seed = ft.dwLowDateTime;
-    value = RtlUniform(&seed);
-    *(DWORD *)key_data = value;
-    seed = ft.dwHighDateTime;
-    value = RtlUniform(&seed);
-    *(DWORD *)(key_data + 4) = value;
+#ifdef __REACTOS__
+    /* The key comes from the system random number generator: the system time is the same
+     * for everybody who made the key in the same second, and anybody who knows roughly when
+     * it was made can try all of the values. The old source stays as the fall-back, so that
+     * storing a credential still works when the generator refuses. */
+    if (!SystemFunction036(key_data, KEY_SIZE))
+#endif
+    {
+        GetSystemTimeAsFileTime(&ft);
+        seed = ft.dwLowDateTime;
+        value = RtlUniform(&seed);
+        *(DWORD *)key_data = value;
+        seed = ft.dwHighDateTime;
+        value = RtlUniform(&seed);
+        *(DWORD *)(key_data + 4) = value;
+    }
 
     ret = RegSetValueExW(hkeyMgr, wszEncryptionKeyValue, 0, REG_BINARY,
                          key_data, KEY_SIZE);
