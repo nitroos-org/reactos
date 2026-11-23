@@ -2366,6 +2366,10 @@ NtUserSetSystemCursor(
               pcur->cx = cx;
               pcur->cy = cy;
 
+              /* The pointer may be showing the system cursor: it shows the new data now, before the old
+               * bitmaps go with the destroyed object */
+              UserRefreshPointerShape(pcurOrig);
+
               IntDestroyCurIconObject(pcur);
               Ret = TRUE;
            }

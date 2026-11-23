@@ -173,6 +173,31 @@ UserSetCursor(
     return OldCursor;
 }
 
+/* The data of the cursor that is on the screen changed (SetSystemCursor): the pointer takes the new shape. The
+ * display keeps its own copy of the shape, so without this the old shape stays until the next cursor change. */
+VOID
+FASTCALL
+UserRefreshPointerShape(PCURICON_OBJECT Cursor)
+{
+    HDC hdcScreen;
+
+    if (!Cursor || IntGetSysCursorInfo()->CurrentCursorObject != Cursor ||
+        (Cursor->CURSORF_flags & CURSORF_ACON))
+        return;
+
+    if (!(hdcScreen = IntGetScreenDC()))
+        return;
+
+    GreSetPointerShape(hdcScreen,
+                       Cursor->hbmAlpha ? NULL : Cursor->hbmMask,
+                       Cursor->hbmAlpha ? Cursor->hbmAlpha : Cursor->hbmColor,
+                       Cursor->xHotspot,
+                       Cursor->yHotspot,
+                       gpsi->ptCursor.x,
+                       gpsi->ptCursor.y,
+                       Cursor->hbmAlpha ? SPS_ALPHA : 0);
+}
+
 /* Called from NtUserCallOneParam with Routine ONEPARAM_ROUTINE_SHOWCURSOR
  * User32 macro NtUserShowCursor */
 int UserShowCursor(BOOL bShow)
