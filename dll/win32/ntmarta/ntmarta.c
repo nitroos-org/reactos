@@ -675,7 +675,8 @@ RtlNewSecurityObjectEx(IN PSECURITY_DESCRIPTOR ParentDescriptor,
                        IN HANDLE Token,
                        IN PGENERIC_MAPPING GenericMapping);
 
-static GENERIC_MAPPING AccpKeyMapping = { KEY_READ, KEY_WRITE, KEY_EXECUTE, KEY_ALL_ACCESS };
+/* GENERIC_EXECUTE on a key is 0x20039 (KEY_EXECUTE | KEY_CREATE_LINK) as in the kernel's key mapping and on Windows */
+static GENERIC_MAPPING AccpKeyMapping = { KEY_READ, KEY_WRITE, KEY_EXECUTE | KEY_CREATE_LINK, KEY_ALL_ACCESS };
 
 /* The descriptor of a key (LocalAlloc, self-relative), or NULL. The key is reopened for READ_CONTROL if it lacks it. */
 static PSECURITY_DESCRIPTOR
@@ -1875,6 +1876,238 @@ Cleanup:
 }
 
 
+
+/*
+ * What SetSecurityInfo and SetNamedSecurityInfo store of the ACEs the caller supplies, on Windows Server 2022
+ * (measured, x64 and x86: (A;CI;GW;;;BA)(A;OI;GR;;;BU)(A;OICI;GA;;;SY) and (A;;GA;;;WD)(A;OICI;GR;;;BU) in an unprotected
+ * and a protected DACL, (A;OICIIO;GA;;;CO)(A;CIIO;GR;;;BU)(A;;0x1F01FF;;;SY), and (AU;OICIIOSA;GW;;;WD)(AU;SA;0x10000;;;WD)
+ * in a SACL, on a file, a directory and a key):
+ *  - on a directory or a key an effective ACE with inheritance flags and generic rights becomes two ACEs: an effective one
+ *    without inheritance flags (the kernel maps its rights) and an inherit-only copy with the inheritance flags and the
+ *    generic rights as they were (CI -> CIIO, OI -> OIIO, OICI -> OICIIO);
+ *  - on a file the inheritance flags of every ACE are not stored and its inherit-only ACEs are dropped, in the DACL and the SACL;
+ *  - ACEs that are marked inherited, and ACEs of other objects, are left as they are.
+ * Returns ERROR_SUCCESS and *NewAcl NULL when nothing changes, else the rewritten ACL (LocalAlloc).
+ */
+static DWORD
+AccpRewriteAclForSet(IN PACL Acl,
+                     IN BOOLEAN IsDacl,
+                     IN BOOLEAN IsContainer,
+                     OUT PACL *NewAcl)
+{
+    PACE_HEADER Ace;
+    ULONG i, Size;
+    BOOLEAN Change = FALSE;
+    PACL New;
+    DWORD Ret = ERROR_SUCCESS;
+
+    *NewAcl = NULL;
+    if (Acl == NULL || !IsValidAcl(Acl))
+        return ERROR_SUCCESS;
+
+    Ace = (PACE_HEADER)(Acl + 1);
+    for (i = 0; i < Acl->AceCount; i++)
+    {
+        if ((PUCHAR)Ace + sizeof(ACE_HEADER) > (PUCHAR)Acl + Acl->AclSize ||
+            (PUCHAR)Ace + Ace->AceSize > (PUCHAR)Acl + Acl->AclSize)
+            return ERROR_SUCCESS;
+        if (!(Ace->AceFlags & INHERITED_ACE))
+        {
+            if (!IsContainer)
+            {
+                if (Ace->AceFlags & (INHERIT_ONLY_ACE | OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | NO_PROPAGATE_INHERIT_ACE))
+                    Change = TRUE;
+            }
+            else if (IsDacl &&
+                     (Ace->AceType == ACCESS_ALLOWED_ACE_TYPE || Ace->AceType == ACCESS_DENIED_ACE_TYPE) &&
+                     !(Ace->AceFlags & INHERIT_ONLY_ACE) &&
+                     (Ace->AceFlags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)) &&
+                     Ace->AceSize >= sizeof(ACCESS_ALLOWED_ACE) &&
+                     (((PACCESS_ALLOWED_ACE)Ace)->Mask & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL)))
+                Change = TRUE;
+        }
+        Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize);
+    }
+    if (!Change)
+        return ERROR_SUCCESS;
+
+    Size = Acl->AclSize * 2 + sizeof(ACL);
+    New = (PACL)LocalAlloc(LMEM_FIXED, Size);
+    if (New == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    if (!InitializeAcl(New, Size, Acl->AclRevision))
+    {
+        Ret = GetLastError();
+        LocalFree(New);
+        return Ret;
+    }
+
+    Ace = (PACE_HEADER)(Acl + 1);
+    for (i = 0; i < Acl->AceCount && Ret == ERROR_SUCCESS; i++)
+    {
+        PACE_HEADER Copy = (PACE_HEADER)LocalAlloc(LMEM_FIXED, Ace->AceSize);
+        UCHAR Flags = Ace->AceFlags;
+        BOOLEAN Split = FALSE;
+
+        if (Copy == NULL)
+        {
+            Ret = ERROR_NOT_ENOUGH_MEMORY;
+            break;
+        }
+        RtlCopyMemory(Copy, Ace, Ace->AceSize);
+
+        if (!(Flags & INHERITED_ACE))
+        {
+            if (!IsContainer)
+            {
+                if (Flags & INHERIT_ONLY_ACE)
+                {
+                    LocalFree(Copy);
+                    Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize);
+                    continue;
+                }
+                Copy->AceFlags = Flags & ~(OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | NO_PROPAGATE_INHERIT_ACE);
+            }
+            else if (IsDacl &&
+                     (Ace->AceType == ACCESS_ALLOWED_ACE_TYPE || Ace->AceType == ACCESS_DENIED_ACE_TYPE) &&
+                     !(Flags & INHERIT_ONLY_ACE) &&
+                     (Flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)) &&
+                     Ace->AceSize >= sizeof(ACCESS_ALLOWED_ACE) &&
+                     (((PACCESS_ALLOWED_ACE)Ace)->Mask & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL)))
+            {
+                /* the effective ACE first, without inheritance flags; its generic rights are mapped when it is stored */
+                Copy->AceFlags = Flags & ~(OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | NO_PROPAGATE_INHERIT_ACE);
+                Split = TRUE;
+            }
+        }
+
+        if (!AddAce(New, Acl->AclRevision, MAXDWORD, Copy, Copy->AceSize))
+            Ret = GetLastError();
+        if (Ret == ERROR_SUCCESS && Split)
+        {
+            /* then the inherit-only copy with the generic rights */
+            RtlCopyMemory(Copy, Ace, Ace->AceSize);
+            Copy->AceFlags = (Flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | NO_PROPAGATE_INHERIT_ACE)) | INHERIT_ONLY_ACE |
+                             (Flags & ~VALID_INHERIT_FLAGS & ~INHERIT_ONLY_ACE);
+            if (!AddAce(New, Acl->AclRevision, MAXDWORD, Copy, Copy->AceSize))
+                Ret = GetLastError();
+        }
+        LocalFree(Copy);
+        Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize);
+    }
+
+    if (Ret != ERROR_SUCCESS)
+    {
+        LocalFree(New);
+        return Ret;
+    }
+    *NewAcl = New;
+    return ERROR_SUCCESS;
+}
+
+/* Whether the file or directory behind a handle is a directory; FALSE when that cannot be told (nothing is rewritten then) */
+static BOOLEAN
+AccpHandleIsDirectory(IN HANDLE Handle,
+                      OUT PBOOLEAN Known)
+{
+    BYTE Buffer[sizeof(OBJECT_NAME_INFORMATION) + 520 * sizeof(WCHAR)];
+    POBJECT_NAME_INFORMATION Name = (POBJECT_NAME_INFORMATION)Buffer;
+    FILE_BASIC_INFORMATION Basic;
+    IO_STATUS_BLOCK Iosb;
+    OBJECT_ATTRIBUTES Oa;
+    NTSTATUS Status;
+
+    *Known = FALSE;
+    Status = NtQueryInformationFile(Handle, &Iosb, &Basic, sizeof(Basic), FileBasicInformation);
+    if (NT_SUCCESS(Status))
+    {
+        *Known = TRUE;
+        return (Basic.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    }
+
+    /* no FILE_READ_ATTRIBUTES on the handle: ask for the attributes by the name of the object */
+    Status = NtQueryObject(Handle, ObjectNameInformation, Buffer, sizeof(Buffer), NULL);
+    if (!NT_SUCCESS(Status) || Name->Name.Length == 0)
+        return FALSE;
+    InitializeObjectAttributes(&Oa, &Name->Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtQueryAttributesFile(&Oa, &Basic);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+    *Known = TRUE;
+    return (Basic.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+/*
+ * The descriptor to set for a key, a file or a directory (see AccpRewriteAclForSet): Rewritten is filled and returned when the DACL
+ * or SACL changes, with the buffers to free in Dacl and Sacl; otherwise the caller's descriptor is returned.
+ */
+static PSECURITY_DESCRIPTOR
+AccpRewriteForSet(IN HANDLE Handle,
+                  IN SE_OBJECT_TYPE ObjectType,
+                  IN SECURITY_INFORMATION SecurityInfo,
+                  IN PSECURITY_DESCRIPTOR Sd,
+                  OUT PSECURITY_DESCRIPTOR Rewritten,
+                  OUT PACL *Dacl,
+                  OUT PACL *Sacl)
+{
+    BOOLEAN IsContainer, Known = TRUE, Present, Defaulted;
+    PACL OldDacl = NULL, OldSacl = NULL;
+    PSID Owner = NULL, Group = NULL;
+    SECURITY_DESCRIPTOR_CONTROL Control;
+    ULONG Revision;
+
+    *Dacl = NULL;
+    *Sacl = NULL;
+    if (Sd == NULL || !(SecurityInfo & (DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION)))
+        return Sd;
+    if (ObjectType == SE_REGISTRY_KEY)
+        IsContainer = TRUE;
+    else if (ObjectType == SE_FILE_OBJECT)
+        IsContainer = AccpHandleIsDirectory(Handle, &Known);
+    else
+        return Sd;
+    if (!Known)
+        return Sd;
+
+    if (SecurityInfo & DACL_SECURITY_INFORMATION)
+    {
+        RtlGetDaclSecurityDescriptor(Sd, &Present, &OldDacl, &Defaulted);
+        if (!Present || AccpRewriteAclForSet(OldDacl, TRUE, IsContainer, Dacl) != ERROR_SUCCESS)
+            *Dacl = NULL;
+    }
+    /* a key keeps its SACL as given */
+    if ((SecurityInfo & SACL_SECURITY_INFORMATION) && ObjectType == SE_FILE_OBJECT)
+    {
+        RtlGetSaclSecurityDescriptor(Sd, &Present, &OldSacl, &Defaulted);
+        if (!Present || AccpRewriteAclForSet(OldSacl, FALSE, IsContainer, Sacl) != ERROR_SUCCESS)
+            *Sacl = NULL;
+    }
+    if (*Dacl == NULL && *Sacl == NULL)
+        return Sd;
+
+    /* the same descriptor with the rewritten ACLs: owner, group and control as given */
+    RtlGetOwnerSecurityDescriptor(Sd, &Owner, &Defaulted);
+    RtlGetGroupSecurityDescriptor(Sd, &Group, &Defaulted);
+    RtlGetControlSecurityDescriptor(Sd, &Control, &Revision);
+    RtlGetDaclSecurityDescriptor(Sd, &Present, &OldDacl, &Defaulted);
+    RtlGetSaclSecurityDescriptor(Sd, &Present, &OldSacl, &Defaulted);
+    InitializeSecurityDescriptor(Rewritten, SECURITY_DESCRIPTOR_REVISION);
+    if (Owner)
+        SetSecurityDescriptorOwner(Rewritten, Owner, FALSE);
+    if (Group)
+        SetSecurityDescriptorGroup(Rewritten, Group, FALSE);
+    if (Control & SE_DACL_PRESENT)
+        SetSecurityDescriptorDacl(Rewritten, TRUE, *Dacl ? *Dacl : OldDacl, FALSE);
+    if (Control & SE_SACL_PRESENT)
+        SetSecurityDescriptorSacl(Rewritten, TRUE, *Sacl ? *Sacl : OldSacl, FALSE);
+    SetSecurityDescriptorControl(Rewritten,
+                                 SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED |
+                                 SE_SACL_PROTECTED | SE_SACL_AUTO_INHERIT_REQ | SE_SACL_AUTO_INHERITED,
+                                 Control & (SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED |
+                                            SE_SACL_PROTECTED | SE_SACL_AUTO_INHERIT_REQ | SE_SACL_AUTO_INHERITED));
+    return Rewritten;
+}
+
 /**********************************************************************
  * AccRewriteSetHandleRights				EXPORTED
  *
@@ -1889,9 +2122,15 @@ AccRewriteSetHandleRights(HANDLE handle,
     NTSTATUS Status;
     DWORD LastErr;
     DWORD Ret = ERROR_SUCCESS;
+    SECURITY_DESCRIPTOR Rewritten;
+    PACL RewrittenDacl = NULL, RewrittenSacl = NULL;
 
     /* save the last error code */
     LastErr = GetLastError();
+
+    /* what a key, a file or a directory stores of the ACEs the caller supplies (see AccpRewriteAclForSet) */
+    pSecurityDescriptor = AccpRewriteForSet(handle, ObjectType, SecurityInfo, pSecurityDescriptor,
+                                            &Rewritten, &RewrittenDacl, &RewrittenSacl);
 
     /* set the security according to the object type */
     switch (ObjectType)
@@ -1948,6 +2187,11 @@ AccRewriteSetHandleRights(HANDLE handle,
         }
     }
 
+
+    if (RewrittenDacl != NULL)
+        LocalFree(RewrittenDacl);
+    if (RewrittenSacl != NULL)
+        LocalFree(RewrittenSacl);
 
     /* restore the last error code */
     SetLastError(LastErr);
