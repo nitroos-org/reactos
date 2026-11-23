@@ -667,11 +667,12 @@ PNEIGHBOR_CACHE_ENTRY NBFindOrCreateNeighbor(
         TI_DbgPrint(MID_TRACE,("BCAST: %s\n", A2S(&Interface->Broadcast)));
         if (Address->Type == IP_ADDRESS_V4 && IPV4_IS_MULTICAST(Address->Address.IPv4Address)) {
             /* An IPv4 group: its Ethernet address (RFC 1112 6.4: 01:00:5e and the low 23 bits of the group), a
-               permanent entry, as Windows lists one for each group it sent to; no ARP. Windows ages them (measured:
-               they are gone minutes after the last send) and does not bound them (measured: 55 000 listed); any user
-               can send to 2^28 groups, so ours go after NB_GROUP_IDLE_SECONDS without a send, and past
-               NB_MAX_GROUP_ENTRIES cached ones a group gets an entry of its own that is not in the cache and goes
-               with its last reference */
+               permanent entry, as Windows lists one for each group it sent to; no ARP. Windows neither bounds
+               nor ages them per entry in the sizes measured (5 000 groups were still listed after 8 minutes, 55 000
+               were all listed) and only trims a very large table. Any user can send to 2^28 groups, so ours differ
+               on purpose: they go after NB_GROUP_IDLE_SECONDS without a send, and past NB_MAX_GROUP_ENTRIES
+               cached ones a group gets an entry of its own that is not in the cache and goes with its last
+               reference */
             const UCHAR *Group = (const UCHAR *)&Address->Address.IPv4Address;
             UCHAR Mac[6];
 
