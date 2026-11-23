@@ -60,7 +60,7 @@ Local changes to upstream files (marked "NitroOS"; 1-3 inside #ifdef HAVE_SSPI)
      session_setup_cb            smb2_sspi_session_complete(): refuses guest/anonymous sessions,
                                  checks the server's last SPNEGO token, sets the session key
      free_c_data                 smb2_sspi_free_auth_data()
-2a. lib/smb2-signing.c: AES-CMAC through nitro/aes-bcrypt.c when NITRO_SMB2_BCRYPT_AES is set.
+2a. lib/smb2-signing.c: AES-CMAC through nitro/aes-bcrypt.c (the define NITRO_SMB2_BCRYPT_AES, set in CMakeLists.txt).
 3. lib/init.c: signing always offered (SecurityMode SIGNING_ENABLED); smb2_destroy_context()
    calls smb2_sspi_destroy() (credentials released, keys and password wiped).
 4. Fixes, not conditional (commit "[LIBSMB2] Fix large writes on Windows, keys of SMB 3.0 sessions,
@@ -81,15 +81,15 @@ NEED_GETLOGIN_R/GETPID/RANDOM/SRANDOM (as libsmb2's own CMake sets for Windows),
 HAVE_ARC4RANDOM_BUF, NITRO_SMB2_BCRYPT_AES. No OpenSSL, so GCM is not offered (upstream offers GCM
 only with OpenSSL): SMB 3.x encryption is AES-128-CCM. Signing: HMAC-SHA256 (2.x) through bcrypt
 (nitro/crypto.c), AES-CMAC (3.x); keys: libsmb2's SP800-108 KDF over that HMAC.
-AES-CCM and AES-CMAC: NITRO_SMB2_BCRYPT_AES (CMakeLists.txt, default ON) takes them from bcrypt
-(nitro/aes-bcrypt.c: lib/aes128ccm.c is not built; one hook in lib/smb2-signing.c); OFF builds
+AES-CCM and AES-CMAC: the define NITRO_SMB2_BCRYPT_AES (CMakeLists.txt) takes them from bcrypt
+(nitro/aes-bcrypt.c: lib/aes128ccm.c is not built; one hook in lib/smb2-signing.c), not from
 libsmb2's own (byte-wise AES for CCM; CMAC with AES-NI on amd64, the compiler's wmmintrin.h/cpuid.h
 for that file). Measured 2026-11-18 (300 MB each way, Windows Server 2022 and Samba 4.19, 3.1.1 and
 3.0, IPv4/IPv6; shared host, indications): encrypted share bcrypt 20-26 MB/s put / 28-32 get,
 own 8-11 / 10-11 (x64 and x86 alike); signed x64 bcrypt 32/37, own (AES-NI) 39/44; signed x86
 bcrypt 28/39, own 15/17; plain 30-48 either way. Default: bcrypt (2.5-3x on encrypted shares, 2x
 for signing on x86; the x64 AES-NI CMAC of libsmb2 is about 15 % faster than bcrypt's, not worth a
-second switch).
+second code path).
 Random bytes: every call site of smb2_random_bytes() is listed in nitro/crypto.c.
 
 Updating

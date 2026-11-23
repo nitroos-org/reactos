@@ -19,16 +19,11 @@ add_definitions(-D_WIN32_WINNT=0x600 -DWIN32_LEAN_AND_MEAN -D_WINDOWS -DHAVE_CON
 # What libsmb2's own CMake sets for Windows, and the NitroOS backends (see nitro/config.h)
 add_definitions(-DNEED_GETLOGIN_R -DNEED_GETPID -DNEED_RANDOM -DNEED_SRANDOM -DHAVE_SSPI -DHAVE_ARC4RANDOM_BUF)
 
-# AES-128-CCM (SMB 3.x encryption) and AES-128-CMAC (SMB 3.x signing): through bcrypt (SymCrypt, AES
-# instructions; nitro/aes-bcrypt.c) or libsmb2's own code (lib/aes128ccm.c, lib/smb2-signing.c). Measured on
-# the encrypted shares: see README.NitroOS. OFF builds libsmb2's own.
-set(NITRO_SMB2_BCRYPT_AES ON)
-if(NITRO_SMB2_BCRYPT_AES)
-    add_definitions(-DNITRO_SMB2_BCRYPT_AES)
-    set(LIBSMB2_CCM_SOURCE nitro/aes-bcrypt.c)
-else()
-    set(LIBSMB2_CCM_SOURCE lib/aes128ccm.c)
-endif()
+# AES-128-CCM (SMB 3.x encryption) and AES-128-CMAC (SMB 3.x signing) go through bcrypt (SymCrypt, AES
+# instructions; nitro/aes-bcrypt.c) instead of libsmb2's own code (lib/aes128ccm.c, lib/smb2-signing.c).
+# Measured on the encrypted shares: see README.NitroOS. The define selects the hook in lib/smb2-signing.c.
+add_definitions(-DNITRO_SMB2_BCRYPT_AES)
+set(LIBSMB2_CCM_SOURCE nitro/aes-bcrypt.c)
 
 list(APPEND SOURCE
     lib/aes.c

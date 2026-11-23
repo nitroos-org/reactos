@@ -146,8 +146,8 @@ points to it); nothing is redistributed. mshtml (synced to Wine 10.0) accepts ex
 
 ## Native installs and the RAPPS catalog (rapps.exe is gone)
 
-NitroOS no longer builds or ships `rapps.exe` / `rapps.com` (the upstream source stays in `base/applications/rapps*`; build it
-with `-DNITRO_SHIP_RAPPS=ON`). Everything it did for us is done here:
+NitroOS no longer builds or ships `rapps.exe` / `rapps.com` (the upstream source stays in `base/applications/rapps*`, unbuilt).
+Everything it did for us is done here:
 
 - **Provider=native** (`native.c`, `natgen.c`; the old spelling `rapps` is read as `native`): featmgr downloads the file itself
   (wininet; https, or http when the entry has a checksum), verifies SHA-256, else SHA-1 (both when both are given; an entry with
