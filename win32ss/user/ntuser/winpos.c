@@ -3452,11 +3452,17 @@ co_WinPosSearchChildren(
     if (!(ScopeWin->style & WS_MINIMIZE) &&
          RECTL_bPointInRect(&ScopeWin->rcClient, Point->x, Point->y) )
     {
-        UserReferenceObject(ScopeWin);
+        USER_REFERENCE_ENTRY ScopeRef;
+        USER_HELD_POOL_ENTRY HeldList;
+
+        /* The children's WM_NCHITTEST runs window procedures: the window and the list are held so that the thread
+           cleanup gives them back if the thread ends in one of them */
+        UserRefObjectCo(ScopeWin, &ScopeRef);
 
         List = IntWinListChildren(ScopeWin);
         if (List)
         {
+            UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
             for (phWnd = List; *phWnd; ++phWnd)
             {
                 if (!(pwndChild = ValidateHwndNoErr(*phWnd)))
@@ -3469,14 +3475,14 @@ co_WinPosSearchChildren(
                 if (pwndChild != NULL)
                 {
                     /* We found a window. Don't send any more WM_NCHITTEST messages */
-                    ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
-                    UserDereferenceObject(ScopeWin);
+                    UserFreePoolCo(&HeldList);
+                    UserDerefObjectCo(ScopeWin);
                     return pwndChild;
                 }
             }
-            ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+            UserFreePoolCo(&HeldList);
         }
-        UserDereferenceObject(ScopeWin);
+        UserDerefObjectCo(ScopeWin);
     }
 
     if (ScopeWin->head.pti == PsGetCurrentThreadWin32Thread())
