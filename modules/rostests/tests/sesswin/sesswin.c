@@ -1,8 +1,8 @@
 /*
  * PROJECT:     NitroOS tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     Windows image (GUI subsystem, kernel32 only) that SMSS starts
- *              in session 1 at NitroSessions=4. It checks that it is served
+ * PURPOSE:     Windows image (GUI subsystem, kernel32 only) run in session 1
+ *              (the console session). It checks that it is served
  *              by its own session's csrss: the csrss it connected to, the
  *              directories and the named-object directory that basesrv hands
  *              out, and a child process created through basesrv. The report

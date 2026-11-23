@@ -78,9 +78,10 @@ FindProcess(
         {
             /* -1: in no session (System, Idle); smss reports 0 as the leader */
             Session = PsGetProcessSessionIdEx(Process);
-            if (!SameSession)
+            if (!SameSession && (Session != MAXULONG))
             {
-                /* The kernel's view must match what the entry reports */
+                /* The kernel's view must match what the entry reports (System and Idle, in no session, are
+                   reported as session 0; the test runs in the console session, so it meets them here) */
                 ok_eq_ulong(Session, Entry->SessionId);
             }
             if ((Session == Entry->SessionId) &&
@@ -137,11 +138,10 @@ START_TEST(MmSessionSpace)
     ok_eq_ulong(PsGetCurrentProcessSessionId(), OwnSession);
 
     Other = FindProcess(OwnSession, FALSE, &OtherSession);
+    /* Session 0 (services) and session 1 (the console) always exist */
+    ok(Other != NULL, "No process in a second session\n");
     if (!Other)
-    {
-        skip(FALSE, "No process in a second session (NitroSessions=0)\n");
         return;
-    }
     trace("Own session %lu, other session %lu (pid %p)\n",
           OwnSession, OtherSession, PsGetProcessId(Other));
 

@@ -256,11 +256,9 @@ START_TEST(MmSessionTables)
               PsGetProcessId(Processes[i].Process));
         ViewCount++;
     }
-    /* Needs a second session (NitroSessions 1 or 4): with one, nothing is
-       compared; that is reported as skipped, as the other session tests do, and
-       is not a failure of a default system (NitroSessions 0) */
-    if (ViewCount < 2)
-        skip(FALSE, "Only %lu session(s) with a member: no second session (NitroSessions=0)\n", ViewCount);
+    /* Session 0 and the console session 1 always have members: with one, nothing is
+       compared and the test would pass for nothing */
+    ok(ViewCount >= 2, "Only %lu session(s) with a member: no second session\n", ViewCount);
 
     /*
      * Every process against every session's view:

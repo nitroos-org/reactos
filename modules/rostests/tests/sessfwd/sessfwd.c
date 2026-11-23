@@ -9,13 +9,12 @@
  *              serves only SMSS.
  *              Run it as LocalSystem in session 0, as a service:
  *                sc create sfwd binPath= "C:\ReactOS\bin\sessfwd.exe svc C:\harness\out\sessfwd.txt"
- *              with NitroSessions 5 and a session-1 test command that keeps
- *              running (sesswin2.exe hold). One line per check, PASS or FAIL,
- *              to the file and to the debugger.
+ *              Session 1 is the console session (the user's). One line per
+ *              check, PASS or FAIL, to the file and to the debugger.
  *              "child <session>" is the process the test creates: it exits
  *              with 0x5E55 when it runs in that session.
- *              Without a session 1 (NitroSessions absent or 0) the cases that
- *              need it are reported as SKIP, not FAIL.
+ *              Without a session 1 the cases that need it are reported as
+ *              SKIP, not FAIL.
  *              "concurrent-forwards": STRESS_THREADS threads create children
  *              into session 1 at once, console and detached, which exit at
  *              once: forwards through SMSS overlap with each other and with
@@ -37,12 +36,7 @@
  *              SMSS must keep answering (a refused forward is the probe, it
  *              needs a free API thread), and the record of a child that runs in
  *              session 1 meanwhile must survive: its csrss's SmSessionComplete
- *              at exit then finds it (the SMSS log, which the gate reads, says
- *              SUCCESS, not NOT_FOUND; NitroSessionsTestForward bit 2, value 4).
- *              "svc <file> stuck": a stuck target csrss (NitroSessionsTestForwardStall
- *              makes every forward wait in SMSS instead of the target answering):
- *              concurrent creates into session 1 must neither wedge SMSS (probe
- *              answers while they are stuck) nor hang (every create returns).
+ *              at exit then finds it.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka
  */
 
@@ -78,8 +72,6 @@ typedef NTSTATUS (NTAPI *PRTL_CREATE_USER_THREAD)(HANDLE, PSECURITY_DESCRIPTOR, 
 #define DATAGRAM_FLOOD 10000
 #define DATAGRAM_HOLD_MS 20000
 #define PROBE_BOUND_MS 15000
-#define STUCK_THREADS 3
-#define STUCK_BOUND_MS 120000
 
 #define STRESS_THREADS 4
 #define STRESS_ROUNDS 15
@@ -553,7 +545,6 @@ Soak(ULONG Seconds, ULONG Session)
         return;
     }
     Start = LastLine = GetTickCount();
-    /* SMSS logs its session-record count for a refused forward (NitroSessionsTestForward bit 1, value 2) */
     SmssAnswers("soak-start", PROBE_BOUND_MS);
     ProcessUsage(SmssPid, &SmssPrivate, &SmssHandles);
     ProcessUsage(CsrPid, &CsrPrivate, &CsrHandles);
@@ -780,86 +771,6 @@ DatagramTests(HANDLE Token)
     }
 }
 
-typedef struct _STUCK
-{
-    HANDLE Token;
-    BOOL Ok;
-    DWORD CreateMs;
-    DWORD Error;
-} STUCK, *PSTUCK;
-
-static
-DWORD
-WINAPI
-StuckThread(PVOID Parameter)
-{
-    PSTUCK Stuck = Parameter;
-
-    Stuck->Ok = StressChild(Stuck->Token, TARGET_SESSION, DETACHED_PROCESS, &Stuck->CreateMs, &Stuck->Error);
-    return 0;
-}
-
-/*
- * A stuck target csrss (SMSS test switch NitroSessionsTestForwardStall, longer than the retry of csrsrv):
- * STUCK_THREADS creates into session 1 at once. One forward is stuck in SMSS, the others are told BUSY
- * and retried. SMSS must go on answering other requests all the while, and every create must return (fail).
- */
-static
-VOID
-StuckTests(HANDLE Token)
-{
-    STUCK Stuck[STUCK_THREADS + 1];
-    HANDLE Threads[STUCK_THREADS + 1];
-    ULONG i, Started = 0, Returned = 0, Failed = 0;
-    DWORD Wait;
-    BOOL Late;
-
-    RtlZeroMemory(Stuck, sizeof(Stuck));
-    for (i = 0; i < STUCK_THREADS; i++)
-    {
-        Stuck[i].Token = Token;
-        Threads[i] = CreateThread(NULL, 0, StuckThread, &Stuck[i], 0, NULL);
-        if (!Threads[i]) break;
-        Started++;
-    }
-    Log("SESSFWD stuck started=%lu of %u\n", Started, STUCK_THREADS);
-    if (Started != STUCK_THREADS) Failures++;
-
-    /* While they are in flight (the stall is longer than all of this) */
-    Sleep(1500);
-    SmssAnswers("stuck-while-forwards-in-flight-1", PROBE_BOUND_MS);
-    Sleep(1500);
-    SmssAnswers("stuck-while-forwards-in-flight-2", PROBE_BOUND_MS);
-    Sleep(6000);
-    SmssAnswers("stuck-after-busy-retries-expired", PROBE_BOUND_MS);
-
-    /* One more create, while the first forward is still stuck */
-    Stuck[Started].Token = Token;
-    Threads[Started] = CreateThread(NULL, 0, StuckThread, &Stuck[Started], 0, NULL);
-    Late = (Threads[Started] != NULL);
-    Started += Late ? 1 : 0;
-
-    Wait = WaitForMultipleObjects(Started, Threads, TRUE, STUCK_BOUND_MS);
-    for (i = 0; i < Started; i++)
-    {
-        BOOL Done = (WaitForSingleObject(Threads[i], 0) == WAIT_OBJECT_0);
-
-        Log("SESSFWD stuck create %lu returned=%d ok=%d create-ms=%lu error=%lx\n", i, Done, Stuck[i].Ok,
-            Stuck[i].CreateMs, Stuck[i].Error);
-        if (Done)
-        {
-            Returned++;
-            if (!Stuck[i].Ok) Failed++;
-            CloseHandle(Threads[i]);
-        }
-    }
-    /* A stalled forward ends in a failed create and so does a busy one, none may hang or succeed */
-    Log("SESSFWD stuck-creates-fail-cleanly started=%lu returned=%lu failed=%lu wait=%lx %s\n", Started, Returned,
-        Failed, Wait, ((Wait == WAIT_OBJECT_0) && (Returned == Started) && (Failed == Started)) ? "PASS" : "FAIL");
-    if (!((Wait == WAIT_OBJECT_0) && (Returned == Started) && (Failed == Started))) Failures++;
-    SmssAnswers("stuck-after-all-returned", PROBE_BOUND_MS);
-}
-
 static
 VOID
 Tests(VOID)
@@ -893,7 +804,7 @@ Tests(VOID)
         Failures++;
     }
 
-    /* Everything else needs a session 1 (NitroSessions 4 or 5) */
+    /* Everything else needs a session 1 */
     Session1 = (FindPidInSession(L"csrss.exe", TARGET_SESSION) != 0);
     Log("SESSFWD session-1 %s\n", Session1 ? "present" : "absent");
     if (!Session1)
@@ -1014,29 +925,6 @@ Done:
     Log("SESSFWD done failures=%lu skipped=%lu\n", Failures, Skips);
 }
 
-/* "svc <file> stuck": only the stuck-target test */
-static
-VOID
-StuckMain(VOID)
-{
-    BOOLEAN Old;
-    HANDLE Token;
-
-    RtlAdjustPrivilege(SE_TCB_PRIVILEGE, TRUE, FALSE, &Old);
-    Log("SESSFWD stuck start session=%lu\n", ProcessSession(NtCurrentProcess()));
-    Token = FindPidInSession(L"csrss.exe", TARGET_SESSION) ? TokenForSession(TARGET_SESSION) : NULL;
-    if (!Token)
-    {
-        Skip("stuck-target", "no session 1");
-    }
-    else
-    {
-        StuckTests(Token);
-        CloseHandle(Token);
-    }
-    Log("SESSFWD done failures=%lu skipped=%lu\n", Failures, Skips);
-}
-
 static SERVICE_STATUS_HANDLE StatusHandle;
 
 static
@@ -1048,7 +936,6 @@ Report(DWORD State)
 }
 
 static ULONG SoakSeconds, SoakSession = TARGET_SESSION;
-static BOOL StuckMode;
 
 static
 VOID
@@ -1058,7 +945,6 @@ ServiceMain(DWORD Argc, LPWSTR *Argv)
     StatusHandle = RegisterServiceCtrlHandlerW(L"sfwd", NULL);
     Report(SERVICE_RUNNING);
     if (SoakSeconds) Soak(SoakSeconds, SoakSession);
-    else if (StuckMode) StuckMain();
     else Tests();
     Report(SERVICE_STOPPED);
 }
@@ -1078,7 +964,6 @@ wmain(int argc, wchar_t *argv[])
         SERVICE_TABLE_ENTRYW Table[] = { { L"sfwd", ServiceMain }, { NULL, NULL } };
 
         if (argc > 2) Out = _wfopen(argv[2], L"w");
-        if ((argc > 3) && !_wcsicmp(argv[3], L"stuck")) StuckMode = TRUE;
         if ((argc > 4) && !_wcsicmp(argv[3], L"soak")) SoakSeconds = wcstoul(argv[4], NULL, 10);
         if ((argc > 5) && SoakSeconds) SoakSession = wcstoul(argv[5], NULL, 10);
         if ((argc > 6) && SoakSeconds && !_wcsicmp(argv[6], L"detached")) StressDetachedOnly = TRUE;
