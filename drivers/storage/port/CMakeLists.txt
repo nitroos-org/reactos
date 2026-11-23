@@ -1,4 +1,5 @@
 add_subdirectory(buslogic)
+add_subdirectory(megasas)
 add_subdirectory(mptsas)
 add_subdirectory(pvscsi)
 add_subdirectory(scsiport)

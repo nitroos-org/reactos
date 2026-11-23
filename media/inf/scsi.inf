@@ -30,6 +30,8 @@ DefaultDestDir = 12
 %PCI\VEN_104B&CC_0100.DeviceDesc% = BusLogic_Inst,PCI\VEN_104B&CC_0100
 %PCI\VEN_15AD&DEV_07C0.DeviceDesc% = Pvscsi_Inst,PCI\VEN_15AD&DEV_07C0
 %PCI\VEN_1000&DEV_0054.DeviceDesc% = Mptsas_Inst,PCI\VEN_1000&DEV_0054
+%PCI\VEN_1000&DEV_0060.DeviceDesc% = Megasas_Inst,PCI\VEN_1000&DEV_0060
+%PCI\VEN_1000&DEV_0079.DeviceDesc% = Megasas_Inst,PCI\VEN_1000&DEV_0079
 
 ;--------------------------- SCSIPORT DRIVER ----------------------------
 
@@ -107,6 +109,25 @@ ErrorControl  = 1
 ServiceBinary = %12%\mptsas.sys
 LoadOrderGroup = SCSI Miniport
 
+;--------------------------- MEGASAS DRIVER -----------------------------
+
+[Megasas_Inst.NT]
+CopyFiles = Megasas_CopyFiles.NT, Scsiport_CopyFiles.NT
+
+[Megasas_CopyFiles.NT]
+megasas.sys
+
+[Megasas_Inst.NT.Services]
+AddService = megasas, 0x00000002, Megasas_Service_Inst
+AddService = Scsiport, , Scsiport_Service_Inst
+
+[Megasas_Service_Inst]
+ServiceType   = 1
+StartType     = 0
+ErrorControl  = 1
+ServiceBinary = %12%\megasas.sys
+LoadOrderGroup = SCSI Miniport
+
 ;-------------------------------- STRINGS -------------------------------
 
 [Strings]
@@ -122,6 +143,8 @@ GEN_SCSIADAPTER.DeviceDesc = "SCSI/RAID Host Controller"
 PCI\VEN_104B&CC_0100.DeviceDesc = "BusLogic SCSI Controller"
 PCI\VEN_15AD&DEV_07C0.DeviceDesc = "VMware PVSCSI SCSI Controller"
 PCI\VEN_1000&DEV_0054.DeviceDesc = "LSI Logic SAS SCSI Controller"
+PCI\VEN_1000&DEV_0060.DeviceDesc = "LSI MegaRAID SAS 1078 Controller"
+PCI\VEN_1000&DEV_0079.DeviceDesc = "LSI MegaRAID SAS 2108 Controller"
 
 [Strings.0404]
 SCSIClassName = "SCSI / RAID 控制器"

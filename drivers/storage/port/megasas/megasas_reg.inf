@@ -1,0 +1,7 @@
+; LSI MegaRAID SAS (MFI) miniport driver (boot start: Setup and the first boot find the logical drives)
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\megasas","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\megasas","Group",0x00000000,"SCSI Miniport"
+HKLM,"SYSTEM\CurrentControlSet\Services\megasas","ImagePath",0x00020000,"system32\drivers\megasas.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\megasas","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\megasas","Type",0x00010001,0x00000001
