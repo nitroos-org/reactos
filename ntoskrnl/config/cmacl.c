@@ -5329,8 +5329,15 @@ CmpAclRestrictedSubject(
     if (!CmpAclReady || CmpRegistryAclEffectiveMode == CM_REGACL_MODE_LEGACY)
         return FALSE;
 
+    /*
+     * A lowbox (AppContainer) token likewise: the AppContainer pass of SeAccessCheck grants it only what an
+     * ACE for its package SID, its capabilities or the application package groups grants, which the legacy
+     * descriptor has only for the modes without key security (legacy); Windows decides by the key's own
+     * descriptor (measured on Windows Server 2022: the AppContainer token writes its profile's storage key
+     * through the package SID ACE).
+     */
     Token = SeQuerySubjectContextToken(&AccessState->SubjectSecurityContext);
-    return Token && SeTokenIsRestricted(Token);
+    return Token && (SeTokenIsRestricted(Token) || ((PTOKEN)Token)->Lowbox != NULL);
 }
 
 /*

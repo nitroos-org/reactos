@@ -14,9 +14,10 @@
  * TOKEN_LOWBOX set. NtQueryInformationToken reports the AppContainer classes
  * from it (tokencls.c).
  *
- * The package SID and capabilities are reported only: access checks do not
- * apply the AppContainer rules (a lowbox token is granted what its user and
- * groups are granted, as before this existed).
+ * The access checks apply the AppContainer pass to a lowbox token: it is
+ * granted only what both its user and groups and its package SID,
+ * capabilities and the application package groups are granted
+ * (accesschk.c, SepAppContainerAllowedAccess).
  *
  * Not measured on Windows (the documented contract only): the statuses for
  * a SID that is not a package SID, a NULL capability or handle array with a

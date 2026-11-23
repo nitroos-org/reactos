@@ -443,6 +443,171 @@ SepMandatoryAllowedAccess(
     return Allowed;
 }
 
+/*
+ * The AppContainer pass. A lowbox (AppContainer) token is granted only what both the normal
+ * pass and an AppContainer pass grant (Microsoft Learn, "AppContainer isolation" and "Launch an
+ * AppContainer", paraphrased: the package and capability SIDs of the token are separate from its
+ * user and group SIDs, and a resource is reachable only where the DACL grants them access).
+ * Measured on Windows Server 2022 (the rvac matrix of the access check
+ * services, 2,277 lowbox rows, and object opens of named objects, files, keys and processes by
+ * an impersonated lowbox token): a lowbox token gets nothing without an ACE for its package SID,
+ * a capability it holds or ALL APPLICATION PACKAGES, also on a NULL DACL, a descriptor without
+ * a DACL and as the owner (no implicit READ_CONTROL); the open of another process of its user,
+ * whose DACL has no such ACE, is refused.
+ *
+ * In the AppContainer pass an ACE applies when its SID is the token's package SID, one of its
+ * capability SIDs that is enabled, ALL APPLICATION PACKAGES (S-1-15-2-1) or ALL RESTRICTED
+ * APPLICATION PACKAGES (S-1-15-2-2); its rights are worked out as for MAXIMUM_ALLOWED (an allow
+ * grants what was not denied before it, a deny denies what was not granted before it). Not
+ * measured, the choice taken (to verify on Windows): OWNER RIGHTS and PRINCIPAL SELF ACEs do not
+ * apply in the AppContainer pass; rights a privilege grants (ACCESS_SYSTEM_SECURITY) and rights
+ * the caller of SeAccessCheck grants itself stay granted; for an object type list the pass of
+ * the object (the root) bounds every entry.
+ */
+typedef struct _SEP_SID2
+{
+    UCHAR Revision;
+    UCHAR SubAuthorityCount;
+    SID_IDENTIFIER_AUTHORITY IdentifierAuthority;
+    ULONG SubAuthority[2];
+} SEP_SID2;
+
+static const SEP_SID2 SepAllAppPackagesSid =
+    { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_APP_PACKAGE_BASE_RID, SECURITY_BUILTIN_PACKAGE_ANY_PACKAGE } };
+static const SEP_SID2 SepAllRestrictedAppPackagesSid =
+    { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_APP_PACKAGE_BASE_RID, 2 } };
+
+/* The SID is one an ACE of the AppContainer pass applies to for the lowbox data */
+static
+BOOLEAN
+SepIsAppContainerSidOf(
+    _In_ PSEP_LOWBOX Lowbox,
+    _In_ PISID Sid,
+    _In_ ULONG SidLength)
+{
+    ULONG i;
+
+    if (Sid->IdentifierAuthority.Value[5] != 15 || Sid->IdentifierAuthority.Value[0] != 0)
+        return FALSE;
+    if ((SidLength == sizeof(SEP_SID2) && RtlEqualSid(Sid, (PSID)&SepAllAppPackagesSid)) ||
+        (SidLength == sizeof(SEP_SID2) && RtlEqualSid(Sid, (PSID)&SepAllRestrictedAppPackagesSid)) ||
+        (SidLength == RtlLengthSid(Lowbox->PackageSid) && RtlEqualSid(Sid, Lowbox->PackageSid)))
+    {
+        return TRUE;
+    }
+    for (i = 0; i < Lowbox->CapabilityCount; i++)
+    {
+        if ((Lowbox->Capabilities[i].Attributes & SE_GROUP_ENABLED) &&
+            SidLength == RtlLengthSid(Lowbox->Capabilities[i].Sid) &&
+            RtlEqualSid(Sid, Lowbox->Capabilities[i].Sid))
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/**
+ * @brief
+ * Works out the rights the AppContainer pass leaves a token.
+ *
+ * @param[in] Token
+ * The token the access check is for. The caller holds its lock.
+ *
+ * @param[in] SecurityDescriptor
+ * The security descriptor of the object (captured, or a kernel caller's).
+ *
+ * @return
+ * MAXULONG when the token is not a lowbox token (no AppContainer pass),
+ * else the rights the DACL grants the token's AppContainer SIDs (none
+ * without a DACL, with a NULL or an empty one).
+ */
+static
+ACCESS_MASK
+SepAppContainerAllowedAccess(
+    _In_ PTOKEN Token,
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor)
+{
+    ACCESS_MASK Granted = 0, Denied = 0, Mask;
+    BOOLEAN Present, Defaulted, IsDenied;
+    PACE_HEADER Ace;
+    PUCHAR AclEnd;
+    ULONG AceIndex, SidOffset, Left, Flags;
+    PISID Sid;
+    PACL Dacl;
+
+    PAGED_CODE();
+
+    if (Token->Lowbox == NULL)
+        return MAXULONG;
+
+    if (!NT_SUCCESS(RtlGetDaclSecurityDescriptor(SecurityDescriptor, &Present, &Dacl, &Defaulted)) ||
+        !Present || Dacl == NULL || Dacl->AclSize < sizeof(ACL))
+    {
+        return 0;
+    }
+
+    /* Every ACE must lie within the ACL (a kernel caller's descriptor is not validated): the walk stops at one that does not */
+    AclEnd = (PUCHAR)Dacl + Dacl->AclSize;
+    Ace = (PACE_HEADER)(Dacl + 1);
+    for (AceIndex = 0; AceIndex < Dacl->AceCount; AceIndex++, Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize))
+    {
+        if ((PUCHAR)Ace >= AclEnd)
+            break;
+        Left = (ULONG)(AclEnd - (PUCHAR)Ace);
+        if (Left < sizeof(ACE_HEADER) || Ace->AceSize < sizeof(ACE_HEADER) || Left < Ace->AceSize)
+            break;
+        Left = Ace->AceSize;
+
+        if (Ace->AceFlags & INHERIT_ONLY_ACE)
+            continue;
+
+        switch (Ace->AceType)
+        {
+            case ACCESS_ALLOWED_ACE_TYPE:
+            case ACCESS_DENIED_ACE_TYPE:
+                IsDenied = (Ace->AceType == ACCESS_DENIED_ACE_TYPE);
+                SidOffset = FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart);
+                break;
+
+            case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+            case ACCESS_DENIED_OBJECT_ACE_TYPE:
+                if (Left < FIELD_OFFSET(ACCESS_ALLOWED_OBJECT_ACE, ObjectType))
+                    continue;
+                IsDenied = (Ace->AceType == ACCESS_DENIED_OBJECT_ACE_TYPE);
+                Flags = ((PACCESS_ALLOWED_OBJECT_ACE)Ace)->Flags;
+                /* As the normal pass: an allow with an object type is for the list only, a deny denies */
+                if (!IsDenied && (Flags & ACE_OBJECT_TYPE_PRESENT))
+                    continue;
+                SidOffset = FIELD_OFFSET(ACCESS_ALLOWED_OBJECT_ACE, ObjectType) +
+                            ((Flags & ACE_OBJECT_TYPE_PRESENT) ? sizeof(GUID) : 0) +
+                            ((Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT) ? sizeof(GUID) : 0);
+                break;
+
+            default:
+                continue;
+        }
+
+        /* The SID must lie within the ACE */
+        if (Left < SidOffset + FIELD_OFFSET(SID, SubAuthority))
+            continue;
+        Sid = (PISID)((PUCHAR)Ace + SidOffset);
+        if (Left < SidOffset + RtlLengthRequiredSid(Sid->SubAuthorityCount) ||
+            !SepIsAppContainerSidOf(Token->Lowbox, Sid, RtlLengthRequiredSid(Sid->SubAuthorityCount)))
+        {
+            continue;
+        }
+
+        Mask = ((PACCESS_ALLOWED_ACE)Ace)->Mask;
+        if (IsDenied)
+            Denied |= Mask & ~Granted;
+        else
+            Granted |= Mask & ~Denied;
+    }
+
+    return Granted;
+}
+
 /**
  * @brief
  * Tells whether the mandatory label of a descriptor denies a token some of
@@ -1760,7 +1925,7 @@ SepAccessCheckCaptured(
     _Out_writes_(UseResultList ? ObjectTypeListLength : 1) PACCESS_MASK GrantedAccessList,
     _Out_writes_(UseResultList ? ObjectTypeListLength : 1) PNTSTATUS AccessStatusList)
 {
-    ACCESS_MASK MandatoryAllowed;
+    ACCESS_MASK MandatoryAllowed, AppContainerAllowed;
     ULONG ResultIndex;
 
     PAGED_CODE();
@@ -1789,6 +1954,29 @@ SepAccessCheckCaptured(
                                  STATUS_ACCESS_DENIED);
         SepReleaseTokenLock(Token);
         return;
+    }
+
+    /*
+     * The AppContainer pass of a lowbox token (SepAppContainerAllowedAccess): a right it does not
+     * grant is refused, as the label's, before the owner's implicit rights and the DACL count
+     */
+    AppContainerAllowed = SepAppContainerAllowedAccess(Token, CapturedSecurityDescriptor);
+    if (AppContainerAllowed != MAXULONG)
+    {
+        ACCESS_MASK MappedAccess = DesiredAccess | PreviouslyGrantedAccess;
+
+        RtlMapGenericMask(&MappedAccess, CapturedGenericMapping);
+        if (MappedAccess & ~(MAXIMUM_ALLOWED | ACCESS_SYSTEM_SECURITY | AppContainerAllowed))
+        {
+            SepSetAccessCheckResults(GrantedAccessList,
+                                     AccessStatusList,
+                                     UseResultList,
+                                     ObjectTypeListLength,
+                                     0,
+                                     STATUS_ACCESS_DENIED);
+            SepReleaseTokenLock(Token);
+            return;
+        }
     }
 
     /*
@@ -1854,6 +2042,17 @@ SepAccessCheckCaptured(
         for (ResultIndex = 0; ResultIndex < (UseResultList ? ObjectTypeListLength : 1); ResultIndex++)
         {
             GrantedAccessList[ResultIndex] &= MandatoryAllowed;
+            if (AccessStatusList[ResultIndex] == STATUS_SUCCESS && GrantedAccessList[ResultIndex] == 0)
+                AccessStatusList[ResultIndex] = STATUS_ACCESS_DENIED;
+        }
+    }
+
+    /* MAXIMUM_ALLOWED of a lowbox token: within what the AppContainer pass grants (the owner's rights too) */
+    if (AppContainerAllowed != MAXULONG && (DesiredAccess & MAXIMUM_ALLOWED))
+    {
+        for (ResultIndex = 0; ResultIndex < (UseResultList ? ObjectTypeListLength : 1); ResultIndex++)
+        {
+            GrantedAccessList[ResultIndex] &= AppContainerAllowed | ACCESS_SYSTEM_SECURITY;
             if (AccessStatusList[ResultIndex] == STATUS_SUCCESS && GrantedAccessList[ResultIndex] == 0)
                 AccessStatusList[ResultIndex] = STATUS_ACCESS_DENIED;
         }
@@ -2444,6 +2643,7 @@ SeAccessCheck(
     _Out_ PNTSTATUS AccessStatus)
 {
     ACCESS_MASK MandatoryAllowed, MappedAccess, CallerGrantedAccess;
+    ACCESS_MASK AppContainerAllowed, AppContainerCallerGranted;
     PACCESS_TOKEN Token;
     BOOLEAN ret;
 
@@ -2524,6 +2724,28 @@ SeAccessCheck(
     }
 
     /*
+     * The AppContainer pass of a lowbox token (SepAppContainerAllowedAccess), with the same rule:
+     * a right it does not grant is refused first; the rights the caller grants itself stay
+     */
+    AppContainerAllowed = SepAppContainerAllowedAccess((PTOKEN)Token, SecurityDescriptor);
+    AppContainerCallerGranted = 0;
+    if (AppContainerAllowed != MAXULONG)
+    {
+        AppContainerCallerGranted = PreviouslyGrantedAccess;
+        RtlMapGenericMask(&AppContainerCallerGranted, GenericMapping);
+        MappedAccess = DesiredAccess;
+        RtlMapGenericMask(&MappedAccess, GenericMapping);
+        if (MappedAccess & ~(MAXIMUM_ALLOWED | ACCESS_SYSTEM_SECURITY | AppContainerAllowed))
+        {
+            *GrantedAccess = 0;
+            *AccessStatus = STATUS_ACCESS_DENIED;
+            if (!SubjectContextLocked)
+                SeUnlockSubjectContext(SubjectSecurityContext);
+            return FALSE;
+        }
+    }
+
+    /*
      * Check if the token is the owner and grant WRITE_DAC and READ_CONTROL rights,
      * unless the DACL has an OWNER RIGHTS ACE for the object
      */
@@ -2578,6 +2800,17 @@ SeAccessCheck(
     if (ret && MandatoryAllowed != MAXULONG && (DesiredAccess & MAXIMUM_ALLOWED))
     {
         *GrantedAccess &= MandatoryAllowed | CallerGrantedAccess;
+        if (*GrantedAccess == 0)
+        {
+            *AccessStatus = STATUS_ACCESS_DENIED;
+            ret = FALSE;
+        }
+    }
+
+    /* MAXIMUM_ALLOWED of a lowbox token: within the AppContainer pass (the owner's rights too), but what the caller granted */
+    if (ret && AppContainerAllowed != MAXULONG && (DesiredAccess & MAXIMUM_ALLOWED))
+    {
+        *GrantedAccess &= AppContainerAllowed | AppContainerCallerGranted | ACCESS_SYSTEM_SECURITY;
         if (*GrantedAccess == 0)
         {
             *AccessStatus = STATUS_ACCESS_DENIED;

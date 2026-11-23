@@ -10,6 +10,7 @@ extern void func_AccessCheckMandatory(void);
 extern void func_AccessCheckNoAccess(void);
 extern void func_AccessCheckGenericAce(void);
 extern void func_AccessCheckMalformedAcl(void);
+extern void func_AccessCheckAppContainer(void);
 extern void func_AccessCheckObjectTypeList(void);
 extern void func_AddMandatoryAce(void);
 extern void func_RegSaveKeyExFormat(void);
@@ -207,6 +208,7 @@ const struct test winetest_testlist[] =
     { "AccessCheckNoAccess", func_AccessCheckNoAccess },
     { "AccessCheckGenericAce", func_AccessCheckGenericAce },
     { "AccessCheckMalformedAcl", func_AccessCheckMalformedAcl },
+    { "AccessCheckAppContainer", func_AccessCheckAppContainer },
     { "AccessCheckObjectTypeList", func_AccessCheckObjectTypeList },
     { "AddMandatoryAce", func_AddMandatoryAce },
     { "RegSaveKeyExFormat", func_RegSaveKeyExFormat },
