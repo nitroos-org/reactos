@@ -90,8 +90,10 @@ KdpReceivePacketLeader(
         if (KdStatus == KDP_PACKET_TIMEOUT)
         {
             /* Check if we already got a breakin byte */
-            if (Buffer[0] == BREAKIN_PACKET_BYTE)
+            if ((Buffer[0] == BREAKIN_PACKET_BYTE) || KdpBreakInSeen)
             {
+                /* The caller reports it (KdpControlCPending): not a second time */
+                KdpBreakInSeen = FALSE;
                 KdpHostIsPresent();
                 return KDP_PACKET_RESEND;
             }
@@ -126,6 +128,14 @@ KdpReceivePacketLeader(
             if (Byte == BREAKIN_PACKET_BYTE)
             {
                 KDDBGPRINT("BREAKIN_PACKET_BYTE\n");
+
+                /*
+                 * Keep it: the acknowledge that the host sends right after
+                 * (a packet leader) replaces it in Buffer[0], and the
+                 * request to stop would be lost.
+                 */
+                if (KdpRememberBreakIn)
+                    KdpBreakInSeen = TRUE;
                 Index = 0;
                 Buffer[0] = Byte;
                 continue;

@@ -113,10 +113,19 @@ KdReceivePacket(
         return KdpPollBreakIn();
     }
 
+    /*
+     * Waiting for the acknowledge of a packet that was just sent: the target
+     * is running, so a break-in byte that arrives meanwhile is remembered,
+     * and the wait is short. A stop starts here (the target waits for the
+     * debugger's requests): a break-in byte from before it is obsolete.
+     */
+    KdpRememberBreakIn = WaitForAck;
+    if (PacketType == PACKET_TYPE_KD_STATE_MANIPULATE)
+        KdpBreakInSeen = FALSE;
+
     for (;;)
     {
         /* Step 1 - Read PacketLeader */
-        /* Waiting for the acknowledge of a packet that was just sent: a short wait */
         KdpByteSpin = WaitForAck ? KdpAckSpin() : 0;
         KdStatus = KdpReceivePacketLeader(&Packet.PacketLeader);
         KdpByteSpin = 0;

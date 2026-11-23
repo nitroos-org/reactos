@@ -35,6 +35,8 @@ CPPORT KdComPort;
 ULONG KdpByteSpin;          /* 0: wait as long as the port library does */
 BOOLEAN KdpHostSeen;
 BOOLEAN KdpPatient;
+BOOLEAN KdpBreakInSeen;
+BOOLEAN KdpRememberBreakIn;
 #ifdef KDDEBUG
 CPPORT KdDebugComPort;
 #endif
@@ -349,21 +351,37 @@ KdpReceiveByte(OUT PUCHAR OutByte)
     }
 }
 
+/*
+ * Look for a break-in request: a byte seen earlier while a packet was
+ * exchanged (KdpBreakInSeen), or one that is waiting in the port now. Every
+ * byte that is waiting is taken, a host that sent a packet first must not
+ * make the break-in wait for one poll per clock tick.
+ */
 KDP_STATUS
 NTAPI
 KdpPollBreakIn(VOID)
 {
     KDP_STATUS KdStatus;
     UCHAR Byte;
+    ULONG Count;
+    BOOLEAN BreakIn = KdpBreakInSeen;
 
-    KdStatus = KdpPollByte(&Byte);
-    if ((KdStatus == KDP_PACKET_RECEIVED) && (Byte == BREAKIN_PACKET_BYTE))
+    for (Count = 0; Count < 32; Count++)
     {
-        /* The host is there, also if it was not heard before (it attached late) */
-        KdpHostIsPresent();
-        return KDP_PACKET_RECEIVED;
+        KdStatus = KdpPollByte(&Byte);
+        if (KdStatus == KDP_PACKET_TIMEOUT)
+            break;
+        if ((KdStatus == KDP_PACKET_RECEIVED) && (Byte == BREAKIN_PACKET_BYTE))
+            BreakIn = TRUE;
     }
-    return KDP_PACKET_TIMEOUT;
+
+    if (!BreakIn)
+        return KDP_PACKET_TIMEOUT;
+
+    /* The host is there, also if it was not heard before (it attached late) */
+    KdpBreakInSeen = FALSE;
+    KdpHostIsPresent();
+    return KDP_PACKET_RECEIVED;
 }
 
 /* EOF */
