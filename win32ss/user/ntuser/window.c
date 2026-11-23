@@ -628,6 +628,17 @@ LRESULT co_UserFreeWindow(PWND Window,
 
    if(Window->state2 & WNDS2_INDESTROY)
    {
+      /* The thread of the window ended inside a callback of an earlier free of it (WM_NCDESTROY, a send
+         to a child of another thread, a termination in such a wait): that frame never comes back, and the
+         window kept its class, handle and links. Its thread cleanup, where no callback runs any more,
+         finishes the free. Everything after the marking above WNDS_DESTROYED runs without a callback, so
+         a window still without WNDS_DESTROYED is one whose free stopped before that point. */
+      if (!(Window->state & WNDS_DESTROYED) && ThreadData == PsGetCurrentThreadWin32Thread() &&
+          Window->head.pti == ThreadData && (ThreadData->TIF_flags & TIF_INCLEANUP))
+      {
+         ERR("Finishing the free of window %p that its thread left in a callback\n", UserHMGetHandle(Window));
+         goto ResumeFree;
+      }
       TRACE("Tried to call co_UserFreeWindow() twice\n");
       return 0;
    }
@@ -641,6 +652,7 @@ LRESULT co_UserFreeWindow(PWND Window,
    if (!IsListEmpty(&Window->ThreadListEntry))
        RemoveEntryList(&Window->ThreadListEntry);
 
+ResumeFree:
    BelongsToThreadData = IntWndBelongsToThread(Window, ThreadData);
 
    IntDeRegisterShellHookWindow(UserHMGetHandle(Window));
