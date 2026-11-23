@@ -74,7 +74,9 @@ START_TEST(CommitStress)
     }
     ok_ntstatus(Status, STATUS_COMMITMENT_LIMIT);
     ok(Count > 16, "only %Iu MB could be committed\n", Count);
-    AtFailure = QueryCommit(NULL);
+    /* The limit is read again: a system managed paging file grows while the memory is committed, and the limit reported
+     * is the one this process can charge, which moves with it */
+    AtFailure = QueryCommit(&CommitLimit);
     trace("committed %Iu MB, system commit %Iu of %Iu pages (from %Iu)\n", Count, AtFailure, CommitLimit, Start);
     ok(AtFailure <= CommitLimit, "commit %Iu above the limit %Iu\n", AtFailure, CommitLimit);
 

@@ -522,17 +522,22 @@ TestReporting(VOID)
     ok(Before <= CommitLimit, "committed %Iu above the limit %Iu\n", Before, CommitLimit);
 
     /*
-     * As on Windows (measured on Windows 10: 2423623 = 2095943 pages of RAM + one 327680 page paging file) the
-     * limit is physical memory plus the size of every paging file. Applications derive the paging file size
-     * from it: GlobalMemoryStatusEx ullTotalPageFile - ullTotalPhys. No paging file: the limit is RAM.
+     * Windows (measured on Windows 10: 2423623 = 2095943 pages of RAM + one 327680 page paging file) reports as the
+     * limit physical memory plus the size of every paging file, because that is what it can charge. Here a
+     * non-critical process can charge less (RAM less a resident headroom backs private memory, and the kernel keeps
+     * a reserve, see MiGetChargeableCommitLimit), and the limit reported is the one the caller can charge, so that
+     * the available commit is honest (Windows Server 2022: the commit that failed had its size reported
+     * available). So the limit is at most RAM plus the paging files. No paging file: at most RAM.
      */
     QuerySystemCommit(&LimitAfter);
     PagingAfter = QueryPagingFilePages();
     if ((LimitAfter != CommitLimit) || (PagingAfter != PagingFile))
         skip("a paging file grew or shrank in between\n");
     else
-        ok(CommitLimit == PhysicalPages + PagingFile, "limit %Iu, physical memory %lu plus paging files %Iu pages\n",
+    {
+        ok(CommitLimit <= PhysicalPages + PagingFile, "limit %Iu, physical memory %lu plus paging files %Iu pages\n",
            CommitLimit, PhysicalPages, PagingFile);
+    }
 
     Before = QuerySystemCommit(NULL);
     ok(GlobalMemoryStatusEx(&MemoryStatus), "GlobalMemoryStatusEx failed with %lu\n", GetLastError());
@@ -551,7 +556,9 @@ TestReporting(VOID)
     {
         ok(MemoryStatus.ullTotalPageFile == (ULONGLONG)CommitLimit * PageSize,
            "ullTotalPageFile %I64u, commit limit %Iu pages\n", MemoryStatus.ullTotalPageFile, CommitLimit);
-        ok(MemoryStatus.ullTotalPageFile - MemoryStatus.ullTotalPhys == (ULONGLONG)PagingFile * PageSize,
+        /* Windows: ullTotalPageFile - ullTotalPhys is the size of the paging files. The limit reported here is
+         * lower by what the caller cannot charge (see above), so it is that size at most */
+        ok(MemoryStatus.ullTotalPageFile <= MemoryStatus.ullTotalPhys + (ULONGLONG)PagingFile * PageSize,
            "ullTotalPageFile %I64u minus ullTotalPhys %I64u, paging files %Iu pages\n",
            MemoryStatus.ullTotalPageFile, MemoryStatus.ullTotalPhys, PagingFile);
 
@@ -625,6 +632,13 @@ CommitRange(
 /* The test system's paging file is system managed and can grow, see START_TEST */
 static BOOLEAN GrowthFixture;
 
+/*
+ * A 64-bit kernel (also seen by a 32-bit test under WoW64). Its limit has the pager behind it: a section can be
+ * committed up to the limit reported only on the 32-bit kernel, where the reported limit is what RAM backs
+ * (see MiGetChargeableCommitLimit); the "known gap" expectations below hold on the 64-bit kernel.
+ */
+static BOOLEAN Kernel64;
+
 static
 VOID
 TestCommitBeyondRam(VOID)
@@ -652,7 +666,7 @@ TestCommitBeyondRam(VOID)
     if (PhysicalPages < MB_PAGES(1024))
         skip("%lu pages of RAM: the gap between the limit and what ReactOS backs is small\n", PhysicalPages);
     else
-        CommitRange(CommitLimit - Committed - MB_PAGES(64), TRUE, !GrowthFixture, TRUE);
+        CommitRange(CommitLimit - Committed - MB_PAGES(64), TRUE, !GrowthFixture, Kernel64);
 }
 
 static
@@ -746,8 +760,8 @@ TestGrowthAndExhaustion(VOID)
     Committed = QuerySystemCommit(&CommitLimit);
     trace("filled: %lu sections, commit %Iu of %Iu pages, paging files %Iu pages (from %Iu)\n",
           Count, Committed, CommitLimit, QueryPagingFilePages(), PagingStart);
-    /* Windows fills the limit; ReactOS stops at what RAM can back, below the reported limit (known gap) */
-    todo_if(is_reactos())
+    /* Windows fills the limit; ReactOS stops at what RAM can back, below the reported limit (known gap on the 64-bit kernel) */
+    todo_if(is_reactos() && Kernel64)
         ok(CommitLimit - Committed < MB_PAGES(64), "%Iu pages left below the limit\n", CommitLimit - Committed);
 
     /* Committing what is committed needs nothing, even now */
@@ -820,6 +834,16 @@ START_TEST(CommitCharge)
         PageSize = BasicInfo.PageSize;
         PhysicalPages = BasicInfo.NumberOfPhysicalPages;
     }
+
+#ifdef _WIN64
+    Kernel64 = TRUE;
+#else
+    {
+        BOOL Wow64 = FALSE;
+
+        Kernel64 = IsWow64Process(GetCurrentProcess(), &Wow64) && Wow64;
+    }
+#endif
 
     TestReporting();
 
