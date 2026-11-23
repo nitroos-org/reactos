@@ -6,6 +6,7 @@
 
 #include <apitest.h>
 #include <winioctl.h>
+#include <aclapi.h>
 #include <userenv.h>
 #include <strsafe.h>
 
@@ -172,6 +173,193 @@ TestOpenThrough(PCWSTR ProfilePath)
     ok(GetFileAttributesW(Real) == INVALID_FILE_ATTRIBUTES, "The file is still in AppData\\Roaming\n");
 }
 
+/*
+ * The DACL of a junction object in the root of the volume (the object itself, not its target): not what the root passes
+ * on (Authenticated Users: Modify), but the DACL of its target, protected, after the deny of the listing. Users,
+ * Authenticated Users, Everyone and the interactive logon may neither write nor delete it nor change its DACL or owner.
+ * On ReactOS only: the DACL of the Windows object is not measured.
+ */
+static void
+TestRootJunctionDacl(PCWSTR Link)
+{
+    static const WELL_KNOWN_SID_TYPE Others[] = { WinBuiltinUsersSid, WinAuthenticatedUserSid, WinWorldSid, WinInteractiveSid };
+    const ACCESS_MASK Write = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_DELETE_CHILD |
+                              FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL;
+    BYTE Sid[SECURITY_MAX_SID_SIZE];
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    SECURITY_DESCRIPTOR_CONTROL Control = 0;
+    PACCESS_ALLOWED_ACE Ace;
+    PACL Dacl = NULL;
+    DWORD Error, Revision, Size, i, j;
+    HANDLE hLink;
+
+    if (!is_reactos())
+    {
+        skip("%S: the DACL of the Windows junction is not known\n", Link);
+        return;
+    }
+
+    hLink = CreateFileW(Link, READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    ok(hLink != INVALID_HANDLE_VALUE, "%S: open: error %lu\n", Link, GetLastError());
+    if (hLink == INVALID_HANDLE_VALUE)
+        return;
+    Error = GetSecurityInfo(hLink, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &Dacl, NULL, &Sd);
+    CloseHandle(hLink);
+    ok(Error == ERROR_SUCCESS, "%S: GetSecurityInfo: error %lu\n", Link, Error);
+    if (Error != ERROR_SUCCESS)
+        return;
+
+    ok(GetSecurityDescriptorControl(Sd, &Control, &Revision), "GetSecurityDescriptorControl: error %lu\n", GetLastError());
+    ok((Control & SE_DACL_PROTECTED) != 0, "%S: the DACL is not protected (control %#x)\n", Link, Control);
+    ok(Dacl != NULL && Dacl->AceCount > 2, "%S: DACL %p\n", Link, Dacl);
+    if (Dacl == NULL)
+        goto done;
+
+    /* The first entry denies the listing to Everyone */
+    Size = sizeof(Sid);
+    CreateWellKnownSid(WinWorldSid, NULL, Sid, &Size);
+    ok(GetAce(Dacl, 0, (PVOID *)&Ace) && Ace->Header.AceType == ACCESS_DENIED_ACE_TYPE &&
+       (Ace->Mask & FILE_LIST_DIRECTORY) && EqualSid((PSID)&Ace->SidStart, (PSID)Sid),
+       "%S: the first entry does not deny the listing to Everyone\n", Link);
+
+    for (i = 0; i < Dacl->AceCount; i++)
+    {
+        if (!GetAce(Dacl, i, (PVOID *)&Ace) || Ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE)
+            continue;
+        ok(!(Ace->Header.AceFlags & INHERITED_ACE), "%S: entry %lu is inherited\n", Link, i);
+        for (j = 0; j < _countof(Others); j++)
+        {
+            Size = sizeof(Sid);
+            if (CreateWellKnownSid(Others[j], NULL, Sid, &Size) && EqualSid((PSID)&Ace->SidStart, (PSID)Sid))
+                ok(!(Ace->Mask & Write), "%S: entry %lu grants %#lx to well-known SID %u\n", Link, i, Ace->Mask, Others[j]);
+        }
+    }
+
+done:
+    LocalFree(Sd);
+}
+
+static BOOL
+EnablePrivilege(PCWSTR Name)
+{
+    TOKEN_PRIVILEGES Tp;
+    HANDLE hToken;
+    BOOL Ret;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hToken))
+        return FALSE;
+    Tp.PrivilegeCount = 1;
+    Tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    Ret = LookupPrivilegeValueW(NULL, Name, &Tp.Privileges[0].Luid) &&
+          AdjustTokenPrivileges(hToken, FALSE, &Tp, 0, NULL, NULL) && GetLastError() == ERROR_SUCCESS;
+    CloseHandle(hToken);
+    return Ret;
+}
+
+/* Sets the owner and an unprotected copy of Dacl on the junction object */
+static BOOL
+SetJunctionOwnerUnprotected(HANDLE hLink, WELL_KNOWN_SID_TYPE OwnerType, PACL Dacl)
+{
+    BYTE Owner[SECURITY_MAX_SID_SIZE];
+    SECURITY_DESCRIPTOR Sd;
+    DWORD Size = sizeof(Owner);
+
+    return CreateWellKnownSid(OwnerType, NULL, Owner, &Size) &&
+           InitializeSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION) &&
+           SetSecurityDescriptorOwner(&Sd, (PSID)Owner, FALSE) &&
+           SetSecurityDescriptorDacl(&Sd, TRUE, Dacl, FALSE) &&
+           SetKernelObjectSecurity(hLink, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &Sd);
+}
+
+static BOOL
+JunctionIsProtected(HANDLE hLink)
+{
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    SECURITY_DESCRIPTOR_CONTROL Control = 0;
+    DWORD Revision;
+    PACL Dacl;
+
+    if (GetSecurityInfo(hLink, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &Dacl, NULL, &Sd) != ERROR_SUCCESS)
+        return FALSE;
+    GetSecurityDescriptorControl(Sd, &Control, &Revision);
+    LocalFree(Sd);
+    return (Control & SE_DACL_PROTECTED) != 0;
+}
+
+/*
+ * The repair at startup (SecureSystemDirectories, as winlogon calls it) gives the junction the profiles directory's
+ * DACL only when the object is what setup made: owned by SYSTEM or Administrators. One owned by someone else (a user
+ * who replaced the junction with a link of their own) is left alone. The junction is put back as it was.
+ */
+static void
+TestRepairOwner(PCWSTR Link)
+{
+    BOOL (WINAPI *pSecureSystemDirectories)(VOID);
+    PSECURITY_DESCRIPTOR Original = NULL;
+    PSID Owner = NULL;
+    PACL Dacl = NULL;
+    SECURITY_DESCRIPTOR_CONTROL Control = 0;
+    SECURITY_DESCRIPTOR Restore;
+    DWORD Error, Revision;
+    HANDLE hLink;
+
+    if (!is_reactos())
+    {
+        skip("%S: SecureSystemDirectories is ours\n", Link);
+        return;
+    }
+    pSecureSystemDirectories = (PVOID)GetProcAddress(GetModuleHandleW(L"userenv.dll"), MAKEINTRESOURCEA(300));
+    if (!pSecureSystemDirectories || !EnablePrivilege(L"SeRestorePrivilege"))
+    {
+        skip("No SecureSystemDirectories or no SeRestorePrivilege (error %lu)\n", GetLastError());
+        return;
+    }
+
+    hLink = CreateFileW(Link, READ_CONTROL | WRITE_DAC | WRITE_OWNER, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (hLink == INVALID_HANDLE_VALUE)
+    {
+        skip("%S: open for WRITE_OWNER: error %lu\n", Link, GetLastError());
+        return;
+    }
+    Error = GetSecurityInfo(hLink, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                            &Owner, NULL, &Dacl, NULL, &Original);
+    ok(Error == ERROR_SUCCESS && Dacl != NULL, "%S: GetSecurityInfo: error %lu\n", Link, Error);
+    if (Error != ERROR_SUCCESS || Dacl == NULL)
+        goto done;
+    GetSecurityDescriptorControl(Original, &Control, &Revision);
+
+    /* Owned by Users, unprotected: left alone */
+    if (!SetJunctionOwnerUnprotected(hLink, WinBuiltinUsersSid, Dacl))
+    {
+        skip("%S: owner Users: error %lu\n", Link, GetLastError());
+        goto done;
+    }
+    ok(!JunctionIsProtected(hLink), "%S: still protected\n", Link);
+    pSecureSystemDirectories();
+    ok(!JunctionIsProtected(hLink), "%S: owned by Users, but the repair gave it a protected DACL\n", Link);
+
+    /* Owned by Administrators, unprotected: repaired */
+    ok(SetJunctionOwnerUnprotected(hLink, WinBuiltinAdministratorsSid, Dacl), "%S: owner Administrators: error %lu\n",
+       Link, GetLastError());
+    pSecureSystemDirectories();
+    ok(JunctionIsProtected(hLink), "%S: owned by Administrators, but not repaired\n", Link);
+
+    /* As it was */
+    ok(InitializeSecurityDescriptor(&Restore, SECURITY_DESCRIPTOR_REVISION) &&
+       SetSecurityDescriptorOwner(&Restore, Owner, FALSE) &&
+       SetSecurityDescriptorDacl(&Restore, TRUE, Dacl, FALSE) &&
+       SetSecurityDescriptorControl(&Restore, SE_DACL_PROTECTED, Control & SE_DACL_PROTECTED) &&
+       SetKernelObjectSecurity(hLink, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &Restore),
+       "%S: restore: error %lu\n", Link, GetLastError());
+
+done:
+    if (Original)
+        LocalFree(Original);
+    CloseHandle(hLink);
+}
+
 START_TEST(LegacyProfileJunctions)
 {
     WCHAR DefaultPath[MAX_PATH], ProgramDataPath[MAX_PATH], Root[MAX_PATH], Link[MAX_PATH], Target[MAX_PATH];
@@ -210,6 +398,11 @@ START_TEST(LegacyProfileJunctions)
 
         ok(IsJunction, "%S: no junction, error %lu\n", Link, GetLastError());
         if (IsJunction)
+        {
             ok(!_wcsicmp(Target, ProfilesPath), "%S: target %S, expected %S\n", Link, Target, ProfilesPath);
+            TestRootJunctionDacl(Link);
+            TestRepairOwner(Link);
+            TestRootJunctionDacl(Link);
+        }
     }
 }

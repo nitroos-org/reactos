@@ -786,7 +786,7 @@ CreateLegacyProgramDataJunctions(
     _In_ PCWSTR pszProfilesPath)
 {
     static const JUNCTIONDATA UsersJunction = {L"Documents and Settings", L""};
-    WCHAR szSystemDrive[MAX_PATH];
+    WCHAR szSystemDrive[MAX_PATH], szLink[MAX_PATH];
 
     if (!VolumeHasJunctions(pszProgramDataPath))
         return;
@@ -797,7 +797,16 @@ CreateLegacyProgramDataJunctions(
                     PublicJunctions, ARRAYSIZE(PublicJunctions));
 
     if (ExpandEnvironmentStringsW(L"%SystemDrive%", szSystemDrive, ARRAYSIZE(szSystemDrive)))
+    {
         CreateJunctions(szSystemDrive, pszProfilesPath, &UsersJunction, 1);
+
+        /* In the root it would keep the root's entries (Authenticated Users: Modify): the DACL of its target instead */
+        if (SUCCEEDED(StringCchPrintfW(szLink, ARRAYSIZE(szLink), L"%s\\%s", szSystemDrive, UsersJunction.pszLink)) &&
+            !SecureLegacyUsersJunction(szLink, pszProfilesPath))
+        {
+            DPRINT1("Failed to secure the junction %S\n", szLink);
+        }
+    }
 }
 
 /* EOF */
