@@ -709,6 +709,34 @@ LRESULT co_UserFreeWindow(PWND Window,
    /* flush the message queue */
    MsqRemoveWindowMessagesFromQueue(Window);
 
+   /* Windows still owned by this one: co_UserDestroyWindow takes the owner away from the windows it owns
+      before it sends WM_DESTROY, but another thread can create a window with this owner after that (during
+      the destroy messages). Their owner link keeps this window's memory, not its storage (the class, the
+      links): every walk of the owner chain would read the freed storage. They have no owner from now on,
+      before this window is marked destroyed below (user32 reads the owner of a window without the USER
+      lock: once it sees this window destroyed, no window names it as its owner any more). A window created
+      later with this owner drops it before it is linked (co_UserCreateWindowEx). */
+   if (Window->head.rpdesk && Window->head.rpdesk->pDeskInfo &&
+       !(Window->head.rpdesk->dwDTFlags & DF_DESTROYED) &&
+       Window != Window->head.rpdesk->pDeskInfo->spwnd && Window != Window->head.rpdesk->spwndMessage)
+   {
+      PWND pwndRoots[2], pwndNode;
+      ULONG i;
+
+      pwndRoots[0] = Window->head.rpdesk->pDeskInfo->spwnd;
+      pwndRoots[1] = Window->head.rpdesk->spwndMessage;
+      for (i = 0; i < ARRAYSIZE(pwndRoots); i++)
+      {
+         if (!pwndRoots[i])
+            continue;
+         for (pwndNode = pwndRoots[i]->spwndChild; pwndNode; pwndNode = pwndNode->spwndNext)
+         {
+            if (pwndNode->spwndOwner == Window)
+               WndSetOwner(pwndNode, NULL);
+         }
+      }
+   }
+
    /* from now on no messages can be sent to this window anymore */
    Window->state |= WNDS_DESTROYED;
    Window->fnid |= FNID_FREED;
@@ -2670,6 +2698,16 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
    {
       ERR("co_UserCreateWindowEx(%wZ): NCCREATE message failed\n", ClassName);
       goto cleanup;
+   }
+
+   /* The owner can have been destroyed by its thread during the callbacks above (the hook, WM_NCCREATE):
+      its storage went (co_UserFreeWindow) while this window, not linked yet, kept it as the owner. Owned
+      windows that are linked lose such an owner in co_UserFreeWindow; this one has none from now on */
+   if (Window->spwndOwner &&
+       ((Window->spwndOwner->state & WNDS_DESTROYED) || (Window->spwndOwner->state2 & WNDS2_INDESTROY)))
+   {
+      ERR("co_UserCreateWindowEx(%wZ): the owner was destroyed meanwhile\n", ClassName);
+      WndSetOwner(Window, NULL);
    }
 
    /* Link the window */
