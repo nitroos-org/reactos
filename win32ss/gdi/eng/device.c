@@ -324,8 +324,7 @@ NTSTATUS
 EngpUpdateGraphicsDeviceList(VOID)
 {
     ULONG iDevNum, ulMaxObjectNumber = 0, iPass;
-    WCHAR awcDeviceName[20], awcWinDeviceName[20];
-    UNICODE_STRING ustrDeviceName;
+    WCHAR awcDeviceName[20];
     WCHAR awcBuffer[256];
     NTSTATUS Status;
     PGRAPHICS_DEVICE pGraphicsDevice, pNewPrimaryGraphicsDevice = NULL;
@@ -366,16 +365,13 @@ EngpUpdateGraphicsDeviceList(VOID)
             /* Create the adapter's key name */
             _swprintf(awcDeviceName, L"\\Device\\Video%lu", iDevNum);
 
-            /* Create the display device name */
-            _swprintf(awcWinDeviceName, L"\\\\.\\DISPLAY%lu", iDevNum + 1);
-            RtlInitUnicodeString(&ustrDeviceName, awcWinDeviceName);
-
-            /* Check if the device exists already */
-            pGraphicsDevice = EngpFindGraphicsDevice(&ustrDeviceName, iDevNum);
-            if (pGraphicsDevice != NULL)
-            {
+            /*
+             * Registered already? By its device name: its \\.\DISPLAYn name is
+             * not DISPLAY(N+1) when a device before it could not be opened, or
+             * when it is a fallback device registered after the other ones.
+             */
+            if (EngpIsVideoDeviceRegistered(awcDeviceName))
                 continue;
-            }
 
             /* Read the reg key name */
             cbValue = sizeof(awcBuffer);
@@ -389,10 +385,6 @@ EngpUpdateGraphicsDeviceList(VOID)
 
             bFallback = EngpIsFallbackDevice(awcBuffer);
             if (bFallback != (iPass == 1))
-                continue;
-
-            /* Registered under another DISPLAY number (a device before it could not be opened) */
-            if (EngpIsVideoDeviceRegistered(awcDeviceName))
                 continue;
 
             /* Initialize the driver for this device */
