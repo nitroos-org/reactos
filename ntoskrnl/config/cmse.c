@@ -76,6 +76,33 @@ static CMP_LEGACY_KEY_CHECK_SD CmpLegacyKeyCheckSd =
     }
 };
 
+/*
+ * The same descriptor without its SACL, for subjects at Medium or above: no
+ * label restricts them (the Untrusted label as little as the implicit Medium
+ * one), and without the SACL SeAccessCheck skips the label lookup that would
+ * otherwise run on every key open.
+ */
+static CMP_LEGACY_KEY_CHECK_SD CmpLegacyKeyCheckSdNoLabel =
+{
+    {
+        SECURITY_DESCRIPTOR_REVISION, 0,
+        SE_SELF_RELATIVE | SE_DACL_PRESENT,
+        FIELD_OFFSET(CMP_LEGACY_KEY_CHECK_SD, Owner),
+        FIELD_OFFSET(CMP_LEGACY_KEY_CHECK_SD, Group),
+        0,
+        FIELD_OFFSET(CMP_LEGACY_KEY_CHECK_SD, Dacl)
+    },
+    { SID_REVISION, 1, {SECURITY_WORLD_SID_AUTHORITY}, {SECURITY_WORLD_RID} },
+    { SID_REVISION, 1, {SECURITY_WORLD_SID_AUTHORITY}, {SECURITY_WORLD_RID} },
+    { ACL_REVISION, 0, sizeof(ACL) + sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->Ace), 1, 0 },
+    {
+        { ACCESS_ALLOWED_ACE_TYPE, 0, sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->Ace) },
+        KEY_ALL_ACCESS,
+        { SID_REVISION, 1, {SECURITY_WORLD_SID_AUTHORITY}, {SECURITY_WORLD_RID} }
+    }
+    /* (no SACL: the rest stays zero) */
+};
+
 /* Room for the legacy descriptor a key reports (CmpQuerySecurityDescriptor), whatever part of it is asked for */
 #define CMP_LEGACY_SD_BUFFER 128
 
@@ -109,6 +136,7 @@ CmpCheckKeyOpenAccess(
     _Out_ PNTSTATUS AccessStatus)
 {
     PSECURITY_DESCRIPTOR Sd = (PSECURITY_DESCRIPTOR)&CmpLegacyKeyCheckSd;
+    PTOKEN Token;
     PPRIVILEGE_SET Privileges = NULL;
     ACCESS_MASK GrantedAccess = 0;
     BOOLEAN Result;
@@ -116,6 +144,11 @@ CmpCheckKeyOpenAccess(
     PAGED_CODE();
 
     SeLockSubjectContext(&AccessState->SubjectSecurityContext);
+
+    /* At Medium or above the label restricts nothing: the descriptor without it spares the label lookup */
+    Token = SeQuerySubjectContextToken(&AccessState->SubjectSecurityContext);
+    if (Token && Token->IntegrityLevel >= SECURITY_MANDATORY_MEDIUM_RID)
+        Sd = (PSECURITY_DESCRIPTOR)&CmpLegacyKeyCheckSdNoLabel;
 
     Result = SeAccessCheck(Sd,
                            &AccessState->SubjectSecurityContext,
