@@ -743,6 +743,18 @@ LRESULT co_UserFreeWindow(PWND Window,
    if (ThreadData->MessageQueue->spwndActive == Window)
       ThreadData->MessageQueue->spwndActive = NULL;
 
+   /* The previous active window too: a window freed here without co_UserDestroyWindow (a child of a
+      window being destroyed, that SetParent made a child while it was the previous active window) would
+      be left as a plain pointer, read later by the activation (VerifyWnd, can_activate_window). Its own
+      thread's queue as well, when another thread frees it (a child of another thread) */
+   if (ThreadData->MessageQueue->spwndActivePrev == Window)
+      ThreadData->MessageQueue->spwndActivePrev = NULL;
+   if (Window->head.pti->MessageQueue &&
+       Window->head.pti->MessageQueue->spwndActivePrev == Window)
+   {
+      Window->head.pti->MessageQueue->spwndActivePrev = NULL;
+   }
+
    if (ThreadData->MessageQueue->spwndCapture == Window)
    {
       IntReleaseCapture();
