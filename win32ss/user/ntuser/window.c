@@ -2443,6 +2443,7 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
    PTHREADINFO pti;
    DWORD dwShowMode = SW_SHOW;
    CREATESTRUCTW *pCsw = NULL;
+   USER_HELD_POOL_ENTRY HeldCsw, HeldCbtCreate;
    PVOID pszClass = NULL, pszName = NULL;
    PWND ret = NULL;
 
@@ -2607,18 +2608,30 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
       pCbtCreate->hwndInsertAfter = hwndInsertAfter;
 
       //// Call the WH_CBT hook ////
+      /* The two blocks are needed for the hook only: held across it (the thread can end inside the hook
+         procedure), freed right after it. Kept to the end of the creation, they were lost whenever the
+         thread ended inside one of the creation messages */
+      UserHoldPoolCo(pCsw, TAG_HOOK, &HeldCsw);
+      UserHoldPoolCo(pCbtCreate, TAG_HOOK, &HeldCbtCreate);
       Result = co_HOOK_CallHooks(WH_CBT, HCBT_CREATEWND, (WPARAM) hWnd, (LPARAM) pCbtCreate);
+      if (Result == 0)
+      {
+         // Write back changes.
+         Cs->cx = pCsw->cx;
+         Cs->cy = pCsw->cy;
+         Cs->x = pCsw->x;
+         Cs->y = pCsw->y;
+         hwndInsertAfter = pCbtCreate->hwndInsertAfter;
+      }
+      UserFreePoolCo(&HeldCbtCreate);
+      UserFreePoolCo(&HeldCsw);
+      pCbtCreate = NULL;
+      pCsw = NULL;
       if (Result != 0)
       {
          ERR("WH_CBT HCBT_CREATEWND hook failed! 0x%x\n", Result);
          goto cleanup;
       }
-      // Write back changes.
-      Cs->cx = pCsw->cx;
-      Cs->cy = pCsw->cy;
-      Cs->x = pCsw->x;
-      Cs->y = pCsw->y;
-      hwndInsertAfter = pCbtCreate->hwndInsertAfter;
    }
 
    if ((Cs->style & (WS_CHILD|WS_POPUP)) == WS_CHILD)

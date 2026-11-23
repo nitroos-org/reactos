@@ -384,12 +384,15 @@ IntDeactivateWindow(PTHREADINFO pti, HANDLE tid)
       HANDLE OldTID = PsGetThreadId(ptiPrev->pEThread);
       PWND cWindow;
       HWND *List, *phWnd;
+      USER_HELD_POOL_ENTRY HeldList;
 
       /* The windows of ptiPrev are on ptiPrev's desktop */
       cWindow = ptiPrev->rpdesk ? IntGetThreadDesktopWindow(ptiPrev) : NULL;
       List = cWindow ? IntWinListChildren(cWindow) : NULL;
       if ( List )
       {
+         /* Held across WM_ACTIVATEAPP: the thread can end inside it */
+         UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
          if ( OldTID )
          {
             for (phWnd = List; *phWnd; ++phWnd)
@@ -405,7 +408,7 @@ IntDeactivateWindow(PTHREADINFO pti, HANDLE tid)
                }
             }
          }
-         ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+         UserFreePoolCo(&HeldList);
       }
    }
 
@@ -618,7 +621,12 @@ co_IntSendActivateMessages(PWND WindowPrev, PWND Window, BOOL MouseActivate, BOO
          pwndDesktop = co_GetDesktopWindow(Window);//UserGetDesktopWindow();
          if (Window->spwndParent == pwndDesktop )
          {
+            USER_HELD_POOL_ENTRY HeldTopLevel;
+
             phwndTopLevel = IntWinListChildren(pwndDesktop);
+            /* Held across WM_WINDOWPOSCHANGING: the thread can end inside it */
+            if (phwndTopLevel)
+               UserHoldPoolCo(phwndTopLevel, USERTAG_WINDOWLIST, &HeldTopLevel);
             phwndCurrent = phwndTopLevel;
             while(phwndCurrent && *phwndCurrent)
             {
@@ -634,7 +642,7 @@ co_IntSendActivateMessages(PWND WindowPrev, PWND Window, BOOL MouseActivate, BOO
                 }
                 phwndCurrent++;
             }
-            if (phwndTopLevel) ExFreePoolWithTag(phwndTopLevel, USERTAG_WINDOWLIST);
+            if (phwndTopLevel) UserFreePoolCo(&HeldTopLevel);
           }
       }
       ////
@@ -652,12 +660,15 @@ co_IntSendActivateMessages(PWND WindowPrev, PWND Window, BOOL MouseActivate, BOO
    {
       PWND cWindow;
       HWND *List, *phWnd;
+      USER_HELD_POOL_ENTRY HeldList;
 
       /* The windows of the activated and deactivated threads, on their (own) desktop */
       cWindow = co_GetDesktopWindow(Window ? Window : WindowPrev);
       List = cWindow ? IntWinListChildren(cWindow) : NULL;
       if ( List )
       {
+         /* Held across WM_ACTIVATEAPP: the thread can end inside it */
+         UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
          if ( OldTID )
          {
             ptiOld->TIF_flags |= TIF_INACTIVATEAPPMSG;
@@ -694,7 +705,7 @@ co_IntSendActivateMessages(PWND WindowPrev, PWND Window, BOOL MouseActivate, BOO
                }
             }
          }
-         ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+         UserFreePoolCo(&HeldList);
       }
    }
 

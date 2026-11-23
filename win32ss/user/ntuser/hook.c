@@ -1485,11 +1485,14 @@ co_HOOK_CallHooks( INT HookId,
        PTHREADINFO ptiHook;
        HHOOK *pHookHandles;
        unsigned i;
+       USER_HELD_POOL_ENTRY HeldHandles;
 
        /* Keep hooks in array because hooks can be destroyed in user world */
        pHookHandles = IntGetGlobalHookHandles(pdo, HookId);
        if(!pHookHandles)
           goto Exit;
+       /* Held across the hook procedures: the thread can end inside one of them */
+       UserHoldPoolCo(pHookHandles, TAG_HOOK, &HeldHandles);
 
       /* Performance goes down the drain. If more hooks are associated to this
        * hook ID, this will have to post to each of the thread message queues
@@ -1569,7 +1572,7 @@ co_HOOK_CallHooks( INT HookId,
           }
           UserDerefObjectCo(Hook);
        }
-       ExFreePoolWithTag(pHookHandles, TAG_HOOK);
+       UserFreePoolCo(&HeldHandles);
        TRACE("Ret: Global HookId %d Result 0x%x\n", HookId,Result);
     }
 Exit:

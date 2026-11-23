@@ -63,6 +63,49 @@ UserDerefObjectCo(PVOID obj)
 #endif
 }
 
+/*
+ * A pool block that a kernel frame keeps across callbacks to user mode (a window list walked while each
+ * window is sent a message): when the thread ends inside one of the callbacks, the frame never runs again
+ * and would never free it. Held blocks are listed in the thread (the entry lives in the frame, as for
+ * UserRefObjectCo) and freed by the thread's exit cleanup. UserFreePoolCo frees the block and unlists it.
+ */
+typedef struct _USER_HELD_POOL_ENTRY
+{
+   SINGLE_LIST_ENTRY Entry;
+   PVOID pv;
+   ULONG Tag;
+} USER_HELD_POOL_ENTRY, *PUSER_HELD_POOL_ENTRY;
+
+static __inline VOID
+UserHoldPoolCo(_In_ PVOID pv, _In_ ULONG Tag, _Out_ PUSER_HELD_POOL_ENTRY HeldEntry)
+{
+    PTHREADINFO W32Thread = PsGetCurrentThreadWin32Thread();
+
+    ASSERT(W32Thread != NULL);
+    HeldEntry->pv = pv;
+    HeldEntry->Tag = Tag;
+    PushEntryList(&W32Thread->HeldPoolList, &HeldEntry->Entry);
+}
+
+static __inline VOID
+UserFreePoolCo(_Inout_ PUSER_HELD_POOL_ENTRY HeldEntry)
+{
+    PTHREADINFO W32Thread = PsGetCurrentThreadWin32Thread();
+    PSINGLE_LIST_ENTRY *ppEntry;
+
+    ASSERT(W32Thread != NULL);
+    /* Usually the first entry; unlisted wherever it is */
+    for (ppEntry = &W32Thread->HeldPoolList.Next; *ppEntry; ppEntry = &(*ppEntry)->Next)
+    {
+        if (*ppEntry == &HeldEntry->Entry)
+        {
+            *ppEntry = HeldEntry->Entry.Next;
+            break;
+        }
+    }
+    ExFreePoolWithTag(HeldEntry->pv, HeldEntry->Tag);
+}
+
 void FreeProcMarkObject(_In_ PVOID Object);
 
 /* EOF */
