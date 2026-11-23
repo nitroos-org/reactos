@@ -431,6 +431,34 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
         endforeach()
     endif()
 
+    # NITRO_PDB_PUBLICS: list of the PDBs written next to the build output (image, GUID, age, hashes)
+    if(NITRO_PDB_PUBLICS)
+        get_property(_pdb_modules GLOBAL PROPERTY NITRO_PDB_MODULE_LIST)
+        set(_pdb_lines "")
+        set(_pdb_targets "")
+        foreach(_entry ${_pdb_modules})
+            string(REGEX MATCH "^([^|]*)\\|(.*)$" _unused "${_entry}")
+            set(_m "${CMAKE_MATCH_1}")
+            set(_rel "${CMAKE_MATCH_2}")
+            list(APPEND _pdb_targets ${_m})
+            if(_rel STREQUAL "")
+                set(_pdb_dir "${REACTOS_BINARY_DIR}/pdb")
+            else()
+                set(_pdb_dir "${REACTOS_BINARY_DIR}/pdb/${_rel}")
+            endif()
+            string(APPEND _pdb_lines "$<TARGET_FILE:${_m}>|${_pdb_dir}/$<TARGET_FILE_BASE_NAME:${_m}>.pdb\n")
+        endforeach()
+        file(GENERATE OUTPUT ${CMAKE_BINARY_DIR}/pdb_modules.txt CONTENT "${_pdb_lines}")
+        add_custom_target(nitro_pdb_manifest ALL
+            COMMAND ${CMAKE_COMMAND}
+                -DLIST=${CMAKE_BINARY_DIR}/pdb_modules.txt
+                -DPDB_ROOT=${REACTOS_BINARY_DIR}/pdb
+                -DOUT=${REACTOS_BINARY_DIR}/pdb/MANIFEST.txt
+                -P ${REACTOS_SOURCE_DIR}/sdk/cmake/pdb_manifest.cmake
+            DEPENDS ${_pdb_targets}
+            VERBATIM)
+    endif()
+
     if(SYSWOW64_GUEST)
         syswow64_guest_end()
     endif()
