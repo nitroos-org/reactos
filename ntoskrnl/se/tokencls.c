@@ -2347,6 +2347,9 @@ NtSetInformationToken(
                             *RtlSubAuthoritySid(Token->UserAndGroups[i].Sid, 0) = Rid;
                         }
                     }
+
+                    /* Below Medium the privileges are disabled and stay so (V1, V8, V17, measured) */
+                    SepDisablePrivilegesForIntegrity(Token);
                     ExAllocateLocallyUniqueId(&Token->ModifiedId);
                 }
                 SepReleaseTokenLock(Token);

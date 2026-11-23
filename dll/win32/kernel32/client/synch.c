@@ -380,13 +380,17 @@ CreateWaitableTimerExW(IN LPSECURITY_ATTRIBUTES lpTimerAttributes OPTIONAL,
         ObjectAttributes = BaseFormatObjectAttributes(&LocalAttributes,
                                                       lpTimerAttributes,
                                                       lpTimerName ? &ObjectName : NULL);
-        Status = NtCreateTimer2(&Handle,
-                                NULL,
-                                ObjectAttributes,
-                                TIMER2_ATTRIBUTE_HIGH_RESOLUTION |
-                                ((dwFlags & CREATE_WAITABLE_TIMER_MANUAL_RESET) ?
-                                 TIMER2_ATTRIBUTE_NOTIFICATION : 0),
-                                dwDesiredAccess);
+        Status = BasepCheckNamedObjectDirectory(ObjectAttributes);
+        if (NT_SUCCESS(Status))
+        {
+            Status = NtCreateTimer2(&Handle,
+                                    NULL,
+                                    ObjectAttributes,
+                                    TIMER2_ATTRIBUTE_HIGH_RESOLUTION |
+                                    ((dwFlags & CREATE_WAITABLE_TIMER_MANUAL_RESET) ?
+                                     TIMER2_ATTRIBUTE_NOTIFICATION : 0),
+                                    dwDesiredAccess);
+        }
         if (NT_SUCCESS(Status))
         {
             SetLastError(ERROR_SUCCESS);

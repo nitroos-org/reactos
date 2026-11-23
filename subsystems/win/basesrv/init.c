@@ -503,6 +503,38 @@ BaseBuildSessionNamespaceDacls(
     return Status;
 }
 
+/*
+ * The mandatory label of the named object directories (BaseNamedObjects of
+ * the session, its Restricted directory, \Sessions\0\BaseNamedObjects):
+ * Low, NO_WRITE_UP, not inheritable. Measured on Windows Server 2022
+ * (\BaseNamedObjects, \Sessions\1\BaseNamedObjects and its Restricted
+ * directory all carry (ML;;NW;;;LW)): a Low process creates named events,
+ * mutexes, semaphores, timers and sections there and they get its own Low
+ * label; an Untrusted process creates none. Without a label the directories
+ * count as Medium and a Low process could create no named object at all.
+ * The links in the directory (Global, Local, Session) stay unlabelled.
+ */
+typedef struct _BASE_LABEL_SACL
+{
+    ACL Acl;
+    struct
+    {
+        ACE_HEADER Header;
+        ACCESS_MASK Mask;
+        SID Sid;
+    } Label;
+} BASE_LABEL_SACL;
+
+static BASE_LABEL_SACL BaseNamedObjectsLabel =
+{
+    { ACL_REVISION, 0, sizeof(BASE_LABEL_SACL), 1, 0 },
+    {
+        { SYSTEM_MANDATORY_LABEL_ACE_TYPE, 0, sizeof(((BASE_LABEL_SACL *)0)->Label) },
+        SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        { SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY}, {SECURITY_MANDATORY_LOW_RID} }
+    }
+};
+
 VOID
 NTAPI
 BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
@@ -733,6 +765,10 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
     Status = RtlSetDaclSecurityDescriptor(BnoSd, TRUE, BnoDacl, FALSE);
     ASSERT(NT_SUCCESS(Status));
 
+    /* The directories carry the Low label (the links do not: removed again before they are made) */
+    Status = RtlSetSaclSecurityDescriptor(BnoSd, TRUE, &BaseNamedObjectsLabel.Acl, FALSE);
+    ASSERT(NT_SUCCESS(Status));
+
     /* Create the BNO directory */
     InitializeObjectAttributes(&ObjectAttributes,
                                &BnoString,
@@ -766,6 +802,10 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
                                          &ObjectAttributes);
         if (NT_SUCCESS(Status)) NtClose(Session0BnoDirectory);
     }
+
+    /* Session 0's links use the directory's descriptor: without the label */
+    Status = RtlSetSaclSecurityDescriptor(BnoSd, FALSE, NULL, FALSE);
+    ASSERT(NT_SUCCESS(Status));
 
     /*
      * Tag the directory with this process's session (the object manager keeps
@@ -890,6 +930,8 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
         /* Create the BNO\Restricted directory and set the restricted DACL */
         RtlInitUnicodeString(&DirectoryName, L"Restricted");
         Status = RtlSetDaclSecurityDescriptor(BnoSd, TRUE, BnoRestrictedDacl, FALSE);
+        ASSERT(NT_SUCCESS(Status));
+        Status = RtlSetSaclSecurityDescriptor(BnoSd, TRUE, &BaseNamedObjectsLabel.Acl, FALSE);
         ASSERT(NT_SUCCESS(Status));
         InitializeObjectAttributes(&ObjectAttributes,
                                    &DirectoryName,

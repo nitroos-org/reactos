@@ -480,6 +480,12 @@ SepGetDescriptorLabel(
     _Out_opt_ PULONG LabelLevel,
     _Out_opt_ PACCESS_MASK LabelPolicy);
 
+BOOLEAN
+NTAPI
+SepDescriptorHasObjectLabelAbove(
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _In_ ULONG Level);
+
 NTSTATUS
 NTAPI
 SeCheckLabelChange(
@@ -544,6 +550,15 @@ VOID
 SepUpdatePrivilegeFlagsToken(
     _Inout_ PTOKEN Token);
 
+BOOLEAN
+SepPrivilegeUsableAtIntegrity(
+    _In_ PTOKEN Token,
+    _In_ ULONG Index);
+
+VOID
+SepDisablePrivilegesForIntegrity(
+    _Inout_ PTOKEN Token);
+
 VOID
 SepRemovePrivilegeToken(
     _Inout_ PTOKEN Token,
@@ -602,6 +617,11 @@ NTAPI
 SeIsTokenSibling(
     _In_ PTOKEN Token,
     _Out_ PBOOLEAN IsSibling);
+
+BOOLEAN
+NTAPI
+SeIsTokenAboveProcessIntegrity(
+    _In_ PTOKEN Token);
 
 NTSTATUS
 NTAPI

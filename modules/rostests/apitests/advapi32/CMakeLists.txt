@@ -71,6 +71,7 @@ list(APPEND SOURCE
     LsaTrustedClientToken.c
     LsaManageSidNameMapping.c
     LsaSecretStorage.c
+    MandatoryLabelOpen.c
     ProcessThreadLabel.c
     QueryServiceConfig.c
     QueryServiceConfig2.c

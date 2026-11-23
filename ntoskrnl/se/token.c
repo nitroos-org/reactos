@@ -590,6 +590,69 @@ SepUpdatePrivilegeFlagsToken(
 
 /**
  * @brief
+ * Whether a privilege of a token may be enabled at the token's integrity
+ * level.
+ *
+ * @remarks
+ * Measured on Windows Server 2022 (V1, V8, V17): a token lowered to Low or
+ * Untrusted keeps its privileges, disabled, and AdjustTokenPrivileges does
+ * not enable them again (ERROR_NOT_ALL_ASSIGNED, the state stays disabled;
+ * SeImpersonatePrivilege, SeBackupPrivilege, SeRestorePrivilege,
+ * SeDebugPrivilege and SeShutdownPrivilege measured). Medium and above
+ * are not restricted. SeChangeNotifyPrivilege (traverse checking, on which
+ * every path lookup of a sandboxed process relies) is not measured and
+ * stays usable.
+ *
+ * @param[in] Token
+ * The token, locked by the caller.
+ *
+ * @param[in] Index
+ * Index of the privilege in the token.
+ *
+ * @return
+ * TRUE if the privilege may be enabled.
+ */
+BOOLEAN
+SepPrivilegeUsableAtIntegrity(
+    _In_ PTOKEN Token,
+    _In_ ULONG Index)
+{
+    ASSERT(Index < Token->PrivilegeCount);
+
+    if (Token->IntegrityLevel >= SECURITY_MANDATORY_MEDIUM_RID)
+        return TRUE;
+
+    return RtlEqualLuid(&Token->Privileges[Index].Luid, &SeChangeNotifyPrivilege);
+}
+
+/**
+ * @brief
+ * Disables the privileges a token may not use at its integrity level (see
+ * SepPrivilegeUsableAtIntegrity), enabled by default included: measured,
+ * SeImpersonatePrivilege attributes 0x3 before lowering a token to Low or
+ * Untrusted, 0x0 after.
+ *
+ * @param[in,out] Token
+ * The token, locked exclusively by the caller.
+ */
+VOID
+SepDisablePrivilegesForIntegrity(
+    _Inout_ PTOKEN Token)
+{
+    ULONG i;
+
+    for (i = 0; i < Token->PrivilegeCount; i++)
+    {
+        if (SepPrivilegeUsableAtIntegrity(Token, i))
+            continue;
+
+        Token->Privileges[i].Attributes &= ~(SE_PRIVILEGE_ENABLED | SE_PRIVILEGE_ENABLED_BY_DEFAULT);
+        SepUpdateSinglePrivilegeFlagToken(Token, i);
+    }
+}
+
+/**
+ * @brief
  * Removes a privilege from the token.
  *
  * @param[in,out] Token
@@ -1544,6 +1607,50 @@ SeIsTokenSibling(
 
 /**
  * @brief
+ * Whether a token has a higher integrity level than the primary token of
+ * the current process.
+ *
+ * @remarks
+ * A child or a sibling of the caller's token may be assigned as a primary
+ * token without SeAssignPrimaryTokenPrivilege, but not one of a higher
+ * level: measured on Windows Server 2022, a Low or Untrusted process that
+ * duplicates the token of its High or Medium parent (a sibling of its own)
+ * gets ERROR_PRIVILEGE_NOT_HELD from CreateProcessAsUser, while a duplicate
+ * lowered to its own level starts. A token at the caller's level or below
+ * stays assignable.
+ *
+ * @param[in] Token
+ * The token to compare.
+ *
+ * @return
+ * TRUE if the token's integrity level is above the process token's.
+ */
+BOOLEAN
+NTAPI
+SeIsTokenAboveProcessIntegrity(
+    _In_ PTOKEN Token)
+{
+    PTOKEN ProcessToken;
+    ULONG ProcessLevel, TokenLevel;
+
+    ProcessToken = PsReferencePrimaryToken(PsGetCurrentProcess());
+    if (!ProcessToken)
+        return TRUE;
+
+    SepAcquireTokenLockShared(ProcessToken);
+    ProcessLevel = ProcessToken->IntegrityLevel;
+    SepReleaseTokenLock(ProcessToken);
+    ObFastDereferenceObject(&PsGetCurrentProcess()->Token, ProcessToken);
+
+    SepAcquireTokenLockShared(Token);
+    TokenLevel = Token->IntegrityLevel;
+    SepReleaseTokenLock(Token);
+
+    return TokenLevel > ProcessLevel;
+}
+
+/**
+ * @brief
  * Copies an existing access token (technically duplicating a new one).
  *
  * @param[in] Token
@@ -1856,6 +1963,39 @@ SepGetDescriptorLabel(
             *LabelPolicy = Policy;
     }
     return STATUS_SUCCESS;
+}
+
+/*
+ * Whether a descriptor holds a label of the object itself (not inherit-only)
+ * above Level. The caller has validated the labels (SepGetDescriptorLabel).
+ */
+BOOLEAN
+NTAPI
+SepDescriptorHasObjectLabelAbove(
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _In_ ULONG Level)
+{
+    BOOLEAN Present, Defaulted;
+    PACE_HEADER Entry;
+    PACL Sacl = NULL;
+    ULONG Rid, i;
+
+    if (!NT_SUCCESS(RtlGetSaclSecurityDescriptor(SecurityDescriptor, &Present, &Sacl, &Defaulted)) ||
+        !Present || !Sacl)
+    {
+        return FALSE;
+    }
+
+    for (i = 0; i < Sacl->AceCount; i++)
+    {
+        if (!NT_SUCCESS(RtlGetAce(Sacl, i, (PVOID*)&Entry)))
+            break;
+        if (Entry->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE || (Entry->AceFlags & INHERIT_ONLY_ACE))
+            continue;
+        if (NT_SUCCESS(SepValidateLabelAce(Entry, &Rid)) && Rid > Level)
+            return TRUE;
+    }
+    return FALSE;
 }
 
 /*
@@ -2743,6 +2883,24 @@ SeTokenCanImpersonate(
     {
         DPRINT("The token to impersonate has an anonymous authentication ID, allow impersonation either way\n");
         CanImpersonate = TRUE;
+        goto Quit;
+    }
+
+    /*
+     * A process may not impersonate a token of a higher integrity level than
+     * its own: "Windows Integrity Mechanism Design" (How Windows assigns a
+     * mandatory label to objects): the labels of process, thread, token and
+     * job objects keep processes of the same user at lower integrity levels
+     * from "impersonating a higher-level access token". A token object's
+     * label only refuses the write rights, and TOKEN_DUPLICATE is not one of
+     * them: the level is compared here, and the caller (PsImpersonateClient)
+     * then gets an identification-level copy of the token instead.
+     */
+    if (TokenToImpersonate->IntegrityLevel > ProcessToken->IntegrityLevel)
+    {
+        DPRINT1("Cannot impersonate a token of a higher integrity level (0x%lx > 0x%lx)\n",
+                TokenToImpersonate->IntegrityLevel, ProcessToken->IntegrityLevel);
+        CanImpersonate = FALSE;
         goto Quit;
     }
 

@@ -114,7 +114,9 @@
     ObjectAttributes = BaseFormatObjectAttributes(&LocalAttributes,             \
                                                     sec,                        \
                                                     name ? &ObjectName : NULL); \
-    Status = NtCreate##ntobj(&Handle, access, ObjectAttributes, ##__VA_ARGS__);
+    Status = BasepCheckNamedObjectDirectory(ObjectAttributes);                  \
+    if (NT_SUCCESS(Status))                                                     \
+        Status = NtCreate##ntobj(&Handle, access, ObjectAttributes, ##__VA_ARGS__);
 #define CreateNtObjectFromWin32ApiEpilogue                                      \
     if (NT_SUCCESS(Status))                                                     \
     {                                                                           \
@@ -153,7 +155,9 @@
                                inh ? OBJ_INHERIT : 0,                           \
                                BasepGetNamedObjectDirectory(),                  \
                                NULL);                                           \
-    Status = NtOpen##ntobj(&Handle, acc, ObjectAttributes);                     \
+    Status = BasepCheckNamedObjectDirectory(ObjectAttributes);                  \
+    if (NT_SUCCESS(Status))                                                     \
+        Status = NtOpen##ntobj(&Handle, acc, ObjectAttributes);                 \
     if (!NT_SUCCESS(Status))                                                    \
     {                                                                           \
         BaseSetLastNTError(Status);                                             \

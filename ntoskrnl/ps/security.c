@@ -164,6 +164,16 @@ PspWriteTebImpersonationInfo(IN PETHREAD Thread,
                 Teb->ImpersonationLocale = 0;
                 Teb->IsImpersonating = 0;
             }
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+            /* A 32-bit thread reads its own TEB (kernel32 reverts impersonation by this flag) */
+            if (Process->Wow64Process)
+            {
+                PTEB32 Teb32 = PS_GET_TEB32_FROM_TEB(Teb);
+
+                Teb32->ImpersonationLocale = IsImpersonating ? -1 : 0;
+                Teb32->IsImpersonating = IsImpersonating ? 1 : 0;
+            }
+#endif
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
@@ -273,6 +283,14 @@ PspSetPrimaryToken(IN PEPROCESS Process,
             return Status;
         }
     }
+
+    /*
+     * A child or sibling of a higher integrity level than the caller's token
+     * counts as an independent token (V12, measured on Windows Server 2022:
+     * ERROR_PRIVILEGE_NOT_HELD without SeAssignPrimaryTokenPrivilege)
+     */
+    if (IsChildOrSibling && SeIsTokenAboveProcessIntegrity(NewToken))
+        IsChildOrSibling = FALSE;
 
     /* Check if this was an independent token */
     if (!IsChildOrSibling)

@@ -4856,75 +4856,6 @@ CmpAclBackupRestoreAccess(
 }
 
 /*
- * Mandatory integrity (registry ACL design 2.4): a key without a label ACE
- * has an implicit Medium label with NO_WRITE_UP; a token below the key's
- * level gets only the generic rights the label's policy leaves (read and
- * execute for NO_WRITE_UP), whatever the DACL says: measured on Windows 10,
- * a Low token cannot create HKCU\Software\x but can create below a key
- * labelled S:(ML;OICI;NW;;;LW). SeAccessCheck does not apply labels yet, so
- * the key decision does. Returns the rights the label allows the subject,
- * MAXULONG when it does not restrict it. The caller holds the subject
- * context locked.
- */
-static
-ACCESS_MASK
-CmpAclMandatoryAllowed(
-    _In_ PSECURITY_DESCRIPTOR Sd,
-    _In_ PSECURITY_SUBJECT_CONTEXT Subject)
-{
-    PGENERIC_MAPPING Mapping = &CmpKeyObjectType->TypeInfo.GenericMapping;
-    ULONG Level = SECURITY_MANDATORY_MEDIUM_RID;
-    ACCESS_MASK Policy = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
-    ACCESS_MASK Allowed = 0;
-    BOOLEAN Present, Defaulted;
-    PACL Sacl = NULL;
-    PACE_HEADER Ace;
-    PISID LabelSid;
-    PTOKEN Token;
-    ULONG i;
-
-    Token = (PTOKEN)SeQuerySubjectContextToken(Subject);
-    if (!Token)
-        return MAXULONG;
-
-    /* The first label ACE that applies to the key itself (not inherit-only) */
-    if (NT_SUCCESS(RtlGetSaclSecurityDescriptor(Sd, &Present, &Sacl, &Defaulted)) && Present && Sacl)
-    {
-        for (i = 0; i < Sacl->AceCount; i++)
-        {
-            if (!NT_SUCCESS(RtlGetAce(Sacl, i, (PVOID *)&Ace)))
-                break;
-            if (Ace->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE || (Ace->AceFlags & INHERIT_ONLY_ACE))
-                continue;
-            LabelSid = (PISID)&((PSYSTEM_MANDATORY_LABEL_ACE)Ace)->SidStart;
-            if (Ace->AceSize < FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) + FIELD_OFFSET(SID, SubAuthority) + sizeof(ULONG) ||
-                LabelSid->SubAuthorityCount != 1 ||
-                LabelSid->IdentifierAuthority.Value[0] || LabelSid->IdentifierAuthority.Value[1] ||
-                LabelSid->IdentifierAuthority.Value[2] || LabelSid->IdentifierAuthority.Value[3] ||
-                LabelSid->IdentifierAuthority.Value[4] ||
-                LabelSid->IdentifierAuthority.Value[5] != 16 /* SECURITY_MANDATORY_LABEL_AUTHORITY */)
-            {
-                continue;
-            }
-            Level = LabelSid->SubAuthority[0];
-            Policy = ((PSYSTEM_MANDATORY_LABEL_ACE)Ace)->Mask;
-            break;
-        }
-    }
-
-    if (Token->IntegrityLevel >= Level)
-        return MAXULONG;
-
-    if (!(Policy & SYSTEM_MANDATORY_LABEL_NO_READ_UP))
-        Allowed |= Mapping->GenericRead;
-    if (!(Policy & SYSTEM_MANDATORY_LABEL_NO_WRITE_UP))
-        Allowed |= Mapping->GenericWrite;
-    if (!(Policy & SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP))
-        Allowed |= Mapping->GenericExecute;
-    return Allowed;
-}
-
-/*
  * May the subject (its context locked) reach a key of a user hive whose check
  * after the transition could not be completed (CMHIVE_FLAG_ACL_UNCHECKED)?
  * Only the hive's own account (from the name it is loaded at), SYSTEM, and a
@@ -5017,7 +4948,7 @@ CmpAclDecide(
     PSECURITY_DESCRIPTOR Sd, ToFree;
     PVOID PoolCopy;
     ULONG Rule;
-    ACCESS_MASK BackupAccess, MandatoryAllowed;
+    ACCESS_MASK BackupAccess;
     PPRIVILEGE_SET Used = NULL;
     BOOLEAN Result;
 
@@ -5070,8 +5001,6 @@ CmpAclDecide(
 
     SeLockSubjectContext(&AccessState->SubjectSecurityContext);
 
-    /* The integrity label first: rights it does not allow are not granted, whatever the DACL says */
-    MandatoryAllowed = CmpAclMandatoryAllowed(Sd, &AccessState->SubjectSecurityContext);
     if (Kcb->KeyHive &&
         (CONTAINING_RECORD(Kcb->KeyHive, CMHIVE, Hive)->Flags & CMHIVE_FLAG_ACL_UNCHECKED) &&
         CmpRegistryAclEffectiveMode == CM_REGACL_MODE_ENFORCE &&
@@ -5083,15 +5012,16 @@ CmpAclDecide(
         *AccessStatus = STATUS_ACCESS_DENIED;
         Rule = CmpAclRuleUserUnchecked;
     }
-    else if (MandatoryAllowed != MAXULONG &&
-             (Desired & ~(MAXIMUM_ALLOWED | ACCESS_SYSTEM_SECURITY) & ~MandatoryAllowed))
-    {
-        Result = FALSE;
-        *Granted = 0;
-        *AccessStatus = STATUS_ACCESS_DENIED;
-    }
     else
     {
+        /*
+         * SeAccessCheck applies the integrity label first (registry ACL design
+         * 2.4; the rule of every object open): a key without a label ACE is
+         * Medium, a token below the key's level gets at most its read and
+         * execute rights, whatever the DACL says. Measured on Windows 10: a Low
+         * token cannot create HKCU\Software\x but can create below a key
+         * labelled S:(ML;OICI;NW;;;LW).
+         */
         Result = SeAccessCheck(Sd,
                                &AccessState->SubjectSecurityContext,
                                TRUE,
@@ -5102,16 +5032,6 @@ CmpAclDecide(
                                UserMode,
                                Granted,
                                AccessStatus);
-        if (Result && MandatoryAllowed != MAXULONG)
-        {
-            /* MAXIMUM_ALLOWED: what the DACL gives, within the label */
-            *Granted &= MandatoryAllowed | ACCESS_SYSTEM_SECURITY | Previous;
-            if (!*Granted)
-            {
-                Result = FALSE;
-                *AccessStatus = STATUS_ACCESS_DENIED;
-            }
-        }
     }
 
     /* What CmpCheckKeyOpenAccess (and ObCheckObjectAccess) do with the descriptor checked */

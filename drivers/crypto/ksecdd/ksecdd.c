@@ -16,8 +16,59 @@
 
 PDEVICE_OBJECT KsecDeviceObject;
 
+NTKERNELAPI
+NTSTATUS
+NTAPI
+ObSetSecurityObjectByPointer(
+    _In_ PVOID Object,
+    _In_ SECURITY_INFORMATION SecurityInformation,
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor);
+
+/* A SACL that holds one mandatory label: Low, no write up */
+typedef struct _KSEC_LABEL_SACL
+{
+    ACL Acl;
+    struct
+    {
+        ACE_HEADER Header;
+        ACCESS_MASK Mask;
+        SID Sid;
+    } Label;
+} KSEC_LABEL_SACL;
+
 
 /* FUNCTIONS ******************************************************************/
+
+/*
+ * Object opens apply the mandatory label of the device (a secure-open device:
+ * every open is checked against it); a device without one counts as Medium.
+ * Windows Server 2022 labels \Device\KsecDD Low, NO_WRITE_UP (measured, V15):
+ * Low processes open it for read and write, Untrusted ones for read.
+ */
+static
+VOID
+KsecLabelDevice(
+    _In_ PDEVICE_OBJECT DeviceObject)
+{
+    static const KSEC_LABEL_SACL Sacl =
+    {
+        { ACL_REVISION, 0, sizeof(KSEC_LABEL_SACL), 1, 0 },
+        {
+            { SYSTEM_MANDATORY_LABEL_ACE_TYPE, 0, sizeof(((KSEC_LABEL_SACL *)0)->Label) },
+            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+            { SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY}, {SECURITY_MANDATORY_LOW_RID} }
+        }
+    };
+    SECURITY_DESCRIPTOR Sd;
+    NTSTATUS Status;
+
+    RtlCreateSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+    Status = RtlSetSaclSecurityDescriptor(&Sd, TRUE, (PACL)&Sacl, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = ObSetSecurityObjectByPointer(DeviceObject, LABEL_SECURITY_INFORMATION, &Sd);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("KsecDD: the device label could not be set (0x%lx)\n", Status);
+}
 
 NTSTATUS
 NTAPI
@@ -41,6 +92,8 @@ DriverEntry(
         DPRINT1("Failed to create KsecDD device: 0x%lx\n", Status);
         return Status;
     }
+
+    KsecLabelDevice(KsecDeviceObject);
 
     /* Set up dispatch table */
     DriverObject->MajorFunction[IRP_MJ_CREATE] = KsecDdDispatch;
