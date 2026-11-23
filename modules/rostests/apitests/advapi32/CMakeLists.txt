@@ -159,6 +159,7 @@ list(APPEND SOURCE
     SddlSids.c
     ServiceProcess.c
     ServiceInheritOnlyGeneric.c
+    ServiceSharedToken.c
     ServiceSidToken.c
     PerfCounterValues.c
     PerfProvider.c
