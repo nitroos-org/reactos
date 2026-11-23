@@ -1,0 +1,24 @@
+VMware vmxnet3 paravirtual Ethernet adapter, NDIS 5.1 miniport, PCI 15AD:07B0 (also emulated by QEMU:
+-device vmxnet3)
+
+The driver (vmxnet3.c, info.c) is new code, GPL-2.0-or-later.
+
+Origin of the device interface
+  Project:  OpenBSD
+  Files:    sys/dev/pci/if_vmxreg.h revision 1.10 (2024/06/07) and sys/dev/pci/if_vmx.c revision 1.96
+            (2026/06/23): the start-up order and the use of the rings only
+  URL:      https://github.com/openbsd/src/blob/master/sys/dev/pci/if_vmxreg.h
+  License:  ISC, notice kept in the header of vmxnet3.h
+  Used:     the register offsets, the command numbers, the layouts of the transmit and receive
+            descriptors and of the completion descriptors, of the driver shared structure and of the
+            queue shared structures, the generation bit protocol of the rings, and the order of the start-up
+            steps (revision selection, shared structure address, command enable). No code was copied:
+            the OpenBSD driver is written for its own network stack and DMA API.
+
+Not used: the Linux driver vmxnet3 (GPL-2.0-only with a vendor notice: not a licence this tree takes), and any
+VMware binary driver.
+
+What it does not do: offloads (checksum, TSO, LRO, VLAN tags, RSS), more than one queue, MSI and MSI-X (INTx
+only), jumbo frames (MTU 1500), wake on LAN. The frames are copied between the packets and buffers that the
+driver owns. Every value that the device writes (the completion indices, the frame lengths, the MAC address,
+the link speed) is validated before it is used; the driver waits for nothing on the device.

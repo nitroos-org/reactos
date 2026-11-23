@@ -1,0 +1,58 @@
+; NETVMXNET3.INF
+
+; Installation file for the VMware vmxnet3 paravirtual network adapter
+
+[Version]
+Signature  = "$Windows NT$"
+;Signature  = "$ReactOS$"
+LayoutFile = layout.inf
+Class      = Net
+ClassGUID  = {4D36E972-E325-11CE-BFC1-08002BE10318}
+Provider   = %ReactOS%
+DriverVer  = 11/23/2026,1.00
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[Manufacturer]
+%VMwareMfg% = VMwareMfg
+
+[VMwareMfg]
+%Vmxnet3.DeviceDesc% = Vmxnet3_Inst.ndi,PCI\VEN_15AD&DEV_07B0
+
+;---------------------------- VMXNET3 DRIVER ----------------------------
+
+[Vmxnet3_Inst.ndi.NT]
+Characteristics = 0x4 ; NCF_PHYSICAL
+BusType = 5 ; PCIBus
+AddReg = Vmxnet3_AddReg.NT
+CopyFiles = Vmxnet3_CopyFiles.NT
+
+[Vmxnet3_CopyFiles.NT]
+vmxnet3.sys
+
+[Vmxnet3_AddReg.NT]
+HKR, Ndi,            Service,    0, "vmxnet3"
+HKR, Ndi\Interfaces, UpperRange, 0, "ndis5"
+HKR, Ndi\Interfaces, LowerRange, 0, "ethernet"
+
+[Vmxnet3_Inst.ndi.NT.Services]
+AddService = vmxnet3, 0x00000002, Vmxnet3_Service_Inst
+
+[Vmxnet3_Service_Inst]
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 0
+ServiceBinary = %12%\vmxnet3.sys
+LoadOrderGroup = NDIS
+
+;-------------------------------- STRINGS -------------------------------
+
+[Strings]
+; Non-localizable
+ReactOS = "ReactOS Project"
+
+VMwareMfg = "VMware, Inc."
+
+; Localizable
+Vmxnet3.DeviceDesc = "VMware VMXNET3 Ethernet Adapter"
