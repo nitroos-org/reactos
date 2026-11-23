@@ -11,6 +11,7 @@ list(APPEND SOURCE
     CM_Get_Device_Interface_List.c
     RegisterDeviceNotification.c
     devclass.c
+    HdaFunctionDevice.c
     RootBusDisable.c
     RootDeviceDisable.c
     RootDeviceInstallRestart.c

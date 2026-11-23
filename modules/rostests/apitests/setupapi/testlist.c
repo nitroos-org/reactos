@@ -6,6 +6,7 @@ extern void func_CM_Is_Dock_Station_Present(void);
 extern void func_CM_Get_DevNode_Property(void);
 extern void func_CM_Register_Notification(void);
 extern void func_devclass(void);
+extern void func_HdaFunctionDevice(void);
 extern void func_RootBusDisable(void);
 extern void func_RootDeviceDisable(void);
 extern void func_RootDeviceInstallRestart(void);
@@ -28,6 +29,7 @@ const struct test winetest_testlist[] =
     { "CM_Get_DevNode_Property", func_CM_Get_DevNode_Property },
     { "CM_Register_Notification", func_CM_Register_Notification },
     { "devclass", func_devclass },
+    { "HdaFunctionDevice", func_HdaFunctionDevice },
     { "RootBusDisable", func_RootBusDisable },
     { "RootDeviceDisable", func_RootDeviceDisable },
     { "RootDeviceInstallRestart", func_RootDeviceInstallRestart },
