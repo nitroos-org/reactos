@@ -977,7 +977,7 @@ WSHIoctl(
         Info->BufferSize = InputBufferLength;
         memcpy(Info->Buffer, InputBuffer, InputBufferLength);
 
-        if (Context->SocketState == SocketStateCreated || Context->SocketState == SocketStateBound)
+        if (Context->SocketState == SocketStateCreated)
         {
             if (Context->RequestQueue)
             {
@@ -1686,7 +1686,7 @@ WSHSetSocketInformation(
     Info->BufferSize = OptionLength;
     memcpy(Info->Buffer, OptionValue, OptionLength);
 
-    if (Context->SocketState == SocketStateCreated || Context->SocketState == SocketStateBound)
+    if (Context->SocketState == SocketStateCreated)
     {
         if (Context->RequestQueue)
         {
