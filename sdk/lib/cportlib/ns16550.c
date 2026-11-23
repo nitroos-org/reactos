@@ -270,6 +270,16 @@ Uart16550GetByte(
             /* If an error happened, clear the byte and fail */
             if (Lsr & (SERIAL_LSR_FE | SERIAL_LSR_PE | SERIAL_LSR_OE))
             {
+                /*
+                 * A framing or parity error belongs to the character at the front of the
+                 * receive FIFO, which stays there until it is read: take it out (a caller
+                 * that only polls leaves the data where it is), so that the next call sees
+                 * the next character.  An overrun does not flag that character (the lost
+                 * one is a later one) and is cleared by reading the LSR: nothing to read.
+                 */
+                if (!Poll && (Lsr & (SERIAL_LSR_FE | SERIAL_LSR_PE)))
+                    (VOID)READ_PORT_UCHAR(Port->Address + RECEIVE_BUFFER_REGISTER);
+
                 *Byte = 0;
                 return CP_GET_ERROR;
             }
