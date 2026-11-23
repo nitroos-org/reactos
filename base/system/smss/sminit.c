@@ -1438,6 +1438,11 @@ SmpInitializeDosDevices(VOID)
     return Status;
 }
 
+/* The list that SmpInitializeKnownDllsInternal works through and SmpProcessModuleImports adds the imports to */
+static PLIST_ENTRY SmpKnownDllsActive = &SmpKnownDllsList;
+/* The 64-bit (native) set is fatal when a file does not verify; the 32-bit set (\KnownDlls32) leaves that file out */
+static BOOLEAN SmpKnownDllsFatal = TRUE;
+
 VOID
 NTAPI
 SmpProcessModuleImports(IN PVOID Unused,
@@ -1476,8 +1481,8 @@ SmpProcessModuleImports(IN PVOID Unused,
                       ImportUnicodeString.MaximumLength - (ImportUnicodeString.Length + sizeof(UNICODE_NULL)),
                       ImportUnicodeString.Buffer, Length);
 
-    /* Add the DLL to the list */
-    SmpSaveRegistryValue(&SmpKnownDllsList, DllName, DllValue, TRUE);
+    /* Add the DLL to the list that is being worked on */
+    SmpSaveRegistryValue(SmpKnownDllsActive, DllName, DllValue, TRUE);
 }
 
 NTSTATUS
@@ -1588,8 +1593,8 @@ SmpInitializeKnownDllsInternal(IN PUNICODE_STRING Directory,
     ASSERT(NT_SUCCESS(Status1));
 
     /* Now loop the known DLLs */
-    NextEntry = SmpKnownDllsList.Flink;
-    while (NextEntry != &SmpKnownDllsList)
+    NextEntry = SmpKnownDllsActive->Flink;
+    while (NextEntry != SmpKnownDllsActive)
     {
         /* Get the entry and move on */
         RegEntry = CONTAINING_RECORD(NextEntry, SMP_REGISTRY_VALUE, Entry);
@@ -1627,7 +1632,19 @@ SmpInitializeKnownDllsInternal(IN PUNICODE_STRING Directory,
                                                SmpProcessModuleImports,
                                                RegEntry,
                                                &ImageCharacteristics);
-        if (!NT_SUCCESS(Status))
+        if (!NT_SUCCESS(Status) && !SmpKnownDllsFatal)
+        {
+            /* A 32-bit file that does not verify is not made known */
+            DPRINT1("SMSS: %wZ is not made a known DLL - Status == %lx\n", &RegEntry->Value, Status);
+            NtClose(FileHandle);
+            continue;
+        }
+        else if (!SmpKnownDllsFatal && !(ImageCharacteristics & IMAGE_FILE_DLL))
+        {
+            NtClose(FileHandle);
+            continue;
+        }
+        else if (!NT_SUCCESS(Status))
         {
             /* Checksum failed, so don't even try going further -- kill SMSS */
             RtlInitUnicodeString(&ErrorResponse,
@@ -1707,21 +1724,13 @@ Quickie:
     return Status;
 }
 
-NTSTATUS
-NTAPI
-SmpInitializeKnownDlls(VOID)
+static
+VOID
+SmpFreeKnownDllsList(IN PLIST_ENTRY Head)
 {
-    NTSTATUS Status;
+    PLIST_ENTRY NextEntry;
     PSMP_REGISTRY_VALUE RegEntry;
-    UNICODE_STRING KnownDllsName;
-    PLIST_ENTRY Head, NextEntry;
 
-    /* Call the internal function */
-    RtlInitUnicodeString(&KnownDllsName, L"\\KnownDlls");
-    Status = SmpInitializeKnownDllsInternal(&KnownDllsName, &SmpKnownDllPath);
-
-    /* Wipe out the list regardless of success */
-    Head = &SmpKnownDllsList;
     while (!IsListEmpty(Head))
     {
         /* Remove this entry */
@@ -1733,6 +1742,71 @@ SmpInitializeKnownDlls(VOID)
         RtlFreeHeap(RtlGetProcessHeap(), 0, RegEntry->Value.Buffer);
         RtlFreeHeap(RtlGetProcessHeap(), 0, RegEntry);
     }
+}
+
+NTSTATUS
+NTAPI
+SmpInitializeKnownDlls(VOID)
+{
+    NTSTATUS Status, Status32;
+    PSMP_REGISTRY_VALUE RegEntry;
+    UNICODE_STRING KnownDllsName, Known32Path, NtSystemRoot;
+    WCHAR Known32PathBuffer[MAX_PATH];
+    LIST_ENTRY Known32List;
+    PLIST_ENTRY NextEntry;
+
+    /* The list as the registry gave it, for \KnownDlls32 (the 64-bit pass adds the imports of its files to the list) */
+    InitializeListHead(&Known32List);
+    for (NextEntry = SmpKnownDllsList.Flink; NextEntry != &SmpKnownDllsList; NextEntry = NextEntry->Flink)
+    {
+        RegEntry = CONTAINING_RECORD(NextEntry, SMP_REGISTRY_VALUE, Entry);
+        if (RegEntry->Name.Buffer && RegEntry->Value.Buffer)
+            SmpSaveRegistryValue(&Known32List, RegEntry->Name.Buffer, RegEntry->Value.Buffer, TRUE);
+    }
+
+    /* Call the internal function */
+    RtlInitUnicodeString(&KnownDllsName, L"\\KnownDlls");
+    Status = SmpInitializeKnownDllsInternal(&KnownDllsName, &SmpKnownDllPath);
+
+    /* Wipe out the list regardless of success */
+    SmpFreeKnownDllsList(&SmpKnownDllsList);
+
+    /* \KnownDlls32 for 32-bit programs, where there is a SysWOW64 directory: the same names, the files of that
+     * directory, the imports of those files. A file that does not verify is left out; the 64-bit set decides
+     * whether the system starts. */
+    RtlInitUnicodeString(&Known32Path, NULL);
+    Known32Path.Buffer = Known32PathBuffer;
+    Known32Path.MaximumLength = sizeof(Known32PathBuffer);
+    RtlInitUnicodeString(&NtSystemRoot, SharedUserData->NtSystemRoot);
+    if (NT_SUCCESS(RtlAppendUnicodeStringToString(&Known32Path, &NtSystemRoot)) &&
+        NT_SUCCESS(RtlAppendUnicodeToString(&Known32Path, L"\\SysWOW64")))
+    {
+        UNICODE_STRING NtPath32;
+        OBJECT_ATTRIBUTES ObjectAttributes;
+        IO_STATUS_BLOCK IoStatusBlock;
+        HANDLE Dir32;
+
+        if (RtlDosPathNameToNtPathName_U(Known32Path.Buffer, &NtPath32, NULL, NULL))
+        {
+            InitializeObjectAttributes(&ObjectAttributes, &NtPath32, OBJ_CASE_INSENSITIVE, NULL, NULL);
+            if (NT_SUCCESS(NtOpenFile(&Dir32, FILE_LIST_DIRECTORY | SYNCHRONIZE, &ObjectAttributes, &IoStatusBlock,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                      FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT)))
+            {
+                NtClose(Dir32);
+                SmpKnownDllsActive = &Known32List;
+                SmpKnownDllsFatal = FALSE;
+                RtlInitUnicodeString(&KnownDllsName, L"\\KnownDlls32");
+                Status32 = SmpInitializeKnownDllsInternal(&KnownDllsName, &Known32Path);
+                if (!NT_SUCCESS(Status32))
+                    DPRINT1("SMSS: \\KnownDlls32 was not made - Status == %lx\n", Status32);
+                SmpKnownDllsFatal = TRUE;
+                SmpKnownDllsActive = &SmpKnownDllsList;
+            }
+            RtlFreeHeap(RtlGetProcessHeap(), 0, NtPath32.Buffer);
+        }
+    }
+    SmpFreeKnownDllsList(&Known32List);
 
     /* All done */
     return Status;

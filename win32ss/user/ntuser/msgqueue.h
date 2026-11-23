@@ -315,6 +315,9 @@ PCURICON_OBJECT
 FASTCALL
 UserSetCursor(PCURICON_OBJECT NewCursor,
               BOOL ForceChange);
+VOID
+FASTCALL
+UserRefreshPointerShape(PCURICON_OBJECT Cursor);
 
 DWORD APIENTRY IntGetQueueStatus(DWORD);
 

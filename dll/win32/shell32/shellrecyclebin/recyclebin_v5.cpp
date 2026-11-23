@@ -10,6 +10,7 @@
 #include <atlstr.h>
 #include <shlwapi.h>
 #include "sddl.h"
+#include <aclapi.h>
 
 EXTERN_C HRESULT WINAPI SHUpdateRecycleBinIcon(void);
 
@@ -549,6 +550,32 @@ STDMETHODIMP RecycleBin5::OnClosing(_In_ IRecycleBinEnumList *prbel)
     return S_OK;
 }
 
+/* The descriptor of the folder of one user: full control for the user, SYSTEM and the Administrators, nobody else,
+ * not inheriting from the volume root (protected). The ACEs are inherited by what the folder gets later. */
+static HRESULT
+RecycleBin5_OwnerDescriptor(
+    _In_ PSID OwnerSid,
+    _Out_ PSECURITY_DESCRIPTOR *Descriptor)
+{
+    LPWSTR StringSid = NULL;
+    WCHAR Sddl[256];
+
+    *Descriptor = NULL;
+    if (!ConvertSidToStringSidW(OwnerSid, &StringSid))
+        return HRESULT_FROM_WIN32(GetLastError());
+    if (wcslen(StringSid) + 64 >= _countof(Sddl))
+    {
+        LocalFree(StringSid);
+        return HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER);
+    }
+    /* The order of Windows Server 2022's $Recycle.Bin\<SID> (measured): SYSTEM, Administrators, the user */
+    wsprintfW(Sddl, L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)", StringSid);
+    LocalFree(StringSid);
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(Sddl, SDDL_REVISION_1, Descriptor, NULL))
+        return HRESULT_FROM_WIN32(GetLastError());
+    return S_OK;
+}
+
 static HRESULT
 RecycleBin5_Create(
     _In_ LPCWSTR Folder,
@@ -562,6 +589,7 @@ RecycleBin5_Create(
     DWORD BytesToWrite, BytesWritten;
     SIZE_T Needed;
     HANDLE hFile = INVALID_HANDLE_VALUE;
+    PSECURITY_DESCRIPTOR OwnerDescriptor = NULL;
     HRESULT hr;
 
     Needed = (wcslen(Folder) + 1 + max(wcslen(RECYCLE_BIN_FILE_NAME), wcslen(L"desktop.ini")) + 1) * sizeof(WCHAR);
@@ -584,33 +612,47 @@ RecycleBin5_Create(
     SetFileAttributesW(BufferName, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
     if (Separator)
     {
+        SECURITY_ATTRIBUTES Attributes = { sizeof(Attributes), NULL, FALSE };
+
         *Separator = L'\\';
-        if (!CreateDirectoryW(BufferName, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        if (OwnerSid)
         {
-            hr = HRESULT_FROM_WIN32(GetLastError());
-            goto cleanup;
+            /* Only the user, SYSTEM and the Administrators may open it: the folder is created with that descriptor,
+             * so that it never has the one of the volume root */
+            hr = RecycleBin5_OwnerDescriptor(OwnerSid, &OwnerDescriptor);
+            if (FAILED(hr))
+                goto cleanup;
+            Attributes.lpSecurityDescriptor = OwnerDescriptor;
         }
-    }
-
-    if (OwnerSid)
-    {
-        //DWORD rc;
-
-        /* Add ACL to allow only user/SYSTEM to open it */
-        /* FIXME: rc = SetNamedSecurityInfo(
-            BufferName,
-            SE_FILE_OBJECT,
-            ???,
-            OwnerSid,
-            NULL,
-            ???,
-            ???);
-        if (rc != ERROR_SUCCESS)
+        if (!CreateDirectoryW(BufferName, OwnerSid ? &Attributes : NULL))
         {
-            hr = HRESULT_FROM_WIN32(rc);
-            goto cleanup;
+            if (GetLastError() != ERROR_ALREADY_EXISTS)
+            {
+                hr = HRESULT_FROM_WIN32(GetLastError());
+                goto cleanup;
+            }
+            if (OwnerSid)
+            {
+                /* A folder that is there already (a failed earlier creation) is given the descriptor too */
+                PACL Dacl = NULL;
+                BOOL Present = FALSE, Defaulted = FALSE;
+                DWORD rc;
+
+                if (!GetSecurityDescriptorDacl(OwnerDescriptor, &Present, &Dacl, &Defaulted) || !Present)
+                {
+                    hr = HRESULT_FROM_WIN32(GetLastError() ? GetLastError() : ERROR_INVALID_ACL);
+                    goto cleanup;
+                }
+                rc = SetNamedSecurityInfoW(BufferName, SE_FILE_OBJECT,
+                                           DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                           NULL, NULL, Dacl, NULL);
+                if (rc != ERROR_SUCCESS)
+                {
+                    hr = HRESULT_FROM_WIN32(rc);
+                    goto cleanup;
+                }
+            }
         }
-        */
     }
 
     wcscat(BufferName, L"\\");
@@ -658,6 +700,8 @@ RecycleBin5_Create(
         hr = E_FAIL;
 
 cleanup:
+    if (OwnerDescriptor)
+        LocalFree(OwnerDescriptor);
     HeapFree(GetProcessHeap(), 0, BufferName);
     if (hFile != INVALID_HANDLE_VALUE)
         CloseHandle(hFile);

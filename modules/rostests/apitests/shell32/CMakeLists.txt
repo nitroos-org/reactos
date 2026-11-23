@@ -53,6 +53,7 @@ list(APPEND SOURCE
     SHCreateSessionKey.cpp
     SHCreateFileDataObject.cpp
     SHCreateFileExtractIconW.cpp
+    RecycleBinAcl.cpp
     SHEmptyRecycleBin.cpp
     SHEvaluateSystemCommandTemplate.cpp
     SHGetComputerDisplayNameW.cpp

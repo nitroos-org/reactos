@@ -7,6 +7,7 @@ extern void func_generic_handle(void);
 extern void func_interface_access(void);
 extern void func_ntlm_auth(void);
 extern void func_primitive_handle(void);
+extern void func_FirstPipeInstance(void);
 extern void func_SetAuthInfoRows(void);
 
 const struct test winetest_testlist[] =
@@ -17,6 +18,7 @@ const struct test winetest_testlist[] =
     { "interface_access", func_interface_access },
     { "ntlm_auth", func_ntlm_auth },
     { "primitive_handle", func_primitive_handle },
+    { "FirstPipeInstance", func_FirstPipeInstance },
     { "SetAuthInfoRows", func_SetAuthInfoRows },
     { 0, 0 }
 };

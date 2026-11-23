@@ -4487,14 +4487,103 @@ BOOL WINAPI CreateProcessWithTokenW(HANDLE token, DWORD logon_flags, LPCWSTR app
         DWORD creation_flags, void *environment, LPCWSTR current_directory, STARTUPINFOW *startup_info,
         PROCESS_INFORMATION *process_information )
 {
-    FIXME("%p 0x%08x %s %s 0x%08x %p %s %p %p - semi-stub\n", token,
+    typedef BOOL (WINAPI *PFN_CREATE_ENV)(LPVOID *, HANDLE, BOOL);
+    typedef BOOL (WINAPI *PFN_DESTROY_ENV)(LPVOID);
+    WCHAR system_dir[MAX_PATH];
+    HMODULE userenv = NULL;
+    PFN_DESTROY_ENV destroy_env = NULL;
+    LPVOID env_block = NULL;
+    HANDLE caller_token = NULL;
+    BOOL has_privilege = FALSE, ret;
+    DWORD length, i, error;
+    LUID impersonate_luid;
+    BYTE buffer[2048];
+
+    TRACE("%p 0x%08x %s %s 0x%08x %p %s %p %p\n", token,
           logon_flags, debugstr_w(application_name), debugstr_w(command_line),
           creation_flags, environment, debugstr_w(current_directory),
           startup_info, process_information);
 
-    /* FIXME: check if handles should be inherited */
-    return CreateProcessW( application_name, command_line, NULL, NULL, FALSE, creation_flags, environment,
-                           current_directory, startup_info, process_information );
+    /* Measured on Windows Server 2022: the flags are checked first (only LOGON_WITH_PROFILE and
+     * LOGON_NETCREDENTIALS_ONLY: ERROR_INVALID_PARAMETER), then a NULL token (ERROR_LOGON_FAILURE),
+     * then the privilege of the caller (ERROR_PRIVILEGE_NOT_HELD), then the handle (ERROR_INVALID_HANDLE) */
+    if (logon_flags & ~(LOGON_WITH_PROFILE | LOGON_NETCREDENTIALS_ONLY))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!token)
+    {
+        SetLastError(ERROR_LOGON_FAILURE);
+        return FALSE;
+    }
+
+    /* The caller needs SE_IMPERSONATE_NAME, enabled, in the token it runs with now */
+    if (!startup_info || !process_information)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &caller_token) &&
+        !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &caller_token))
+        return FALSE;
+    if (LookupPrivilegeValueW(NULL, SE_IMPERSONATE_NAME, &impersonate_luid) &&
+        GetTokenInformation(caller_token, TokenPrivileges, buffer, sizeof(buffer), &length))
+    {
+        PTOKEN_PRIVILEGES privileges = (PTOKEN_PRIVILEGES)buffer;
+
+        for (i = 0; i < privileges->PrivilegeCount; i++)
+        {
+            if (privileges->Privileges[i].Luid.LowPart == impersonate_luid.LowPart &&
+                privileges->Privileges[i].Luid.HighPart == impersonate_luid.HighPart)
+            {
+                has_privilege = (privileges->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED) != 0;
+                break;
+            }
+        }
+    }
+    CloseHandle(caller_token);
+    if (!has_privilege)
+    {
+        SetLastError(ERROR_PRIVILEGE_NOT_HELD);
+        return FALSE;
+    }
+
+    /* The process runs with the token: CreateProcessAsUser does that, and fails as it fails (a token the
+     * caller may not assign to a process: ERROR_PRIVILEGE_NOT_HELD) instead of starting the process as the
+     * caller. What the secondary logon service does for a token it may assign for the caller is not done:
+     * the process is not started then. */
+
+    /* Without an environment the child gets the one of the token's user, not the caller's; without a
+     * directory it starts in the system directory (both measured) */
+    if (!environment)
+    {
+        userenv = LoadLibraryW(L"userenv.dll");
+        if (userenv)
+        {
+            PFN_CREATE_ENV create_env = (PFN_CREATE_ENV)GetProcAddress(userenv, "CreateEnvironmentBlock");
+            destroy_env = (PFN_DESTROY_ENV)GetProcAddress(userenv, "DestroyEnvironmentBlock");
+            if (create_env && destroy_env && create_env(&env_block, token, FALSE))
+            {
+                environment = env_block;
+                creation_flags |= CREATE_UNICODE_ENVIRONMENT;
+            }
+            else
+                env_block = NULL;
+        }
+    }
+    if (!current_directory && GetSystemDirectoryW(system_dir, ARRAYSIZE(system_dir)))
+        current_directory = system_dir;
+
+    ret = CreateProcessAsUserW(token, application_name, command_line, NULL, NULL, FALSE, creation_flags,
+                               environment, current_directory, startup_info, process_information);
+    error = GetLastError();
+    if (env_block && destroy_env)
+        destroy_env(env_block);
+    if (userenv)
+        FreeLibrary(userenv);
+    SetLastError(error);
+    return ret;
 }
 
 /*
