@@ -890,8 +890,9 @@ GptBuildArcPath(
  *    multi(0)disk(0)rdisk(R)partition(N) of THAT entry at THIS boot, followed by Rest (GPT_SYSPATH_RESOLVED).
  *    The numbers in the stored path are not consulted.
  * 2. Two or more entries carry the GUID (a cloned disk, a partition copied with its GUID, two entries of one
- *    table): the entry whose disk has the disk GUID of DiskText wins, then the one on the disk the loader was
- *    started from, then the lowest rdisk, then the lowest partition number. Nothing but the rdisk order, which
+ *    table): the entry on the disk the loader was started from wins (a copy of a disk, which kept its partition
+ *    GUIDs and its freeldr.ini, starts its own system and not the original's), then the one whose disk has
+ *    the disk GUID of DiskText, then the lowest rdisk, then the lowest partition number. Nothing but the rdisk order, which
  *    the firmware gives, enters the choice, so it is the same at every boot of the same hardware.
  * 3. No entry has the GUID (the partition was deleted, or recreated by a tool that gave it a new GUID): the
  *    stored position is used ONLY IF the entry it names now covers exactly the blocks of RangeText, on the disk
@@ -951,8 +952,8 @@ GptResolveSystemPartition(
 
         /* Better than the best so far? Disks are visited in rdisk order, so a tie keeps the lower one */
         if (!HaveBest ||
-            (ThisDiskGuid && !BestDiskGuid) ||
-            (ThisDiskGuid == BestDiskGuid && ThisBoot && !BestBoot))
+            (ThisBoot && !BestBoot) ||
+            (ThisBoot == BestBoot && ThisDiskGuid && !BestDiskGuid))
         {
             HaveBest = TRUE;
             BestDisk = Disk;
