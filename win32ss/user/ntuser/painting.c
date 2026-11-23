@@ -521,9 +521,12 @@ co_IntPaintWindows(PWND Wnd, ULONG Flags, BOOL Recurse)
    {
       HWND *List, *phWnd;
       PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+      USER_HELD_POOL_ENTRY HeldList;
 
       if ((List = IntWinListChildren(Wnd)))
       {
+         /* The children's paint messages: the list goes with the thread if it ends in one */
+         UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
          for (phWnd = List; *phWnd; ++phWnd)
          {
             if ((Wnd = UserGetWindowObject(*phWnd)) == NULL)
@@ -540,7 +543,7 @@ co_IntPaintWindows(PWND Wnd, ULONG Flags, BOOL Recurse)
                UserDerefObjectCo(Wnd);
             }
          }
-         ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+         UserFreePoolCo(&HeldList);
       }
    }
 }
