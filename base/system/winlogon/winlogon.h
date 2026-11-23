@@ -295,6 +295,9 @@ typedef enum _WL_SESSION_ROLE
 extern WL_SESSION_ROLE WlSessionRole;
 extern ULONG WlSessionId;
 
+VOID
+WlShutdownSession0(VOID);
+
 #define WLX_LOGGINGOFF(wlxAction) \
   (((wlxAction) == WLX_SAS_ACTION_LOGOFF) || \
    ((wlxAction) == WLX_SAS_ACTION_FORCE_LOGOFF))

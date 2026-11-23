@@ -1312,6 +1312,9 @@ HandleShutdown(
     // SwitchDesktop(Session->WinlogonDesktop); // Re-enable if you notice the desktop may have switched to something else.
     DisplayStatusMessage(Session, Session->WinlogonDesktop, uMsgId);
 
+    /* NitroSessions 3: session 0's processes and services are ended by session 0's Winlogon */
+    WlShutdownSession0();
+
     /* Destroy SAS window */
     UninitializeSAS(Session);
 
