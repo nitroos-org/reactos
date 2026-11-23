@@ -138,9 +138,13 @@ START_TEST(LsaSubmitLength)
         /* The largest accepted length gets past the check */
         Status = Call(Big, LIMIT);
         ok(Status != STATUS_INVALID_PARAMETER, "LsaCallAuthenticationPackage with %lu bytes: 0x%08lx\n", LIMIT, Status);
-        Status = Logon(Big, LIMIT);
-        ok(Status != STATUS_INVALID_PARAMETER, "LsaLogonUser with %lu bytes: 0x%08lx\n", LIMIT, Status);
-        ok(Status == STATUS_NO_SUCH_USER || Status == STATUS_LOGON_FAILURE, "LsaLogonUser with %lu bytes: 0x%08lx\n", LIMIT, Status);
+        {
+            /* the answer for the same logon information at a small length is the answer the largest length gets */
+            NTSTATUS Small4k = Logon(Big, 4096);
+
+            Status = Logon(Big, LIMIT);
+            ok(Status == Small4k, "LsaLogonUser with %lu bytes: 0x%08lx, with 4096 bytes 0x%08lx\n", LIMIT, Status, Small4k);
+        }
 
         for (i = 0; i < RTL_NUMBER_OF(Over); i++)
         {
