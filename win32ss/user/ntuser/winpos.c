@@ -2062,6 +2062,13 @@ co_WinPosSetWindowPosEx(
             }
          }
          WinPos.hwndInsertAfter = WinPosDoOwnedPopups(Window, WinPos.hwndInsertAfter);
+         /* The owned popups were moved with messages to their threads, and this thread answers the
+            messages sent to it while it waits: the window can be gone */
+         if (!IntIsWindow(WinPos.hwnd))
+         {
+            EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+            return FALSE;
+         }
       }
    }
 
@@ -2130,6 +2137,16 @@ co_WinPosSetWindowPosEx(
    }
    else
       WvrFlags = co_WinPosDoNCCALCSize(Window, &WinPos, &NewWindowRect, &NewClientRect, valid_rects);
+
+   /* WM_NCCALCSIZE went to the window's procedure, which can destroy the window (the caller holds it):
+      its storage and links are gone, it must not be linked into the z-order again */
+   if (!IntIsWindow(WinPos.hwnd))
+   {
+      if (VisBefore) REGION_Delete(VisBefore);
+      if (VisBeforeJustClient) REGION_Delete(VisBeforeJustClient);
+      EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+      return FALSE;
+   }
 
 //   ERR("co_WinPosDoNCCALCSize returned 0x%x\n valid dest: %d %d %d %d\n valid src : %d %d %d %d\n", WvrFlags,
 //      valid_rects[0].left,valid_rects[0].top,valid_rects[0].right,valid_rects[0].bottom,
@@ -2228,6 +2245,17 @@ co_WinPosSetWindowPosEx(
    else if (!NoMessages)
    {
       IntCheckFullscreen(Window);
+   }
+
+   /* EVENT_OBJECT_HIDE / EVENT_OBJECT_SHOW (in-context WinEvent procedures run in this thread), the shell
+      hook and the redraw above call back: the window can have been destroyed there (the caller holds it, its
+      storage is gone). Its new visible region and the repaint are not computed then. */
+   if (!IntIsWindow(WinPos.hwnd))
+   {
+      if (VisBefore) REGION_Delete(VisBefore);
+      if (VisBeforeJustClient) REGION_Delete(VisBeforeJustClient);
+      EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+      return FALSE;
    }
 
    if (Window->hrgnUpdate != NULL && Window->hrgnUpdate != HRGN_WINDOW)
