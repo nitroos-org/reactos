@@ -1318,6 +1318,17 @@ co_IntSetParent(PWND Wnd, PWND WndNewParent)
     */
    WasVisible = co_WinPosShowWindow(Wnd, SW_HIDE);
 
+   /* Hiding sends messages to the window's thread: the window, or the new parent, can have been destroyed
+      there (both are held, their storage is gone). Linking either would put a freed window into a list of
+      siblings (every walk of it reads the freed storage), or a child below a freed parent */
+   if ((Wnd->state & WNDS_DESTROYED) || (Wnd->state2 & WNDS2_INDESTROY) ||
+       (WndNewParent->state & WNDS_DESTROYED) || (WndNewParent->state2 & WNDS2_INDESTROY))
+   {
+      ERR("IntSetParent: the window or its new parent was destroyed while it was hidden\n");
+      EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+      return NULL;
+   }
+
    /* Windows allows the window to belong to another process (WebView2 hosting: the host process
       re-parents the browser process' window into its own). The two threads are attached below. */
 
