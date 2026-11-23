@@ -3475,7 +3475,20 @@ co_WinPosSearchChildren(
 
     if (ScopeWin->head.pti == PsGetCurrentThreadWin32Thread())
     {
+       USER_REFERENCE_ENTRY Ref;
+       BOOL bDestroyed;
+
+       /* The window procedure can destroy the window in WM_NCHITTEST: held across it, and a destroyed window
+          is not the window at the point (nothing may get its storage, which is gone) */
+       UserRefObjectCo(ScopeWin, &Ref);
        *HitTest = (USHORT)co_IntSendMessage(UserHMGetHandle(ScopeWin), WM_NCHITTEST, 0, MAKELONG(Point->x, Point->y));
+       bDestroyed = !!(ScopeWin->state & WNDS_DESTROYED);
+       UserDerefObjectCo(ScopeWin);
+       if (bDestroyed)
+       {
+           *HitTest = HTNOWHERE;
+           return NULL;
+       }
 
        if ((*HitTest) == (USHORT)HTTRANSPARENT)
        {
