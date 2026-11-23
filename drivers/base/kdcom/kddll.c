@@ -58,6 +58,23 @@ KdpSendControlPacket(
 }
 
 
+/*
+ * How often a packet is sent before giving up on a debugger. A host that was
+ * heard is given a few resends (it may be busy); one that never answered a
+ * single try.
+ */
+#define KDP_HOST_RETRIES    4
+
+static
+ULONG
+KdpRetriesFor(
+    _In_ ULONG DefaultRetries)
+{
+    if (!KdpHostSeen)
+        return 1;
+    return min(DefaultRetries, KDP_HOST_RETRIES);
+}
+
 /* PUBLIC FUNCTIONS ***********************************************************/
 
 /******************************************************************************
@@ -88,6 +105,7 @@ KdReceivePacket(
     KDP_STATUS KdStatus;
     KD_PACKET Packet;
     ULONG Checksum;
+    BOOLEAN WaitForAck = (PacketType == PACKET_TYPE_KD_ACKNOWLEDGE);
 
     /* Special handling for breakin packet */
     if (PacketType == PACKET_TYPE_KD_POLL_BREAKIN)
@@ -98,7 +116,10 @@ KdReceivePacket(
     for (;;)
     {
         /* Step 1 - Read PacketLeader */
+        /* Waiting for the acknowledge of a packet that was just sent: a short wait */
+        KdpByteSpin = WaitForAck ? KdpAckSpin() : 0;
         KdStatus = KdpReceivePacketLeader(&Packet.PacketLeader);
+        KdpByteSpin = 0;
         if (KdStatus != KDP_PACKET_RECEIVED)
         {
             /* Check if we got a breakin  */
@@ -321,6 +342,19 @@ KdSendPacket(
     KDP_STATUS KdStatus;
     ULONG Retries;
 
+    /*
+     * No debugger answered before: nothing is sent until one shows itself
+     * (a packet, or a break-in byte seen by KdpPollBreakIn), and
+     * KdRefreshDebuggerNotPresent asks again. A boot with /BREAK still
+     * reports its stops.
+     */
+    if (KD_DEBUGGER_NOT_PRESENT &&
+        !(KdpPatient && ((PacketType == PACKET_TYPE_KD_STATE_CHANGE32) ||
+                         (PacketType == PACKET_TYPE_KD_STATE_CHANGE64))))
+    {
+        return;
+    }
+
     /* Initialize a KD_PACKET */
     Packet.PacketLeader = PACKET_LEADER;
     Packet.PacketType = (USHORT)PacketType;
@@ -336,7 +370,7 @@ KdSendPacket(
                                                 MessageData->Length);
     }
 
-    Retries = KdContext->KdpDefaultRetries;
+    Retries = KdpRetriesFor(KdContext->KdpDefaultRetries);
 
     for (;;)
     {
@@ -370,7 +404,7 @@ KdSendPacket(
         {
             /* Packet received, we can quit the loop */
             CurrentPacketId &= ~SYNC_PACKET_ID;
-            Retries = KdContext->KdpDefaultRetries;
+            Retries = KdpRetriesFor(KdContext->KdpDefaultRetries);
             break;
         }
         else if (KdStatus == KDP_PACKET_TIMEOUT)
@@ -386,25 +420,30 @@ KdSendPacket(
             if (Retries == 0)
             {
                 ULONG MessageId = *(PULONG)MessageHeader->Buffer;
-                switch (PacketType)
+
+                /* Nobody ever answered: give up whatever the packet is, unless this boot waits for a debugger */
+                if (KdpHostSeen || KdpPatient)
                 {
-                    case PACKET_TYPE_KD_DEBUG_IO:
+                    switch (PacketType)
                     {
-                        if (MessageId != DbgKdPrintStringApi) continue;
-                        break;
-                    }
+                        case PACKET_TYPE_KD_DEBUG_IO:
+                        {
+                            if (MessageId != DbgKdPrintStringApi) continue;
+                            break;
+                        }
 
-                    case PACKET_TYPE_KD_STATE_CHANGE32:
-                    case PACKET_TYPE_KD_STATE_CHANGE64:
-                    {
-                        if (MessageId != DbgKdLoadSymbolsStateChange) continue;
-                        break;
-                    }
+                        case PACKET_TYPE_KD_STATE_CHANGE32:
+                        case PACKET_TYPE_KD_STATE_CHANGE64:
+                        {
+                            if (MessageId != DbgKdLoadSymbolsStateChange) continue;
+                            break;
+                        }
 
-                    case PACKET_TYPE_KD_FILE_IO:
-                    {
-                        if (MessageId != DbgKdCreateFileApi) continue;
-                        break;
+                        case PACKET_TYPE_KD_FILE_IO:
+                        {
+                            if (MessageId != DbgKdCreateFileApi) continue;
+                            break;
+                        }
                     }
                 }
 

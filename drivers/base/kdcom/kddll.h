@@ -62,4 +62,20 @@ KDP_STATUS
 NTAPI
 KdpPollBreakIn(VOID);
 
+/*
+ * State of the link, see kdcom.c: how long the wait for an acknowledge may
+ * last, and whether a host was ever heard.
+ */
+extern ULONG KdpByteSpin;
+extern BOOLEAN KdpHostSeen;
+extern BOOLEAN KdpPatient;
+
+VOID
+NTAPI
+KdpHostIsPresent(VOID);
+
+ULONG
+NTAPI
+KdpAckSpin(VOID);
+
 #endif /* _KDDLL_H_ */

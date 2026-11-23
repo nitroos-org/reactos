@@ -92,6 +92,7 @@ KdpReceivePacketLeader(
             /* Check if we already got a breakin byte */
             if (Buffer[0] == BREAKIN_PACKET_BYTE)
             {
+                KdpHostIsPresent();
                 return KDP_PACKET_RESEND;
             }
 
@@ -138,8 +139,7 @@ KdpReceivePacketLeader(
     while (Index < 4);
 
     /* Enable the debugger */
-    KD_DEBUGGER_NOT_PRESENT = FALSE;
-    SharedUserData->KdDebuggerEnabled |= 0x00000002;
+    KdpHostIsPresent();
 
     /* Return the received packet leader */
     *PacketLeader = *(PULONG)Buffer;

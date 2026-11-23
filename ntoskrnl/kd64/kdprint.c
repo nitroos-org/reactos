@@ -546,6 +546,11 @@ KdpDprintf(
     String.Buffer = Buffer;
     String.Length = String.MaximumLength = Length;
 
+#ifdef _WINKD_
+    /* A debugger that did not answer is not asked again for every message */
+    if (KdDebuggerNotPresent) return;
+#endif
+
     /* Send it to the debugger directly */
     KdpPrintString(&String);
 }

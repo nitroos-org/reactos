@@ -18,6 +18,23 @@
 /* GLOBALS ********************************************************************/
 
 CPPORT KdComPort;
+
+/*
+ * The wait for an acknowledge is counted in polls of the port, and is short:
+ * a host that is attached answers within milliseconds, and one that is not
+ * must not hold the machine for minutes (each packet used to wait 20 times
+ * 200,000 polls, 2.7 s each under a hypervisor). Before any host was heard
+ * a single wait of KDP_ACK_SPIN_NOHOST ends the attempt; afterwards the
+ * packet is resent a few times (KDP_HOST_RETRIES in kddll.c). A boot with
+ * /BREAK is patient: the user said a debugger is coming, so its first stop
+ * waits until the host is there.
+ */
+#define KDP_ACK_SPIN_NOHOST     8000
+#define KDP_ACK_SPIN_HOST       12000
+
+ULONG KdpByteSpin;          /* 0: wait as long as the port library does */
+BOOLEAN KdpHostSeen;
+BOOLEAN KdpPatient;
 #ifdef KDDEBUG
 CPPORT KdDebugComPort;
 #endif
@@ -61,6 +78,23 @@ ULONG KdpDbgPrint(const char *Format, ...)
 #endif
 
 /* FUNCTIONS ******************************************************************/
+
+ULONG
+NTAPI
+KdpAckSpin(VOID)
+{
+    return KdpHostSeen ? KDP_ACK_SPIN_HOST : KDP_ACK_SPIN_NOHOST;
+}
+
+/* A packet leader or a break-in byte arrived: there is a debugger on the other end */
+VOID
+NTAPI
+KdpHostIsPresent(VOID)
+{
+    KdpHostSeen = TRUE;
+    KD_DEBUGGER_NOT_PRESENT = FALSE;
+    SharedUserData->KdDebuggerEnabled |= 0x00000002;
+}
 
 NTSTATUS
 NTAPI
@@ -143,6 +177,9 @@ KdDebuggerInitialize0(IN PLOADER_PARAMETER_BLOCK LoaderBlock OPTIONAL)
 
         /* Upcase it */
         _strupr(CommandLine);
+
+        /* /BREAK: the first stop of the boot waits for the debugger to come */
+        KdpPatient = (strstr(CommandLine, "BREAK") != NULL);
 
         /* Get the port and baud rate */
         PortString = strstr(CommandLine, "DEBUGPORT");
@@ -282,9 +319,22 @@ NTAPI
 KdpReceiveByte(OUT PUCHAR OutByte)
 {
     USHORT Status;
+    ULONG Spin = KdpByteSpin;
 
-    /* Get the byte */
-    Status = CpGetByte(&KdComPort, OutByte, TRUE, FALSE);
+    if (!Spin)
+    {
+        /* Wait as long as the port library does */
+        Status = CpGetByte(&KdComPort, OutByte, TRUE, FALSE);
+    }
+    else
+    {
+        /* A bounded wait: poll the port Spin times */
+        do
+        {
+            Status = CpGetByte(&KdComPort, OutByte, FALSE, FALSE);
+        } while ((Status == CP_GET_NODATA) && (--Spin != 0));
+    }
+
     switch (Status)
     {
         case CP_GET_SUCCESS:
@@ -309,6 +359,8 @@ KdpPollBreakIn(VOID)
     KdStatus = KdpPollByte(&Byte);
     if ((KdStatus == KDP_PACKET_RECEIVED) && (Byte == BREAKIN_PACKET_BYTE))
     {
+        /* The host is there, also if it was not heard before (it attached late) */
+        KdpHostIsPresent();
         return KDP_PACKET_RECEIVED;
     }
     return KDP_PACKET_TIMEOUT;

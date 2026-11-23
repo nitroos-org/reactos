@@ -2795,6 +2795,16 @@ KdRefreshDebuggerNotPresent(VOID)
     /* Enter the debugger */
     Enable = KdEnterDebugger(NULL, NULL);
 
+#ifdef _WINKD_
+    /*
+     * Nothing is sent to a debugger that did not answer before (the
+     * transport and KdpDprintf skip it): ask again, that is the point of
+     * this call. A debugger that is still not there answers nothing, and
+     * the transport marks it as not present again.
+     */
+    KdDebuggerNotPresent = FALSE;
+#endif
+
     /*
      * Attempt to send a string to the debugger
      * to refresh the connection state.
