@@ -1013,18 +1013,21 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
            if (bShared)
               IntQueueForgetThreadWindows(pumqFrom, ptiFrom);
 
-           CurIcon = ptiFrom->MessageQueue->CursorObject;
-
-           /* The queue of ptiFrom goes away with its raw input, and the wake bit with it */
-           MsqPurgeRawInputOfThread(ptiFrom);
-
-           MsqDestroyMessageQueue(ptiFrom);
-
+           /* The cursor of the queue: the queue holds a reference on it, which MsqCleanupMessageQueue gives back
+              when the queue goes away. It is held here before that (a cursor its owner destroyed lives on that
+              reference only), and handed to ptiTo's queue or given back below. A queue other threads stay on
+              keeps its cursor and its reference. */
+           CurIcon = bShared ? NULL : pumqFrom->CursorObject;
            if (CurIcon)
            {
               // Could be global. Keep it above the water line!
               UserReferenceObject(CurIcon);
            }
+
+           /* The queue of ptiFrom goes away with its raw input, and the wake bit with it */
+           MsqPurgeRawInputOfThread(ptiFrom);
+
+           MsqDestroyMessageQueue(ptiFrom);
 
            if (CurIcon && UserObjectInDestroy(UserHMGetHandle(CurIcon)))
            {
@@ -1039,6 +1042,11 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
            {
               ERR("ptiTo receiving ptiFrom Cursor\n");
               ptiTo->MessageQueue->CursorObject = CurIcon;
+           }
+           else if (CurIcon)
+           {
+              /* ptiTo's queue has its own cursor: the reference taken above goes (it was kept for good) */
+              UserDereferenceObject(CurIcon);
            }
 
            ptiFrom->MessageQueue->cThreads++;

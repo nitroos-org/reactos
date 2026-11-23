@@ -2911,7 +2911,9 @@ MsqCleanupMessageQueue(PTHREADINFO pti)
       UserCleanupRawInput(MessageQueue);
    } ////
 
-   if (MessageQueue->CursorObject)
+   /* The queue's reference on its cursor goes with the queue: not while other threads (attached to this
+      thread) keep the queue, which still names the cursor (UserAttachThreadInput) */
+   if (MessageQueue->cThreads == 0 && MessageQueue->CursorObject)
    {
        PCURICON_OBJECT pCursor = MessageQueue->CursorObject;
 
