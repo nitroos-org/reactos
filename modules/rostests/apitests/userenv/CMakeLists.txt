@@ -10,6 +10,7 @@ list(APPEND SOURCE
     NetworkCatalogUpgrade.c
     ProfileSecurity.c
     ProgramDataSecurity.c
+    ProgramFilesSecurity.c
     testlist.c)
 
 add_executable(userenv_apitest ${SOURCE})
