@@ -1023,6 +1023,9 @@ ExitThreadCallback(PETHREAD Thread)
        ObDereferenceObject(ptiCurrent->pEventQueueServer);
     }
     ptiCurrent->hEventQueueClient = NULL;
+    /* The THREADINFO can outlive this (its windows, hooks, a queue other attached threads keep): a wake of the
+       thread from then on must not reach the event (MsqWakeQueue and the timers check it) */
+    ptiCurrent->pEventQueueServer = NULL;
 
     ASSERT(ptiCurrent->cRefObjectCo == 0);
 

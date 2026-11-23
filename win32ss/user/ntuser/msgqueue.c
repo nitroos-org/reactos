@@ -546,7 +546,10 @@ MsqWakeQueue(PTHREADINFO pti, DWORD MessageBits, BOOL KeyEvent)
          Increment = IO_KEYBOARD_INCREMENT;
       else if (MessageBits & QS_MOUSE)
          Increment = IO_MOUSE_INCREMENT;
-      KeSetEvent(pti->pEventQueueServer, Increment, FALSE);
+      /* A thread whose exit cleanup is done has no wake event any more (ExitThreadCallback), while its
+         queue can live on for other attached threads */
+      if (pti->pEventQueueServer)
+         KeSetEvent(pti->pEventQueueServer, Increment, FALSE);
    }
 }
 
