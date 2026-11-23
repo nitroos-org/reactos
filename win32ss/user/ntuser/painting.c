@@ -431,6 +431,7 @@ co_IntPaintWindows(PWND Wnd, ULONG Flags, BOOL Recurse)
    HDC hDC;
    HWND hWnd = UserHMGetHandle(Wnd);
    HRGN TempRegion = NULL;
+   USER_REFERENCE_ENTRY Ref;
 
    Wnd->state &= ~WNDS_PAINTNOTPROCESSED;
 
@@ -451,6 +452,8 @@ co_IntPaintWindows(PWND Wnd, ULONG Flags, BOOL Recurse)
 
          if (Wnd->head.pti == PsGetCurrentThreadWin32Thread())
          {
+            /* WM_NCPAINT can destroy the window: hold it, and erase nothing of a destroyed one */
+            UserRefObjectCo(Wnd, &Ref);
             if (Wnd->state & WNDS_SENDNCPAINT)
             {
                TempRegion = IntGetNCUpdateRgn(Wnd, TRUE);
@@ -462,6 +465,12 @@ co_IntPaintWindows(PWND Wnd, ULONG Flags, BOOL Recurse)
                   /* NOTE: The region can already be deleted! */
                   GreDeleteObject(TempRegion);
                }
+            }
+
+            if (Wnd->state & WNDS_DESTROYED)
+            {
+               UserDerefObjectCo(Wnd);
+               return;
             }
 
             if (Wnd->state & WNDS_SENDERASEBACKGROUND)
@@ -487,6 +496,7 @@ co_IntPaintWindows(PWND Wnd, ULONG Flags, BOOL Recurse)
                   UserReleaseDC(Wnd, hDC, FALSE);
                }
             }
+            UserDerefObjectCo(Wnd);
          }
 
       }
@@ -663,6 +673,7 @@ VOID FASTCALL
 UserSyncAndPaintWindows(PWND pWnd, ULONG Flags)
 {
    PWND Parent = pWnd;
+   USER_REFERENCE_ENTRY Ref;
    // Find parent, if it needs to be painted, leave.
    while(TRUE)
    {
@@ -671,8 +682,12 @@ UserSyncAndPaintWindows(PWND pWnd, ULONG Flags)
       if ( Parent->hrgnUpdate != NULL || Parent->state & WNDS_INTERNALPAINT ) return;
    }
 
+   /* WM_SYNCPAINT to a window of this thread is a call of its procedure, which can destroy it */
+   UserRefObjectCo(pWnd, &Ref);
    IntSendSyncPaint(pWnd, Flags);
-   co_IntPaintWindows(pWnd, Flags, FALSE);
+   if (!(pWnd->state & WNDS_DESTROYED))
+      co_IntPaintWindows(pWnd, Flags, FALSE);
+   UserDerefObjectCo(pWnd);
 }
 
 /*
