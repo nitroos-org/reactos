@@ -16,6 +16,8 @@
 #include <aclapi.h>
 #include <sddl.h>
 #include <winioctl.h>
+#include <ndk/iofuncs.h>
+#include <ndk/obfuncs.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -450,147 +452,538 @@ IsLegacyAce(
 }
 
 /*
- * Keep the explicit entries of an object and let it inherit afresh from its parent: the entries
- * it got from the old parent go. Returns FALSE for an object whose DACL is protected (nothing is
- * changed, and what is below it inherits from it, not from us) or cannot be read.
+ * The repairs below run as SYSTEM over trees that users of an older install can write to. They never name an object
+ * below their top folder by path: a directory they have listed could be replaced by a junction before they reach
+ * its entries, and a path through it would then name an object elsewhere. Every object is opened relative to the
+ * handle of the directory it was listed in, without following a reparse point (FILE_OPEN_REPARSE_POINT), and what
+ * the handle shows decides, not the listing: a reparse point is left alone (it is not changed and not walked), a
+ * directory is walked through a handle opened relative to its own handle, and a file with more than one name is
+ * left alone (its other names can lie outside the tree; the rule of the propagation in ntmarta). Its new DACL is
+ * computed from its parent's descriptor read through the parent's handle, and set through its own handle. The top
+ * folder itself is opened the same way (OpenWalkTop): a top folder that is a reparse point is not touched.
  */
-static BOOL
-ResetInheritedEntries(
-    _In_ PCWSTR pszPath,
-    _In_ PACL pLegacyAcl)
+static GENERIC_MAPPING WalkFileMapping = { FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS };
+
+#ifndef SEF_DACL_AUTO_INHERIT
+#define SEF_DACL_AUTO_INHERIT 0x01
+#endif
+
+/* ntdll (not in the user-mode NDK headers; ntmarta declares it the same way) */
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlNewSecurityObjectEx(IN PSECURITY_DESCRIPTOR ParentDescriptor,
+                       IN PSECURITY_DESCRIPTOR CreatorDescriptor,
+                       OUT PSECURITY_DESCRIPTOR *NewDescriptor,
+                       IN LPGUID ObjectType,
+                       IN BOOLEAN IsDirectoryObject,
+                       IN ULONG AutoInheritFlags,
+                       IN HANDLE Token,
+                       IN PGENERIC_MAPPING GenericMapping);
+
+#define WALK_MAX_DEPTH 64
+#define WALK_BUFFER 0x1000
+
+/* Opens Name (cbName bytes; none: hDirectory itself again) relative to hDirectory, never following a reparse point */
+static NTSTATUS
+OpenRelative(
+    _In_ HANDLE hDirectory,
+    _In_opt_ PCWSTR pszName,
+    _In_ ULONG cbName,
+    _In_ ACCESS_MASK Access,
+    _In_ ULONG Options,
+    _Out_ PHANDLE phFile)
 {
-    PSECURITY_DESCRIPTOR pSd = NULL;
-    SECURITY_DESCRIPTOR_CONTROL Control;
-    PACL pOldAcl = NULL, pNewAcl;
-    BOOL bPresent, bDefaulted, bResult = FALSE;
-    DWORD dwSize = 0, dwRevision, dwError, i;
+    OBJECT_ATTRIBUTES Attributes;
+    UNICODE_STRING Name;
+    IO_STATUS_BLOCK Iosb;
 
-    GetFileSecurityW(pszPath, DACL_SECURITY_INFORMATION, NULL, 0, &dwSize);
-    if (dwSize == 0)
-        return FALSE;
+    Name.Buffer = (PWSTR)pszName;
+    Name.Length = Name.MaximumLength = (USHORT)cbName;
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, hDirectory, NULL);
+    return NtOpenFile(phFile, Access | SYNCHRONIZE, &Attributes, &Iosb,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                      Options | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT);
+}
 
-    pSd = LocalAlloc(LMEM_FIXED, dwSize);
-    if (!pSd)
-        return FALSE;
+/* The parts Info of the descriptor of a handle (LocalFree), or NULL */
+static PSECURITY_DESCRIPTOR
+QueryHandleSecurity(
+    _In_ HANDLE hObject,
+    _In_ SECURITY_INFORMATION Info)
+{
+    PSECURITY_DESCRIPTOR pSd;
+    DWORD dwSize = 0x200, dwNeeded = 0;
 
-    if (!GetFileSecurityW(pszPath, DACL_SECURITY_INFORMATION, pSd, dwSize, &dwSize) ||
-        !GetSecurityDescriptorControl(pSd, &Control, &dwRevision) ||
-        (Control & SE_DACL_PROTECTED) ||
-        !GetSecurityDescriptorDacl(pSd, &bPresent, &pOldAcl, &bDefaulted))
-        goto done;
-
-    /* No DACL grants everything to everybody: that is how it was meant */
-    if (!bPresent || !pOldAcl)
-        goto done;
-
-    pNewAcl = LocalAlloc(LMEM_FIXED, pOldAcl->AclSize);
-    if (!pNewAcl)
-        goto done;
-
-    if (InitializeAcl(pNewAcl, pOldAcl->AclSize, ACL_REVISION))
+    for (;;)
     {
-        BOOL bOk = TRUE;
-
-        for (i = 0; i < pOldAcl->AceCount; i++)
-        {
-            PACE_HEADER pAce;
-
-            if (!GetAce(pOldAcl, i, (PVOID *)&pAce))
-            {
-                bOk = FALSE;
-                break;
-            }
-            if ((pAce->AceFlags & INHERITED_ACE) || IsLegacyAce(pAce, pLegacyAcl))
-                continue;
-            if (!AddAce(pNewAcl, ACL_REVISION, MAXDWORD, pAce, pAce->AceSize))
-            {
-                bOk = FALSE;
-                break;
-            }
-        }
-
-        if (bOk)
-        {
-            dwError = SetNamedSecurityInfoW((PWSTR)pszPath,
-                                            SE_FILE_OBJECT,
-                                            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
-                                            NULL, NULL, pNewAcl, NULL);
-            if (dwError != ERROR_SUCCESS)
-                DPRINT1("Failed to secure %S, error: %lu\n", pszPath, dwError);
-            bResult = TRUE;
-        }
+        pSd = LocalAlloc(LMEM_FIXED, dwSize);
+        if (!pSd)
+            return NULL;
+        if (GetKernelObjectSecurity(hObject, Info, pSd, dwSize, &dwNeeded))
+            return pSd;
+        LocalFree(pSd);
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || dwNeeded <= dwSize)
+            return NULL;
+        dwSize = dwNeeded;
     }
-
-    LocalFree(pNewAcl);
-
-done:
-    LocalFree(pSd);
-    return bResult;
 }
 
 /*
- * Reset the DACL of everything under a directory to what its parent inherits, top down: the
- * explicit entries of the older installs (Authenticated Users: Modify) go, and so do the copies
- * of them that the files and directories got from their parents. Junctions are left alone:
- * they are links into the same profile and are listed by nobody.
+ * The top folder of a walk, opened by its path for listing (and for its DACL with bWriteDac): NULL if that is not a
+ * directory or is a reparse point (a junction put in its place is not followed)
  */
-static VOID
-ResetInheritance(
-    _In_ PCWSTR pszDirectory,
-    _In_ PACL pEmptyAcl,
-    _In_opt_ PACL pLegacyAcl,
-    _In_ UINT uDepth)
+static HANDLE
+OpenWalkTop(
+    _In_ PCWSTR pszPath,
+    _In_ BOOL bWriteDac)
 {
-    WCHAR szPath[MAX_PATH];
-    WIN32_FIND_DATAW FindData;
-    HANDLE hFind;
-    SIZE_T cchDir;
-    DWORD dwError;
+    BY_HANDLE_FILE_INFORMATION Info;
+    HANDLE hTop;
 
-    cchDir = wcslen(pszDirectory);
-    if (uDepth > 64 || cchDir + 3 > ARRAYSIZE(szPath))
-        return;
-
-    StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\*", pszDirectory);
-    hFind = FindFirstFileW(szPath, &FindData);
-    if (hFind == INVALID_HANDLE_VALUE)
-        return;
-
-    do
+    hTop = CreateFileW(pszPath,
+                       READ_CONTROL | FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES |
+                       (bWriteDac ? WRITE_DAC : 0),
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                       FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (hTop == INVALID_HANDLE_VALUE)
+        return NULL;
+    if (!GetFileInformationByHandle(hTop, &Info) ||
+        !(Info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        (Info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
     {
-        if (!wcscmp(FindData.cFileName, L".") || !wcscmp(FindData.cFileName, L".."))
-            continue;
+        DPRINT1("%S is not a directory or is a reparse point: left alone\n", pszPath);
+        CloseHandle(hTop);
+        return NULL;
+    }
+    return hTop;
+}
 
-        if (FindData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
-            continue;
+/*
+ * Gives hObject (listed in hParent) the DACL pKept followed by what its parent passes on, as SetNamedSecurityInfo with
+ * UNPROTECTED_DACL_SECURITY_INFORMATION computes it, but from the parent's handle (RtlNewSecurityObjectEx, the
+ * parent's inheritable entries marked inherited after the kept ones). bAutoInherited: set it as the propagation of
+ * ntmarta sets a child's DACL (auto-inherited, DACL_SECURITY_INFORMATION alone) instead
+ */
+static DWORD
+SetInheritingDacl(
+    _In_ HANDLE hParent,
+    _In_ HANDLE hObject,
+    _In_ BOOL bDirectory,
+    _In_ PACL pKept,
+    _In_ BOOL bAutoInherited)
+{
+    PSECURITY_DESCRIPTOR pParentSd, pOwnSd, pNewSd = NULL;
+    SECURITY_DESCRIPTOR Creator, Set;
+    PSID pOwner = NULL, pGroup = NULL;
+    PACL pNewAcl = NULL;
+    BOOL bDefaulted, bPresent = FALSE;
+    NTSTATUS Status;
+    DWORD dwError = ERROR_SUCCESS;
 
-        if (FAILED(StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\%s", pszDirectory, FindData.cFileName)))
+    pParentSd = QueryHandleSecurity(hParent, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                             DACL_SECURITY_INFORMATION);
+    pOwnSd = QueryHandleSecurity(hObject, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION);
+    if (!pParentSd || !pOwnSd)
+    {
+        dwError = GetLastError() ? GetLastError() : ERROR_ACCESS_DENIED;
+        goto done;
+    }
+
+    /* Its own owner and group (for CREATOR OWNER and CREATOR GROUP entries), the kept entries as explicit ones */
+    GetSecurityDescriptorOwner(pOwnSd, &pOwner, &bDefaulted);
+    GetSecurityDescriptorGroup(pOwnSd, &pGroup, &bDefaulted);
+    if (!InitializeSecurityDescriptor(&Creator, SECURITY_DESCRIPTOR_REVISION) ||
+        !SetSecurityDescriptorOwner(&Creator, pOwner, FALSE) ||
+        !SetSecurityDescriptorGroup(&Creator, pGroup, FALSE) ||
+        !SetSecurityDescriptorDacl(&Creator, TRUE, pKept, FALSE))
+    {
+        dwError = GetLastError();
+        goto done;
+    }
+    Status = RtlNewSecurityObjectEx(pParentSd, &Creator, &pNewSd, NULL, (BOOLEAN)bDirectory, SEF_DACL_AUTO_INHERIT,
+                                    NULL, &WalkFileMapping);
+    if (!NT_SUCCESS(Status))
+    {
+        dwError = RtlNtStatusToDosError(Status);
+        pNewSd = NULL;
+        goto done;
+    }
+    if (!GetSecurityDescriptorDacl(pNewSd, &bPresent, &pNewAcl, &bDefaulted) || !bPresent || !pNewAcl)
+    {
+        dwError = ERROR_INVALID_ACL;
+        goto done;
+    }
+
+    if (!InitializeSecurityDescriptor(&Set, SECURITY_DESCRIPTOR_REVISION) ||
+        !SetSecurityDescriptorDacl(&Set, TRUE, pNewAcl, FALSE) ||
+        (bAutoInherited &&
+         !SetSecurityDescriptorControl(&Set, SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED,
+                                       SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED)) ||
+        !SetKernelObjectSecurity(hObject,
+                                 DACL_SECURITY_INFORMATION |
+                                 (bAutoInherited ? 0 : UNPROTECTED_DACL_SECURITY_INFORMATION),
+                                 &Set))
+    {
+        dwError = GetLastError();
+    }
+
+done:
+    if (pNewSd)
+        RtlDeleteSecurityObject(&pNewSd);
+    if (pOwnSd)
+        LocalFree(pOwnSd);
+    if (pParentSd)
+        LocalFree(pParentSd);
+    return dwError;
+}
+
+typedef enum _WALK_EVENT
+{
+    WalkObject,         /* hObject is open (READ_CONTROL, WRITE_DAC); return TRUE to walk a directory's entries */
+    WalkNotOpened,      /* the entry could not be opened (dwError) */
+    WalkSeveralNames,   /* a file with more than one name: left alone */
+    WalkTooDeep,        /* a directory below the depth limit: not walked */
+    WalkReparse,        /* a reparse point, hObject is the link itself (READ_CONTROL, WRITE_DAC); never walked */
+} WALK_EVENT;
+
+/*
+ * pLevel: what the visitor returned for the directory being listed (*ppChildLevel of its own visit; for the top folder
+ * the walk's caller passes it); a visitor may return a LocalAlloc'd *ppChildLevel for a directory it asks to be walked,
+ * freed by the walk afterwards
+ */
+typedef BOOL (*PWALK_VISIT)(
+    _In_ WALK_EVENT Event,
+    _In_ HANDLE hParent,
+    _In_opt_ HANDLE hObject,
+    _In_ PCWSTR pszPath,        /* for the log only: never opened */
+    _In_ BOOL bDirectory,
+    _In_ DWORD dwError,
+    _Inout_ PVOID pContext,
+    _In_opt_ PVOID pLevel,
+    _Out_ PVOID *ppChildLevel);
+
+/* The entries of hDirectory (FILE_LIST_DIRECTORY), and below the directories the visitor asks for, top down */
+static VOID
+WalkByHandle(
+    _In_ HANDLE hDirectory,
+    _In_ PCWSTR pszDirectory,
+    _In_ UINT uDepth,
+    _In_ PWALK_VISIT Visit,
+    _Inout_ PVOID pContext,
+    _In_opt_ PVOID pLevel)
+{
+    PUCHAR Buffer;
+    BOOLEAN bRestart = TRUE;
+    SIZE_T cchDir = wcslen(pszDirectory);
+
+    Buffer = LocalAlloc(LMEM_FIXED, WALK_BUFFER);
+    if (!Buffer)
+        return;
+
+    for (;;)
+    {
+        PFILE_DIRECTORY_INFORMATION Entry;
+        IO_STATUS_BLOCK Iosb;
+        ULONG Offset = 0;
+        NTSTATUS Status;
+
+        Status = NtQueryDirectoryFile(hDirectory, NULL, NULL, NULL, &Iosb, Buffer, WALK_BUFFER,
+                                      FileDirectoryInformation, FALSE, NULL, bRestart);
+        bRestart = FALSE;
+        if (!NT_SUCCESS(Status))
+            break;
+
+        for (;;)
         {
-            DPRINT1("Path too long, not secured: %S\\%S\n", pszDirectory, FindData.cFileName);
-            continue;
+            FILE_BASIC_INFORMATION Basic;
+            FILE_STANDARD_INFORMATION Standard;
+            HANDLE hObject = NULL, hList = NULL;
+            PVOID pChildLevel = NULL;
+            PWSTR pszPath;
+            SIZE_T cchPath;
+            BOOL bWalk;
+
+            Entry = (PFILE_DIRECTORY_INFORMATION)(Buffer + Offset);
+            Offset = Entry->NextEntryOffset ? Offset + Entry->NextEntryOffset : 0;
+
+            if (!((Entry->FileNameLength == sizeof(WCHAR) && Entry->FileName[0] == L'.') ||
+                  (Entry->FileNameLength == 2 * sizeof(WCHAR) && Entry->FileName[0] == L'.' &&
+                   Entry->FileName[1] == L'.')))
+            {
+                /* The path, for the log */
+                cchPath = cchDir + 1 + Entry->FileNameLength / sizeof(WCHAR) + 1;
+                pszPath = LocalAlloc(LMEM_FIXED, cchPath * sizeof(WCHAR));
+                if (pszPath)
+                {
+                    StringCchPrintfW(pszPath, cchPath, L"%s\\%.*s", pszDirectory,
+                                     (int)(Entry->FileNameLength / sizeof(WCHAR)), Entry->FileName);
+
+                    Status = OpenRelative(hDirectory, Entry->FileName, Entry->FileNameLength,
+                                          READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES, 0, &hObject);
+                    if (!NT_SUCCESS(Status))
+                    {
+                        hObject = NULL;
+                        Visit(WalkNotOpened, hDirectory, NULL, pszPath, FALSE, RtlNtStatusToDosError(Status), pContext,
+                              pLevel, &pChildLevel);
+                    }
+                    else if (!NT_SUCCESS(NtQueryInformationFile(hObject, &Iosb, &Basic, sizeof(Basic),
+                                                                FileBasicInformation)) ||
+                             !NT_SUCCESS(NtQueryInformationFile(hObject, &Iosb, &Standard, sizeof(Standard),
+                                                                FileStandardInformation)))
+                    {
+                        Visit(WalkNotOpened, hDirectory, NULL, pszPath, FALSE, ERROR_ACCESS_DENIED, pContext, pLevel,
+                              &pChildLevel);
+                    }
+                    else if (Basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+                    {
+                        /* The link itself (opened with FILE_OPEN_REPARSE_POINT), never what it points to */
+                        Visit(WalkReparse, hDirectory, hObject, pszPath, Standard.Directory, ERROR_SUCCESS, pContext,
+                              pLevel, &pChildLevel);
+                    }
+                    else if (!Standard.Directory && Standard.NumberOfLinks > 1)
+                    {
+                        Visit(WalkSeveralNames, hDirectory, hObject, pszPath, FALSE, ERROR_SUCCESS, pContext, pLevel,
+                              &pChildLevel);
+                    }
+                    else
+                    {
+                        bWalk = Visit(WalkObject, hDirectory, hObject, pszPath, Standard.Directory, ERROR_SUCCESS,
+                                      pContext, pLevel, &pChildLevel);
+                        if (bWalk && Standard.Directory)
+                        {
+                            if (uDepth + 1 > WALK_MAX_DEPTH)
+                            {
+                                Visit(WalkTooDeep, hDirectory, hObject, pszPath, TRUE, ERROR_SUCCESS, pContext, pLevel,
+                                      &pChildLevel);
+                            }
+                            /* Listed through this handle and the parent of what is listed: READ_CONTROL for
+                               SetInheritingDacl, which reads the parent's descriptor through it */
+                            else if (NT_SUCCESS(OpenRelative(hObject, NULL, 0,
+                                                             FILE_LIST_DIRECTORY | FILE_TRAVERSE | READ_CONTROL,
+                                                             FILE_DIRECTORY_FILE, &hList)))
+                            {
+                                WalkByHandle(hList, pszPath, uDepth + 1, Visit, pContext, pChildLevel);
+                                NtClose(hList);
+                            }
+                        }
+                    }
+                    if (pChildLevel)
+                        LocalFree(pChildLevel);
+                    if (hObject)
+                        NtClose(hObject);
+                    LocalFree(pszPath);
+                }
+            }
+            if (Offset == 0)
+                break;
         }
+    }
 
-        if (pLegacyAcl)
+    LocalFree(Buffer);
+}
+
+/*
+ * Marks in pDrop[] (one per ACE of pAcl) the ACEs a new object made in a directory whose descriptor was pOldParentSd
+ * got from it, as our file systems store them at a create (the inheritable entries of the parent, without
+ * INHERITED_ACE: RtlNewSecurityObjectEx without auto-inheritance), when the object still holds every one of them.
+ * Returns TRUE when it holds them all (they are its inherited entries), FALSE otherwise (nothing marked). This is the
+ * rule by which the propagation of ntmarta takes such entries for inherited ones.
+ */
+static BOOL
+MarkOldInheritedAces(
+    _In_opt_ PSECURITY_DESCRIPTOR pOldParentSd,
+    _In_ PSECURITY_DESCRIPTOR pOwnSd,
+    _In_ BOOL bDirectory,
+    _In_ PACL pAcl,
+    _Inout_ PBOOL pDrop)
+{
+    PSECURITY_DESCRIPTOR pNewSd = NULL;
+    SECURITY_DESCRIPTOR Creator;
+    PACL pParentAcl = NULL, pSet = NULL;
+    PSID pOwner = NULL, pGroup = NULL;
+    BOOL bPresent = FALSE, bDefaulted, bInheritable = FALSE, bAll = FALSE;
+    PACE_HEADER pAce, pSetAce;
+    DWORD i, j;
+
+    if (!pOldParentSd ||
+        !GetSecurityDescriptorDacl(pOldParentSd, &bPresent, &pParentAcl, &bDefaulted) || !bPresent || !pParentAcl)
+    {
+        return FALSE;
+    }
+    for (i = 0; i < pParentAcl->AceCount && !bInheritable; i++)
+    {
+        if (GetAce(pParentAcl, i, (PVOID *)&pAce) && (pAce->AceFlags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)))
+            bInheritable = TRUE;
+    }
+    if (!bInheritable)
+        return FALSE;
+
+    GetSecurityDescriptorOwner(pOwnSd, &pOwner, &bDefaulted);
+    GetSecurityDescriptorGroup(pOwnSd, &pGroup, &bDefaulted);
+    if (!InitializeSecurityDescriptor(&Creator, SECURITY_DESCRIPTOR_REVISION) ||
+        !SetSecurityDescriptorOwner(&Creator, pOwner, FALSE) ||
+        !SetSecurityDescriptorGroup(&Creator, pGroup, FALSE) ||
+        !NT_SUCCESS(RtlNewSecurityObjectEx(pOldParentSd, &Creator, &pNewSd, NULL, (BOOLEAN)bDirectory, 0, NULL,
+                                           &WalkFileMapping)))
+    {
+        return FALSE;
+    }
+    if (GetSecurityDescriptorDacl(pNewSd, &bPresent, &pSet, &bDefaulted) && bPresent && pSet && pSet->AceCount != 0)
+    {
+        /* Every ACE of the set, each matched by one ACE of the object's DACL that is equal to it, byte for byte */
+        bAll = TRUE;
+        for (i = 0; i < pSet->AceCount && bAll; i++)
         {
-            /* Entries put there on purpose stay, a protected DACL and what hangs below it is not ours */
-            if (!ResetInheritedEntries(szPath, pLegacyAcl))
-                continue;
+            bAll = FALSE;
+            if (!GetAce(pSet, i, (PVOID *)&pSetAce))
+                break;
+            for (j = 0; j < pAcl->AceCount; j++)
+            {
+                if (!pDrop[j] && GetAce(pAcl, j, (PVOID *)&pAce) && pAce->AceSize == pSetAce->AceSize &&
+                    RtlEqualMemory(pAce, pSetAce, pAce->AceSize))
+                {
+                    pDrop[j] = TRUE;
+                    bAll = TRUE;
+                    break;
+                }
+            }
         }
-        else
+        if (!bAll)
+            ZeroMemory(pDrop, pAcl->AceCount * sizeof(BOOL));
+    }
+    RtlDeleteSecurityObject(&pNewSd);
+    return bAll;
+}
+
+/*
+ * Reset the DACL of everything under a directory to what its parent inherits, top down, each object set once. With
+ * pLegacyAcl (the root's DACL of an older install) an object keeps its explicit entries but not its inherited ones (those
+ * marked inherited, or else the copies of what its parent's descriptor before the walk passed on, see
+ * MarkOldInheritedAces) and not the copies of the root's entries, and one whose DACL is protected (or that has none, or
+ * cannot be read) is left alone with what is below it. Without it every object gets nothing but what its parent passes
+ * on. A reparse point (a junction into the same profile) is never followed; its own DACL is treated as the propagation
+ * of ntmarta treats a link below a directory whose DACL changed. Each directory's descriptor before its set is the
+ * level of its entries (*ppChildLevel).
+ */
+typedef struct _RESET_WALK
+{
+    PACL pLegacyAcl;
+} RESET_WALK, *PRESET_WALK;
+
+static BOOL
+ResetVisit(
+    _In_ WALK_EVENT Event,
+    _In_ HANDLE hParent,
+    _In_opt_ HANDLE hObject,
+    _In_ PCWSTR pszPath,
+    _In_ BOOL bDirectory,
+    _In_ DWORD dwError,
+    _Inout_ PVOID pContext,
+    _In_opt_ PVOID pLevel,
+    _Out_ PVOID *ppChildLevel)
+{
+    PRESET_WALK pWalk = pContext;
+    PSECURITY_DESCRIPTOR pSd = NULL;
+    SECURITY_DESCRIPTOR_CONTROL Control = 0;
+    PACL pOldAcl = NULL, pNewAcl = NULL;
+    BOOL bPresent = FALSE, bDefaulted, bWalk = FALSE, bInherited = FALSE;
+    PBOOL pDrop = NULL;
+    DWORD dwRevision, i;
+    ACL EmptyAcl;
+
+    *ppChildLevel = NULL;
+    if (Event == WalkNotOpened)
+    {
+        DPRINT1("Failed to secure %S, error: %lu\n", pszPath, dwError);
+        return FALSE;
+    }
+    if (Event != WalkObject && Event != WalkReparse)
+    {
+        DPRINT1("Not secured (several names, or too deep): %S\n", pszPath);
+        return FALSE;
+    }
+
+    /* What it has now (before this set): read for the rules below, and the level of its own entries */
+    pSd = QueryHandleSecurity(hObject, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION);
+    if (pSd)
+    {
+        GetSecurityDescriptorControl(pSd, &Control, &dwRevision);
+        GetSecurityDescriptorDacl(pSd, &bPresent, &pOldAcl, &bDefaulted);
+    }
+
+    if (Event == WalkObject && !pWalk->pLegacyAcl)
+    {
+        if (InitializeAcl(&EmptyAcl, sizeof(EmptyAcl), ACL_REVISION))
         {
-            dwError = SetNamedSecurityInfoW(szPath,
-                                            SE_FILE_OBJECT,
-                                            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
-                                            NULL, NULL, pEmptyAcl, NULL);
+            dwError = SetInheritingDacl(hParent, hObject, bDirectory, &EmptyAcl, FALSE);
             if (dwError != ERROR_SUCCESS)
-                DPRINT1("Failed to secure %S, error: %lu\n", szPath, dwError);
+                DPRINT1("Failed to secure %S, error: %lu\n", pszPath, dwError);
         }
+        *ppChildLevel = pSd;
+        return TRUE;
+    }
 
-        if (FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            ResetInheritance(szPath, pEmptyAcl, pLegacyAcl, uDepth + 1);
-    } while (FindNextFileW(hFind, &FindData));
+    /* Entries put there on purpose stay, a protected DACL and what hangs below it is not ours */
+    if (!pSd || (Control & SE_DACL_PROTECTED) || !bPresent || !pOldAcl)
+    {
+        /* No DACL grants everything to everybody: that is how it was meant */
+        goto done;
+    }
 
-    FindClose(hFind);
+    pDrop = LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, (pOldAcl->AceCount + 1) * sizeof(BOOL));
+    pNewAcl = LocalAlloc(LMEM_FIXED, pOldAcl->AclSize);
+    if (!pDrop || !pNewAcl || !InitializeAcl(pNewAcl, pOldAcl->AclSize, ACL_REVISION))
+        goto done;
+
+    /* Its inherited entries: those marked so, or else the copies of what its parent passed on before */
+    for (i = 0; i < pOldAcl->AceCount; i++)
+    {
+        PACE_HEADER pAce;
+
+        if (GetAce(pOldAcl, i, (PVOID *)&pAce) && (pAce->AceFlags & INHERITED_ACE))
+            bInherited = TRUE;
+    }
+    if (!(Control & SE_DACL_AUTO_INHERITED) && !bInherited &&
+        !MarkOldInheritedAces(pLevel, pSd, bDirectory, pOldAcl, pDrop) && Event == WalkReparse)
+    {
+        /* A link with entries of its own only: left alone, as the propagation leaves it */
+        goto done;
+    }
+
+    for (i = 0; i < pOldAcl->AceCount; i++)
+    {
+        PACE_HEADER pAce;
+
+        if (!GetAce(pOldAcl, i, (PVOID *)&pAce))
+            goto done;
+        if (pDrop[i] || (pAce->AceFlags & INHERITED_ACE) ||
+            (Event == WalkObject && IsLegacyAce(pAce, pWalk->pLegacyAcl)))
+        {
+            continue;
+        }
+        if (!AddAce(pNewAcl, ACL_REVISION, MAXDWORD, pAce, pAce->AceSize))
+            goto done;
+    }
+
+    dwError = SetInheritingDacl(hParent, hObject, bDirectory, pNewAcl, Event == WalkReparse);
+    if (dwError != ERROR_SUCCESS)
+        DPRINT1("Failed to secure %S, error: %lu\n", pszPath, dwError);
+    if (Event == WalkObject)
+    {
+        bWalk = TRUE;
+        *ppChildLevel = pSd;
+        pSd = NULL;
+    }
+
+done:
+    if (pDrop)
+        LocalFree(pDrop);
+    if (pNewAcl)
+        LocalFree(pNewAcl);
+    if (pSd)
+        LocalFree(pSd);
+    return bWalk;
 }
 
 /* The security descriptor (LocalFree) of the volume root if it still is the one of the older installs; its DACL in *ppAcl */
@@ -645,9 +1038,12 @@ SecureExistingProfileDirectory(
 {
     PSECURITY_DESCRIPTOR pSd, pLegacySd = NULL;
     PACL pAcl = NULL, pLegacyAcl = NULL;
-    ACL EmptyAcl;
     BOOL bPresent, bDefaulted;
     DWORD dwError;
+    HANDLE hTop;
+    RESET_WALK Walk;
+    PSECURITY_DESCRIPTOR pTopOldSd = NULL;
+    BOOL bWalk;
     BOOL bShared = (Kind == ProfileDirProgramData || Kind == ProfileDirSystem || Kind == ProfileDirTemp);
 
     if (GetFileAttributesW(pszPath) == INVALID_FILE_ATTRIBUTES)
@@ -681,21 +1077,52 @@ SecureExistingProfileDirectory(
         return;
     }
 
-    if (GetSecurityDescriptorDacl(pSd, &bPresent, &pAcl, &bDefaulted) && bPresent && pAcl)
+    /* The folder itself through a handle that is not a link (OpenWalkTop), and what is below it through that handle */
+    hTop = OpenWalkTop(pszPath, TRUE);
+    if (hTop && GetSecurityDescriptorDacl(pSd, &bPresent, &pAcl, &bDefaulted) && bPresent && pAcl)
     {
-        dwError = SetNamedSecurityInfoW((PWSTR)pszPath,
-                                        SE_FILE_OBJECT,
-                                        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                                        NULL, NULL, pAcl, NULL);
+        bWalk = bRecurse && Kind != ProfileDirRoot && (!bShared || pLegacyAcl);
+        if (bWalk)
+        {
+            /*
+             * The walk below gives every object its DACL, once: the folder's own set does not propagate (the
+             * propagation of ntmarta would set the whole tree first, and the walk then every object again)
+             */
+            SECURITY_DESCRIPTOR Set;
+
+            /* What the folder passed on before: the walk recognises its copies below it as inherited entries */
+            pTopOldSd = QueryHandleSecurity(hTop, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                                  DACL_SECURITY_INFORMATION);
+            dwError = ERROR_SUCCESS;
+            if (!InitializeSecurityDescriptor(&Set, SECURITY_DESCRIPTOR_REVISION) ||
+                !SetSecurityDescriptorDacl(&Set, TRUE, pAcl, FALSE) ||
+                !SetKernelObjectSecurity(hTop, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, &Set))
+            {
+                dwError = GetLastError();
+            }
+        }
+        else
+        {
+            /* Nothing walks below it: the propagation gives what is below the folder its inheritance */
+            dwError = SetSecurityInfo(hTop,
+                                      SE_FILE_OBJECT,
+                                      DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                      NULL, NULL, pAcl, NULL);
+        }
         if (dwError != ERROR_SUCCESS)
         {
             DPRINT1("Failed to secure %S, error: %lu\n", pszPath, dwError);
         }
-        else if (bRecurse && Kind != ProfileDirRoot && (!bShared || pLegacyAcl) && InitializeAcl(&EmptyAcl, sizeof(EmptyAcl), ACL_REVISION))
+        else if (bWalk)
         {
-            ResetInheritance(pszPath, &EmptyAcl, pLegacyAcl, 0);
+            Walk.pLegacyAcl = pLegacyAcl;
+            WalkByHandle(hTop, pszPath, 0, ResetVisit, &Walk, pTopOldSd);
         }
     }
+    if (pTopOldSd)
+        LocalFree(pTopOldSd);
+    if (hTop)
+        CloseHandle(hTop);
 
     LocalFree(pSd);
     if (pLegacySd)
@@ -1311,33 +1738,66 @@ IsRootCopyAce(
     return FALSE;
 }
 
-/* Repair one object (see above). FALSE: its DACL is protected, leave what is below it alone */
+/*
+ * Repair one object (see above), opened relative to its folder's handle (WalkByHandle). FALSE: its DACL is protected,
+ * leave what is below it alone
+ */
 static BOOL
-RepairProgramFilesObject(
+RepairProgramFilesVisit(
+    _In_ WALK_EVENT Event,
+    _In_ HANDLE hParent,
+    _In_opt_ HANDLE hObject,
     _In_ PCWSTR pszPath,
-    _Inout_ PPF_REPAIR pCtx)
+    _In_ BOOL bDirectory,
+    _In_ DWORD dwError,
+    _Inout_ PVOID pContext,
+    _In_opt_ PVOID pLevel,
+    _Out_ PVOID *ppChildLevel)
 {
+    PPF_REPAIR pCtx = pContext;
     PSECURITY_DESCRIPTOR pSd;
     SECURITY_DESCRIPTOR_CONTROL Control;
     PACL pOldAcl = NULL, pNewAcl;
     PACE_HEADER pAce;
     BOOL bPresent, bDefaulted, bCopies = FALSE, bResult = TRUE;
-    DWORD dwSize = 0, dwRevision, dwError, i, nRemoved = 0;
+    DWORD dwRevision, i, nRemoved = 0;
+
+    UNREFERENCED_PARAMETER(pLevel);
+    *ppChildLevel = NULL;
+
+    switch (Event)
+    {
+        case WalkReparse:
+            /* A link is not walked and not repaired (the listing's reparse points were skipped before too) */
+            return FALSE;
+        case WalkNotOpened:
+            pCtx->Checked++;
+            pCtx->Failed++;
+            PfRepairLog(pCtx, L"not read (error %lu): %s", dwError, pszPath);
+            return FALSE;
+        case WalkSeveralNames:
+            pCtx->Checked++;
+            pCtx->Skipped++;
+            PfRepairLog(pCtx, L"not checked (a file with more than one name): %s", pszPath);
+            return FALSE;
+        case WalkTooDeep:
+            pCtx->Skipped++;
+            PfRepairLog(pCtx, L"not checked (too deep): %s", pszPath);
+            return FALSE;
+        default:
+            break;
+    }
 
     pCtx->Checked++;
-    GetFileSecurityW(pszPath, DACL_SECURITY_INFORMATION, NULL, 0, &dwSize);
-    if (dwSize == 0)
+    pSd = QueryHandleSecurity(hObject, DACL_SECURITY_INFORMATION);
+    if (!pSd)
     {
         pCtx->Failed++;
         PfRepairLog(pCtx, L"not read (error %lu): %s", GetLastError(), pszPath);
         return TRUE;
     }
-    pSd = LocalAlloc(LMEM_FIXED, dwSize);
-    if (!pSd)
-        return TRUE;
 
-    if (!GetFileSecurityW(pszPath, DACL_SECURITY_INFORMATION, pSd, dwSize, &dwSize) ||
-        !GetSecurityDescriptorControl(pSd, &Control, &dwRevision) ||
+    if (!GetSecurityDescriptorControl(pSd, &Control, &dwRevision) ||
         !GetSecurityDescriptorDacl(pSd, &bPresent, &pOldAcl, &bDefaulted))
     {
         pCtx->Failed++;
@@ -1395,10 +1855,7 @@ RepairProgramFilesObject(
     else
     {
         /* the kept entries, then what the parent passes on */
-        dwError = SetNamedSecurityInfoW((PWSTR)pszPath,
-                                        SE_FILE_OBJECT,
-                                        DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
-                                        NULL, NULL, pNewAcl, NULL);
+        dwError = SetInheritingDacl(hParent, hObject, bDirectory, pNewAcl, FALSE);
         if (dwError == ERROR_SUCCESS)
         {
             pCtx->Repaired++;
@@ -1416,50 +1873,6 @@ RepairProgramFilesObject(
 done:
     LocalFree(pSd);
     return bResult;
-}
-
-static VOID
-RepairProgramFilesTree(
-    _In_ PCWSTR pszDirectory,
-    _Inout_ PPF_REPAIR pCtx,
-    _In_ UINT uDepth)
-{
-    WCHAR szPath[MAX_PATH];
-    WIN32_FIND_DATAW FindData;
-    HANDLE hFind;
-
-    if (uDepth > 64 || FAILED(StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\*", pszDirectory)))
-    {
-        pCtx->Skipped++;
-        PfRepairLog(pCtx, L"not checked (too deep or path too long): %s", pszDirectory);
-        return;
-    }
-
-    hFind = FindFirstFileW(szPath, &FindData);
-    if (hFind == INVALID_HANDLE_VALUE)
-        return;
-
-    do
-    {
-        if (!wcscmp(FindData.cFileName, L".") || !wcscmp(FindData.cFileName, L".."))
-            continue;
-        if (FindData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
-            continue;
-        if (FAILED(StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\%s", pszDirectory, FindData.cFileName)))
-        {
-            pCtx->Skipped++;
-            PfRepairLog(pCtx, L"not checked (path too long): %s\\%s", pszDirectory, FindData.cFileName);
-            continue;
-        }
-
-        if (!RepairProgramFilesObject(szPath, pCtx))
-            continue;
-
-        if (FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            RepairProgramFilesTree(szPath, pCtx, uDepth + 1);
-    } while (FindNextFileW(hFind, &FindData));
-
-    FindClose(hFind);
 }
 
 /* TRUE when setup is still running (the second stage): Program Files is not finished yet */
@@ -1512,6 +1925,7 @@ RepairProgramFiles(VOID)
     DWORD cbSid, dwSize;
     PF_REPAIR Ctx;
     SYSTEMTIME st;
+    HANDLE hTop;
     PWCHAR p;
     UINT i;
 
@@ -1576,8 +1990,15 @@ RepairProgramFiles(VOID)
             PfRepairLog(&Ctx, L"%s: no access control list to read (error %lu), nothing to repair", szPath, GetLastError());
             continue;
         }
+        hTop = OpenWalkTop(szPath, FALSE);
+        if (!hTop)
+        {
+            PfRepairLog(&Ctx, L"%s: not a directory, or a link: not checked", szPath);
+            continue;
+        }
         PfRepairLog(&Ctx, L"checking %s", szPath);
-        RepairProgramFilesTree(szPath, &Ctx, 0);
+        WalkByHandle(hTop, szPath, 0, RepairProgramFilesVisit, &Ctx, NULL);
+        CloseHandle(hTop);
     }
 
     PfRepairLog(&Ctx, L"done: %lu objects checked, %lu repaired, %lu failed, %lu not checked",
