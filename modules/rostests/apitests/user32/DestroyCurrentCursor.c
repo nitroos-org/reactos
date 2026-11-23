@@ -127,6 +127,28 @@ static void Test_NoLeak(HCURSOR Arrow)
     ok(After == Before, "USER objects: %lu before, %lu after\n", Before, After);
 }
 
+/* SetSystemCursor takes the cursor (Windows destroys it); one that it does not keep must not stay referenced
+ * after the program destroys it */
+static void Test_SetSystemCursorNoLeak(void)
+{
+    DWORD Before, After;
+    int i;
+
+    Before = GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS);
+    for (i = 0; i < 50; i++)
+    {
+        HCURSOR Cursor = MakeCursor();
+
+        if (!Cursor)
+            break;
+        SetSystemCursor(Cursor, OCR_NORMAL);
+        DestroyCursor(Cursor);
+    }
+    SystemParametersInfoW(SPI_SETCURSORS, 0, NULL, 0);
+    After = GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS);
+    ok(After == Before, "USER objects: %lu before, %lu after\n", Before, After);
+}
+
 START_TEST(DestroyCurrentCursor)
 {
     HCURSOR Arrow = LoadCursorW(NULL, MAKEINTRESOURCEW(OCR_NORMAL));
@@ -138,4 +160,5 @@ START_TEST(DestroyCurrentCursor)
     Test_SetTwice(Arrow);
     Test_Replaced(Arrow);
     Test_NoLeak(Arrow);
+    Test_SetSystemCursorNoLeak();
 }
