@@ -39,6 +39,9 @@
 #include "wininet.h"
 #include "winternl.h"
 #include "winioctl.h"
+#ifdef __REACTOS__
+#include "aclapi.h"
+#endif
 
 #include "rpc.h"
 #include "rpcndr.h"
@@ -86,6 +89,7 @@ typedef struct _RpcConnection_np
     BOOL read_closed;
 #ifdef __REACTOS__
     HANDLE read_closed_event;
+    PSECURITY_DESCRIPTOR security_descriptor;   /* of the endpoint (the listener only), self-relative; NULL = default */
 #endif
 } RpcConnection_np;
 
@@ -380,34 +384,156 @@ Quit:
 }
 #endif
 
-static RPC_STATUS rpcrt4_conn_create_pipe(RpcConnection *conn)
+#ifdef __REACTOS__
+/* Whether a pipe that exists already belongs to a process this server may share the endpoint with: its owner is
+ * SYSTEM, the Administrators, or the user (or the default owner) of this process. A pipe of another user is
+ * somebody who created the name before the server did. The pipe is opened with READ_CONTROL only and at the
+ * anonymous impersonation level: nothing is sent and the owner of the pipe learns nothing about this process. */
+static BOOL rpcrt4_pipe_owner_trusted(const char *pipe_name)
+{
+    static SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    HANDLE pipe, token = NULL;
+    PSID owner = NULL, system_sid = NULL, admins_sid = NULL;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    BYTE buffer[512];
+    DWORD length;
+    BOOL trusted = FALSE;
+
+    pipe = CreateFileA(pipe_name, READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                       SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS, NULL);
+    if (pipe == INVALID_HANDLE_VALUE)
+        return FALSE;
+    if (GetSecurityInfo(pipe, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, &owner, NULL, NULL, NULL, &sd) != ERROR_SUCCESS ||
+        !owner)
+    {
+        CloseHandle(pipe);
+        return FALSE;
+    }
+
+    if (AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &system_sid) &&
+        EqualSid(owner, system_sid))
+        trusted = TRUE;
+    else if (AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+                                      0, 0, 0, 0, 0, 0, &admins_sid) && EqualSid(owner, admins_sid))
+        trusted = TRUE;
+    else if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+    {
+        if (GetTokenInformation(token, TokenUser, buffer, sizeof(buffer), &length) &&
+            EqualSid(owner, ((PTOKEN_USER)buffer)->User.Sid))
+            trusted = TRUE;
+        else if (GetTokenInformation(token, TokenOwner, buffer, sizeof(buffer), &length) &&
+                 EqualSid(owner, ((PTOKEN_OWNER)buffer)->Owner))
+            trusted = TRUE;
+    }
+
+    if (token) CloseHandle(token);
+    if (system_sid) FreeSid(system_sid);
+    if (admins_sid) FreeSid(admins_sid);
+    LocalFree(sd);
+    CloseHandle(pipe);
+    return trusted;
+}
+
+/* A copy (self-relative) of the descriptor the program gave RpcServerUseProtseqEp*; NULL is no descriptor */
+static RPC_STATUS rpcrt4_copy_pipe_descriptor(const void *descriptor, PSECURITY_DESCRIPTOR *copy)
+{
+    SECURITY_DESCRIPTOR_CONTROL control;
+    DWORD revision, length = 0;
+
+    *copy = NULL;
+    if (!descriptor)
+        return RPC_S_OK;
+    if (!IsValidSecurityDescriptor((PSECURITY_DESCRIPTOR)descriptor))
+        return RPC_S_INVALID_SECURITY_DESC;
+    if (!GetSecurityDescriptorControl((PSECURITY_DESCRIPTOR)descriptor, &control, &revision))
+        return RPC_S_INVALID_SECURITY_DESC;
+
+    if (control & SE_SELF_RELATIVE)
+    {
+        length = GetSecurityDescriptorLength((PSECURITY_DESCRIPTOR)descriptor);
+        *copy = malloc(length);
+        if (!*copy)
+            return RPC_S_OUT_OF_RESOURCES;
+        memcpy(*copy, descriptor, length);
+        return RPC_S_OK;
+    }
+
+    if (MakeSelfRelativeSD((PSECURITY_DESCRIPTOR)descriptor, NULL, &length) || GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+        return RPC_S_INVALID_SECURITY_DESC;
+    *copy = malloc(length);
+    if (!*copy)
+        return RPC_S_OUT_OF_RESOURCES;
+    if (!MakeSelfRelativeSD((PSECURITY_DESCRIPTOR)descriptor, *copy, &length))
+    {
+        free(*copy);
+        *copy = NULL;
+        return RPC_S_INVALID_SECURITY_DESC;
+    }
+    return RPC_S_OK;
+}
+#endif
+
+/* first: the first instance of the endpoint's pipe. It must be the first: when the name exists already, somebody
+ * else made it before this server, and joining it would hand this server's clients to that process (and let it
+ * impersonate them). A pipe whose owner is SYSTEM, the Administrators or this process's own user is joined: a
+ * second server of the same endpoint (the plug and play server shares \pipe\ntsvcs with the service controller). */
+static RPC_STATUS rpcrt4_conn_create_pipe(RpcConnection *conn, BOOL first)
 {
     RpcConnection_np *connection = (RpcConnection_np *) conn;
 #ifdef __REACTOS__
     DWORD ErrCode;
     SECURITY_ATTRIBUTES SecurityAttributes;
-    PSECURITY_DESCRIPTOR PipeSecDesc;
+    PSECURITY_DESCRIPTOR PipeSecDesc = NULL;
+    BOOL OwnDescriptor = FALSE;
+    DWORD OpenMode;
 #endif
 
     TRACE("listening on %s\n", connection->listen_pipe);
 
 #ifdef __REACTOS__
-    ErrCode = rpcrt4_create_pipe_security(&PipeSecDesc);
-    if (ErrCode != ERROR_SUCCESS)
+    /* The descriptor the program gave the endpoint, else the default one */
+    if (connection->security_descriptor)
+        PipeSecDesc = connection->security_descriptor;
+    else
     {
-        ERR("rpcrt4_conn_create_pipe(): Pipe security descriptor creation failed\n");
-        return RPC_S_CANT_CREATE_ENDPOINT;
+        ErrCode = rpcrt4_create_pipe_security(&PipeSecDesc);
+        if (ErrCode != ERROR_SUCCESS)
+        {
+            ERR("rpcrt4_conn_create_pipe(): Pipe security descriptor creation failed\n");
+            return RPC_S_CANT_CREATE_ENDPOINT;
+        }
+        OwnDescriptor = TRUE;
     }
 
     SecurityAttributes.nLength = sizeof(SECURITY_ATTRIBUTES);
     SecurityAttributes.lpSecurityDescriptor = PipeSecDesc;
     SecurityAttributes.bInheritHandle = FALSE;
 
-    connection->pipe = CreateNamedPipeA(connection->listen_pipe, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+    OpenMode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0);
+    connection->pipe = CreateNamedPipeA(connection->listen_pipe, OpenMode,
                                         PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE,
                                         PIPE_UNLIMITED_INSTANCES,
                                         RPC_MAX_PACKET_SIZE, RPC_MAX_PACKET_SIZE, 5000, &SecurityAttributes);
-    HeapFree(GetProcessHeap(), 0, PipeSecDesc);
+    if (connection->pipe == INVALID_HANDLE_VALUE && first && GetLastError() == ERROR_ACCESS_DENIED)
+    {
+        /* The name exists (the error of a first instance that is not the first). Share it only with a server. */
+        if (rpcrt4_pipe_owner_trusted(connection->listen_pipe))
+        {
+            connection->pipe = CreateNamedPipeA(connection->listen_pipe, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                                                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE,
+                                                PIPE_UNLIMITED_INSTANCES,
+                                                RPC_MAX_PACKET_SIZE, RPC_MAX_PACKET_SIZE, 5000, &SecurityAttributes);
+        }
+        else
+        {
+            WARN("%s exists and its owner is not SYSTEM, an administrator or this user\n", connection->listen_pipe);
+            if (OwnDescriptor)
+                HeapFree(GetProcessHeap(), 0, PipeSecDesc);
+            return RPC_S_DUPLICATE_ENDPOINT;
+        }
+    }
+    if (OwnDescriptor)
+        HeapFree(GetProcessHeap(), 0, PipeSecDesc);
 #else
     connection->pipe = CreateNamedPipeA(connection->listen_pipe, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
                                         PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE,
@@ -526,7 +652,7 @@ static RPC_STATUS rpcrt4_ncalrpc_open(RpcConnection* Connection)
   return r;
 }
 
-static RPC_STATUS rpcrt4_protseq_ncalrpc_open_endpoint(RpcServerProtseq* protseq, const char *endpoint)
+static RPC_STATUS rpcrt4_protseq_ncalrpc_open_endpoint(RpcServerProtseq* protseq, const char *endpoint, const void *descriptor)
 {
   RPC_STATUS r;
   RpcConnection *Connection;
@@ -548,7 +674,19 @@ static RPC_STATUS rpcrt4_protseq_ncalrpc_open_endpoint(RpcServerProtseq* protseq
       return r;
 
   ((RpcConnection_np*)Connection)->listen_pipe = ncalrpc_pipe_name(Connection->Endpoint);
+#ifdef __REACTOS__
+  r = rpcrt4_copy_pipe_descriptor(descriptor, &((RpcConnection_np*)Connection)->security_descriptor);
+  if (r == RPC_S_OK)
+      r = rpcrt4_conn_create_pipe(Connection, TRUE);
+  if (r != RPC_S_OK)
+  {
+      /* No endpoint: nothing is listed to be listened on later (a later attempt would join the pipe of whoever has the name) */
+      RPCRT4_ReleaseConnection(Connection);
+      return r;
+  }
+#else
   r = rpcrt4_conn_create_pipe(Connection);
+#endif
 
   EnterCriticalSection(&protseq->cs);
   list_add_head(&protseq->listeners, &Connection->protseq_entry);
@@ -629,7 +767,7 @@ static RPC_STATUS rpcrt4_ncacn_np_open(RpcConnection* Connection)
   return r;
 }
 
-static RPC_STATUS rpcrt4_protseq_ncacn_np_open_endpoint(RpcServerProtseq *protseq, const char *endpoint)
+static RPC_STATUS rpcrt4_protseq_ncacn_np_open_endpoint(RpcServerProtseq *protseq, const char *endpoint, const void *descriptor)
 {
   RPC_STATUS r;
   RpcConnection *Connection;
@@ -655,7 +793,19 @@ static RPC_STATUS rpcrt4_protseq_ncacn_np_open_endpoint(RpcServerProtseq *protse
 #else
   ((RpcConnection_np*)Connection)->listen_pipe = ncacn_pipe_name(Connection->Endpoint);
 #endif
+#ifdef __REACTOS__
+  r = rpcrt4_copy_pipe_descriptor(descriptor, &((RpcConnection_np*)Connection)->security_descriptor);
+  if (r == RPC_S_OK)
+      r = rpcrt4_conn_create_pipe(Connection, TRUE);
+  if (r != RPC_S_OK)
+  {
+      /* No endpoint: nothing is listed to be listened on later (a later attempt would join the pipe of whoever has the name) */
+      RPCRT4_ReleaseConnection(Connection);
+      return r;
+  }
+#else
   r = rpcrt4_conn_create_pipe(Connection);
+#endif
 
   EnterCriticalSection(&protseq->cs);
   list_add_head(&protseq->listeners, &Connection->protseq_entry);
@@ -687,7 +837,7 @@ static RPC_STATUS rpcrt4_ncacn_np_handoff(RpcConnection *old_conn, RpcConnection
   RPC_STATUS status;
 
   rpcrt4_conn_np_handoff((RpcConnection_np *)old_conn, (RpcConnection_np *)new_conn);
-  status = rpcrt4_conn_create_pipe(old_conn);
+  status = rpcrt4_conn_create_pipe(old_conn, FALSE);
 
   /* Store the local computer name as the NetworkAddr for ncacn_np as long as
    * we don't support named pipes over the network. */
@@ -740,7 +890,7 @@ static RPC_STATUS rpcrt4_ncalrpc_handoff(RpcConnection *old_conn, RpcConnection 
   TRACE("%s\n", old_conn->Endpoint);
 
   rpcrt4_conn_np_handoff((RpcConnection_np *)old_conn, (RpcConnection_np *)new_conn);
-  status = rpcrt4_conn_create_pipe(old_conn);
+  status = rpcrt4_conn_create_pipe(old_conn, FALSE);
 
   /* Store the local computer name as the NetworkAddr for ncalrpc. */
   new_conn->NetworkAddr = malloc(len);
@@ -848,6 +998,11 @@ static int rpcrt4_conn_np_close(RpcConnection *conn)
     {
         CloseHandle(connection->read_closed_event);
         connection->read_closed_event = 0;
+    }
+    if (connection->security_descriptor)
+    {
+        free(connection->security_descriptor);
+        connection->security_descriptor = NULL;
     }
 #endif
     return 0;
@@ -1077,7 +1232,7 @@ static void *rpcrt4_protseq_np_get_wait_array(RpcServerProtseq *protseq, void *p
     *count = 1;
     LIST_FOR_EACH_ENTRY(conn, &protseq->listeners, RpcConnection_np, common.protseq_entry)
     {
-        if (!conn->pipe && rpcrt4_conn_create_pipe(&conn->common) != RPC_S_OK)
+        if (!conn->pipe && rpcrt4_conn_create_pipe(&conn->common, FALSE) != RPC_S_OK)
             continue;
         if (!conn->listen_event)
         {
@@ -1644,7 +1799,7 @@ static RPC_STATUS rpcrt4_ncacn_ip_tcp_open(RpcConnection* Connection)
   return RPC_S_SERVER_UNAVAILABLE;
 }
 
-static RPC_STATUS rpcrt4_protseq_ncacn_ip_tcp_open_endpoint(RpcServerProtseq *protseq, const char *endpoint)
+static RPC_STATUS rpcrt4_protseq_ncacn_ip_tcp_open_endpoint(RpcServerProtseq *protseq, const char *endpoint, const void *descriptor)
 {
     RPC_STATUS status = RPC_S_CANT_CREATE_ENDPOINT;
     int sock;

@@ -57,7 +57,7 @@ struct protseq_ops
      * new connection was established */
     int (*wait_for_new_connection)(RpcServerProtseq *protseq, unsigned int count, void *wait_array);
     /* opens the endpoint and optionally begins listening */
-    RPC_STATUS (*open_endpoint)(RpcServerProtseq *protseq, const char *endpoint);
+    RPC_STATUS (*open_endpoint)(RpcServerProtseq *protseq, const char *endpoint, const void *descriptor);
 };
 
 typedef struct _RpcServerInterface
