@@ -100,6 +100,7 @@ UserSetCursor(
     PTHREADINFO pti;
     PUSER_MESSAGE_QUEUE MessageQueue;
     PWND pWnd;
+    PCURICON_OBJECT CursorFrame;
 
     pti = PsGetCurrentThreadWin32Thread();
     MessageQueue = pti->MessageQueue;
@@ -133,16 +134,18 @@ UserSetCursor(
             return NULL;
         }
 
-        if (NewCursor)
+        /* Call GDI to set the new screen cursor */
+        CursorFrame = NewCursor;
+        if (NewCursor && (NewCursor->CURSORF_flags & CURSORF_ACON))
         {
-            /* Call GDI to set the new screen cursor */
-            PCURICON_OBJECT CursorFrame = NewCursor;
-            if(NewCursor->CURSORF_flags & CURSORF_ACON)
-            {
-                FIXME("Should animate the cursor, using only the first frame now.\n");
-                /* The bitmaps are the frame's: the animated cursor itself has none */
-                CursorFrame = ((PACON)NewCursor)->aspcur[((PACON)NewCursor)->aicur[0]];
-            }
+            FIXME("Should animate the cursor, using only the first frame now.\n");
+            /* The bitmaps are the frame's: the animated cursor itself has none.
+             * One without frames has no shape: it is shown as no pointer. */
+            CursorFrame = IntGetAconFrame((PACON)NewCursor, 0);
+        }
+
+        if (CursorFrame)
+        {
             GreSetPointerShape(hdcScreen,
                                CursorFrame->hbmAlpha ? NULL : CursorFrame->hbmMask,
                                CursorFrame->hbmAlpha ? CursorFrame->hbmAlpha : CursorFrame->hbmColor,
@@ -158,7 +161,7 @@ UserSetCursor(
             GreMovePointer(hdcScreen, -1, -1);
             TRACE("Removing pointer!\n");
         }
-        IntGetSysCursorInfo()->CurrentCursorObject = NewCursor;
+        IntGetSysCursorInfo()->CurrentCursorObject = CursorFrame ? NewCursor : NULL;
     }
 
     /* Return the old cursor */
@@ -802,18 +805,18 @@ co_MsqInsertMouseMessageEx(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Ho
        if (Msg->message == WM_MOUSEMOVE)
        {
           /* Check if cursor should be visible */
+           /* An animated cursor has its bitmaps in the frames; one without frames shows no pointer */
+           PCURICON_OBJECT CursorFrame = MessageQueue->CursorObject;
+           if (CursorFrame && (CursorFrame->CURSORF_flags & CURSORF_ACON))
+               CursorFrame = IntGetAconFrame((PACON)CursorFrame, 0);
+
            if(hdcScreen &&
-              MessageQueue->CursorObject &&
+              CursorFrame &&
               MessageQueue->iCursorLevel >= 0)
            {
                /* Check if shape has changed */
                if(CurInfo->CurrentCursorObject != MessageQueue->CursorObject)
                {
-                   /* An animated cursor has its bitmaps in the frames */
-                   PCURICON_OBJECT CursorFrame = MessageQueue->CursorObject;
-                   if (CursorFrame->CURSORF_flags & CURSORF_ACON)
-                       CursorFrame = ((PACON)CursorFrame)->aspcur[((PACON)CursorFrame)->aicur[0]];
-
                    /* Call GDI to set the new screen cursor */
                     GreSetPointerShape(hdcScreen,
                                        CursorFrame->hbmAlpha ?
@@ -835,7 +838,7 @@ co_MsqInsertMouseMessageEx(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Ho
 
            /* Update global cursor info */
            CurInfo->ShowingCursor = MessageQueue->iCursorLevel;
-           CurInfo->CurrentCursorObject = MessageQueue->CursorObject;
+           CurInfo->CurrentCursorObject = CursorFrame ? MessageQueue->CursorObject : NULL;
            gpqCursor = MessageQueue;
 
            /* Mouse move is a special case */

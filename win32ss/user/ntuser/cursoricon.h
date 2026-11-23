@@ -44,6 +44,13 @@ typedef struct tagACON
 
 C_ASSERT(FIELD_OFFSET(ACON, cpcur) == FIELD_OFFSET(CURICON_OBJECT, xHotspot));
 
+/* The frame an animated cursor shows at step istep; NULL for an animated cursor that has no
+ * frames (created empty, or whose data was refused) or a step outside it */
+PCURICON_OBJECT
+IntGetAconFrame(
+    _In_ PACON pacon,
+    _In_ UINT istep);
+
 BOOLEAN
 IntDestroyCurIconObject(
     _In_ PVOID Object);

@@ -5,6 +5,7 @@ add_subdirectory(wevhook)
 list(APPEND SOURCE
     AttachThreadInput.c
     AttachThreadInputQueue.c
+    AniEmpty.c
     AniMalformed.c
     AutoRotation.c
     BroadcastHung.c
@@ -108,6 +109,7 @@ list(APPEND SOURCE
     NextDlgItem.c
     OwnDcDestroy.c
     PaintDesktopSwitch.c
+    ExtractIconAni.c
     PrivateExtractIcons.c
     ProcessConnectTerminate.c
     PngIconRows.c

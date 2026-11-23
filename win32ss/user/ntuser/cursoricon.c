@@ -231,7 +231,13 @@ IntSystemSetCursor(PCURICON_OBJECT pcurNew)
 {
     PCURICON_OBJECT pcurOld = UserSetCursor(pcurNew, FALSE);
     if (pcurNew) UserReferenceObject(pcurNew);
-    if (pcurOld) UserDereferenceObject(pcurOld);
+    if (pcurOld)
+    {
+        /* It is not the current cursor any more: as it is, DestroyCursor refused it for good */
+        if (pcurOld != pcurNew)
+            pcurOld->CURSORF_flags &= ~CURSORF_CURRENT;
+        UserDereferenceObject(pcurOld);
+    }
     return pcurOld;
 }
 
@@ -318,6 +324,20 @@ IntCreateCurIconHandle(BOOLEAN Animated)
     UserDereferenceObject(CurIcon);
 
     return hCurIcon;
+}
+
+PCURICON_OBJECT
+IntGetAconFrame(
+    _In_ PACON pacon,
+    _In_ UINT istep)
+{
+    if (pacon->aspcur == NULL || pacon->aicur == NULL || istep >= pacon->cicur)
+        return NULL;
+
+    if (pacon->aicur[istep] >= pacon->cpcur)
+        return NULL;
+
+    return pacon->aspcur[pacon->aicur[istep]];
 }
 
 BOOLEAN
@@ -462,7 +482,13 @@ NtUserGetIconInfo(
         if (CurIcon->CURSORF_flags & CURSORF_ACON)
         {
             /* Get information from first frame. */
-            FrameCurIcon = ((PACON)CurIcon)->aspcur[0];
+            FrameCurIcon = IntGetAconFrame((PACON)CurIcon, 0);
+            if (FrameCurIcon == NULL)
+            {
+                /* No frames: there is nothing to describe */
+                EngSetLastError(ERROR_INVALID_CURSOR_HANDLE);
+                goto leave;
+            }
         }
 
         /* Fill data */
@@ -634,7 +660,14 @@ NtUserGetIconSize(
     {
         /* Use first frame for animated cursors */
         PACON AniCurIcon = (PACON)CurIcon;
-        CurIcon = AniCurIcon->aspcur[0];
+        CurIcon = IntGetAconFrame(AniCurIcon, 0);
+        if (CurIcon == NULL)
+        {
+            /* No frames */
+            EngSetLastError(ERROR_INVALID_CURSOR_HANDLE);
+            UserDereferenceObject(AniCurIcon);
+            goto cleanup;
+        }
         UserDereferenceObject(AniCurIcon);
         UserReferenceObject(CurIcon);
     }
@@ -1100,9 +1133,9 @@ NtUserSetCursor(
 
     pcurOld = UserSetCursor(pcurNew, FALSE);
 
-    // If returning an old cursor than validate it, Justin Case!
-    if ( pcurOld &&
-        (pcurOld = UserGetObjectNoErr(gHandleTable, UserHMGetHandle(pcurOld), TYPE_CURSOR)))
+    /* The old cursor is the one that the queue held a reference to: that reference is released even when the
+     * object was destroyed meanwhile (its handle is not given back then); it used to be kept for good */
+    if (pcurOld)
     {
         hOldCursor = UserHMGetHandle(pcurOld);
     /*
@@ -1744,12 +1777,12 @@ UserDrawIconEx(
     if (pIcon->CURSORF_flags & CURSORF_ACON)
     {
         ACON* pAcon = (ACON*)pIcon;
-        if (istepIfAniCur >= pAcon->cicur)
+        pIcon = IntGetAconFrame(pAcon, istepIfAniCur);
+        if (pIcon == NULL)
         {
-            ERR("NtUserDrawIconEx: istepIfAniCur too big!\n");
+            ERR("NtUserDrawIconEx: istepIfAniCur too big or no frames!\n");
             return FALSE;
         }
-        pIcon = pAcon->aspcur[pAcon->aicur[istepIfAniCur]];
     }
 
     hbmMask = pIcon->hbmMask;
@@ -2190,7 +2223,8 @@ NtUserGetCursorFrameInfo(
     if (CurIcon->CURSORF_flags & CURSORF_ACON)
     {
         PACON AniCurIcon = (PACON)CurIcon;
-        if (istep >= AniCurIcon->cicur)
+        PCURICON_OBJECT Frame = IntGetAconFrame(AniCurIcon, istep);
+        if (Frame == NULL)
         {
             UserDereferenceObject(CurIcon);
             UserLeave();
@@ -2198,7 +2232,7 @@ NtUserGetCursorFrameInfo(
         }
         jiffies = AniCurIcon->ajifRate[istep];
         steps = AniCurIcon->cicur;
-        ret = UserHMGetHandle(AniCurIcon->aspcur[AniCurIcon->aicur[istep]]);
+        ret = UserHMGetHandle(Frame);
     }
 
     _SEH2_TRY

@@ -54,7 +54,7 @@ static BOOL ImpersonateWithoutAdmins(void)
 
 START_TEST(WallpaperAccess)
 {
-    WCHAR dir[MAX_PATH], file[MAX_PATH], old[MAX_PATH] = L"";
+    WCHAR dir[MAX_PATH], file[MAX_PATH], old[MAX_PATH] = L"", path[MAX_PATH], path2[MAX_PATH];
     PSECURITY_DESCRIPTOR sd;
     HANDLE h;
     BOOL ret, canRead;
@@ -69,6 +69,20 @@ START_TEST(WallpaperAccess)
         skip("cannot make the file, error %lu\n", GetLastError());
         goto done;
     }
+
+    SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH, old, 0);
+
+    /* A file that does not exist: TRUE, the path is kept (Windows Server 2022, measured) */
+    wcscpy(path, dir);
+    wcscat(path, L"\\missing.bmp");
+    SetLastError(0xdeadbeef);
+    ret = SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, path, 0);
+    ok(ret, "SPI_SETDESKWALLPAPER of a missing file failed, error %lu\n", GetLastError());
+    ok(GetLastError() == 0xdeadbeef, "error changed to %lu\n", GetLastError());
+    wcscpy(path2, L"");
+    SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH, path2, 0);
+    ok(!wcscmp(path2, path), "wallpaper path is %S\n", path2);
+    SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, old, 0);
 
     /* Only SYSTEM and Administrators may read it (needs a file system with access lists) */
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;FA;;;SY)(A;;FA;;;BA)", SDDL_REVISION_1, &sd, NULL) ||
@@ -97,10 +111,15 @@ START_TEST(WallpaperAccess)
         goto done;
     }
 
-    /* Without Administrators in effect the file cannot be read, so it cannot be the wallpaper */
+    /* Without Administrators in effect the file cannot be read, so its picture is not shown.
+       Windows (Server 2022, measured) answers TRUE and keeps the path, as for a missing file. */
     SetLastError(0xdeadbeef);
     ret = SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, file, 0);
-    ok(!ret, "SPI_SETDESKWALLPAPER of a file the caller cannot read succeeded\n");
+    ok(ret, "SPI_SETDESKWALLPAPER of a file the caller cannot read failed, error %lu\n", GetLastError());
+    ok(GetLastError() == 0xdeadbeef, "error changed to %lu\n", GetLastError());
+    path[0] = 0;
+    SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH, path, 0);
+    ok(!wcscmp(path, file), "wallpaper path is %S\n", path);
     RevertToSelf();
 
     /* The same call with the rights restored works */

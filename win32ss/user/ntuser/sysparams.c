@@ -689,6 +689,7 @@ SpiSetWallpaper(PVOID pvParam, FLONG fl)
     HBITMAP hbmp, hOldBitmap;
     SURFACE *psurfBmp;
     ULONG ulTile, ulStyle;
+    ULONG dwLastError;
 
     REQ_INTERACTIVE_WINSTA(ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION);
 
@@ -744,11 +745,17 @@ SpiSetWallpaper(PVOID pvParam, FLONG fl)
         }
 
         /* Load the Bitmap */
+        dwLastError = EngGetLastError();
         hbmp = UserLoadImage(ustr.Buffer);
         if (!hbmp)
         {
+            /* A file that is missing, or that the caller cannot read, is no error: the
+             * setting is stored (above) and the call succeeds, with the last error
+             * unchanged, as on Windows. The picture of such a file is never shown, the
+             * current one stays. */
             ERR("UserLoadImage failed\n");
-            return 0;
+            EngSetLastError(dwLastError);
+            return (UINT_PTR)KEY_DESKTOP;
         }
 
         /* Try to get the size of the wallpaper */

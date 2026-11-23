@@ -4,6 +4,7 @@
 
 extern void func_AttachThreadInput(void);
 extern void func_AttachThreadInputQueue(void);
+extern void func_AniEmpty(void);
 extern void func_AniMalformed(void);
 extern void func_AutoRotation(void);
 extern void func_BroadcastHung(void);
@@ -107,6 +108,7 @@ extern void func_NextDlgItem(void);
 extern void func_OwnDcDestroy(void);
 extern void func_PaintDesktopSwitch(void);
 extern void func_PrintWindow(void);
+extern void func_ExtractIconAni(void);
 extern void func_PrivateExtractIcons(void);
 extern void func_PngIconRows(void);
 extern void func_ProcessConnectTerminate(void);
@@ -183,6 +185,7 @@ const struct test winetest_testlist[] =
     { "AttachThreadInputQueue", func_AttachThreadInputQueue },
     { "AutoRotation", func_AutoRotation },
     { "BroadcastHung", func_BroadcastHung },
+    { "AniEmpty", func_AniEmpty },
     { "AniMalformed", func_AniMalformed },
     { "CharFuncs", func_CharFuncs },
     { "CloseWindow", func_CloseWindow },
@@ -284,6 +287,7 @@ const struct test winetest_testlist[] =
     { "OwnDcDestroy", func_OwnDcDestroy },
     { "PaintDesktopSwitch", func_PaintDesktopSwitch },
     { "PrintWindow", func_PrintWindow },
+    { "ExtractIconAni", func_ExtractIconAni },
     { "PrivateExtractIcons", func_PrivateExtractIcons },
     { "ProcessConnectTerminate", func_ProcessConnectTerminate },
     { "RawInput", func_RawInput },

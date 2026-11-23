@@ -142,6 +142,8 @@ BOOL    SkipQuestions( PCHAR pBuffer,
 
 /* The reply is complete enough to read its header (12 bytes). */
 #define DNS_HEADER_LENGTH 12
+/* The largest DNS message: the answer buffers hold what a TCP answer (two byte length) can carry */
+#define DNS_MAX_MESSAGE 65535
 /* Truncation (TC) bit, in the third byte of the header. */
 #define DNS_FLAG_TC 0x02
 

@@ -158,7 +158,7 @@ BOOL PerformInternalLookup( PCHAR pAddr, PCHAR pResult )
     /* Needed to issue DNS packets and parse them. */
     PCHAR Buffer = NULL, RecBuffer = NULL;
     CHAR pResolve[256];
-    ULONG BufferLength = 0, RecBufferLength = 512;
+    ULONG BufferLength = 0, RecBufferLength = DNS_MAX_MESSAGE;
     int i = 0, j = 0, k = 0;
     BOOL bOk = FALSE;
 
@@ -712,7 +712,7 @@ static LQ_RESULT QueryAddresses( PCHAR pName, USHORT WantType, ADDRESS_TEXT *Lis
                                  BOOL *pAuthoritative )
 {
     PCHAR Buffer, RecBuffer;
-    ULONG BufferLength = 12 + (ULONG)(strlen( pName ) + 2) + 4, RecBufferLength = 512;
+    ULONG BufferLength = 12 + (ULONG)(strlen( pName ) + 2) + 4, RecBufferLength = DNS_MAX_MESSAGE;
     LQ_RESULT Result = LQ_BAD;
     int k = 12;
 
@@ -811,7 +811,7 @@ void PerformLookup( PCHAR pAddr )
     PCHAR Buffer = NULL, RecBuffer = NULL;
     CHAR pResolve[256];
     CHAR pResult[256];
-    ULONG BufferLength = 0, RecBufferLength = 512;
+    ULONG BufferLength = 0, RecBufferLength = DNS_MAX_MESSAGE;
     int k = 0, d = 0;
     BOOL bOk = FALSE;
 
