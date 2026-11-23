@@ -1,0 +1,5 @@
+add_library(sym53c8xx MODULE sym53c8xx.c sym53c8xx.rc)
+set_module_type(sym53c8xx kernelmodedriver)
+add_importlibs(sym53c8xx scsiport ntoskrnl hal)
+add_cd_file(TARGET sym53c8xx DESTINATION reactos/system32/drivers NO_CAB FOR all)
+add_registry_inf(sym53c8xx_reg.inf)
