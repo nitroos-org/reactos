@@ -1884,14 +1884,16 @@ LsaApLogonTerminated(
 
     TRACE("LsaApLogonTerminated()\n");
 
-    /* Remove the given logon entry from the list */
+    /* Find and remove the given logon entry under the lock: the LSA may end the same logon from two threads at
+       once (a failed logon request and the notice of its last token closing), only one may free the entry */
+    RtlAcquireResourceExclusive(&LogonListResource, TRUE);
     LogonEntry = GetLogonByLogonId(LogonId);
     if (LogonEntry != NULL)
-    {
-        RtlAcquireResourceExclusive(&LogonListResource, TRUE);
         RemoveEntryList(&LogonEntry->ListEntry);
-        RtlReleaseResource(&LogonListResource);
+    RtlReleaseResource(&LogonListResource);
 
+    if (LogonEntry != NULL)
+    {
         if (LogonEntry->UserName.Buffer)
             RtlFreeHeap(RtlGetProcessHeap(), 0, LogonEntry->UserName.Buffer);
 

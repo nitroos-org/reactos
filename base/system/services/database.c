@@ -465,8 +465,10 @@ LogonUserExExW(
  *   restricting logon session SID is that of the SCM's own token, the SYSTEM logon session here;
  *   ScmCreateSystemServiceToken).
  * A service that sets neither gets the token it got before. Applied to own-process services (not shared
- * processes: Windows merges the settings of all services of the process, not done here). The privilege
- * list is not applied to LocalSystem services (not measured).
+ * processes: Windows merges the settings of all services of the process, not done here and not measured).
+ * The privilege list applies to LocalSystem own-process services too (the token is then a copy of the
+ * controller's SYSTEM token with the other privileges removed), as Windows does (Windows Server 2022: a
+ * LocalSystem own-process service gets the RequiredPrivileges filter as well as the service SID).
  */
 typedef struct _SCM_TOKEN_CONFIG
 {
@@ -1098,10 +1100,34 @@ done:
     return dwError;
 }
 
+/* A primary copy of the controller's own token (SYSTEM), for a LocalSystem service whose privileges are filtered */
+static
+DWORD
+ScmDuplicateSystemToken(
+    _Out_ PHANDLE phToken)
+{
+    HANDLE hSelf;
+    DWORD dwError = ERROR_SUCCESS;
+
+    *phToken = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &hSelf))
+        return GetLastError();
+    if (!DuplicateTokenEx(hSelf, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenPrimary, phToken))
+    {
+        dwError = GetLastError();
+        *phToken = NULL;
+    }
+    CloseHandle(hSelf);
+    return dwError;
+}
+
 /*
- * A LocalSystem own-process service whose ServiceSidType is not NONE runs with a token that has its service SID
- * (see SCM_TOKEN_CONFIG). Its image has no logon token (hToken stays NULL, the controller's account is used for the
- * environment and the failure actions); hProcessToken is the token of its process.
+ * A LocalSystem own-process service whose ServiceSidType is not NONE runs with a token that has its service SID,
+ * and one with a RequiredPrivileges list with a token that has only the listed privileges (and
+ * SeChangeNotifyPrivilege), as for the other accounts (see SCM_TOKEN_CONFIG; a malformed list stops the start the
+ * same way). Its image has no logon token (hToken stays NULL, the controller's account is used for the environment
+ * and the failure actions); hProcessToken is the token of its process. A service that sets neither runs with the
+ * controller's own token, as before.
  */
 static
 DWORD
@@ -1113,12 +1139,15 @@ ScmLogonLocalSystemService(
     HANDLE hToken = NULL;
     DWORD dwError;
 
-    dwError = ScmReadTokenConfig(pService, TRUE, &TokenConfig);
+    dwError = ScmReadTokenConfig(pService, FALSE, &TokenConfig);
     if (dwError != ERROR_SUCCESS)
     {
         DPRINT1("ScmReadTokenConfig() failed (Error %lu)\n", dwError);
         return dwError;
     }
+
+    if (TokenConfig.pServiceSid == NULL && TokenConfig.pszPrivileges == NULL)
+        goto done;
 
     if (TokenConfig.pServiceSid != NULL)
     {
@@ -1128,20 +1157,42 @@ ScmLogonLocalSystemService(
         if (dwError != ERROR_SUCCESS)
         {
             DPRINT1("ScmCreateSystemServiceToken() failed (Error %lu)\n", dwError);
+            goto done;
         }
-        else if (TokenConfig.dwSidType == SERVICE_SID_TYPE_RESTRICTED)
+    }
+    else
+    {
+        dwError = ScmDuplicateSystemToken(&hToken);
+        if (dwError != ERROR_SUCCESS)
         {
-            dwError = ScmMakeRestrictedToken(hToken, TokenConfig.pServiceSid, &pImage->hProcessToken);
-            CloseHandle(hToken);
-            if (dwError != ERROR_SUCCESS)
-                DPRINT1("ScmMakeRestrictedToken() failed (Error %lu)\n", dwError);
-        }
-        else
-        {
-            pImage->hProcessToken = hToken;
+            DPRINT1("ScmDuplicateSystemToken() failed (Error %lu)\n", dwError);
+            goto done;
         }
     }
 
+    /* The privileges, then the write restricted copy (it takes the privileges of the token it is made from) */
+    if (TokenConfig.pszPrivileges != NULL)
+    {
+        dwError = ScmApplyRequiredPrivileges(pService, hToken, TokenConfig.pszPrivileges);
+        if (dwError != ERROR_SUCCESS)
+            goto done;
+    }
+
+    if (TokenConfig.dwSidType == SERVICE_SID_TYPE_RESTRICTED)
+    {
+        dwError = ScmMakeRestrictedToken(hToken, TokenConfig.pServiceSid, &pImage->hProcessToken);
+        if (dwError != ERROR_SUCCESS)
+            DPRINT1("ScmMakeRestrictedToken() failed (Error %lu)\n", dwError);
+    }
+    else
+    {
+        pImage->hProcessToken = hToken;
+        hToken = NULL;
+    }
+
+done:
+    if (hToken != NULL)
+        CloseHandle(hToken);
     ScmFreeTokenConfig(&TokenConfig);
     return dwError;
 }

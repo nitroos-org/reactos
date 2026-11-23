@@ -257,6 +257,18 @@ LsapHandlePortConnection(PLSA_API_MSG RequestMsg)
 
         RequestMsg->ConnectInfo.Status = Status;
     }
+    else
+    {
+        /* A connection without a logon context (secur32 opens one per process for the logon session and
+         * policy notification requests) still has a communication port handle here: it needs an entry too,
+         * or the handle is never closed. It has no client process handle, which the requests of a logon
+         * process need */
+        LogonContext = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(LSAP_LOGON_CONTEXT));
+        if (LogonContext == NULL)
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        else
+            LogonContext->ContextId = LsapNextLogonContextId++;
+    }
 
     if (NT_SUCCESS(Status))
     {
@@ -281,7 +293,8 @@ LsapHandlePortConnection(PLSA_API_MSG RequestMsg)
         /* The connection never existed, release what the check opened */
         if (LogonContext != NULL)
         {
-            NtClose(LogonContext->ClientProcessHandle);
+            if (LogonContext->ClientProcessHandle != NULL)
+                NtClose(LogonContext->ClientProcessHandle);
             RtlFreeHeap(RtlGetProcessHeap(), 0, LogonContext);
         }
         return Status;
@@ -290,7 +303,8 @@ LsapHandlePortConnection(PLSA_API_MSG RequestMsg)
     /* A rejected connection has no handle and no use for the context */
     if (Accept == FALSE && LogonContext != NULL)
     {
-        NtClose(LogonContext->ClientProcessHandle);
+        if (LogonContext->ClientProcessHandle != NULL)
+            NtClose(LogonContext->ClientProcessHandle);
         RtlFreeHeap(RtlGetProcessHeap(), 0, LogonContext);
         LogonContext = NULL;
     }
@@ -324,6 +338,7 @@ AuthPortThreadRoutine(PVOID Param)
     PVOID PortContext = NULL;
     PLSA_API_MSG ReplyMsg = NULL;
     LSA_API_MSG RequestMsg;
+    ULONG FailureCount = 0;
     NTSTATUS Status;
 
     TRACE("AuthPortThreadRoutine() called\n");
@@ -339,8 +354,35 @@ AuthPortThreadRoutine(PVOID Param)
                                         (PPORT_MESSAGE)&RequestMsg);
         if (!NT_SUCCESS(Status))
         {
-            TRACE("NtReplyWaitReceivePort() failed (Status %lx)\n", Status);
-            break;
+            /*
+             * This thread is the only server of the port and must not end: lsass does not survive it, and
+             * no logon would be served. Failures here come from clients that end while they are served:
+             * a reply that cannot be delivered (its client thread or process is gone; the call fails before
+             * it receives) is dropped, and a receive that finds the request withdrawn by its dying client
+             * (STATUS_UNSUCCESSFUL) is retried. A failure that persists is retried after a short pause.
+             */
+            if (ReplyMsg != NULL)
+                ERR("The reply to a client could not be sent (Status 0x%lx), it is dropped\n", Status);
+            else
+                ERR("NtReplyWaitReceivePort() failed (Status 0x%lx)\n", Status);
+
+            ReplyMsg = NULL;
+            if (++FailureCount > 16)
+            {
+                LARGE_INTEGER Delay;
+                Delay.QuadPart = -10 * 1000 * 10; /* 10 ms */
+                NtDelayExecution(FALSE, &Delay);
+            }
+            continue;
+        }
+        FailureCount = 0;
+
+        /* The message buffer is reused: what the caller did not send must not be read as its request (it was the
+         * previous caller's message or its reply) */
+        if ((ULONG)sizeof(PORT_MESSAGE) + RequestMsg.h.u1.s1.DataLength < sizeof(RequestMsg))
+        {
+            RtlZeroMemory((PUCHAR)&RequestMsg + sizeof(PORT_MESSAGE) + RequestMsg.h.u1.s1.DataLength,
+                          sizeof(RequestMsg) - sizeof(PORT_MESSAGE) - RequestMsg.h.u1.s1.DataLength);
         }
 
         /* A connection that is gone (or has no context) is not found */
@@ -375,8 +417,9 @@ AuthPortThreadRoutine(PVOID Param)
             default:
                 TRACE("Received request (ApiNumber: %lu)\n", RequestMsg.ApiNumber);
 
-                /* These requests need the context of the connection */
-                if (LogonContext == NULL &&
+                /* These requests need the logon context of the connection (a connection made without one has
+                 * an entry without a client process) */
+                if ((LogonContext == NULL || LogonContext->ClientProcessHandle == NULL) &&
                     (RequestMsg.ApiNumber == LSASS_REQUEST_CALL_AUTHENTICATION_PACKAGE ||
                      RequestMsg.ApiNumber == LSASS_REQUEST_LOGON_USER ||
                      RequestMsg.ApiNumber == LSASS_REQUEST_LOOKUP_AUTHENTICATION_PACKAGE ||
