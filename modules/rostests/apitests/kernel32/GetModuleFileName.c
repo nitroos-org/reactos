@@ -212,6 +212,48 @@ TestTruncation(VOID)
     ok(Error == ERROR_MOD_NOT_FOUND, "Error = %lu\n", Error);
 }
 
+/*
+ * The system DLLs of a process are named by the directory GetSystemDirectory returns: System32, also in a
+ * 32-bit process on a 64-bit system (where file system redirection opens the SysWOW64 file; measured on
+ * Windows Server 2022: C:\Windows\System32\KERNEL32.DLL, C:\Windows\SYSTEM32\ntdll.dll).
+ */
+static
+VOID
+TestSystemModuleDirectory(VOID)
+{
+    static const PCWSTR Names[] = { L"kernel32.dll", L"ntdll.dll", L"user32.dll", L"imagehlp.dll" };
+    WCHAR SystemDir[MAX_PATH], Path[MAX_PATH];
+    UINT DirLength;
+    DWORD Length;
+    HMODULE Module;
+    int i;
+
+    DirLength = GetSystemDirectoryW(SystemDir, ARRAYSIZE(SystemDir));
+    ok(DirLength > 0 && DirLength < ARRAYSIZE(SystemDir), "DirLength = %u\n", DirLength);
+    if (DirLength == 0 || DirLength >= ARRAYSIZE(SystemDir))
+        return;
+
+    for (i = 0; i < ARRAYSIZE(Names); i++)
+    {
+        Module = LoadLibraryW(Names[i]);
+        if (!Module)
+        {
+            skip("%ls is not available (%lu)\n", Names[i], GetLastError());
+            continue;
+        }
+
+        Length = GetModuleFileNameW(Module, Path, ARRAYSIZE(Path));
+        ok(Length > DirLength + 1 && Length < ARRAYSIZE(Path), "%ls: Length = %lu\n", Names[i], Length);
+        if (Length > DirLength + 1 && Length < ARRAYSIZE(Path))
+        {
+            ok(Path[DirLength] == L'\\' && !_wcsnicmp(Path, SystemDir, DirLength) &&
+               !_wcsicmp(Path + DirLength + 1, Names[i]),
+               "%ls is named %ls, GetSystemDirectory returned %ls\n", Names[i], Path, SystemDir);
+        }
+        FreeLibrary(Module);
+    }
+}
+
 START_TEST(GetModuleFileName)
 {
     int argc;
@@ -220,6 +262,7 @@ START_TEST(GetModuleFileName)
     argc = winetest_get_mainargs(&argv);
     if (argc < 3)
     {
+        TestSystemModuleDirectory();
         TestTruncation();
         StartChild(argv);
     }
