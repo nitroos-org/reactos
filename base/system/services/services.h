@@ -29,6 +29,10 @@
 
 #include "resource.h"
 
+#ifndef SERVICE_CONTROL_PRESHUTDOWN
+#define SERVICE_CONTROL_PRESHUTDOWN 0x0000000F
+#endif
+
 typedef struct _SERVICE_GROUP
 {
     LIST_ENTRY GroupListEntry;
@@ -210,6 +214,7 @@ DWORD ScmCreateServiceDatabase(VOID);
 VOID ScmShutdownServiceDatabase(VOID);
 VOID ScmGetBootAndSystemDriverState(VOID);
 VOID ScmAutoStartServices(VOID);
+VOID ScmPreshutdownServices(VOID);
 VOID ScmAutoShutdownServices(VOID);
 DWORD ScmStartService(PSERVICE Service,
                       DWORD argc,

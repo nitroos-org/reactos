@@ -233,6 +233,8 @@ ShutdownHandlerRoutine(DWORD dwCtrlType)
         DPRINT1("Shutdown event received\n");
         ScmShutdown = TRUE;
 
+        /* The services that accept the preshutdown control first, then the ones that accept the shutdown */
+        ScmPreshutdownServices();
         ScmAutoShutdownServices();
         ScmShutdownServiceDatabase();
 
