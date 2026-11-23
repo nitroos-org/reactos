@@ -87,6 +87,7 @@ extern void func_QueryServiceConfig(void);
 extern void func_QueryServiceConfig2(void);
 extern void func_QueryServiceObjectSecurity(void);
 extern void func_RegConcurrentWrite(void);
+extern void func_RegCreateDeleteStress(void);
 extern void func_RegCreateKeyEx(void);
 extern void func_RegCreateKeyTransacted(void);
 extern void func_RegDeleteTreeOpenHandles(void);
@@ -294,6 +295,7 @@ const struct test winetest_testlist[] =
     { "QueryServiceConfig2", func_QueryServiceConfig2 },
     { "QueryServiceObjectSecurity", func_QueryServiceObjectSecurity },
     { "RegConcurrentWrite", func_RegConcurrentWrite },
+    { "RegCreateDeleteStress", func_RegCreateDeleteStress },
     { "RegCreateKeyEx", func_RegCreateKeyEx },
     { "RegCreateKeyTransacted", func_RegCreateKeyTransacted },
     { "RegDeleteTreeOpenHandles", func_RegDeleteTreeOpenHandles },

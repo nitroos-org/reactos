@@ -87,6 +87,7 @@ list(APPEND SOURCE
     QueryServiceConfig2.c
     QueryServiceObjectSecurity.c
     RegConcurrentWrite.c
+    RegCreateDeleteStress.c
     RegCreateKeyEx.c
     RegCreateKeyTransacted.c
     RegDeleteTreeOpenHandles.c
