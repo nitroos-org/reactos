@@ -20,19 +20,22 @@ setid_main(
     INT i, length;
     PWSTR pszSuffix, pszId = NULL;
     NTSTATUS Status;
+    BOOLEAN bNoErr = ArgsHaveNoErr(argc, argv);
 
     DPRINT("SetId()\n");
 
+    /* the level of a failure in a script (Windows Server 2022): 0x80070057, which noerr does NOT hide when no partition is selected
+       and does hide for an id that is not valid; 0x80042565 for a type that is a Virtual Disk Service error (set id=42), hidden */
     if (CurrentDisk == NULL)
     {
         ConResPuts(StdOut, IDS_SELECT_NO_DISK);
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
     }
 
     if (CurrentPartition == NULL)
     {
         ConResPuts(StdOut, IDS_SELECT_NO_PARTITION);
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
     }
 
     for (i = 1; i < argc; i++)
@@ -45,19 +48,26 @@ setid_main(
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr: a failure does not stop the script; this command never sets an error level */
+            /* noerr: hides the failures that Windows hides (see FAIL_LEVEL) */
         }
         else if (_wcsicmp(argv[i], L"override") == 0)
         {
-            /* override */
+            /* override: the Windows DiskPart takes it and sets the id (measured: set id=07 override); no check of this program
+               needs it overridden, so it changes nothing here */
             DPRINT("OVERRIDE\n");
-            return RefuseUnsupportedOption(L"OVERRIDE");
         }
         else
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return EXIT_SUCCESS;
+            return EXIT_CMD_FAILED;
         }
+    }
+
+    /* no id= : the arguments are not valid */
+    if (pszId == NULL)
+    {
+        ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+        return EXIT_CMD_FAILED;
     }
 
     if (!CheckPartitionLayoutForChange(CurrentDisk))
@@ -68,7 +78,7 @@ setid_main(
         if (!StringToGUID(&CurrentPartition->Gpt.PartitionType, pszId))
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return EXIT_SUCCESS;
+            return FAIL_LEVEL(bNoErr, TRUE, EXIT_CMD_FAILED);
         }
 
         CurrentDisk->Dirty = TRUE;
@@ -88,13 +98,13 @@ setid_main(
         if (length == 0)
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return EXIT_SUCCESS;
+            return EXIT_CMD_FAILED;
         }
 
         if (length > 2 || !IsHexString(pszId))
         {
             ConResPuts(StdErr, IDS_SETID_INVALID_FORMAT);
-            return EXIT_SUCCESS;
+            return FAIL_LEVEL(bNoErr, TRUE, EXIT_CMD_FAILED);
         }
 
         PartitionType = (UCHAR)wcstoul(pszSuffix, NULL, 16);
@@ -102,13 +112,13 @@ setid_main(
         if (PartitionType == 0)
         {
             ConResPuts(StdErr, IDS_SETID_INVALID_FORMAT);
-            return EXIT_SUCCESS;
+            return FAIL_LEVEL(bNoErr, TRUE, EXIT_CMD_FAILED);
         }
 
         if (PartitionType == 0x42)
         {
             ConResPuts(StdErr, IDS_SETID_INVALID_TYPE);
-            return EXIT_SUCCESS;
+            return FAIL_LEVEL(bNoErr, TRUE, EXIT_CMD_BAD_TYPE);
         }
 
         CurrentPartition->Mbr.PartitionType = PartitionType;

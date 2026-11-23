@@ -22,11 +22,13 @@ UniqueIdDisk(
     PWSTR pszSuffix, pszId = NULL;
     INT i;
     ULONG ulValue;
+    BOOLEAN bNoErr = ArgsHaveNoErr(argc, argv);
 
+    /* the level of a failure in a script (Windows Server 2022): 0x80070057 for an id that is not valid, which noerr hides */
     if (CurrentDisk == NULL)
     {
         ConResPuts(StdOut, IDS_SELECT_NO_DISK);
-        return EXIT_SUCCESS;
+        return FAIL_LEVEL(bNoErr, TRUE, EXIT_CMD_FAILED);
     }
 
     if (argc == 2)
@@ -43,15 +45,16 @@ UniqueIdDisk(
         return EXIT_SUCCESS;
     }
 
-    if (argc != 3)
+    /* "uniqueid disk id=<id>", with noerr after it */
+    if (argc != 3 && !(argc == 4 && bNoErr))
     {
         ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
     }
 
-    for (i = 1; i < argc; i++)
+    for (i = 2; i < argc; i++)
     {
-        if (HasPrefix(argv[2], L"id=", &pszSuffix))
+        if (HasPrefix(argv[i], L"id=", &pszSuffix))
         {
             /* id=<Byte>|<GUID> */
             DPRINT("ID : %s\n", pszSuffix);
@@ -59,13 +62,19 @@ UniqueIdDisk(
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr: a failure does not stop the script; this command never sets an error level */
+            /* noerr: hides the failures that Windows hides (see FAIL_LEVEL) */
         }
         else
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return EXIT_SUCCESS;
+            return EXIT_CMD_FAILED;
         }
+    }
+
+    if (pszId == NULL)
+    {
+        ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+        return EXIT_CMD_FAILED;
     }
 
     if (!CheckPartitionLayoutForChange(CurrentDisk))
@@ -76,7 +85,7 @@ UniqueIdDisk(
         if (!StringToGUID(&CurrentDisk->LayoutBuffer->Gpt.DiskId, pszId))
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return EXIT_SUCCESS;
+            return FAIL_LEVEL(bNoErr, TRUE, EXIT_CMD_FAILED);
         }
 
         CurrentDisk->Dirty = TRUE;
@@ -90,14 +99,14 @@ UniqueIdDisk(
             (IsHexString(pszId) == FALSE))
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return EXIT_SUCCESS;
+            return FAIL_LEVEL(bNoErr, TRUE, EXIT_CMD_FAILED);
         }
 
         ulValue = wcstoul(pszId, NULL, 16);
         if ((ulValue == 0) && (errno == ERANGE))
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return EXIT_SUCCESS;
+            return FAIL_LEVEL(bNoErr, TRUE, EXIT_CMD_FAILED);
         }
 
         DPRINT("New Signature: 0x%08lx\n", ulValue);

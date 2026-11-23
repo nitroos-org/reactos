@@ -20,13 +20,15 @@ assign_main(
     WCHAR DriveLetter = UNICODE_NULL;
     INT i, nExclusive = 0;
     BOOL bResult;
+    BOOLEAN bNoErr = ArgsHaveNoErr(argc, argv);
 
     DPRINT1("assign_main()\n");
 
+    /* the level of a failure in a script (Windows Server 2022): 0x80070057 for no volume (noerr hides it) and for invalid arguments (not hidden) */
     if (GetFocusVolume() == NULL)
     {
         ConResPuts(StdOut, IDS_SELECT_NO_VOLUME);
-        return EXIT_SUCCESS;
+        return FAIL_LEVEL(bNoErr, TRUE, EXIT_CMD_FAILED);
     }
 
     for (i = 1; i < argc; i++)
@@ -41,7 +43,7 @@ assign_main(
             else
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                return EXIT_SUCCESS; 
+                return EXIT_CMD_FAILED;
             }
         }
         else if (HasPrefix(argv[i], L"mount=", &pszSuffix))
@@ -51,12 +53,12 @@ assign_main(
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr: a failure does not stop the script; this command never sets an error level */
+            /* noerr: hides the failures that Windows hides (see FAIL_LEVEL) */
         }
         else
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return EXIT_SUCCESS;
+            return EXIT_CMD_FAILED;
         }
     }
 
@@ -69,7 +71,7 @@ assign_main(
     if (nExclusive > 1)
     {
         ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
     }
 
     DPRINT1("VolumeName: %S\n", CurrentVolume->VolumeName);
@@ -82,8 +84,9 @@ assign_main(
 
         if ((DriveLetter < L'C') || (DriveLetter > L'Z'))
         {
+            /* letter=1: "The arguments specified for this command are not valid" on Windows, level 0x80070057 */
             ConResPuts(StdOut, IDS_ASSIGN_INVALID_LETTER);
-            return EXIT_SUCCESS;
+            return EXIT_CMD_FAILED;
         }
 
         if (DriveLetter == CurrentVolume->DriveLetter)

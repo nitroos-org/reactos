@@ -83,8 +83,15 @@ typedef enum _EXIT_CODE
     /* The error level of a command that failed in a script: 0x80070057 as the Windows DiskPart gives it (measured), -2147024809 */
     EXIT_CMD_FAILED = -2147024809,
     /* 0x8004240F, a range given by offset= that cannot be had (the Virtual Disk Service error "not enough usable space") */
-    EXIT_CMD_NO_SPACE = -2147212273
+    EXIT_CMD_NO_SPACE = -2147212273,
+    /* 0x80042416, the Virtual Disk Service error "The path is not found" (remove letter= of a letter the volume does not have) */
+    EXIT_CMD_NOT_FOUND = -2147212266,
+    /* 0x80042565, the Virtual Disk Service error "The specified partition type is not valid for this operation" (set id=42) */
+    EXIT_CMD_BAD_TYPE = -2147211931
 } EXIT_CODE;
+
+/* The level of a failing command in a script (Windows Server 2022, measured): bHideable failures are not an error with noerr */
+#define FAIL_LEVEL(bNoErr, bHideable, level) (((bHideable) && (bNoErr)) ? EXIT_SUCCESS : (level))
 
 typedef struct _COMMAND
 {
@@ -588,6 +595,11 @@ merge_main(
     _In_ PWSTR *argv);
 
 /* misc.c */
+BOOLEAN
+ArgsHaveNoErr(
+    _In_ INT argc,
+    _In_ PWSTR *argv);
+
 EXIT_CODE
 RefuseUnsupportedOption(
     _In_ PCWSTR pszOption);

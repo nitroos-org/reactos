@@ -337,6 +337,22 @@ PrintBusType(
  * An option that diskpart does not implement: the command does nothing, says so and
  * sets the error level (the script run stops, as with any command that fails).
  */
+/* Whether the command line has noerr (for a script: a failure that noerr hides is not an error level) */
+BOOLEAN
+ArgsHaveNoErr(
+    _In_ INT argc,
+    _In_ PWSTR *argv)
+{
+    INT i;
+
+    for (i = 1; i < argc; i++)
+    {
+        if (_wcsicmp(argv[i], L"noerr") == 0)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 EXIT_CODE
 RefuseUnsupportedOption(
     _In_ PCWSTR pszOption)

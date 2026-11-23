@@ -544,7 +544,11 @@ extend_main(
     HMODULE hModule;
     NTSTATUS Status;
     INT i;
+    BOOLEAN bNoErr = ArgsHaveNoErr(argc, argv);
+    EXIT_CODE ecResult = EXIT_SUCCESS;
 
+    /* the level of a failure in a script (Windows Server 2022): 0x80070057 for no volume (noerr hides it) and for arguments that
+       are not valid or a disk= of a basic volume (not hidden here: not measured with noerr), 0x8004240F for no usable space */
     for (i = 1; i < argc; i++)
     {
         if (HasPrefix(argv[i], L"size=", &pszSuffix))
@@ -555,13 +559,15 @@ extend_main(
                 ullSize > MAXLONGLONG / SIZE_1MB)
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                return EXIT_SUCCESS;
+                return EXIT_CMD_FAILED;
             }
         }
         else if (HasPrefix(argv[i], L"disk=", &pszSuffix))
         {
-            /* disk=<N>: space on another disk makes a spanned volume (dynamic disks) */
-            return RefuseUnsupportedOption(L"DISK");
+            /* disk=<N>: space on another disk makes a spanned volume (dynamic disks); this system has basic disks only, and the
+               Windows DiskPart answers a basic volume (measured: disk=0, disk=999) with this message and 0x80070057 */
+            ConPuts(StdOut, L"Cannot extend a basic volume to a different disk.\nPlease use extend without specifying a disk.\n");
+            return EXIT_CMD_FAILED;
         }
         else if (_wcsicmp(argv[i], L"filesystem") == 0)
         {
@@ -569,12 +575,12 @@ extend_main(
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr */
+            /* noerr: hides the failures that Windows hides (see FAIL_LEVEL) */
         }
         else
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return EXIT_SUCCESS;
+            return EXIT_CMD_FAILED;
         }
     }
 
@@ -582,7 +588,7 @@ extend_main(
     if (bFileSystemOnly && ullSize != 0)
     {
         ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
     }
 
     bVolumeFocus = (GetFocusVolume() != NULL);
@@ -590,7 +596,7 @@ extend_main(
     if (PartEntry == NULL || !PartEntry->IsPartitioned)
     {
         ConResPuts(StdOut, bVolumeFocus ? IDS_EXTEND_NOT_PARTITION : IDS_SELECT_NO_VOLUME);
-        return EXIT_SUCCESS;
+        return bVolumeFocus ? EXIT_SUCCESS : FAIL_LEVEL(bNoErr, TRUE, EXIT_CMD_FAILED);
     }
     ulDiskNumber = PartEntry->DiskEntry->DiskNumber;
     ullStartSector = PartEntry->StartSector.QuadPart;
@@ -664,6 +670,7 @@ extend_main(
         if (ullFree == 0 || ullBytes > ullFree)
         {
             ConResPuts(StdOut, IDS_EXTEND_NO_SPACE);
+            ecResult = EXIT_CMD_NO_SPACE;
             goto done;
         }
         ullNewSectors = PartEntry->SectorCount.QuadPart + ullBytes / ulBytesPerSector;
@@ -779,5 +786,5 @@ done:
     if (hVolume != NULL)
         NtClose(hVolume);
 
-    return EXIT_SUCCESS;
+    return ecResult;
 }
