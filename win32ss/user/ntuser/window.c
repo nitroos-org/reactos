@@ -664,10 +664,18 @@ ResumeFree:
    Children = IntWinListChildren(Window);
    if (Children)
    {
+      USER_HELD_POOL_ENTRY HeldChildren;
+
+      /* The sends to children of other threads and the children's own free can end the thread: the list and
+         each child are held so that its cleanup gives them back */
+      UserHoldPoolCo(Children, USERTAG_WINDOWLIST, &HeldChildren);
       for (ChildHandle = Children; *ChildHandle; ++ChildHandle)
       {
-         if ((Child = IntGetWindowObject(*ChildHandle)))
+         USER_REFERENCE_ENTRY ChildRef;
+
+         if ((Child = UserGetWindowObject(*ChildHandle)))
          {
+            UserRefObjectCo(Child, &ChildRef);
             if (!IntWndBelongsToThread(Child, ThreadData))
             {
                /* send WM_DESTROY messages to windows not belonging to the same thread */
@@ -695,10 +703,10 @@ ResumeFree:
             else
                co_UserFreeWindow(Child, ProcessData, ThreadData, SendMessages);
 
-            UserDereferenceObject(Child);
+            UserDerefObjectCo(Child);
          }
       }
-      ExFreePoolWithTag(Children, USERTAG_WINDOWLIST);
+      UserFreePoolCo(&HeldChildren);
    }
 
    if (SendMessages)
