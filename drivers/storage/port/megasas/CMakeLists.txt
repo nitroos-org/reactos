@@ -1,0 +1,5 @@
+add_library(megasas MODULE megasas.c megasas.rc)
+set_module_type(megasas kernelmodedriver)
+add_importlibs(megasas scsiport ntoskrnl hal)
+add_cd_file(TARGET megasas DESTINATION reactos/system32/drivers NO_CAB FOR all)
+add_registry_inf(megasas_reg.inf)

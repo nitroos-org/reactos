@@ -104,6 +104,7 @@ vioscsi.sys = 1,,,,,,x,4,,,,1,4
 viostor.sys = 1,,,,,,x,4,,,,1,4
 pvscsi.sys = 1,,,,,,x,4,,,,1,4
 mptsas.sys = 1,,,,,,x,4,,,,1,4
+megasas.sys = 1,,,,,,x,4,,,,1,4
 blue.sys     = 1,,,,,,x,4,,,,1,4
 vgafonts.cab = 1,,,,,,,1,,,,1,1
 bootvid.dll  = 1,,,,,,,2,,,,1,2
@@ -192,6 +193,8 @@ PCI\VEN_1AF4&DEV_1001 = viostor
 PCI\VEN_1AF4&DEV_1042 = viostor
 PCI\VEN_15AD&DEV_07C0 = pvscsi
 PCI\VEN_1000&DEV_0054 = mptsas
+PCI\VEN_1000&DEV_0060 = megasas
+PCI\VEN_1000&DEV_0079 = megasas
 ;*PNP0600 = uniata
 *PNP0600 = atapi
 USB\CLASS_09 = usbhub
@@ -244,6 +247,7 @@ vioscsi = vioscsi.sys
 viostor = viostor.sys
 pvscsi = pvscsi.sys
 mptsas = mptsas.sys
+megasas = megasas.sys
 disk = disk.sys
 
 [MouseDrivers.Load]
