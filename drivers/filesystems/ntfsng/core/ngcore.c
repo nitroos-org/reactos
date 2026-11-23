@@ -59,7 +59,6 @@ int kshim_icache_busy(struct super_block *sb, unsigned long hashval,
 		int (*test)(struct inode *, void *), void *data);
 extern unsigned int (*kshim_icache_cost)(struct inode *i);
 extern unsigned long kshim_pc_pages, kshim_inodes_live, kshim_counter_reads;
-void kshim_dump_allocs(void);
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len);
 int kshim_sync(struct super_block *sb);
 bool kshim_sb_dirty(struct super_block *sb);
@@ -146,8 +145,12 @@ struct ngc_ncache {
 	u64 dgen[NGC_NC_DGEN];
 	struct ngc_nce e[NGC_NC_N];
 };
-/* 0: off (registry NoNameCache=1), 1: on, 2: verify (registry NameCacheVerify=1): a hit is checked against the lookup, which is used */
-int ngc_nc_mode = 1;
+#if DBG
+/* Test only (registry NameCacheVerify=1, checked builds): a hit is checked against the lookup, which is used */
+int ngc_nc_verify;
+#else
+#define ngc_nc_verify 0   /* compiled out of release */
+#endif
 static unsigned long ngc_nc_bad;
 
 static void ngc_sdc_drop(struct ngc_vol *v, unsigned long long mft_no);
@@ -158,8 +161,13 @@ static void ngc_nc_free(struct ngc_vol *v);
 static void ngc_nc_dirty(struct ngc_vol *v, struct inode *dir);
 static void ngc_sdc_flush(struct ngc_vol *v);
 
-/* Mount-time consistency check: 0 never, 1 after an unclean shutdown or when $MFT is at most 64 MB, 2 always. */
-int ngc_check_policy = 1;
+/* Mount-time consistency check: after an unclean shutdown or when $MFT is at most 64 MB; always in a checked build
+ * whose test hook (registry MountCheck=1) asks for it. */
+#if DBG
+int ngc_check_always;
+#else
+#define ngc_check_always 0   /* compiled out of release */
+#endif
 
 /*
  * Runs the consistency check on the read-only mounted volume.  Returns a reason to stay read-only
@@ -170,8 +178,7 @@ static const char *ngc_mount_check(struct ngc_vol *v, struct ntfs_volume *vol, s
 {
 	struct ngc_fsck_res *r;
 	int err;
-	if (!ngc_check_policy ||
-	    (ngc_check_policy == 1 && !unclean && i_size_read(vol->mft_ino) > (64LL << 20)))
+	if (!ngc_check_always && !unclean && i_size_read(vol->mft_ino) > (64LL << 20))
 		return NULL;
 	r = kzalloc(sizeof(*r), GFP_KERNEL);
 	if (!r) {
@@ -517,7 +524,7 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 		 * smss starts it.  So the flag goes only after the same evidence a clean volume needs: no other
 		 * flag that forces read-only, a $LogFile that is empty or marked clean (a log another system left
 		 * in use is not ours to replay), and a consistency check that ran and found nothing, whatever the
-		 * MountCheck policy says for other volumes.  The write pass then clears the flag before the core
+		 * mount-time check's own policy says for other volumes.  The write pass then clears the flag before the core
 		 * reads the volume.
 		 */
 		int foreign = jrec == NGJ_NONE && dirty && !jerr0 &&
@@ -538,8 +545,6 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 		else if (!ngc_logfile_clean(vol))
 			*why_ro = dirty ? "volume is marked dirty and its $LogFile was not shut down cleanly (needs chkdsk)" :
 				"$LogFile was not shut down cleanly";
-		else if (foreign && !ngc_check_policy)
-			*why_ro = "volume is marked dirty and the mount-time check is disabled (MountCheck=2)";
 		else if (pass == NGC_PASS_CHECK)
 			*why_ro = ngc_mount_check(v, vol, b, need_write || dirty);
 		if (!*why_ro && foreign && pass == NGC_PASS_CHECK) {
@@ -706,7 +711,7 @@ void ngc_umount(ngc_vol *v, int discard)
 		kshim_watch_del(v->watched);
 	ngc_stc_free(v);
 	if (v->nc_stores)
-		printk(KERN_WARNING "NAMECACHE: mode %d: %lu hits, %lu stores, %lu mismatches\n", ngc_nc_mode, v->nc_hits, v->nc_stores, ngc_nc_bad);
+		printk(KERN_WARNING "NAMECACHE: verify %d: %lu hits, %lu stores, %lu mismatches\n", ngc_nc_verify, v->nc_hits, v->nc_stores, ngc_nc_bad);
 	ngc_nc_free(v);
 	ngc_sdc_flush(v);
 	kfree(v->jv);
@@ -860,7 +865,7 @@ static struct ngc_nce *ngc_nc_find(struct ngc_vol *v, struct inode *dir, const u
 	struct ngc_nce *e;
 	unsigned int i;
 
-	if (!v->nc || !ngc_nc_mode || !len || len > NGC_NC_NAME)
+	if (!v->nc || !len || len > NGC_NC_NAME)
 		return NULL;
 	e = ngc_nc_slot(v, dno, name, len);
 	if (e->dir != dno || e->nlen != len || e->gen != v->nc->dgen[ngc_nc_dslot(dno)] || (want_real && !e->rlen))
@@ -877,7 +882,7 @@ static void ngc_nc_store(struct ngc_vol *v, struct inode *dir, const unsigned sh
 	u64 dno = NTFS_I(dir)->mft_no;
 	struct ngc_nce *e;
 
-	if (!ngc_nc_mode || !len || len > NGC_NC_NAME)
+	if (!len || len > NGC_NC_NAME)
 		return;
 	if (!v->nc) {
 		v->nc = kvzalloc(sizeof(*v->nc), GFP_NOFS);
@@ -910,10 +915,12 @@ static void ngc_nc_free(struct ngc_vol *v)
 	v->nc = NULL;
 }
 
-void ngc_set_namecache(int mode)
+#if DBG
+void ngc_set_namecache_verify(void)
 {
-	ngc_nc_mode = mode;
+	ngc_nc_verify = 1;
 }
+#endif
 
 static int ngc_lookup_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, ngc_node **out,
 		unsigned short *real, unsigned int *real_len)
@@ -929,7 +936,7 @@ static int ngc_lookup_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *nam
 		return -ENOTDIR;
 	/* A name found lately in this directory, whose directory has not changed its names since: the same record. */
 	hit = ngc_nc_find(v, dir, name, len, real && real_len);
-	if (hit && ngc_nc_mode == 1) {
+	if (hit && !ngc_nc_verify) {
 		vi = ntfs_iget(v->sb, hit->child);
 		if (!IS_ERR(vi) && NTFS_I(vi)->seq_no == hit->seq) {
 			if (real && real_len) {
@@ -954,9 +961,9 @@ static int ngc_lookup_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *nam
 		return PTR_ERR(r);
 	}
 	vi = r ? r->d_inode : d->d_inode;
-	if (hit && ngc_nc_mode == 2)
+	if (hit && ngc_nc_verify)
 		v->nc_hits++;
-	if (hit && ngc_nc_mode == 2 && (!vi || NTFS_I(vi)->mft_no != hit->child || NTFS_I(vi)->seq_no != hit->seq)) {
+	if (hit && ngc_nc_verify && (!vi || NTFS_I(vi)->mft_no != hit->child || NTFS_I(vi)->seq_no != hit->seq)) {
 		ngc_nc_bad++;
 		printk(KERN_ERR "NAMECACHE: mismatch in directory %llx: cached record %llx seq %x, directory says %llx seq %x (%lu so far)\n",
 		       (unsigned long long)NTFS_I(dir)->mft_no, (unsigned long long)hit->child, hit->seq,
@@ -1800,13 +1807,6 @@ long ngc_read_direct(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned i
 	return len;
 }
 
-void ngc_debug_dump(void)
-{
-	printk("shim: %lu cache pages, %lu live inodes, %lu device reads\n",
-			kshim_pc_pages, kshim_inodes_live, kshim_counter_reads);
-	kshim_dump_allocs();
-}
-
 /* ------------------------------------------------------------------ write side */
 
 /* Evicts unused cached inodes beyond the cache limits; called between core operations. */
@@ -1959,8 +1959,6 @@ static int ngc_commit(struct ngc_vol *v)
  * While the I/O runs other threads run core operations; their metadata writes go to a new live overlay, and reads see
  * the sealed pages too (kshim_jnl.c).  Never from inside a core operation.
  */
-int ngc_unlocked_commit = 1;
-
 void ngc_set_fua(ngc_vol *v, int on)
 {
 	v->bdev->kshim_fua = on;
@@ -1996,20 +1994,11 @@ void ngc_commit_prestart(ngc_vol *v)
 	}
 }
 
-/* NoRetainedCommit=1: commits put their pages in place before they return, as before retained transactions (comparison, fallback). */
-extern int kshim_jnl_noret;
-void ngc_set_no_retain(int off)
-{
-	kshim_jnl_noret = off;
-}
-
 int ngc_commit_begin(ngc_vol *v, int retain)
 {
 	unsigned long long t0 = ngos_ticks();
 	struct block_device *b = v->bdev;
 	int err, r;
-	if (!ngc_unlocked_commit)
-		return ngc_commit_now(v);
 	/* As ngc_commit_now. */
 	if (NVolErrors(NTFS_SB(v->sb)))
 		kshim_jnl_mark_errors(b);
@@ -2343,8 +2332,6 @@ static unsigned long ngc_commit_threshold(struct ngc_vol *v)
 	return min_t(unsigned long, NGC_JNL_COMMIT_PAGES, kshim_jnl_capacity(v->bdev) / 2);
 }
 
-int ngc_free_reservation = 1;	/* 0: an allocation after a free waits for the commit (registry NoFreeReservation=1) */
-
 /*
  * An allocation of about @need clusters can go ahead before the commits that cover pending frees: the allocator leaves
  * the clusters those frees gave back alone (kshim_resv_skip), and the rest of the volume has room for it.  False when a
@@ -2355,7 +2342,7 @@ static bool ngc_resv_ok(struct ngc_vol *v, s64 need)
 	struct ntfs_volume *vol = NTFS_SB(v->sb);
 	s64 resv, avail;
 
-	if (!ngc_free_reservation || !v->watched || !v->bdev->jnl || !NVolFreeClusterKnown(vol))
+	if (!v->watched || !v->bdev->jnl || !NVolFreeClusterKnown(vol))
 		return false;
 	resv = kshim_resv_state(v->bdev);
 	if (resv < 0)
@@ -2376,7 +2363,7 @@ static int ngc_frees_pending(struct ngc_vol *v)
  */
 int ngc_commit_wanted(ngc_vol *v, long long alloc_bytes)
 {
-	if (!v->bdev->jnl || sb_rdonly(v->sb) || !ngc_unlocked_commit)
+	if (!v->bdev->jnl || sb_rdonly(v->sb))
 		return 0;
 	return kshim_jnl_pending(v->bdev) > ngc_commit_threshold(v) ||
 	       (alloc_bytes > 0 && ngc_frees_pending(v) && !ngc_resv_ok(v, (alloc_bytes + (s64)NTFS_SB(v->sb)->cluster_size - 1) >> NTFS_SB(v->sb)->cluster_size_bits));
@@ -2450,7 +2437,7 @@ int ngc_mark_dirty(ngc_vol *v)
 		 * The glue commits at its next safe point without the lock for the I/O (ngc_commit_wanted), and its flusher
 		 * is asked to now; the operation goes on, but not too far past the threshold.
 		 */
-		if (ngc_unlocked_commit && pending <= ngc_commit_hard(v)) {
+		if (pending <= ngc_commit_hard(v)) {
 			if (v->bdev->kshim_kick)
 				v->bdev->kshim_kick(v->bdev->kshim_kick_ctx);
 			return 0;

@@ -23,7 +23,7 @@
 
 #define NG_NODE_VCB 0x4e47
 #define NG_NODE_FCB 0x4e48
-/* Idle FCBs with cached data kept per volume before the oldest is purged (registry "FcbCacheMax" overrides). */
+/* Idle FCBs with cached data kept per volume before the oldest is purged: the smallest value of the limit, which scales with RAM (ntfsng.c). */
 #define NG_FCB_CACHE_DEFAULT 1024
 
 /*
@@ -202,7 +202,7 @@ typedef struct _NG_VCB
 #define NG_FLUSH_PERIOD_MS 2000
 /* The flusher's period while writes of a group commit are not committed (the longest such a write stays not durable when no batch, flush or cleanup comes). */
 #define NG_GROUP_PERIOD_MS 1000
-/* Bytes of extending write-through writes per group commit (registry "GroupCommitMB"; "NoGroupCommit"=1 commits every write as before). */
+/* Bytes of extending write-through writes per group commit. */
 #define NG_GROUP_DEFAULT_MB 32
 /* Over the System process base (8): 13, the critical work queue (EX_CRITICAL_QUEUE_PRIORITY_INCREMENT). */
 #define NG_FLUSHER_PRIORITY_INCREMENT 5
@@ -353,25 +353,27 @@ typedef struct _NG_GLOBAL
     ULONG MaxStackAtIo;             /* stack depth when the core issues a device read */
     UCHAR MaxStackMajor;
     LONG FcbLive;
-    ULONG FcbCacheMax;              /* idle FCBs with cached data kept per volume; MAXULONG = no trimming ("FcbCacheMax", "NoFcbTrim") */
+    ULONG FcbCacheMax;              /* idle FCBs with cached data kept per volume (scaled by RAM at load) */
     LONG Opens;
-    ULONG NoFastQueryOpen;          /* "NoFastQueryOpen" DWORD: no FastIoQueryOpen (comparison, fallback) */
     LONG FastQueryHits, FastQueryMisses;   /* FastIoQueryOpen answered / left to the ordinary open */
-    ULONG PermissiveOpen;           /* diagnostic: grant write access at open, refuse the modification itself */
-    ULONG FuaAliasMB;               /* test only: "FuaAliasMB" DWORD, see NgDevSetFua */
-    ULONG NoFua;                    /* "NoFua" DWORD in the service key: never use Force Unit Access, keep the flushes of the journal */
-    ULONG GroupCommitMB;            /* batch of a group commit in MB ("GroupCommitMB", default NG_GROUP_DEFAULT_MB); 0 = off ("NoGroupCommit"=1) */
-    ULONG FlushJournalOnly;         /* "FlushJournalOnly" DWORD: a file flush leaves a small commit retained (durable in the journal only, as before; comparison) */
-    ULONG FlushAlwaysInPlace;       /* "FlushAlwaysInPlace" DWORD: every file flush puts the committed metadata in place (comparison) */
-    ULONG ForceReadOnly;            /* "ReadOnly" DWORD in the service key: mount every volume read-only */
-    ULONG Verbose;                  /* "Verbose" DWORD: request log (NGDIAG) and periodic core dumps on the debug port */
-    BOOLEAN Disable8dot3;           /* NtfsDisable8dot3NameCreation == 1: no short names for new names */
+#if DBG
+    ULONG PermissiveOpen;           /* test only ("PermissiveOpen", checked builds): grant write access at open, refuse the modification itself */
+    ULONG ForceReadOnly;            /* test only ("ReadOnly", checked builds): mount every volume read-only */
+#endif
+    BOOLEAN Disable8dot3;          /* NtfsDisable8dot3NameCreation == 1: no short names for new names */
     FAST_MUTEX VcbListLock;
     LIST_ENTRY VcbList;
 } NG_GLOBAL;
 
 extern NG_GLOBAL NgGlobal;
-VOID NgDevSetFua(PDEVICE_OBJECT Device, BOOLEAN Fua, ULONGLONG Alias);
+#if DBG
+#define NG_PERMISSIVE_OPEN (NgGlobal.PermissiveOpen)
+#define NG_FORCE_READ_ONLY (NgGlobal.ForceReadOnly)
+#else
+#define NG_PERMISSIVE_OPEN 0   /* test hooks are compiled out of release */
+#define NG_FORCE_READ_ONLY 0
+#endif
+VOID NgDevSetFua(PDEVICE_OBJECT Device, BOOLEAN Fua);
 
 /* ntoskrnl (ReactOS): the last close of a file may leave its dirty data to the lazy writer.  Safe here: the
  * FCB (SectionObjectPointers, lazy write context) lives until the cached file object is closed, which the
@@ -399,9 +401,6 @@ VOID NgDereferenceFcb(PNG_FCB Fcb);
 VOID NgFillStat(PNG_FCB Fcb);
 int NgEnsureNode(PNG_FCB Fcb);
 VOID NgParkNode(PNG_FCB Fcb);
-
-/* diag.c */
-VOID NgDiagLogRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp, NTSTATUS Status);
 
 /* fsctl.c */
 NTSTATUS NgFileSystemControl(PDEVICE_OBJECT DeviceObject, PIRP Irp);

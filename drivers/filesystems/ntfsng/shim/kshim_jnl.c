@@ -141,7 +141,6 @@ enum { KJ_S_NONE = 0, KJ_S_RUNNING = 1, KJ_S_DONE = 2 };
 /* CRC-32 (the usual, reflected 0xedb88320) eight bytes per step: every page of a commit is checksummed twice (descriptor, payload). */
 static u32 kj_crc_t[8][256];
 static int kj_crc_ready;
-int kshim_jnl_noret;		/* registry NoRetainedCommit=1: every commit puts its pages in place before it returns (comparison, fallback) */
 #if DBG
 unsigned long kshim_jnl_fault;
 unsigned long kshim_jnl_fault_stage;	/* where in the commit the fault stops it: 0 half way through the in-place pass, 1 before the COMMITTED header, 2 after it, 3 after the in-place pass */
@@ -649,7 +648,7 @@ int kshim_jnl_activate(struct block_device *b, const struct kj_ext *ext, int nex
 	while (kj_slot_page(j->capacity) < lf_pages)
 		j->capacity++;
 	/* Two slot areas must fit in $LogFile for retained transactions. */
-	j->ret_ok = !kshim_jnl_noret && j->capacity >= KJ_AREA_BASE + 2 * KJ_AREA_SLOTS;
+	j->ret_ok = j->capacity >= KJ_AREA_BASE + 2 * KJ_AREA_SLOTS;
 	/*
 	 * The volume is clean at activation (recovery cleared the dirty flag, or the mount refused a dirty
 	 * one), so no header is left on the medium: the first commit writes one.
