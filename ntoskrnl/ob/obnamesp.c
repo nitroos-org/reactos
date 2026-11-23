@@ -310,6 +310,18 @@ ObpCheckWithinBoundary(
     ULONG i;
 
     SeCaptureSubjectContext(&SubjectContext);
+
+    /*
+     * A thread impersonating below SecurityImpersonation (identification or anonymous) may not act as its
+     * client: it is not judged by the client's SIDs, it is refused, as SeAccessCheck refuses such a context
+     * (Windows not measured: the stricter choice, to verify)
+     */
+    if (SubjectContext.ClientToken != NULL && SubjectContext.ImpersonationLevel < SecurityImpersonation)
+    {
+        SeReleaseSubjectContext(&SubjectContext);
+        return STATUS_BAD_IMPERSONATION_LEVEL;
+    }
+
     Token = (PTOKEN)SeQuerySubjectContextToken(&SubjectContext);
     SepAcquireTokenLockShared(Token);
 
