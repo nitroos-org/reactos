@@ -162,6 +162,8 @@ KMT_TESTFUNC Test_SeAccessCheckAuditAlarm;
 KMT_TESTFUNC Test_SeAccessCheckDifferential;
 KMT_TESTFUNC Test_SeAccessCheckDifferentialFull;
 KMT_TESTFUNC Test_SeAccessCheckDifferentialPerf;
+KMT_TESTFUNC Test_SeAccessCheckLargeDaclPerf;
+KMT_TESTFUNC Test_SeAccessCheckMalformedAcl;
 KMT_TESTFUNC Test_SeAutoInherit;
 KMT_TESTFUNC Test_SeInheritance;
 KMT_TESTFUNC Test_SeLogonSession;
@@ -359,6 +361,8 @@ const KMT_TEST TestList[] =
     { "SeAccessCheckDifferential",          Test_SeAccessCheckDifferential },
     { "-SeAccessCheckDifferentialFull",     Test_SeAccessCheckDifferentialFull },
     { "-SeAccessCheckDifferentialPerf",     Test_SeAccessCheckDifferentialPerf },
+    { "-SeAccessCheckLargeDaclPerf",        Test_SeAccessCheckLargeDaclPerf },
+    { "SeAccessCheckMalformedAcl",          Test_SeAccessCheckMalformedAcl },
     { "SeAutoInherit",                      Test_SeAutoInherit },
     { "SeInheritance",                      Test_SeInheritance },
     { "SeLogonSession",                     Test_SeLogonSession },
