@@ -174,8 +174,7 @@ IsListTrusted(PCWSTR pszDir, PCWSTR pszFile)
     szRoot[2] = L'\\';
     if (!GetVolumeInformationW(szRoot, NULL, 0, NULL, NULL, &dwFlags, szFs, sizeof(szFs) / sizeof(WCHAR)))
         return FALSE;
-    /* NOTE: the NTFS driver does not set FILE_PERSISTENT_ACLS (it enforces the lists all the same), so the
-     * flag cannot tell: only the FAT family is known not to keep lists */
+    /* Only the FAT family is known not to keep lists (the flag alone would also name other file systems) */
     if (!_wcsnicmp(szFs, L"FAT", 3) || !_wcsnicmp(szFs, L"EXFAT", 5))
     {
         /* FAT: no file has an owner or a list of who may write it; every user can change every system file */
