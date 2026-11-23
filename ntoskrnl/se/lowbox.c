@@ -282,6 +282,154 @@ SepCreateLowbox(
     return STATUS_SUCCESS;
 }
 
+/*
+ * The default DACL of a lowbox token gets an entry for its package SID with GENERIC_ALL, after the entries it had
+ * (Windows Server 2022, measured: a lowbox token made from an administrator's token has the administrators,
+ * the system, its logon SID and, last, its package SID). What the process of such a token creates, and its own
+ * token, then name the package: the AppContainer pass of the access check grants the process its own token
+ * (OpenProcessToken) and the objects it makes. The token lock is held.
+ */
+static
+NTSTATUS
+SepLowboxGrantPackageDefaultDacl(
+    _In_ PTOKEN Token,
+    _In_ PSID PackageSid)
+{
+    PACL Old = Token->DefaultDacl, New;
+    PACE FreeAce = NULL;
+    ULONG NewSize, NewDynamicLength, AcesLength = 0;
+    NTSTATUS Status;
+
+    NewSize = ALIGN_UP_BY((Old ? Old->AclSize : sizeof(ACL)) + sizeof(ACCESS_ALLOWED_ACE) - sizeof(ULONG) +
+                          RtlLengthSid(PackageSid), sizeof(ULONG));
+    NewDynamicLength = NewSize + RtlLengthSid(Token->PrimaryGroup);
+    if (NewDynamicLength > Token->DynamicCharged)
+        return STATUS_ALLOTTED_SPACE_EXCEEDED;
+
+    New = ExAllocatePoolWithTag(PagedPool, NewSize, TAG_SE_LOWBOX);
+    if (New == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = RtlCreateAcl(New, NewSize, ACL_REVISION);
+    if (NT_SUCCESS(Status) && Old != NULL && Old->AceCount > 0)
+    {
+        if (!RtlFirstFreeAce(Old, &FreeAce) || FreeAce == NULL)
+        {
+            Status = STATUS_INVALID_ACL;
+        }
+        else
+        {
+            AcesLength = (ULONG)((PUCHAR)FreeAce - (PUCHAR)(Old + 1));
+            Status = RtlAddAce(New, ACL_REVISION, MAXULONG, (PACE)(Old + 1), AcesLength);
+        }
+    }
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(New, ACL_REVISION, GENERIC_ALL, PackageSid);
+    if (NT_SUCCESS(Status))
+        Status = SepRebuildDynamicPartOfToken(Token, NewDynamicLength);
+    if (NT_SUCCESS(Status))
+    {
+        /* As NtSetInformationToken(TokenDefaultDacl) does it: the old DACL's room is free again, the new one's taken */
+        if (Token->DefaultDacl)
+            Token->DynamicAvailable += Token->DefaultDacl->AclSize;
+        if ((PULONG)(Token->PrimaryGroup) != Token->DynamicPart)
+        {
+            RtlMoveMemory(Token->DynamicPart, Token->PrimaryGroup, RtlLengthSid(Token->PrimaryGroup));
+            Token->PrimaryGroup = (PSID)(Token->DynamicPart);
+        }
+        Token->DynamicAvailable -= New->AclSize;
+        Token->DefaultDacl = (PACL)((ULONG_PTR)Token->DynamicPart + RtlLengthSid(Token->PrimaryGroup));
+        RtlCopyMemory(Token->DefaultDacl, New, New->AclSize);
+    }
+    ExFreePoolWithTag(New, TAG_SE_LOWBOX);
+    return Status;
+}
+
+/*
+ * The descriptor of the token object of a lowbox token. Windows Server 2022 (measured, a process of an AppContainer and a
+ * token made by NtCreateLowBoxToken): every entry of the default DACL of the token with all token rights (the user, the
+ * system and the package SID), the administrators with TOKEN_QUERY, and a mandatory label of the token's level with
+ * no write up. The process of the token opens its own token (to query it, as Chromium and the runtime do) through
+ * the package SID's entry; the AppContainer pass grants nothing without one. Called for the object just inserted.
+ */
+NTSTATUS
+NTAPI
+SepLowboxAssignTokenSecurity(
+    _In_ PTOKEN Token)
+{
+    typedef struct _LOWBOX_LABEL_SACL
+    {
+        ACL Acl;
+        struct
+        {
+            ACE_HEADER Header;
+            ACCESS_MASK Mask;
+            SID Sid;
+        } Label;
+    } LOWBOX_LABEL_SACL;
+    LOWBOX_LABEL_SACL Sacl;
+    SECURITY_DESCRIPTOR Sd;
+    PACL Old, Dacl;
+    ULONG Size, i;
+    ULONG LabelRid;
+    NTSTATUS Status;
+
+    SepAcquireTokenLockShared(Token);
+    Old = Token->DefaultDacl;
+    LabelRid = Token->IntegrityLevel;
+    Size = sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) - sizeof(ULONG) + RtlLengthSid(SeAliasAdminsSid);
+    if (Old != NULL)
+        Size += Old->AclSize;
+    Dacl = ExAllocatePoolWithTag(PagedPool, Size, TAG_SE_LOWBOX);
+    if (Dacl == NULL)
+    {
+        SepReleaseTokenLock(Token);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Status = RtlCreateAcl(Dacl, Size, ACL_REVISION);
+    for (i = 0; NT_SUCCESS(Status) && Old != NULL && i < Old->AceCount; i++)
+    {
+        PACCESS_ALLOWED_ACE Ace;
+        ACCESS_MASK Mask;
+
+        if (!NT_SUCCESS(RtlGetAce(Old, i, (PVOID *)&Ace)) || Ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE ||
+            (Ace->Header.AceFlags & INHERIT_ONLY_ACE))
+            continue;
+        Mask = Ace->Mask;
+        RtlMapGenericMask(&Mask, &SeTokenObjectType->TypeInfo.GenericMapping);
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, Mask, (PSID)&Ace->SidStart);
+    }
+    SepReleaseTokenLock(Token);
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, TOKEN_QUERY, SeAliasAdminsSid);
+
+    if (NT_SUCCESS(Status))
+    {
+        RtlZeroMemory(&Sacl, sizeof(Sacl));
+        Sacl.Acl.AclRevision = ACL_REVISION;
+        Sacl.Acl.AclSize = sizeof(Sacl);
+        Sacl.Acl.AceCount = 1;
+        Sacl.Label.Header.AceType = SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+        Sacl.Label.Header.AceSize = sizeof(Sacl.Label);
+        Sacl.Label.Mask = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
+        Sacl.Label.Sid.Revision = SID_REVISION;
+        Sacl.Label.Sid.SubAuthorityCount = 1;
+        Sacl.Label.Sid.IdentifierAuthority = (SID_IDENTIFIER_AUTHORITY){SECURITY_MANDATORY_LABEL_AUTHORITY};
+        Sacl.Label.Sid.SubAuthority[0] = LabelRid;
+
+        Status = RtlCreateSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+        if (NT_SUCCESS(Status))
+            Status = RtlSetDaclSecurityDescriptor(&Sd, TRUE, Dacl, FALSE);
+        if (NT_SUCCESS(Status))
+            Status = RtlSetSaclSecurityDescriptor(&Sd, TRUE, &Sacl.Acl, FALSE);
+        if (NT_SUCCESS(Status))
+            Status = ObSetSecurityObjectByPointer(Token, DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION, &Sd);
+    }
+    ExFreePoolWithTag(Dacl, TAG_SE_LOWBOX);
+    return Status;
+}
+
 /* PUBLIC FUNCTIONS ***********************************************************/
 
 /**
@@ -338,7 +486,7 @@ NtCreateLowBoxToken(
     PVOID Object;
     UCHAR SubAuthorityCount;
     OBJECT_HANDLE_INFORMATION HandleInformation;
-    PTOKEN Token = NULL, NewToken = NULL;
+    PTOKEN Token = NULL, NewToken = NULL, InsertedToken;
     PSEP_LOWBOX Lowbox = NULL;
     HANDLE NewHandle;
     NTSTATUS Status;
@@ -488,11 +636,22 @@ NtCreateLowBoxToken(
             }
         }
     }
+    /* The default DACL names the package, as on Windows */
+    Status = SepLowboxGrantPackageDefaultDacl(NewToken, Package);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("NtCreateLowBoxToken(): adding the package to the default DACL failed (Status 0x%lx)\n", Status);
+        SepReleaseTokenLock(NewToken);
+        goto Quit;
+    }
+
     ExAllocateLocallyUniqueId(&NewToken->ModifiedId);
 
     SepReleaseTokenLock(NewToken);
 
-    /* ObInsertObject dereferences the token when it fails */
+    /* ObInsertObject dereferences the token when it fails; the extra reference keeps it for its descriptor */
+    InsertedToken = NewToken;
+    ObReferenceObject(InsertedToken);
     Status = ObInsertObject(NewToken,
                             NULL,
                             DesiredAccess ? DesiredAccess : HandleInformation.GrantedAccess,
@@ -500,6 +659,12 @@ NtCreateLowBoxToken(
                             NULL,
                             &NewHandle);
     NewToken = NULL;
+    if (NT_SUCCESS(Status))
+    {
+        /* The descriptor of the token names its package, as on Windows; the caller's handle stays as granted */
+        SepLowboxAssignTokenSecurity(InsertedToken);
+    }
+    ObDereferenceObject(InsertedToken);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("NtCreateLowBoxToken(): inserting the token failed (Status 0x%lx)\n", Status);
