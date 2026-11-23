@@ -51,7 +51,8 @@ CheckDirectorySecurity__(
     }
 
     Status = ZwQuerySecurityObject(DirectoryHandle,
-                                   OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION,
+                                   OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION |
+                                   LABEL_SECURITY_INFORMATION,
                                    NULL,
                                    0,
                                    &SecurityDescriptorSize);
@@ -73,7 +74,8 @@ CheckDirectorySecurity__(
     }
 
     Status = ZwQuerySecurityObject(DirectoryHandle,
-                                   OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION,
+                                   OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION |
+                                   LABEL_SECURITY_INFORMATION,
                                    SecurityDescriptor,
                                    SecurityDescriptorSize,
                                    &SecurityDescriptorSize);
@@ -114,9 +116,27 @@ CheckDirectorySecurity__(
                                               &Sacl,
                                               &Defaulted);
         ok_eq_hex(Status, STATUS_SUCCESS);
-        ok(Present == FALSE, "SACL present for %ls\n", DirectoryName);
+        if (!_wcsicmp(DirectoryName, L"\\BaseNamedObjects"))
+        {
+            /* NT 6: a mandatory label only, Low, no write up (measured on Windows Server 2022: S:AI(ML;;NW;;;LW)) */
+            PSYSTEM_MANDATORY_LABEL_ACE Label = NULL;
+
+            ok(Present == TRUE, "SACL not present for %ls\n", DirectoryName);
+            ok(Sacl != NULL && Sacl->AceCount == 1, "Sacl %p for %ls\n", Sacl, DirectoryName);
+            if (Sacl != NULL && Sacl->AceCount == 1 && NT_SUCCESS(RtlGetAce(Sacl, 0, (PVOID *)&Label)))
+            {
+                ok_eq_uint(Label->Header.AceType, SYSTEM_MANDATORY_LABEL_ACE_TYPE);
+                ok_eq_uint(Label->Header.AceFlags, 0);
+                ok_eq_hex(Label->Mask, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP);
+                ok_eq_ulong(*RtlSubAuthoritySid((PSID)&Label->SidStart, 0), SECURITY_MANDATORY_LOW_RID);
+            }
+        }
+        else
+        {
+            ok(Present == FALSE, "SACL present for %ls\n", DirectoryName);
+            ok(Sacl == NULL, "Sacl is %p for %ls\n", Sacl, DirectoryName);
+        }
         ok(Defaulted == FALSE, "SACL defaulted for %ls\n", DirectoryName);
-        ok(Sacl == NULL, "Sacl is %p for %ls\n", Sacl, DirectoryName);
     }
     ExFreePoolWithTag(SecurityDescriptor, 'dSmK');
     ObCloseHandle(DirectoryHandle, KernelMode);
