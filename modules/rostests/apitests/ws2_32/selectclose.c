@@ -12,7 +12,9 @@
 
 #include "ws2_32.h"
 
-#define ROUNDS      5000
+/* 5000 rounds took 31 minutes in a one-processor guest and the shard of the test runner is killed after 7 minutes
+ * without output: 500 rounds, a trace line every 50 */
+#define ROUNDS      500
 #define END_WAIT    5000
 
 typedef enum { SELMODE_READ, SELMODE_WRITE, SELMODE_EXCEPT } SELMODE;
@@ -148,8 +150,12 @@ RaceSelect(const char *Name, int Type, BOOL Listen)
 
     for (Round = 0; Round < ROUNDS; Round++)
     {
-        SELECT_PARAM *Select = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Select));
+        SELECT_PARAM *Select;
         HANDLE Threads[2];
+
+        if ((Round % 50) == 0)
+            trace("%s: round %d\n", Name, Round);
+        Select = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Select));
 
         Select->Socket = MakeSocket(Type, Listen);
         Select->Mode = SELMODE_READ;
