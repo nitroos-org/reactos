@@ -64,4 +64,7 @@ if(NOT MSVC)
         target_compile_definitions(pefixup PRIVATE _TARGET_PE64)
     endif()
     target_link_libraries(pefixup PRIVATE host_includes)
+
+    # repairs and cleans the PDB files of NITRO_PDB_PUBLICS (needs nothing but the C library)
+    add_host_tool(pdbfix pdbfix/pdbfix.c)
 endif()
