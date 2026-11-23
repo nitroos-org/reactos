@@ -15,8 +15,8 @@
  * ones after it count for nothing. Sizes that are not a multiple of 4 and an AceCount
  * larger than the ACEs, with slack in the ACL, are walked as RtlGetAce resolves them. A
  * DACL where RtlGetAce fails for an index (an ACE at or beyond AclSize, a bad revision)
- * makes the checked kernel assert; the free kernel stops the walk there: that row runs on
- * free builds only.
+ * stops the walk there, in checked and free builds alike (row 9; a checked kernel used to
+ * assert).
  *
  * The matrix: MA_MATRIX pseudo-random malformed DACLs (fixed seed, only shapes whose every
  * index RtlGetAce resolves and whose ACEs lie within the test's buffer), each checked for
@@ -485,13 +485,12 @@ START_TEST(SeAccessCheckMalformedAcl)
     MaExpect(&SubjectContext, MaSd, 0x2, TRUE, 0x2);
     MaExpect(&SubjectContext, MaSd, MAXIMUM_ALLOWED, TRUE, 0x2);
 
-#if !DBG
-    /* 9. AceCount 2, one ACE that ends exactly at AclSize: index 1 is not an ACE (RtlGetAce fails; a checked kernel asserts) */
+    /* 9. AceCount 2, one ACE that ends exactly at AclSize: index 1 is not an ACE (RtlGetAce fails): the walk stops
+       there in every build (a checked kernel used to assert) */
     MaInitSd(MaSd, sizeof(ACL) + Ace, 2, ACL_REVISION);
     MaPutAce(MaSd->Buffer, sizeof(ACL), ACCESS_ALLOWED_ACE_TYPE, Ace, 0x1, World);
     MaExpect(&SubjectContext, MaSd, 0x1, TRUE, 0x1);
     MaExpect(&SubjectContext, MaSd, MAXIMUM_ALLOWED, TRUE, 0x1);
-#endif
 
     /* The matrix */
     /* Authenticated Users, not the caller's user: the SIDs' bytes are read as ACE fields too, the same on every machine */

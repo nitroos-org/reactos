@@ -167,6 +167,7 @@ KMT_TESTFUNC Test_SeAccessCheckMalformedAcl;
 KMT_TESTFUNC Test_SeAccessCheckMalformedAclRows;
 KMT_TESTFUNC Test_SeAutoInherit;
 KMT_TESTFUNC Test_SeInheritance;
+KMT_TESTFUNC Test_SeInheritMalformedParent;
 KMT_TESTFUNC Test_SeLogonSession;
 KMT_TESTFUNC Test_SeOwnerRights;
 KMT_TESTFUNC Test_SeOwnerRightsPerf;
@@ -367,6 +368,7 @@ const KMT_TEST TestList[] =
     { "-SeAccessCheckMalformedAclRows",     Test_SeAccessCheckMalformedAclRows },
     { "SeAutoInherit",                      Test_SeAutoInherit },
     { "SeInheritance",                      Test_SeInheritance },
+    { "SeInheritMalformedParent",           Test_SeInheritMalformedParent },
     { "SeLogonSession",                     Test_SeLogonSession },
     { "SeOwnerRights",                      Test_SeOwnerRights },
     { "-SeOwnerRightsPerf",                 Test_SeOwnerRightsPerf },
