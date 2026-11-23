@@ -80,6 +80,7 @@ HKR, , Icon,           0, "-27"
 [MicrosoftMfg]
 %ACPI\VMBUS.DeviceDesc% = NO_DRV,ACPI\VMBUS
 %ACPI\HYPER_V_GEN_COUNTER_V1.DeviceDesc% = NO_DRV,ACPI\HYPER_V_GEN_COUNTER_V1
+%ACPI\MSFT0101.DeviceDesc% = NO_DRV,ACPI\MSFT0101
 
 [NecMfg]
 %NecCb.DeviceDesc% = PCI_ISA_Inst,PCI\VEN_1033&DEV_0001
@@ -100,6 +101,8 @@ HKR, , Icon,           0, "-27"
 [RedHatMfg]
 %PCI\VEN_1AF4&DEV_1002.DeviceDesc% = NO_DRV,PCI\VEN_1AF4&DEV_1002
 %PCI\VEN_1AF4&DEV_1045.DeviceDesc% = NO_DRV,PCI\VEN_1AF4&DEV_1045
+%PCI\VEN_1AF4&DEV_1003.DeviceDesc% = NO_DRV,PCI\VEN_1AF4&DEV_1003
+%PCI\VEN_1AF4&DEV_1043.DeviceDesc% = NO_DRV,PCI\VEN_1AF4&DEV_1043
 
 [VirtualBoxMfg]
 %PCI\VEN_80EE&DEV_CAFE.DeviceDesc% = NO_DRV,PCI\VEN_80EE&DEV_CAFE
@@ -251,11 +254,14 @@ PCI\VEN_10DE&DEV_02A6.DeviceDesc = "nVidia MCPX PCI RAM Controller"
 
 PCI\VEN_1AF4&DEV_1002.DeviceDesc = "VirtIO Balloon Device"
 PCI\VEN_1AF4&DEV_1045.DeviceDesc = "VirtIO Balloon Device"
+PCI\VEN_1AF4&DEV_1003.DeviceDesc = "VirtIO Serial Controller (no driver)"
+PCI\VEN_1AF4&DEV_1043.DeviceDesc = "VirtIO Serial Controller (no driver)"
 
 PCI\VEN_80EE&DEV_CAFE.DeviceDesc = "VirtualBox Guest Device"
 
 ACPI\VMBUS.DeviceDesc = "Hyper-V Virtual Machine Bus"
 ACPI\HYPER_V_GEN_COUNTER_V1.DeviceDesc = "Hyper-V Generation Counter"
+ACPI\MSFT0101.DeviceDesc = "Trusted Platform Module 2.0 (no TPM driver)"
 
 [Strings.0404]
 GenericMfg = "(標準系統裝置)"
