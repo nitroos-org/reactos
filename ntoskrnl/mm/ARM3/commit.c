@@ -124,6 +124,32 @@ MiGetCommitLimit(VOID)
     return MiGetCommitCeiling(MiResidentHeadroom);
 }
 
+/*
+ * The commit limit as the calling process can charge it: what NtQuerySystemInformation and the performance
+ * counters report, so that the available commit (limit less charge) is what a private commitment of that
+ * size gets. Windows reports the limit that binds; here it is the ceiling MiChargeCommit applies to private
+ * user memory (less the resident headroom unless the process is critical, less the kernel reserve).
+ */
+SIZE_T
+NTAPI
+MiGetChargeableCommitLimit(VOID)
+{
+    SIZE_T Ceiling, Headroom;
+
+    Headroom = MiIsCriticalProcess(PsGetCurrentProcess()) ? 0 : MiResidentHeadroom;
+    if (MiPagerBacksCommit())
+    {
+        Ceiling = *(volatile SIZE_T *)&MmTotalCommitLimit;
+        Ceiling = (Ceiling > Headroom) ? (Ceiling - Headroom) : 0;
+    }
+    else
+    {
+        Ceiling = MiGetCommitCeiling(Headroom);
+    }
+
+    return (Ceiling > MiCommitReserve) ? (Ceiling - MiCommitReserve) : 0;
+}
+
 CODE_SEG("INIT")
 VOID
 NTAPI

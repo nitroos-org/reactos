@@ -749,13 +749,13 @@ QSI_DEF(SystemPerformanceInformation)
 
     Spi->AvailablePages = (ULONG)MmAvailablePages;
 
-    /* Commit charge and limit, in pages. As on Windows the limit is physical memory plus the paging
-     * files: callers derive the paging file size from it (ullTotalPageFile - ullTotalPhys), and the
-     * available commit (GlobalMemoryStatusEx ullAvailPageFile) is this limit less the charge. What can
-     * be charged is lower (MiGetCommitLimit: ARM3 cannot page out its private memory, so RAM less a
-     * resident headroom backs it, see commit.c), so never report less than is committed. */
+    /* Commit charge and limit, in pages. The limit is the one the calling process can charge against
+     * (physical memory plus the paging files, less the resident headroom and the kernel reserve, see
+     * MiGetChargeableCommitLimit): the available commit (GlobalMemoryStatusEx ullAvailPageFile, the
+     * performance counters) is this limit less the charge, so a commitment of that size is granted and a
+     * larger one is refused, as on Windows. Never report less than is committed. */
     Spi->CommittedPages = MmTotalCommittedPages;
-    Spi->CommitLimit = max(MiGetReportedCommitLimit(), MmTotalCommittedPages);
+    Spi->CommitLimit = max(MiGetChargeableCommitLimit(), MmTotalCommittedPages);
 
     Spi->PeakCommitment = MmPeakCommitment;
     /* The memory manager counts faults and paging I/O per processor (see MI_PRCB_COUNT_ADD); sum them */
