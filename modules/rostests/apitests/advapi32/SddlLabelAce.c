@@ -84,8 +84,18 @@ START_TEST(SddlLabelAce)
 
         ok(CreateWellKnownSid(WinLowLabelSid, NULL, Sid, &Length), "CreateWellKnownSid failed with %lu\n", GetLastError());
         ok(InitializeAcl(Acl, sizeof(AclBuffer), ACL_REVISION), "InitializeAcl failed\n");
-        ok(AddMandatoryAce(Acl, ACL_REVISION, 0, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP, Sid),
-           "AddMandatoryAce failed with %lu\n", GetLastError());
+        {
+            BOOL (WINAPI *pAddMandatoryAce)(PACL, DWORD, DWORD, DWORD, PSID) =
+                (PVOID)GetProcAddress(GetModuleHandleW(L"advapi32.dll"), "AddMandatoryAce");
+
+            if (!pAddMandatoryAce)
+            {
+                skip("AddMandatoryAce is not exported\n");
+                return;
+            }
+            ok(pAddMandatoryAce(Acl, ACL_REVISION, 0, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP, Sid),
+               "AddMandatoryAce failed with %lu\n", GetLastError());
+        }
         ok(InitializeSecurityDescriptor(&Descriptor, SECURITY_DESCRIPTOR_REVISION), "InitializeSecurityDescriptor failed\n");
         ok(SetSecurityDescriptorSacl(&Descriptor, TRUE, Acl, FALSE), "SetSecurityDescriptorSacl failed\n");
         Text = NULL;
