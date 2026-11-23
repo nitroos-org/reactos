@@ -36,11 +36,15 @@ InitDeviceImpl(VOID)
 
 static
 BOOLEAN
+EngpIsVgaDriverKey(
+    _In_ PCWSTR pwszDeviceKey);
+
+static
+BOOLEAN
 EngpHasVgaDriver(
     _In_ PGRAPHICS_DEVICE pGraphicsDevice)
 {
-    WCHAR awcDeviceKey[256], awcServiceName[100];
-    PWSTR lastBkSlash;
+    WCHAR awcDeviceKey[256];
     NTSTATUS Status;
     ULONG cbValue;
     HKEY hkey;
@@ -62,6 +66,24 @@ EngpHasVgaDriver(
         ERR("Could not read '%S' registry value: 0x%08lx\n", Status);
         return FALSE;
     }
+
+    return EngpIsVgaDriverKey(awcDeviceKey);
+}
+
+/* Is the service of this device key (...\Services\<name>\DeviceN) the VGA driver? */
+static
+BOOLEAN
+EngpIsVgaDriverKey(
+    _In_ PCWSTR pwszDeviceKey)
+{
+    WCHAR awcDeviceKey[256], awcServiceName[100];
+    PWSTR lastBkSlash;
+    NTSTATUS Status;
+    ULONG cbValue;
+    HKEY hkey;
+
+    if (!NT_SUCCESS(RtlStringCchCopyW(awcDeviceKey, ARRAYSIZE(awcDeviceKey), pwszDeviceKey)))
+        return FALSE;
 
     /* Replace 'DeviceN' by 'Video' */
     lastBkSlash = wcsrchr(awcDeviceKey, L'\\');
@@ -385,6 +407,13 @@ EngpUpdateGraphicsDeviceList(VOID)
 
             bFallback = EngpIsFallbackDevice(awcBuffer);
             if (bFallback != (iPass == 1))
+                continue;
+
+            /* Base video uses only the VGA device and the fallback ones: the
+             * device of a display driver is not opened at all, its
+             * initialization could reprogram the adapter the firmware
+             * framebuffer lies on */
+            if (gbBaseVideo && !bFallback && !EngpIsVgaDriverKey(awcBuffer))
                 continue;
 
             /* Initialize the driver for this device */
