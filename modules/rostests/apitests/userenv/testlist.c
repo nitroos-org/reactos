@@ -13,6 +13,7 @@ extern void func_NetworkCatalogUpgrade(void);
 extern void func_ProfileSecurity(void);
 extern void func_ProgramDataSecurity(void);
 extern void func_ProgramFilesSecurity(void);
+extern void func_ProgramFilesRepairSwap(void);
 
 const struct test winetest_testlist[] =
 {
@@ -27,5 +28,6 @@ const struct test winetest_testlist[] =
     { "ProfileSecurity", func_ProfileSecurity },
     { "ProgramDataSecurity", func_ProgramDataSecurity },
     { "ProgramFilesSecurity", func_ProgramFilesSecurity },
+    { "ProgramFilesRepairSwap", func_ProgramFilesRepairSwap },
     { 0, 0 }
 };
