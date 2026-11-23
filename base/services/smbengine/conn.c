@@ -1887,7 +1887,8 @@ ConnThread(LPVOID Parameter)
                 ConnStart(Conn);
         }
         if (Conn->State == ConnConnecting &&
-            TimeReached(Now, Conn->ConnectStart, SmbEngConfig.RequestTimeoutSeconds * 1000))
+            TimeReached(Now, Conn->ConnectStart,
+                        min(SmbEngConfig.RequestTimeoutSeconds, SMBENG_CONNECT_SECONDS) * 1000))
         {
             TearDown(Conn, STATUS_BAD_NETWORK_PATH, ERROR_BAD_NETPATH);
         }
