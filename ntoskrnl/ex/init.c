@@ -1159,6 +1159,17 @@ ExpInitializeExecutive(IN ULONG Cpu,
     CmGetSystemControlValues(LoaderBlock->RegistryBase, CmControlVector);
 
     /*
+     * NitroSessions counts only as a REG_DWORD of 4 bytes, the rule of the Session Manager, Winlogon and the
+     * Windows subsystem, which read the same value: anything else is absent (0). Without it a value of
+     * another type (REG_QWORD 3, REG_BINARY 03 00 00 00) gave the kernel 3 and the user-mode readers 0:
+     * the console was published for a session 1 that the Session Manager never created.
+     */
+    if ((CmpNitroSessionsType == REG_DWORD) && (CmpNitroSessionsLength == sizeof(ULONG)))
+        MmNitroSessions = CmpNitroSessionsData[0];
+    else
+        MmNitroSessions = 0;
+
+    /*
      * NitroSessions 3: the console belongs to session 1, as on Windows (WTSGetActiveConsoleSessionId and
      * KUSER_SHARED_DATA.ActiveConsoleId report 1 there). Session 0 keeps the services and system processes,
      * and its win32k, started before any other, then draws into memory. Set before any win32k loads; every

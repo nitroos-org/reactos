@@ -31,6 +31,11 @@ WCHAR CmSuiteBuffer[128];
 ULONG CmSuiteBufferLength = sizeof(CmSuiteBuffer);
 ULONG CmSuiteBufferType;
 
+/* NitroSessions as stored: one ULONG more than a DWORD, so that a value longer than 4 bytes shows in the length */
+ULONG CmpNitroSessionsData[2];
+ULONG CmpNitroSessionsLength = sizeof(CmpNitroSessionsData);
+ULONG CmpNitroSessionsType;
+
 CMHIVE CmControlHive;
 
 ULONG CmpConfigurationAreaSize = PAGE_SIZE * 4;
@@ -377,9 +382,9 @@ DATA_SEG("INITDATA") CM_SYSTEM_CONTROL_VECTOR CmControlVector[] =
     {
         L"Session Manager",
         L"NitroSessions",
-        &MmNitroSessions,
-        NULL,
-        NULL
+        CmpNitroSessionsData,
+        &CmpNitroSessionsLength,
+        &CmpNitroSessionsType
     },
     {
         L"Session Manager\\Memory Management",
