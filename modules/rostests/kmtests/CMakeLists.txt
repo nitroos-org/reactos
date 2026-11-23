@@ -185,6 +185,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_se/SeAutoInherit.c
     ntos_se/SeHelpers.c
     ntos_se/SeInheritance.c
+    ntos_se/SeInheritMalformedParent.c
     ntos_se/SeLogonSession.c
     ntos_se/SeOwnerRights.c
     ntos_se/SeQueryInfoToken.c
