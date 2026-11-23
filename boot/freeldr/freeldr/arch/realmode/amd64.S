@@ -317,6 +317,12 @@ ExitToLongMode:
     /* Save current stack pointer */
     mov word ptr ds:[stack16], sp
 
+    /* Load the GDT again, as the 32-bit loader does on every way back (exit_to_protected): the BIOS may have run
+       protected mode code of its own during the call and left its GDT in the register (SeaBIOS does so when it has
+       no VGA BIOS to hand an int 10h to). Selector LMODE_CS of that table is not our code segment, and the far jump
+       below faults: the machine resets in a loop and the loader never starts. */
+    lgdt lXdtPrefix ds:[gdtptr]
+
     /* Set PAE and PGE: 10100000b */
     mov eax, cr4
     or eax, HEX(00A0)
