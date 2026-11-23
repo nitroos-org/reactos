@@ -2531,6 +2531,15 @@ WSPConnect(SOCKET Handle,
 
         /* Bind it */
         BindError = WSPBind(Handle, BindAddress, BindAddressLength, lpErrno);
+        if (BindError == SOCKET_ERROR && Socket->SharedData->NonBlocking && lpErrno && *lpErrno == WSAEADDRINUSE &&
+            BindAddress->sa_family == AF_INET)
+        {
+            /* Every free port holds a TIME-WAIT towards this endpoint. A non-blocking connect does not fail
+             * at once for that (Windows reports WSAEADDRINUSE through the connect's completion): bind without
+             * the hint and let the transport refuse the connection */
+            RtlZeroMemory(((PSOCKADDR_IN)BindAddress)->sin_zero, sizeof(((PSOCKADDR_IN)BindAddress)->sin_zero));
+            BindError = WSPBind(Handle, BindAddress, BindAddressLength, lpErrno);
+        }
         HeapFree(GetProcessHeap(), 0, BindAddress);
         if (BindError == SOCKET_ERROR)
             return SOCKET_ERROR;
