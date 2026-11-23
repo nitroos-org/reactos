@@ -13,6 +13,9 @@
 #include <win32k.h>
 DBG_DEFAULT_CHANNEL(UserCallback);
 
+/* The most a window procedure callback copies onto the stack of the receiving thread (see co_IntCallWindowProc) */
+#define CB_MAX_STACK_LPARAM 16384
+
 
 /* CALLBACK MEMORY MANAGEMENT ************************************************/
 
@@ -295,6 +298,7 @@ co_IntCallWindowProc(WNDPROC Proc,
    ULONG ResultLength;
    ULONG ArgumentLength;
    LRESULT Result;
+   PVOID BigBuffer = NULL;
 
    TRACE("co_IntCallWindowProc(Proc %p, IsAnsiProc: %s, Wnd %p, Message %u, wParam %Iu, lParam %Id, lParamBufferSize %d)\n",
        Proc, IsAnsiProc ? "TRUE" : "FALSE", Wnd, Message, wParam, lParam, lParamBufferSize);
@@ -326,6 +330,24 @@ co_IntCallWindowProc(WNDPROC Proc,
          _SEH2_YIELD(return -1);
       }
       _SEH2_END;
+
+      /* A buffer too large for the stack of the receiving thread (the arguments are copied onto it): WM_GETTEXT of
+         an edit control with more than 16 KB of text, a long WM_SETTEXT. It goes into memory of this process, which
+         is the receiver's, and the window procedure gets a pointer to it (lParamBufferSize -2) */
+      if (lParamBufferSize > CB_MAX_STACK_LPARAM)
+      {
+         SIZE_T BigSize = lParamBufferSize;
+
+         if (!NT_SUCCESS(ZwAllocateVirtualMemory(NtCurrentProcess(), &BigBuffer, 0, &BigSize,
+                                                 MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)))
+         {
+            BigBuffer = NULL;
+            IntCbFreeMemory(Arguments);
+            return -1;
+         }
+         RtlCopyMemory(BigBuffer, (char *) Arguments + sizeof(WINDOWPROC_CALLBACK_ARGUMENTS), lParamBufferSize);
+         ArgumentLength = sizeof(WINDOWPROC_CALLBACK_ARGUMENTS);
+      }
    }
    else
    {
@@ -337,8 +359,8 @@ co_IntCallWindowProc(WNDPROC Proc,
    Arguments->Wnd = Wnd;
    Arguments->Msg = Message;
    Arguments->wParam = wParam;
-   Arguments->lParam = lParam;
-   Arguments->lParamBufferSize = lParamBufferSize;
+   Arguments->lParam = BigBuffer ? (LPARAM) BigBuffer : lParam;
+   Arguments->lParamBufferSize = BigBuffer ? -2 : lParamBufferSize;
    ResultPointer = NULL;
    ResultLength = ArgumentLength;
 
@@ -354,6 +376,13 @@ co_IntCallWindowProc(WNDPROC Proc,
    if (!NT_SUCCESS(Status))
    {
       ERR("Error Callback to User space Status %lx Message %d\n",Status,Message);
+      if (BigBuffer)
+      {
+         SIZE_T FreeSize = 0;
+         ZwFreeVirtualMemory(NtCurrentProcess(), &BigBuffer, &FreeSize, MEM_RELEASE);
+      }
+      if (lParamBufferSize != -1)
+         IntCbFreeMemory(Arguments);
       UserEnterCo();
       return 0;
    }
@@ -362,6 +391,11 @@ co_IntCallWindowProc(WNDPROC Proc,
    {
       /* Simulate old behaviour: copy into our local buffer */
       RtlMoveMemory(Arguments, ResultPointer, ArgumentLength);
+      if (BigBuffer)
+      {
+         /* what the window procedure left in the large buffer goes back where the write-back below takes it from */
+         RtlMoveMemory((char *) Arguments + sizeof(WINDOWPROC_CALLBACK_ARGUMENTS), BigBuffer, lParamBufferSize);
+      }
    }
    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
    {
@@ -369,6 +403,12 @@ co_IntCallWindowProc(WNDPROC Proc,
       Status = _SEH2_GetExceptionCode();
    }
    _SEH2_END;
+
+   if (BigBuffer)
+   {
+      SIZE_T FreeSize = 0;
+      ZwFreeVirtualMemory(NtCurrentProcess(), &BigBuffer, &FreeSize, MEM_RELEASE);
+   }
 
    UserEnterCo();
 
