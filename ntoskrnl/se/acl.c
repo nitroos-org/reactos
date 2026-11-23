@@ -551,6 +551,42 @@ SepShouldPropagateAce(
     return FALSE;
 }
 
+/* Whether the ACE at Ace lies within its ACL (which ends at AclEnd) with the fields SepPropagateAcl reads */
+static
+BOOLEAN
+SepPropagatedAceFits(
+    _In_ PUCHAR Ace,
+    _In_ PUCHAR AclEnd)
+{
+    PACE_HEADER Header = (PACE_HEADER)Ace;
+    ULONG_PTR Left;
+    PISID Sid;
+
+    /* The rules of RtlValidAcl and of the capture (SepAclHasAlignedAces: every ACE keeps the next one aligned),
+       for the ACE as it lies in its ACL */
+    if ((ULONG_PTR)Ace >= (ULONG_PTR)AclEnd)
+        return FALSE;
+    Left = (ULONG_PTR)(AclEnd - Ace);
+    if (Left < sizeof(ACE_HEADER) || Header->AceSize < sizeof(ACE_HEADER) || Header->AceSize > Left ||
+        (Header->AceSize % sizeof(ULONG)) != 0)
+    {
+        return FALSE;
+    }
+
+    /* The types whose mask and SID are read: the SID must lie within the ACE */
+    if (Header->AceType <= ACCESS_MAX_MS_V2_ACE_TYPE)
+    {
+        if (Header->AceSize < FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + FIELD_OFFSET(SID, SubAuthority))
+        {
+            return FALSE;
+        }
+        Sid = (PISID)&((PACCESS_ALLOWED_ACE)Ace)->SidStart;
+        if (Header->AceSize < FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + RtlLengthRequiredSid(Sid->SubAuthorityCount))
+            return FALSE;
+    }
+    return TRUE;
+}
+
 /**
  * @brief
  * Propagates (copies) an access control list.
@@ -562,13 +598,19 @@ SepShouldPropagateAce(
  * The length of the ACL that we propagate.
  *
  * @param[in] ExplicitAcl
- * If specified, a valid ACL whose ACEs are copied with their
+ * If specified, an ACL whose ACEs are copied with their
  * inheritance flags unchanged.
  *
  * @param[in] ParentAcl
- * If specified, a valid ACL of the parent object whose inheritable
+ * If specified, the ACL of the parent object whose inheritable
  * ACEs are inherited after the explicit ones. At least one of
  * ExplicitAcl and ParentAcl must be specified.
+ *
+ * Neither ACL is assumed valid: a parent's descriptor may come from the
+ * disk (a file system does not validate it again) and a kernel-mode
+ * caller's explicit one is not captured. The walk of each ACL stops at
+ * its first ACE that does not fit (SepPropagatedAceFits): the ACEs before
+ * it are used, it and the ACEs after it in the same ACL are not.
  *
  * @param[in] Owner
  * A SID that represents the main user that identifies the ACL.
@@ -616,6 +658,8 @@ SepPropagateAcl(
     PACCESS_ALLOWED_ACE AceDest;
     PUCHAR CurrentDest;
     PUCHAR CurrentSource;
+    PUCHAR ExplicitEnd;
+    PUCHAR ParentEnd;
     ULONG i;
     ULONG Written;
     UCHAR AceFlags;
@@ -625,10 +669,10 @@ SepPropagateAcl(
     BOOLEAN WriteTwoAces;
     BOOLEAN ExplicitHasLabel = FALSE;
 
-    /* RtlValidAcl lets a caller's ACL size and reserved fields through, as Windows does */
+    /* Neither ACL is assumed valid (see above): each ACE is checked where it is read */
     ASSERT(AclSource != NULL);
-    ASSERT(!ExplicitAcl || RtlValidAcl(ExplicitAcl));
-    ASSERT(!ParentAcl || RtlValidAcl(ParentAcl));
+    ExplicitEnd = ExplicitAcl ? (PUCHAR)ExplicitAcl + ExplicitAcl->AclSize : NULL;
+    ParentEnd = ParentAcl ? (PUCHAR)ParentAcl + ParentAcl->AclSize : NULL;
 
     /*
      * An explicit mandatory label replaces the label of the parent instead of
@@ -642,6 +686,8 @@ SepPropagateAcl(
 
         for (i = 0; i < ExplicitAcl->AceCount; i++)
         {
+            if (!SepPropagatedAceFits((PUCHAR)ExplicitAce, ExplicitEnd))
+                break;
             if (ExplicitAce->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
             {
                 ExplicitHasLabel = TRUE;
@@ -675,8 +721,20 @@ SepPropagateAcl(
             IsInherited = TRUE;
         }
 
+        /* An ACE that does not fit ends the walk of its ACL: the explicit ACL's then goes on with the parent's */
+        if (!SepPropagatedAceFits(CurrentSource, IsInherited ? ParentEnd : ExplicitEnd))
+        {
+            if (!IsInherited && ParentAcl && ExplicitCount < TotalCount)
+            {
+                i = ExplicitCount - 1;
+                continue;
+            }
+            break;
+        }
+
+        /* Every size written is a multiple of 4 (SepPropagatedAceFits), so the destination stays aligned. The
+           source need not be: an ACL of a descriptor from the disk may lie at any offset (x86 and x64 read it) */
         ASSERT((ULONG_PTR)CurrentDest % sizeof(ULONG) == 0);
-        ASSERT((ULONG_PTR)CurrentSource % sizeof(ULONG) == 0);
         AceDest = (PACCESS_ALLOWED_ACE)CurrentDest;
         AceSource = (PACCESS_ALLOWED_ACE)CurrentSource;
 
@@ -721,20 +779,16 @@ SepPropagateAcl(
             continue;
         }
 
-        /* These all have the same structure */
+        /* These all have the same structure, and SepPropagatedAceFits checked that the SID lies within the ACE */
         ASSERT(AceSource->Header.AceType == ACCESS_ALLOWED_ACE_TYPE ||
                AceSource->Header.AceType == ACCESS_DENIED_ACE_TYPE ||
                AceSource->Header.AceType == SYSTEM_AUDIT_ACE_TYPE ||
                AceSource->Header.AceType == SYSTEM_ALARM_ACE_TYPE);
 
-        ASSERT(AceSource->Header.AceSize % sizeof(ULONG) == 0);
-        ASSERT(AceSource->Header.AceSize >= sizeof(*AceSource));
-
         /* FIXME: filter out duplicate ACEs */
         AceSize = AceSource->Header.AceSize;
         Mask = AceSource->Mask;
         Sid = (PSID)&AceSource->SidStart;
-        ASSERT(AceSize >= FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + RtlLengthSid(Sid));
 
         WriteTwoAces = FALSE;
         /* Map effective ACE to specific rights */

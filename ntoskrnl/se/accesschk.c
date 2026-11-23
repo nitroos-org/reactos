@@ -676,8 +676,8 @@ SepAnalyzeAcesForObjectTypeList(
     SepInitAceCursor(&Cursor, Dacl);
     for (AceIndex = 0; AceIndex < Dacl->AceCount; AceIndex++)
     {
+        /* An AceCount larger than the ACEs the ACL holds (a descriptor from the disk) ends the walk as well */
         Found = SepNextAce(&Cursor, (PVOID*)&CurrentAce);
-        ASSERT(Found);
         if (!Found)
             break;
 
@@ -965,17 +965,16 @@ SepAnalyzeAcesFromDacl(
      * Loop over the DACL in one pass: the cursor gives the ACE RtlGetAce gives
      * for each index (RtlGetAce itself starts over from the first ACE for every
      * index, quadratic in the ACE count). Where RtlGetAce fails (a bad revision,
-     * an ACE at or beyond the end of the ACL) the walk asserts as before and
-     * then ends: the ACE pointer RtlGetAce leaves then lies outside the ACL (or
-     * is not set at all). An ACE that starts inside the ACL but does not lie
-     * within it (SepAceWithinAcl) ends the walk too.
+     * an AceCount larger than the ACEs the ACL holds: an ACE at or beyond the
+     * end of the ACL) the walk ends, in every build: the descriptor may come
+     * from the disk unvalidated, so this is a malformed input like the others
+     * here, not a broken invariant. An ACE that starts inside the ACL but does
+     * not lie within it (SepAceWithinAcl) ends the walk too.
      */
     SepInitAceCursor(&Cursor, Dacl);
     for (AceIndex = 0; AceIndex < Dacl->AceCount; AceIndex++)
     {
-        /* Getting this ACE is important, otherwise something is seriously wrong */
         Found = SepNextAce(&Cursor, (PVOID*)&CurrentAce);
-        ASSERT(Found);
         if (!Found)
             break;
 

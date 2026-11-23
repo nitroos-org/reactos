@@ -20,10 +20,12 @@
  * name, the set of SIDs, the label, hex-encoded): the boundary is the key, so no other boundary
  * reaches it and no process can make one with a name of its choosing. The creator must hold every
  * SID of the boundary as an enabled user or group SID (and as a restricting SID when its token
- * is restricted), and the level of the label must not be above its own. The directory gets the
- * creator's default descriptor, the label of the boundary (a lower level can then create objects
- * in it) and what the creator's security attributes set, with the checks of an ordinary
- * NtSetSecurityObject by the creator. Opening is an access check of the caller's token against
+ * is restricted), and the level of the label must not be above its own. The directory is created
+ * with its whole descriptor in one step: the owner, group and DACL of the creator's security
+ * attributes where it gave them (an owner it may assign, SepCheckOwnerSid), its mandatory label
+ * (up to its own level unless it holds SeRelabelPrivilege) or else the label of the boundary (a
+ * lower level cannot write in it), and the creator's defaults for the rest. No opener finds the
+ * directory before that descriptor is in place. Opening is an access check of the caller's token against
  * the directory's descriptor and label. The directory is not permanent: it goes away with its
  * last handle.
  *
@@ -31,7 +33,9 @@
  * held only for deny (or not enabled) does not count; the name is compared exactly (case
  * included); the SIDs are a set (order and repetition do not matter); a boundary without SIDs
  * cannot be created (STATUS_INVALID_PARAMETER); audit entries of the creator's SACL are not
- * applied (only its mandatory label).
+ * applied (only its mandatory label), and a SACL without a label leaves the boundary's label in
+ * place; an owner the creator may not assign is refused (STATUS_INVALID_OWNER), as for a
+ * registry key it creates.
  */
 
 /* INCLUDES *******************************************************************/
@@ -310,6 +314,18 @@ ObpCheckWithinBoundary(
     ULONG i;
 
     SeCaptureSubjectContext(&SubjectContext);
+
+    /*
+     * A thread impersonating below SecurityImpersonation (identification or anonymous) may not act as its
+     * client: it is not judged by the client's SIDs, it is refused, as SeAccessCheck refuses such a context
+     * (Windows not measured: the stricter choice, to verify)
+     */
+    if (SubjectContext.ClientToken != NULL && SubjectContext.ImpersonationLevel < SecurityImpersonation)
+    {
+        SeReleaseSubjectContext(&SubjectContext);
+        return STATUS_BAD_IMPERSONATION_LEVEL;
+    }
+
     Token = (PTOKEN)SeQuerySubjectContextToken(&SubjectContext);
     SepAcquireTokenLockShared(Token);
 
@@ -333,37 +349,74 @@ ObpCheckWithinBoundary(
     return Status;
 }
 
-/* Gives the namespace directory the mandatory label of the boundary, when that is a mandatory label SID */
+/*
+ * The SACL of a new namespace directory, in pool (NULL when it gets none): the mandatory label ACEs of the
+ * creator's SACL when it holds any (only those: its audit entries are not applied), else the label of the
+ * boundary when that is a mandatory label SID (NO_WRITE_UP at the boundary's level)
+ */
 static
 NTSTATUS
-ObpLabelNamespace(
-    _In_ HANDLE KernelHandle,
-    _In_ POBP_BOUNDARY Boundary)
+ObpBuildNamespaceSacl(
+    _In_opt_ PACL CallerSacl,
+    _In_ POBP_BOUNDARY Boundary,
+    _Out_ PACL *Sacl)
 {
-    UCHAR AclBuffer[sizeof(ACL) + sizeof(SYSTEM_MANDATORY_LABEL_ACE) + sizeof(ULONG) * 2];
     SID_IDENTIFIER_AUTHORITY MandatoryAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
     UCHAR SidBuffer[FIELD_OFFSET(SID, SubAuthority) + sizeof(ULONG)];
-    SECURITY_DESCRIPTOR Sd;
-    PACL Sacl = (PACL)AclBuffer;
     PSID LabelSid = (PSID)SidBuffer;
+    PACE_HEADER Ace;
+    ULONG Size = sizeof(ACL), Count = 0, i;
+    PACL Acl;
     NTSTATUS Status;
 
-    if (Boundary->Label == NULL || !SepIsMandatoryLabelSid((PSID)(Boundary->Label + 1), NULL))
-        return STATUS_SUCCESS;
+    *Sacl = NULL;
 
-    RtlInitializeSid(LabelSid, &MandatoryAuthority, 1);
-    *RtlSubAuthoritySid(LabelSid, 0) = ObpBoundaryLevel(Boundary->Label);
-    Status = RtlCreateAcl(Sacl, sizeof(AclBuffer), ACL_REVISION);
-    if (NT_SUCCESS(Status))
-        Status = RtlAddMandatoryAce(Sacl, ACL_REVISION, 0, LabelSid, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+    /* The creator's labels (its descriptor was captured, so its SACL is valid) */
+    if (CallerSacl)
+    {
+        for (i = 0; i < CallerSacl->AceCount && NT_SUCCESS(RtlGetAce(CallerSacl, i, (PVOID *)&Ace)); i++)
+        {
+            if (Ace->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+            {
+                Size += Ace->AceSize;
+                Count++;
+            }
+        }
+    }
+    if (Count == 0)
+    {
+        if (Boundary->Label == NULL || !SepIsMandatoryLabelSid((PSID)(Boundary->Label + 1), NULL))
+            return STATUS_SUCCESS;
+        Size += FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) + sizeof(SidBuffer);
+    }
+
+    Acl = ExAllocatePoolWithTag(PagedPool, Size, TAG_OB_NAMESPACE);
+    if (!Acl)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    Status = RtlCreateAcl(Acl, Size, ACL_REVISION);
+    if (NT_SUCCESS(Status) && Count != 0)
+    {
+        for (i = 0; i < CallerSacl->AceCount && NT_SUCCESS(Status); i++)
+        {
+            Status = RtlGetAce(CallerSacl, i, (PVOID *)&Ace);
+            if (NT_SUCCESS(Status) && Ace->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+                Status = RtlAddAce(Acl, ACL_REVISION, MAXULONG, Ace, Ace->AceSize);
+        }
+    }
+    else if (NT_SUCCESS(Status))
+    {
+        RtlInitializeSid(LabelSid, &MandatoryAuthority, 1);
+        *RtlSubAuthoritySid(LabelSid, 0) = ObpBoundaryLevel(Boundary->Label);
+        Status = RtlAddMandatoryAce(Acl, ACL_REVISION, 0, LabelSid, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
                                     SYSTEM_MANDATORY_LABEL_NO_WRITE_UP);
-    if (NT_SUCCESS(Status))
-        Status = RtlCreateSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
-    if (NT_SUCCESS(Status))
-        Status = RtlSetSaclSecurityDescriptor(&Sd, TRUE, Sacl, FALSE);
-    if (NT_SUCCESS(Status))
-        Status = ZwSetSecurityObject(KernelHandle, LABEL_SECURITY_INFORMATION, &Sd);
-    return Status;
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(Acl, TAG_OB_NAMESPACE);
+        return Status;
+    }
+    *Sacl = Acl;
+    return STATUS_SUCCESS;
 }
 
 /* SYSTEM CALLS ***************************************************************/
@@ -378,11 +431,12 @@ NtCreatePrivateNamespace(
 {
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     PSECURITY_DESCRIPTOR UserSd = NULL, CapturedSd = NULL;
-    SECURITY_INFORMATION SecurityInformation = 0;
+    SECURITY_DESCRIPTOR NewSd;
+    PACL CallerSacl = NULL, Sacl = NULL;
     OBJECT_ATTRIBUTES KernelAttributes;
     UNICODE_STRING Name = {0};
     OBP_BOUNDARY Boundary;
-    HANDLE KernelHandle = NULL, Handle = NULL, SetHandle;
+    HANDLE KernelHandle = NULL, Handle = NULL;
     ULONG Attributes = 0;
     PVOID Directory = NULL;
     NTSTATUS Status;
@@ -435,7 +489,18 @@ NtCreatePrivateNamespace(
     if (!NT_SUCCESS(Status))
         goto done;
 
-    /* The parts of the caller's descriptor to set (with the checks of a set by the caller) */
+    /*
+     * The descriptor of the directory, complete before it exists: the creator's owner, group and DACL as it gave
+     * them (read once, from the captured copy), its label or else the boundary's; what it leaves out comes from
+     * its token, as for any object it creates. The parts whose validity depends on the creator's token are
+     * checked against it first, as a set by the creator would check them: a label above its own level needs
+     * SeRelabelPrivilege (SeCheckLabelChange), and an owner must be one it may assign (SepCheckOwnerSid).
+     * The kernel-mode create then assigns all of it at the insert: no opener ever finds the directory with
+     * another descriptor, and no handle with WRITE_DAC or WRITE_OWNER is made on the way.
+     */
+    Status = RtlCreateSecurityDescriptor(&NewSd, SECURITY_DESCRIPTOR_REVISION);
+    if (!NT_SUCCESS(Status))
+        goto done;
     if (UserSd)
     {
         BOOLEAN Present, Defaulted;
@@ -446,45 +511,47 @@ NtCreatePrivateNamespace(
         if (!NT_SUCCESS(Status))
             goto done;
         if (NT_SUCCESS(RtlGetOwnerSecurityDescriptor(CapturedSd, &Sid, &Defaulted)) && Sid)
-            SecurityInformation |= OWNER_SECURITY_INFORMATION;
+        {
+            SECURITY_SUBJECT_CONTEXT SubjectContext;
+
+            SeCaptureSubjectContext(&SubjectContext);
+            Status = SepCheckOwnerSid(Sid, &SubjectContext, PreviousMode);
+            SeReleaseSubjectContext(&SubjectContext);
+            if (!NT_SUCCESS(Status))
+                goto done;
+            RtlSetOwnerSecurityDescriptor(&NewSd, Sid, FALSE);
+        }
         if (NT_SUCCESS(RtlGetGroupSecurityDescriptor(CapturedSd, &Sid, &Defaulted)) && Sid)
-            SecurityInformation |= GROUP_SECURITY_INFORMATION;
+            RtlSetGroupSecurityDescriptor(&NewSd, Sid, FALSE);
         if (NT_SUCCESS(RtlGetDaclSecurityDescriptor(CapturedSd, &Present, &Acl, &Defaulted)) && Present)
-            SecurityInformation |= DACL_SECURITY_INFORMATION;
+            RtlSetDaclSecurityDescriptor(&NewSd, TRUE, Acl, FALSE);
         if (NT_SUCCESS(RtlGetSaclSecurityDescriptor(CapturedSd, &Present, &Acl, &Defaulted)) && Present)
-            SecurityInformation |= LABEL_SECURITY_INFORMATION;
+        {
+            Status = SeCheckLabelChange(CapturedSd, PreviousMode);
+            if (!NT_SUCCESS(Status))
+                goto done;
+            CallerSacl = Acl;
+        }
     }
+    Status = ObpBuildNamespaceSacl(CallerSacl, &Boundary, &Sacl);
+    if (!NT_SUCCESS(Status))
+        goto done;
+    if (Sacl)
+        RtlSetSaclSecurityDescriptor(&NewSd, TRUE, Sacl, FALSE);
 
     Status = ObpBuildNamespaceName(&Boundary, &Name);
     if (!NT_SUCCESS(Status))
         goto done;
 
-    /* The directory, with the caller's default descriptor (its subject context); an existing one is a collision */
-    InitializeObjectAttributes(&KernelAttributes, &Name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    /* The directory, with that descriptor (and the creator's subject context); an existing one is a collision */
+    InitializeObjectAttributes(&KernelAttributes, &Name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, &NewSd);
     Status = ZwCreateDirectoryObject(&KernelHandle, DIRECTORY_ALL_ACCESS, &KernelAttributes);
-    if (!NT_SUCCESS(Status))
-        goto done;
-
-    Status = ObpLabelNamespace(KernelHandle, &Boundary);
     if (!NT_SUCCESS(Status))
         goto done;
 
     Status = ObReferenceObjectByHandle(KernelHandle, 0, ObpDirectoryObjectType, KernelMode, &Directory, NULL);
     if (!NT_SUCCESS(Status))
         goto done;
-
-    if (SecurityInformation)
-    {
-        /* NtSetSecurityObject as the caller (its previous mode): owner, privileges and label rules apply */
-        Status = ObOpenObjectByPointer(Directory, 0, NULL, WRITE_DAC | WRITE_OWNER, ObpDirectoryObjectType,
-                                       KernelMode, &SetHandle);
-        if (!NT_SUCCESS(Status))
-            goto done;
-        Status = NtSetSecurityObject(SetHandle, SecurityInformation, UserSd);
-        ObCloseHandle(SetHandle, KernelMode);
-        if (!NT_SUCCESS(Status))
-            goto done;
-    }
 
     /* The creator's handle, with the access it asked for */
     Status = ObOpenObjectByPointer(Directory, Attributes, NULL, DesiredAccess, ObpDirectoryObjectType,
@@ -510,6 +577,8 @@ done:
         ZwClose(KernelHandle);
     if (Name.Buffer)
         ExFreePoolWithTag(Name.Buffer, TAG_OB_NAMESPACE);
+    if (Sacl)
+        ExFreePoolWithTag(Sacl, TAG_OB_NAMESPACE);
     if (CapturedSd)
         SeReleaseSecurityDescriptor(CapturedSd, PreviousMode, TRUE);
     ObpFreeBoundary(&Boundary);

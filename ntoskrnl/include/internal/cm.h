@@ -1172,6 +1172,13 @@ CmpDelayDerefKeyControlBlock(
 
 VOID
 NTAPI
+CmpDerefKeyControlBlockOnClose(
+    IN PCM_KEY_CONTROL_BLOCK Kcb,
+    IN BOOLEAN KcbLocked
+);
+
+VOID
+NTAPI
 CmpFlushDelayDerefKCBs(VOID);
 
 VOID

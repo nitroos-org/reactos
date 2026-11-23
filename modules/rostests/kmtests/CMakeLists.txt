@@ -156,6 +156,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_mm/MmReservedMapping.c
     ntos_mm/MmSystemPtes.c
     ntos_mm/MmSection.c
+    ntos_mm/MmSectionNonFile.c
     ntos_mm/MmSessionSpace.c
     ntos_mm/MmSessionImage.c
     ntos_mm/MmSessionTables.c
@@ -184,6 +185,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_se/SeAutoInherit.c
     ntos_se/SeHelpers.c
     ntos_se/SeInheritance.c
+    ntos_se/SeInheritMalformedParent.c
     ntos_se/SeLogonSession.c
     ntos_se/SeOwnerRights.c
     ntos_se/SeQueryInfoToken.c

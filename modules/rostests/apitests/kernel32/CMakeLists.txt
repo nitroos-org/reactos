@@ -89,6 +89,7 @@ list(APPEND SOURCE
     CompareObjectHandles.c
     PrivateNamespaceSecurity.c
     PrivateNamespaceBoundary.c
+    PrivateNamespaceRace.c
     CancelSynchronousIo.c
     IdnTo.c
     NormalizeString.c

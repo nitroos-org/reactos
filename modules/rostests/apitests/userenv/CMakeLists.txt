@@ -11,6 +11,7 @@ list(APPEND SOURCE
     ProfileSecurity.c
     ProgramDataSecurity.c
     ProgramFilesSecurity.c
+    ProgramFilesRepairSwap.c
     testlist.c)
 
 add_executable(userenv_apitest ${SOURCE})

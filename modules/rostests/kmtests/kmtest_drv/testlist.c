@@ -118,6 +118,7 @@ KMT_TESTFUNC Test_MmContiguousStandby;
 KMT_TESTFUNC Test_MmFaultFileHeld;
 KMT_TESTFUNC Test_MmOomRetry;
 KMT_TESTFUNC Test_MmSection;
+KMT_TESTFUNC Test_MmSectionNonFile;
 KMT_TESTFUNC Test_MmSpecialPool;
 KMT_TESTFUNC Test_MmSpecialPoolOverrun;
 KMT_TESTFUNC Test_MmSpecialPoolUnderrun;
@@ -167,6 +168,7 @@ KMT_TESTFUNC Test_SeAccessCheckMalformedAcl;
 KMT_TESTFUNC Test_SeAccessCheckMalformedAclRows;
 KMT_TESTFUNC Test_SeAutoInherit;
 KMT_TESTFUNC Test_SeInheritance;
+KMT_TESTFUNC Test_SeInheritMalformedParent;
 KMT_TESTFUNC Test_SeLogonSession;
 KMT_TESTFUNC Test_SeOwnerRights;
 KMT_TESTFUNC Test_SeOwnerRightsPerf;
@@ -304,6 +306,7 @@ const KMT_TEST TestList[] =
     { "MmFaultFileHeld",                    Test_MmFaultFileHeld },
     { "MmOomRetry",                         Test_MmOomRetry },
     { "MmSection",                          Test_MmSection },
+    { "MmSectionNonFile",                   Test_MmSectionNonFile },
     { "MmSpecialPool",                      Test_MmSpecialPool },
     { "-MmSpecialPoolOverrun",              Test_MmSpecialPoolOverrun },
     { "-MmSpecialPoolUnderrun",             Test_MmSpecialPoolUnderrun },
@@ -367,6 +370,7 @@ const KMT_TEST TestList[] =
     { "-SeAccessCheckMalformedAclRows",     Test_SeAccessCheckMalformedAclRows },
     { "SeAutoInherit",                      Test_SeAutoInherit },
     { "SeInheritance",                      Test_SeInheritance },
+    { "SeInheritMalformedParent",           Test_SeInheritMalformedParent },
     { "SeLogonSession",                     Test_SeLogonSession },
     { "SeOwnerRights",                      Test_SeOwnerRights },
     { "-SeOwnerRightsPerf",                 Test_SeOwnerRightsPerf },

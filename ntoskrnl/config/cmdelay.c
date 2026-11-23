@@ -30,6 +30,16 @@ KGUARDED_MUTEX CmpDelayDerefKCBLock;
 BOOLEAN CmpDelayDerefKCBWorkItemActive;
 LIST_ENTRY CmpDelayDerefKCBListHead;
 ULONG CmpDelayDerefKCBIntervalInSeconds = 5;
+
+/*
+ * The entries of CmpDelayDerefKCBListHead (changed under CmpDelayDerefKCBLock). Every queued KCB keeps its reference,
+ * and with it the one it holds on its parent, until the worker runs: a queue that grows faster than the worker drains
+ * it (more threads closing keys than processors) pinned parents at the 16-bit reference limit, and every create below
+ * such a parent failed (STATUS_INSUFFICIENT_RESOURCES), for every caller. Above CMP_DELAY_DEREF_INLINE the handle close
+ * path, which holds no KCB lock, drops its reference itself (CmpDerefKeyControlBlockOnClose), as the worker would.
+ */
+ULONG CmpDelayDerefKCBCount;
+#define CMP_DELAY_DEREF_INLINE 1024
 KDPC CmpDelayDerefKCBDpc;
 KTIMER CmpDelayDerefKCBTimer;
 
@@ -240,6 +250,7 @@ CmpDelayDerefKCBWorker(IN PVOID Context)
     {
         /* Grab an entry */
         Entry = (PVOID)RemoveHeadList(&CmpDelayDerefKCBListHead);
+        CmpDelayDerefKCBCount--;
 
         /* We can release the lock now */
         KeReleaseGuardedMutex(&CmpDelayDerefKCBLock);
@@ -277,6 +288,7 @@ CmpFlushDelayDerefKCBs(VOID)
     while (!IsListEmpty(&CmpDelayDerefKCBListHead))
     {
         Entry = (PVOID)RemoveHeadList(&CmpDelayDerefKCBListHead);
+        CmpDelayDerefKCBCount--;
         KeReleaseGuardedMutex(&CmpDelayDerefKCBLock);
 
         Entry = CONTAINING_RECORD(Entry, CM_DELAY_DEREF_KCB_ITEM, ListEntry);
@@ -344,6 +356,7 @@ CmpDelayDerefKeyControlBlock(IN PCM_KEY_CONTROL_BLOCK Kcb)
 
     /* Insert the entry into the list */
     InsertTailList(&CmpDelayDerefKCBListHead, &Entry->ListEntry);
+    CmpDelayDerefKCBCount++;
 
     /* Check if we need to enable anything */
     if (!CmpDelayDerefKCBWorkItemActive)
@@ -356,6 +369,33 @@ CmpDelayDerefKeyControlBlock(IN PCM_KEY_CONTROL_BLOCK Kcb)
 
     /* Release the table lock */
     KeReleaseGuardedMutex(&CmpDelayDerefKCBLock);
+}
+
+/*
+ * The reference of a key body that goes away (CmpDeleteKeyObject: the registry lock held shared, the context the worker
+ * dereferences in). Queued as before while the queue is short; dropped here when it is long (CMP_DELAY_DEREF_INLINE
+ * entries or more), so the queue, and the references it pins, stay bounded however many threads close keys. Always
+ * queued when the caller holds the KCB's lock (KcbLocked: an open whose access check failed drops its body inside the
+ * parse), since the last dereference takes that lock. The count is read without the lock: a bound, not an exact limit.
+ */
+VOID
+NTAPI
+CmpDerefKeyControlBlockOnClose(IN PCM_KEY_CONTROL_BLOCK Kcb,
+                               IN BOOLEAN KcbLocked)
+{
+    PAGED_CODE();
+
+    if (!KcbLocked && *(volatile ULONG *)&CmpDelayDerefKCBCount >= CMP_DELAY_DEREF_INLINE)
+    {
+        static LONG Reported;
+
+        /* Once per boot: the queue reached its bound (a sign of a key create/close storm) */
+        if (!InterlockedExchange(&Reported, 1))
+            DPRINT1("CM: %lu delayed KCB dereferences queued: closing handles dereference inline\n", CmpDelayDerefKCBCount);
+        CmpDereferenceKeyControlBlock(Kcb);
+        return;
+    }
+    CmpDelayDerefKeyControlBlock(Kcb);
 }
 
 VOID
