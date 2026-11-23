@@ -3217,11 +3217,14 @@ VOID FASTCALL IntDestroyOwnedWindows(PWND Window)
     HWND* phWnd;
     PWND pWnd;
     USER_REFERENCE_ENTRY Ref;
+    USER_HELD_POOL_ENTRY HeldList;
 
     List = IntWinListOwnedPopups(Window);
     if (!List)
         return;
 
+    /* The destroy of each owned window calls its procedure: the list goes with the thread if it ends there */
+    UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
     for (phWnd = List; *phWnd; ++phWnd)
     {
         pWnd = ValidateHwndNoErr(*phWnd);
@@ -3243,7 +3246,7 @@ VOID FASTCALL IntDestroyOwnedWindows(PWND Window)
         }
     }
 
-    ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+    UserFreePoolCo(&HeldList);
 }
 
 BOOLEAN co_UserDestroyWindow(PVOID Object)
