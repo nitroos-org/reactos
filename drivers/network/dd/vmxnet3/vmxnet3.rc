@@ -1,0 +1,5 @@
+#define REACTOS_VERSION_DLL
+#define REACTOS_STR_FILE_DESCRIPTION  "VMware vmxnet3 Ethernet Driver"
+#define REACTOS_STR_INTERNAL_NAME     "vmxnet3"
+#define REACTOS_STR_ORIGINAL_FILENAME "vmxnet3.sys"
+#include <reactos/version.rc>
