@@ -24,6 +24,7 @@ extern void func_LifetimeSendSenderEnds(void);
 extern void func_LifetimeSetActiveHookAttach(void);
 extern void func_LifetimeSetFocusTopDestroy(void);
 extern void func_LifetimeWinEventUnhook(void);
+extern void func_LifetimeWindowListExitLeak(void);
 extern void func_CharFuncs(void);
 extern void func_CloseWindow(void);
 extern void func_CopyImage(void);
@@ -224,6 +225,7 @@ const struct test winetest_testlist[] =
     { "LifetimeSetActiveHookAttach", func_LifetimeSetActiveHookAttach },
     { "LifetimeSetFocusTopDestroy", func_LifetimeSetFocusTopDestroy },
     { "LifetimeWinEventUnhook", func_LifetimeWinEventUnhook },
+    { "LifetimeWindowListExitLeak", func_LifetimeWindowListExitLeak },
     { "CharFuncs", func_CharFuncs },
     { "CloseWindow", func_CloseWindow },
     { "CopyImage", func_CopyImage },

@@ -1093,6 +1093,122 @@ START_TEST(LifetimeCallbackExitLeak)
 }
 
 /*
+ * WindowListExitLeak: threads end inside the messages that win32k sends to each window of a window list it
+ * holds (owned popups shown or hidden, children and owned windows destroyed, the owner group and the owned
+ * popups z-ordered). The window-list pool (Uswl) must not grow by one block per thread.
+ */
+enum { WLEL_SHOWPOPUPS, WLEL_CHILDDESTROY, WLEL_CHILDNCDESTROY, WLEL_OWNEDDESTROY, WLEL_OWNERGROUP, WLEL_OWNEDZORDER };
+static volatile LONG gWlelCase, gWlelArmed;
+
+static LRESULT CALLBACK WlelWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    LONG_PTR Role = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    BOOL Exit = FALSE;
+
+    if (gWlelArmed)
+    {
+        switch (gWlelCase)
+        {
+        case WLEL_SHOWPOPUPS: Exit = (Role == 2 && msg == WM_SHOWWINDOW && lParam == SW_PARENTCLOSING); break;
+        case WLEL_CHILDDESTROY: Exit = (Role == 2 && msg == WM_DESTROY); break;
+        case WLEL_CHILDNCDESTROY: Exit = (Role == 2 && msg == WM_NCDESTROY); break;
+        case WLEL_OWNEDDESTROY: Exit = (Role == 2 && msg == WM_DESTROY); break;
+        case WLEL_OWNERGROUP: Exit = (Role == 1 && msg == WM_WINDOWPOSCHANGING); break;
+        case WLEL_OWNEDZORDER: Exit = (Role == 2 && msg == WM_WINDOWPOSCHANGED); break;
+        }
+    }
+    if (Exit)
+        ExitThread(0x77);
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static DWORD WINAPI WlelThread(LPVOID Param)
+{
+    BOOL Child = (gWlelCase == WLEL_CHILDDESTROY || gWlelCase == WLEL_CHILDNCDESTROY);
+    HWND hwnd1, hwnd2;
+
+    hwnd1 = CreateWindowExW(0, L"WlelClass", L"wlel-1", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 40, 40, 200, 150, NULL, NULL,
+                            ghInst, NULL);
+    hwnd2 = CreateWindowExW(0, L"WlelClass", L"wlel-2", (Child ? WS_CHILD : WS_POPUP | WS_CAPTION) | WS_VISIBLE,
+                            Child ? 5 : 80, Child ? 5 : 80, 80, 60, hwnd1, NULL, ghInst, NULL);
+    SetWindowLongPtrW(hwnd1, GWLP_USERDATA, 1);
+    SetWindowLongPtrW(hwnd2, GWLP_USERDATA, 2);
+    ClPump();
+    if (gWlelCase == WLEL_OWNEDZORDER)
+        SetWindowPos(hwnd1, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    ClPump();
+    InterlockedExchange(&gWlelArmed, 1);
+    switch (gWlelCase)
+    {
+    case WLEL_SHOWPOPUPS: ShowOwnedPopups(hwnd1, FALSE); break;
+    case WLEL_OWNERGROUP: SetWindowPos(hwnd2, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); break;
+    case WLEL_OWNEDZORDER:
+        SetWindowPos(hwnd2, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        SetWindowPos(hwnd1, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        break;
+    default: DestroyWindow(hwnd1); break;
+    }
+    InterlockedExchange(&gWlelArmed, 0);
+    DestroyWindow(hwnd1);
+    return 1;
+}
+
+START_TEST(LifetimeWindowListExitLeak)
+{
+    static const struct { LONG Case; const char *Name; BOOL MustEnd; } Cases[] =
+    {
+        { WLEL_SHOWPOPUPS, "ShowOwnedPopups / WM_SHOWWINDOW", TRUE },
+        { WLEL_CHILDDESTROY, "DestroyWindow / WM_DESTROY of a child", TRUE },
+        { WLEL_CHILDNCDESTROY, "DestroyWindow / WM_NCDESTROY of a child", TRUE },
+        { WLEL_OWNEDDESTROY, "DestroyWindow / WM_DESTROY of an owned window", TRUE },
+        { WLEL_OWNERGROUP, "SetWindowPos of a popup / WM_WINDOWPOSCHANGING of its owner", FALSE },
+        { WLEL_OWNEDZORDER, "SetWindowPos of an owner / WM_WINDOWPOSCHANGED of its popup", FALSE },
+    };
+    enum { N = 40 };
+    WNDCLASSW wc = { 0 };
+    ULONG Tag = TAG4("Uswl");
+    unsigned c;
+    int i, Ended;
+    LONG Before, After;
+
+    ClRegister();
+    wc.lpfnWndProc = WlelWndProc;
+    wc.hInstance = ghInst;
+    wc.lpszClassName = L"WlelClass";
+    RegisterClassW(&wc);
+    for (c = 0; c < ARRAYSIZE(Cases); c++)
+    {
+        gWlelCase = Cases[c].Case;
+        Ended = 0;
+        Before = ClPoolLive(Tag);
+        for (i = 0; i < N; i++)
+        {
+            DWORD Code = 0;
+            HANDLE h = CreateThread(NULL, 0, WlelThread, NULL, 0, NULL);
+            if (!h)
+                continue;
+            ok(ClWait(h, 10000), "%s: thread %d did not end\n", Cases[c].Name, i);
+            GetExitCodeThread(h, &Code);
+            if (Code == 0x77)
+                Ended++;
+            CloseHandle(h);
+        }
+        ClSleepPump(300);
+        After = ClPoolLive(Tag);
+        trace("%s: %d of %d threads ended inside the message, Uswl live blocks %ld -> %ld\n", Cases[c].Name, Ended, N,
+              Before, After);
+        if (Cases[c].MustEnd)
+            ok(Ended == N, "%s: only %d of %d threads ended inside the message\n", Cases[c].Name, Ended, N);
+        if (Before < 0 || After < 0)
+            skip("%s: no pool tag information\n", Cases[c].Name);
+        else
+            ok(After - Before < N / 2, "%s: Uswl grew by %ld blocks for %d threads\n", Cases[c].Name, After - Before,
+               Ended);
+    }
+    UnregisterClassW(L"WlelClass", ghInst);
+}
+
+/*
  * BroadcastDesktops: BroadcastSystemMessage to all desktops while another thread creates and closes
  * desktops (the desktop list changes while the broadcast waits for the windows of a desktop).
  */
