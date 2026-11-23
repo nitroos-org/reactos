@@ -33,6 +33,11 @@
 
 #define ROOT    CMP_ACL_UH_PLACE_ROOT
 #define APPC    CMP_ACL_UH_PLACE_APPCONTAINER
+#define POL     CMP_ACL_UH_PLACE_POLICY
+#define POLR    (CMP_ACL_UH_PLACE_POLICY | CMP_ACL_UH_PLACE_POLICY_ROOT)
+
+/* The default of HKU\<SID>\Software\Policies (cmacl.c CmpAclSdUserPolicy) */
+#define POLICY_DACL(Sid) "D:P(A;OICI;KR;;;" Sid ")(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)(A;OICI;KR;;;" RC ")"
 
 #define R_OWNER CMP_ACL_UH_OWNER
 #define R_WRITE CMP_ACL_UH_WRITE
@@ -40,6 +45,7 @@
 #define R_READ  CMP_ACL_UH_READ
 #define R_DENY  CMP_ACL_UH_DENY
 #define R_LABEL CMP_ACL_UH_LABEL
+#define R_POL   CMP_ACL_UH_POLICY
 
 typedef struct _ROW
 {
@@ -129,6 +135,22 @@ static const ROW Rows[] =
     { "package full control elsewhere", OWN, 0, "O:" OWN "G:SY" CHILD_DACL(OWN) "(A;OICI;KA;;;" PKG ")", R_WRITE },
     { "package read elsewhere", OWN, 0, "O:" OWN "G:SY" CHILD_DACL(OWN) "(A;;KR;;;" PKG ")", R_READ },
     { "Everyone full in AppContainer\\Storage", OWN, APPC, "O:" OWN "G:SY" CHILD_DACL(OWN) "(A;;KA;;;WD)", R_WRITE },
+
+    /* Software\Policies: the account reads (measured: the user cannot write HKCU\Software\Policies) */
+    { "policy key: the default (account reads)", OWN, POLR, "O:BAG:SY" POLICY_DACL(OWN), 0 },
+    { "policy subkey: inherited from the default", OWN, POL,
+      "O:BAG:SY" "D:AI(A;OICIID;KR;;;" OWN ")(A;OICIID;KA;;;SY)(A;OICIID;KA;;;BA)(A;OICIID;KR;;;" RC ")", 0 },
+    { "policy key inheriting the account's full access", OWN, POLR, "O:BAG:SY" CHILD_DACL(OWN), R_POL },
+    { "policy subkey the account created", OWN, POL, "O:" OWN "G:" OWN CHILD_DACL(OWN), R_POL },
+    { "policy subkey owned by the account, write only for the system", OWN, POL,
+      "O:" OWN "G:SY" "D:(A;;KR;;;" OWN ")(A;;KA;;;SY)", R_POL },
+    { "policy key: the account set value only", OWN, POLR, "O:BAG:SY" POLICY_DACL(OWN) "(A;;0x2;;;" OWN ")", R_POL },
+    { "policy key: the account create subkey, inherit only", OWN, POLR,
+      "O:BAG:SY" POLICY_DACL(OWN) "(A;CIIO;0x4;;;" OWN ")", R_POL },
+    { "policy key: the account full, object inherit only (never on a key)", OWN, POLR,
+      "O:BAG:SY" POLICY_DACL(OWN) "(A;OIIO;KA;;;" OWN ")", 0 },
+    { "policy key: Everyone full", OWN, POLR, "O:BAG:SY" POLICY_DACL(OWN) "(A;CI;KA;;;WD)", R_WRITE },
+    { "the account's full access outside the policy keys", OWN, 0, "O:BAG:SY" CHILD_DACL(OWN), 0 },
 
     /* Deny ACEs */
     { "deny the account itself (a denial of service)", OWN, 0,

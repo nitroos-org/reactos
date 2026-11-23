@@ -142,13 +142,14 @@ typedef enum _CMP_ACL_RULE
     CmpAclRuleUserUnknown,
     CmpAclRuleOther,
     CmpAclRuleUserUnchecked,    /* a user hive whose check failed: only its account and the system (CmpAclDecide) */
+    CmpAclRuleUserPolicy,       /* HKU\<SID>\Software\Policies and below: the account reads */
     CmpAclRuleMax
 } CMP_ACL_RULE;
 
 static const PCSTR CmpAclRuleNames[CmpAclRuleMax] =
 {
     "cell", "inherited", "master", "hardware", "hive-root", "sam-security",
-    "taskcache", "eventlog", "default", "user", "user-unknown", "other", "user-unchecked"
+    "taskcache", "eventlog", "default", "user", "user-unknown", "other", "user-unchecked", "user-policy"
 };
 
 static const PCSTR CmpAclOpNames[] = { "open", "create", "createlink", "linknode", "followlink", "restamp", "keptgrant" };
@@ -331,6 +332,21 @@ static const CMP_ACL_SD_SPEC CmpAclSdUser =
         { OICI, CmpAclSidRestricted, KR },
         { 0, CmpAclSidAppPackages, KR },
         { 0, CmpAclSidLpacCapability, KR },
+    }
+};
+
+static const CMP_ACL_SD_SPEC CmpAclSdUserPolicy =
+{
+    /* HKU\<SID>\Software\Policies: the policy an administrator sets for the account, which the account only reads
+       (measured on Windows Server 2022: the user cannot write there; the descriptor itself is not captured: the
+       HKU\<SID> one with the account's ACE reduced to read and without the root's own AC/LPAC read, as userenv's
+       REGSD_T_USERPOLICY): O:BAG:SYD:P(A;OICI;KR;;;<SID>)(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)(A;OICI;KR;;;RC) */
+    CmpAclSidAdmins, CmpAclSidSystem, SE_DACL_PROTECTED | CMP_ACL_NULL_SACL_AI, 4,
+    {
+        { OICI, CmpAclSidUser, KR },
+        { OICI, CmpAclSidSystem, KA },
+        { OICI, CmpAclSidAdmins, KA },
+        { OICI, CmpAclSidRestricted, KR },
     }
 };
 
@@ -609,6 +625,25 @@ CmpAclNameMatches(
     return TRUE;
 }
 
+/* Does the KCB's name end in "_Classes" (a user's classes hive, \REGISTRY\USER\<SID>_Classes)? */
+static
+BOOLEAN
+CmpAclNameIsClassesHive(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb)
+{
+    static const CHAR Suffix[] = "_CLASSES";
+    ULONG Chars = CmpAclNameChars(Kcb), i;
+
+    if (Chars <= sizeof(Suffix) - 1)
+        return FALSE;
+    for (i = 0; i < sizeof(Suffix) - 1; i++)
+    {
+        if (RtlUpcaseUnicodeChar(CmpAclNameChar(Kcb, Chars - (sizeof(Suffix) - 1) + i)) != (WCHAR)Suffix[i])
+            return FALSE;
+    }
+    return TRUE;
+}
+
 /*
  * Parse "S-1-<authority>-<sub>..." (optionally followed by "_Classes") from a
  * key name into Sid (room for SID_MAX_SUB_AUTHORITIES). The name comes from
@@ -848,6 +883,17 @@ CmpAclSynthesizeSd(
             CmpAclNameMatches(Path[2], "S-1-5-18", FALSE))
         {
             *Rule = CmpAclRuleDefault;
+        }
+        else if (Depth >= 5 &&
+                 CmpAclNameMatches(Path[3], "SOFTWARE", FALSE) &&
+                 CmpAclNameMatches(Path[4], "POLICIES", FALSE) &&
+                 !CmpAclNameIsClassesHive(Path[2]) &&
+                 CmpAclParseUserSid(Path[2], (PSID)SidBuffer) &&
+                 CmpAclBuildSd(&CmpAclSdUserPolicy, (PSID)SidBuffer, UserBuffer, UserBufferSize))
+        {
+            /* The account's policy keys: the account reads them */
+            *Rule = CmpAclRuleUserPolicy;
+            return UserBuffer;
         }
         else if (CmpAclCachedUserSd(Path[2], UserBuffer, UserBufferSize))
         {
@@ -2401,7 +2447,7 @@ CmpAclDefaultKeySd(
  * set of that hive is deleted, as in the machine hives.
  */
 C_ASSERT(CMP_ACL_UH_OWNER == CMP_ACL_PLANTED_OWNER && CMP_ACL_UH_WRITE == CMP_ACL_PLANTED_WRITE);
-C_ASSERT(((CMP_ACL_UH_READ | CMP_ACL_UH_DENY | CMP_ACL_UH_LABEL) &
+C_ASSERT(((CMP_ACL_UH_READ | CMP_ACL_UH_DENY | CMP_ACL_UH_LABEL | CMP_ACL_UH_POLICY) &
           (CMP_ACL_PLANTED_SYSTEM | CMP_ACL_PLANTED_INHERIT | CMP_ACL_PLANTED_LINK | CMP_ACL_LINK_DELETED)) == 0);
 
 /* Is the KCB's name Upper (as CmpAclNameMatches), one level of a path */
@@ -2423,7 +2469,9 @@ CmpAclUserHivePathIs(
 
 /*
  * Where a key of the user hive being checked is (CMP_ACL_UH_PLACE_*): the
- * hive's root, or below AppContainer\Storage or \Mappings of the classes tree
+ * hive's root, Software\Policies or below (an account's hive: the policy an
+ * administrator sets for the account), or below AppContainer\Storage or
+ * \Mappings of the classes tree
  * (HKCU\Software\Classes, or the root of a <SID>_Classes hive), where the
  * profile code grants package SIDs their storage. The caller holds the
  * registry lock (names and parents do not change).
@@ -2453,6 +2501,13 @@ CmpAclUserHivePlace(
     }
     if (!Walk)
         return 0;
+
+    /* Software\Policies and below, in an account's hive (not a classes hive) */
+    if (!User->Classes && Depth >= 2 &&
+        CmpAclUserHivePathIs(Kcb, Depth, 1, "SOFTWARE") && CmpAclUserHivePathIs(Kcb, Depth, 2, "POLICIES"))
+    {
+        return CMP_ACL_UH_PLACE_POLICY | (Depth == 2 ? CMP_ACL_UH_PLACE_POLICY_ROOT : 0);
+    }
 
     /* <Path>\Storage|Mappings\<something>: a classes hive starts at "Local Settings" */
     First = User->Classes ? 2 : 0;
@@ -2498,7 +2553,17 @@ CmpAclCheckStoredKey(
         CmpAcquireKcbLockShared(Kcb);
         Link = (Kcb->Flags & KEY_SYM_LINK) != 0;
         Sd = CmpAclCopyStoredSd(Kcb, Buffer, sizeof(Buffer), &PoolCopy, FALSE);
-        if (Sd && User)
+        if (!Sd && User && !Link && (CmpAclUserHivePlace(Kcb, User) & CMP_ACL_UH_PLACE_POLICY_ROOT))
+        {
+            /*
+             * Software\Policies without a descriptor of its own inherits the
+             * account's full access from Software: it gets the policy descriptor
+             * (CmpAclDefaultKeySd: the account reads), and its subkeys without
+             * one inherit that from then on.
+             */
+            Reasons = CMP_ACL_UH_POLICY;
+        }
+        else if (Sd && User)
         {
             Reasons = CmpAclUserHiveSdVerdict(Sd, User->OwnSid, CmpAclUserHivePlace(Kcb, User),
                                               &CmpKeyObjectType->TypeInfo.GenericMapping, &Owner);
@@ -2551,6 +2616,9 @@ CmpAclCheckStoredKey(
          * reads, and the user still writes. It is deleted instead.
          */
         if (Link && !Force && (Reasons & CMP_ACL_PLANTED_OWNER))
+            Reasons |= CMP_ACL_PLANTED_LINK;
+        /* The same for a link the account made among its policy keys: policy would be read from where it points */
+        if (Link && User && (Reasons & CMP_ACL_UH_POLICY))
             Reasons |= CMP_ACL_PLANTED_LINK;
         if (Reasons)
         {
@@ -3264,7 +3332,8 @@ CmpAclFlushHives(VOID)
  * finds nothing.
  */
 #define CMP_ACL_USER_RECORDS_PATH   L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\RegAclUserHives"
-#define CMP_ACL_USER_RECORD_VERSION 1
+/* 2: the account's policy keys are judged too: a hive recorded with 1 gets one more check */
+#define CMP_ACL_USER_RECORD_VERSION 2
 
 typedef struct _CMP_ACL_USER_RECORD
 {
@@ -3665,6 +3734,48 @@ CmpAclUserHivePass1(
 }
 
 /*
+ * The policy keys of an account's hive (RootName\Software\Policies and below)
+ * under the check of the hive (User): walked when pass 1 gave no reason to
+ * walk the whole hive. A hive without the key has nothing to check.
+ */
+static
+VOID
+CmpAclCheckUserPolicyKeys(
+    _In_ PCUNICODE_STRING RootName,
+    _Inout_ PCMP_ACL_USER_CHECK User)
+{
+    static const WCHAR Tail[] = L"\\Software\\Policies";
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES Attributes;
+    PWCHAR Path;
+    ULONG Bytes = RootName->Length + sizeof(Tail);
+    HANDLE Key;
+    NTSTATUS Status;
+
+    Path = (Bytes <= MAXUSHORT) ? ExAllocatePoolWithTag(PagedPool, Bytes, TAG_CM_ACL) : NULL;
+    if (!Path)
+    {
+        User->Incomplete++;
+        return;
+    }
+    RtlCopyMemory(Path, RootName->Buffer, RootName->Length);
+    RtlCopyMemory((PUCHAR)Path + RootName->Length, Tail, sizeof(Tail));
+    RtlInitUnicodeString(&Name, Path);
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_OPENLINK, NULL, NULL);
+    Status = ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes);
+    if (NT_SUCCESS(Status))
+    {
+        ZwClose(Key);
+        CmpAclWalk(Path, TRUE, FALSE, User);
+    }
+    else if (Status != STATUS_OBJECT_NAME_NOT_FOUND && Status != STATUS_OBJECT_PATH_NOT_FOUND)
+    {
+        User->Incomplete++;
+    }
+    ExFreePoolWithTag(Path, TAG_CM_ACL);
+}
+
+/*
  * Check a user hive just linked (see PER-USER HIVES above). Called by
  * CmLoadKey with the registry lock held shared and the load lock held, while
  * the hive is marked HIVE_IS_UNLOADING with the loading thread as its
@@ -3765,14 +3876,24 @@ CmpAclCheckUserHive(
         {
             User.Incomplete++;
         }
+    }
+    else if (!Classes && RootName)
+    {
+        /*
+         * Pass 1 judges descriptors without their place: a grant to the account
+         * itself is right anywhere but in its policy keys, and Software\Policies
+         * without a descriptor of its own inherits the account's full access.
+         * That subtree (small) is walked whatever pass 1 found.
+         */
+        CmpAclCheckUserPolicyKeys(RootName, &User);
+    }
 
-        /* The new descriptors go to the file before the record says the hive was checked */
-        if (User.Replaced)
-        {
-            CmpLockHiveFlusherExclusive(CmHive);
-            Synced = HvSyncHive(&CmHive->Hive);
-            CmpUnlockHiveFlusher(CmHive);
-        }
+    /* The new descriptors go to the file before the record says the hive was checked */
+    if (User.Replaced)
+    {
+        CmpLockHiveFlusherExclusive(CmHive);
+        Synced = HvSyncHive(&CmHive->Hive);
+        CmpUnlockHiveFlusher(CmHive);
     }
 
     Complete = (User.Failed == 0 && User.Incomplete == 0);
@@ -4787,6 +4908,7 @@ CmpAclInitialize(VOID)
             case CmpAclRuleEventLog: Spec = &CmpAclSdEventLog; break;
             case CmpAclRuleDefault: Spec = &CmpAclSdDefault; break;
             case CmpAclRuleUser: continue; /* per key */
+            case CmpAclRuleUserPolicy: continue; /* per key */
             case CmpAclRuleUserUnchecked: continue; /* a log name only */
             default: Spec = &CmpAclSdMaster; break; /* master, hardware, user-unknown, other */
         }

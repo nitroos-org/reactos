@@ -19,10 +19,13 @@
 #define CMP_ACL_UH_READ         0x0080  /* a read right for a SID outside the read-trusted set */
 #define CMP_ACL_UH_DENY         0x0100  /* a deny ACE for the account itself, SYSTEM, Administrators or a group every logon holds */
 #define CMP_ACL_UH_LABEL        0x0200  /* a mandatory label above Medium */
+#define CMP_ACL_UH_POLICY       0x0400  /* a policy key the account may change (it owns it, or an ACE gives it a write right) */
 
 /* Where the key is (Place): rules that depend on it */
 #define CMP_ACL_UH_PLACE_ROOT           0x1     /* the hive's root key */
 #define CMP_ACL_UH_PLACE_APPCONTAINER   0x2     /* below ...\AppContainer\Storage or ...\AppContainer\Mappings */
+#define CMP_ACL_UH_PLACE_POLICY         0x4     /* Software\Policies or below (an account hive, not a classes hive) */
+#define CMP_ACL_UH_PLACE_POLICY_ROOT    0x8     /* Software\Policies itself (with CMP_ACL_UH_PLACE_POLICY) */
 
 ULONG
 NTAPI

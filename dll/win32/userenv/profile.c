@@ -149,6 +149,134 @@ UserHiveRootHasUserAce(IN HKEY hKey, IN PSID pSid)
     return bFound;
 }
 
+/*
+ * HKU\<SID>\Software\Policies holds the policy an administrator sets for the account (DisableTaskMgr,
+ * DisallowRun, the screen saver policies...). Measured on Windows Server 2022: the user cannot write there,
+ * an administrator can. The key is created with that descriptor (REGSD_T_USERPOLICY) when it is missing, and
+ * gets it back when it lets anyone but SYSTEM and the administrators write (a profile from before, whose key
+ * inherited the user's full access). Its subkeys are the kernel's: the check of the hive at its first load
+ * under enforcement replaces their descriptors that let the account write (cmacl.c).
+ */
+static
+BOOL
+UserPolicyKeyWritableByOthers(IN HKEY hKey)
+{
+    static const DWORD Write = KEY_SET_VALUE | KEY_CREATE_SUB_KEY | KEY_CREATE_LINK | DELETE | WRITE_DAC |
+                               WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL | MAXIMUM_ALLOWED;
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    BOOL bWritable = TRUE, bPresent, bDefaulted;
+    PSID pSystem = NULL, pAdmins = NULL, pOwner;
+    DWORD dwLength = 0, i;
+    PSECURITY_DESCRIPTOR pSd = NULL;
+    PACL pAcl;
+    ACE_HEADER *pHeader;
+    ACCESS_ALLOWED_ACE *pAce;
+
+    if (!AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &pSystem) ||
+        !AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+                                  0, 0, 0, 0, 0, 0, &pAdmins))
+        goto done;
+
+    RegGetKeySecurity(hKey, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL, &dwLength);
+    if (dwLength == 0)
+        goto done;
+    pSd = HeapAlloc(GetProcessHeap(), 0, dwLength);
+    if (!pSd ||
+        RegGetKeySecurity(hKey, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, pSd, &dwLength) != ERROR_SUCCESS)
+        goto done;
+
+    /* The owner may always change the DACL */
+    if (!GetSecurityDescriptorOwner(pSd, &pOwner, &bDefaulted) || !pOwner ||
+        (!EqualSid(pOwner, pSystem) && !EqualSid(pOwner, pAdmins)))
+        goto done;
+    /* No DACL, or a NULL one: everybody writes */
+    if (!GetSecurityDescriptorDacl(pSd, &bPresent, &pAcl, &bDefaulted) || !bPresent || !pAcl)
+        goto done;
+
+    for (i = 0; i < pAcl->AceCount; i++)
+    {
+        if (!GetAce(pAcl, i, (PVOID *)&pHeader))
+            goto done;
+        if (pHeader->AceType != ACCESS_ALLOWED_ACE_TYPE)
+            continue;
+        if ((pHeader->AceFlags & INHERIT_ONLY_ACE) && !(pHeader->AceFlags & CONTAINER_INHERIT_ACE))
+            continue;
+        pAce = (ACCESS_ALLOWED_ACE *)pHeader;
+        if ((pAce->Mask & Write) &&
+            !EqualSid((PSID)&pAce->SidStart, pSystem) && !EqualSid((PSID)&pAce->SidStart, pAdmins))
+            goto done;
+    }
+    bWritable = FALSE;
+
+done:
+    if (pSd)
+        HeapFree(GetProcessHeap(), 0, pSd);
+    if (pSystem)
+        FreeSid(pSystem);
+    if (pAdmins)
+        FreeSid(pAdmins);
+    return bWritable;
+}
+
+static
+VOID
+StampUserPolicyKeySecurity(IN PCWSTR pszSidString, IN PSID pSid)
+{
+    WCHAR szPath[MAX_PATH];
+    UCHAR Sd[512];
+    SECURITY_ATTRIBUTES Attributes;
+    HKEY hKey = NULL;
+    DWORD dwDisposition;
+    BOOL bRestore;
+    LONG Error;
+
+    if (!RegSdBuild(REGSD_T_USERPOLICY, (const UCHAR *)pSid, Sd, sizeof(Sd)) ||
+        FAILED(StringCbPrintfW(szPath, sizeof(szPath), L"%s\\Software\\Policies", pszSidString)))
+        return;
+
+    /*
+     * The template's present NULL SACL is what Windows reports, but a descriptor with a SACL passed to a create
+     * asks for ACCESS_SYSTEM_SECURITY (refused without SeSecurityPrivilege, also when the key exists): the
+     * create gets the descriptor without it (the NULL SACL says nothing).
+     */
+    ((PISECURITY_DESCRIPTOR_RELATIVE)Sd)->Control &= ~(SE_SACL_PRESENT | SE_SACL_AUTO_INHERITED);
+    ((PISECURITY_DESCRIPTOR_RELATIVE)Sd)->Sacl = 0;
+    Attributes.nLength = sizeof(Attributes);
+    Attributes.lpSecurityDescriptor = (PSECURITY_DESCRIPTOR)Sd;
+    Attributes.bInheritHandle = FALSE;
+
+    /* The owner is not the caller: that needs the restore privilege */
+    bRestore = AcquireRemoveRestorePrivilege(TRUE);
+    /* An existing key first: its descriptor is only replaced when others may write it */
+    Error = RegOpenKeyExW(HKEY_USERS, szPath, 0, READ_CONTROL | WRITE_DAC | WRITE_OWNER, &hKey);
+    if (Error == ERROR_SUCCESS)
+    {
+        dwDisposition = REG_OPENED_EXISTING_KEY;
+    }
+    else
+    {
+        hKey = NULL;
+        Error = RegCreateKeyExW(HKEY_USERS, szPath, 0, NULL, REG_OPTION_NON_VOLATILE,
+                                READ_CONTROL | WRITE_DAC | WRITE_OWNER, &Attributes, &hKey, &dwDisposition);
+    }
+    if (Error == ERROR_SUCCESS && dwDisposition == REG_OPENED_EXISTING_KEY && UserPolicyKeyWritableByOthers(hKey))
+    {
+        Error = RegSetKeySecurity(hKey,
+                                  OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                  DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                  (PSECURITY_DESCRIPTOR)Sd);
+        DPRINT1("userenv: the descriptor of HKU\\%S\\Software\\Policies is set (Error %ld)\n", pszSidString, Error);
+    }
+    else if (Error != ERROR_SUCCESS)
+    {
+        DPRINT1("userenv: HKU\\%S\\Software\\Policies: error %ld\n", pszSidString, Error);
+    }
+    if (bRestore)
+        AcquireRemoveRestorePrivilege(FALSE);
+    if (hKey)
+        RegCloseKey(hKey);
+}
+
 static
 VOID
 StampUserHiveRootSecurity(IN PCWSTR pszSidString)
@@ -188,6 +316,9 @@ StampUserHiveRootSecurity(IN PCWSTR pszSidString)
 done:
     if (hKey)
         RegCloseKey(hKey);
+    /* The account's policy key: read only for the account */
+    if (pSid)
+        StampUserPolicyKeySecurity(pszSidString, pSid);
     if (pSid)
         LocalFree(pSid);
 }
