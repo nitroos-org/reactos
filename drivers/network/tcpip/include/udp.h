@@ -68,6 +68,8 @@ NTSTATUS UDPShutdown(
 UINT UDPAllocatePort( UINT HintPort );
 BOOLEAN UDPReservePort( UINT Port );
 VOID UDPFreePort( UINT Port );
+/* RFC 6056: the ephemeral ports of this start begin at a random port of the range (after TCPConnectionKeyInit) */
+VOID UDPRandomizeFirstPort( VOID );
 
 /* UDP over IPv6 (ip/transport/udp/udp6.c), with Tcpip\Parameters\Ipv6Enable on */
 NTSTATUS UDPSendDatagram6(
