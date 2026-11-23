@@ -54,6 +54,7 @@ list(APPEND SOURCE
     GetUserNameImpersonated.c
     IsTextUnicode.c
     LockServiceDatabase.c
+    LabelAutoInherit.c
     LookupPrivilegeNames.c
     LookupAccountSidCaller.c
     LogonUser.c
@@ -80,6 +81,7 @@ list(APPEND SOURCE
     LsaManageSidNameMapping.c
     LsaSecretStorage.c
     MandatoryLabelOpen.c
+    TokenDuplicateLimit.c
     ProcessThreadLabel.c
     QueryServiceConfig.c
     QueryServiceConfig2.c
@@ -146,13 +148,16 @@ list(APPEND SOURCE
     ServiceNetwork.c
     SetEntriesInAclOld.c
     SetSecurityGenericMap.c
+    SetSecurityTypeMask.c
     SetSecurityInfoKey.c
     SetSecurityInfoKeyInherit.c
+    SetSecurityInfoSplit.c
     RegistryRestrictedOpen.c
     SetNamedSecurityInfoInherit.c
     SddlRights.c
     SddlSids.c
     ServiceProcess.c
+    ServiceInheritOnlyGeneric.c
     ServiceSidToken.c
     PerfCounterValues.c
     PerfProvider.c

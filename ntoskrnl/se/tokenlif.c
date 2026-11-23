@@ -2199,15 +2199,28 @@ NtDuplicateToken(
     }
 
     /*
-     * A process of Low or Untrusted integrity gets a duplicate of a token of High integrity or above that it can
-     * only read, duplicate and impersonate with (Windows Server 2022, measured: a Low or Untrusted child
-     * of the High parent asking QUERY|DUPLICATE|ASSIGN_PRIMARY|ADJUST_DEFAULT is granted 0xb, asking for
-     * MAXIMUM_ALLOWED is granted nothing, so TokenIntegrityLevel cannot be set on the duplicate and the
-     * process cannot be given the token; the same child of a Medium parent gets all the access it asks).
+     * A process of Low or Untrusted integrity, which cannot use its own privileges, gets a duplicate of a token
+     * with an enabled privilege (other than SeChangeNotifyPrivilege) that it can only read, duplicate and
+     * impersonate with (Windows Server 2022, measured: a Low or Untrusted child of the High parent asking
+     * QUERY|DUPLICATE|ASSIGN_PRIMARY|ADJUST_DEFAULT is granted 0xb, asking for MAXIMUM_ALLOWED is granted
+     * nothing, so TokenIntegrityLevel cannot be set on the duplicate and the process cannot be given the
+     * token). Which token it is does not depend on its integrity level or its groups: the same token with
+     * SeImpersonatePrivilege, SeCreateGlobalPrivilege, SeDebugPrivilege or SeTimeZonePrivilege (any one)
+     * enabled is limited, with those disabled or deleted it is not, nor is the token of a standard user
+     * of Medium integrity, whose privileges are disabled. The caller's own token (lowered, so all its
+     * privileges disabled) is not limited.
+     */
+    /*
+     * DELIBERATE STRICTER DIFFERENCE FROM WINDOWS: a source token of High integrity or above is limited for such a
+     * caller also when it has no enabled privilege (the earlier rule of ours). Windows Server 2022 gives the full
+     * access there (measured: the elevated administrator's token with only SeChangeNotifyPrivilege, or with
+     * SeImpersonate/SeCreateGlobal/SeDebug/SeTimeZone disabled, duplicated by a Low or Untrusted child: 0xf01ff
+     * for TOKEN_ALL_ACCESS and MAXIMUM_ALLOWED); matching it would make ours less safe than it is. Operator decision.
      */
     LimitedDuplicate = (PreviousMode != KernelMode &&
-                        Token->IntegrityLevel >= SECURITY_MANDATORY_HIGH_RID &&
-                        SeGetCurrentProcessIntegrityLevel() < SECURITY_MANDATORY_MEDIUM_RID);
+                        SeGetCurrentProcessIntegrityLevel() < SECURITY_MANDATORY_MEDIUM_RID &&
+                        (Token->IntegrityLevel >= SECURITY_MANDATORY_HIGH_RID ||
+                         SeTokenHasEnabledPrivilegeBeyondChangeNotify(Token)));
 
     /*
      * Fail, if the original token is an impersonation token and the caller

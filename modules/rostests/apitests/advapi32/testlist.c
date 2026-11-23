@@ -52,6 +52,7 @@ extern void func_HKEY_CLASSES_ROOT(void);
 extern void func_GetUserNameImpersonated(void);
 extern void func_IsTextUnicode(void);
 extern void func_LockServiceDatabase(void);
+extern void func_LabelAutoInherit(void);
 extern void func_LookupPrivilegeNames(void);
 extern void func_LookupAccountSidCaller(void);
 extern void func_LogonUser(void);
@@ -80,6 +81,7 @@ extern void func_LsaManageSidNameMapping(void);
 extern void func_LsaSecretStorage(void);
 extern void func_NetUserChangePassword(void);
 extern void func_MandatoryLabelOpen(void);
+extern void func_TokenDuplicateLimit(void);
 extern void func_ProcessThreadLabel(void);
 extern void func_QueryServiceConfig(void);
 extern void func_QueryServiceConfig2(void);
@@ -163,8 +165,10 @@ extern void func_ServiceVirtualAccount(void);
 extern void func_ServiceNetwork(void);
 extern void func_SetEntriesInAclOld(void);
 extern void func_SetSecurityGenericMap(void);
+extern void func_SetSecurityTypeMask(void);
 extern void func_SetSecurityInfoKey(void);
 extern void func_SetSecurityInfoKeyInherit(void);
+extern void func_SetSecurityInfoSplit(void);
 extern void func_RegistryRestrictedOpen(void);
 extern void func_SetNamedSecurityInfoInherit(void);
 extern void func_SddlRights(void);
@@ -181,6 +185,7 @@ extern void func_RegWow64SharedCreate(void);
 extern void func_RegWow64Aliases(void);
 extern void func_RegWow64RelativeView(void);
 extern void func_ServiceProcess(void);
+extern void func_ServiceInheritOnlyGeneric(void);
 extern void func_ServiceSidToken(void);
 extern void func_ServiceStructLayout(void);
 extern void func_ServiceTriggerPrivileges(void);
@@ -252,6 +257,7 @@ const struct test winetest_testlist[] =
     { "GetUserNameImpersonated", func_GetUserNameImpersonated },
     { "IsTextUnicode" , func_IsTextUnicode },
     { "LockServiceDatabase" , func_LockServiceDatabase },
+    { "LabelAutoInherit", func_LabelAutoInherit },
     { "LookupPrivilegeNames", func_LookupPrivilegeNames },
     { "LookupAccountSidCaller", func_LookupAccountSidCaller },
     { "LogonUser", func_LogonUser },
@@ -280,6 +286,7 @@ const struct test winetest_testlist[] =
     { "LsaSecretStorage", func_LsaSecretStorage },
     { "NetUserChangePassword", func_NetUserChangePassword },
     { "MandatoryLabelOpen", func_MandatoryLabelOpen },
+    { "TokenDuplicateLimit", func_TokenDuplicateLimit },
     { "ProcessThreadLabel", func_ProcessThreadLabel },
     { "QueryServiceConfig", func_QueryServiceConfig },
     { "QueryServiceConfig2", func_QueryServiceConfig2 },
@@ -363,13 +370,16 @@ const struct test winetest_testlist[] =
     { "ServiceNetwork", func_ServiceNetwork },
     { "SetEntriesInAclOld", func_SetEntriesInAclOld },
     { "SetSecurityGenericMap", func_SetSecurityGenericMap },
+    { "SetSecurityTypeMask", func_SetSecurityTypeMask },
     { "SetSecurityInfoKey", func_SetSecurityInfoKey },
     { "SetSecurityInfoKeyInherit", func_SetSecurityInfoKeyInherit },
+    { "SetSecurityInfoSplit", func_SetSecurityInfoSplit },
     { "RegistryRestrictedOpen", func_RegistryRestrictedOpen },
     { "SetNamedSecurityInfoInherit", func_SetNamedSecurityInfoInherit },
     { "SddlRights", func_SddlRights },
     { "SddlSids", func_SddlSids },
     { "ServiceProcess", func_ServiceProcess },
+    { "ServiceInheritOnlyGeneric", func_ServiceInheritOnlyGeneric },
     { "ServiceSidToken", func_ServiceSidToken },
     { "ServiceStructLayout", func_ServiceStructLayout },
     { "ServiceTriggerPrivileges", func_ServiceTriggerPrivileges },

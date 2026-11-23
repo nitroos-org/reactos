@@ -58,6 +58,14 @@ TestSystemDebugControl(
                                 NULL);
 }
 
+/*
+ * Windows Server 2022, booted without a kernel debugger (measured from an elevated administrator with SeDebugPrivilege
+ * disabled and enabled, and from a standard user, 64 and 32 bit: every command from 0 to 47 and some larger values with
+ * NULL buffers): every command except SysDbgGetTriageDump (29) and SysDbgGetLiveKernelDump (37) returns
+ * STATUS_DEBUGGER_INACTIVE, whatever the privilege and whether the command is known; those two are decided by the
+ * privilege first (STATUS_ACCESS_DENIED), then by the empty buffer (STATUS_INFO_LENGTH_MISMATCH). With a debugger
+ * attached nothing was measured: the rows that hold only for a kernel that implements the command are not checked.
+ */
 START_TEST(NtSystemDebugControl)
 {
     NTSTATUS Status;
@@ -89,8 +97,9 @@ START_TEST(NtSystemDebugControl)
                                       sizeof(DebuggerInfo),
                                       NULL);
 
-    IsDebuggerActive = NT_SUCCESS(Status) && !DebuggerInfo.KernelDebuggerNotPresent;
-    // DebuggerInfo.KernelDebuggerEnabled; // SharedUserData->KdDebuggerEnabled;
+    /* A kernel booted with debugging enabled counts as active even while no debugger answers: only a kernel without it was measured */
+    IsDebuggerActive = NT_SUCCESS(Status) &&
+                       (!DebuggerInfo.KernelDebuggerNotPresent || DebuggerInfo.KernelDebuggerEnabled);
 
     trace("Debugger is %s\n", IsDebuggerActive ? "active" : "inactive");
 
@@ -105,6 +114,11 @@ START_TEST(NtSystemDebugControl)
     ok_eq_hex(Status, STATUS_SUCCESS);
     Status = TestSystemDebugControl(SysDbgGetTriageDump /* 29 */);
     ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+    if (Version >= NTDDI_WINBLUE)
+    {
+        Status = TestSystemDebugControl((SYSDBG_COMMAND)37 /* SysDbgGetLiveKernelDump */);
+        ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+    }
 
     /* Now, enable the debug privilege for the rest of the tests */
     Status = RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, TRUE, FALSE, &PrivilegeSet[1]);
@@ -127,7 +141,11 @@ START_TEST(NtSystemDebugControl)
     {
         Status = TestSystemDebugControl((SYSDBG_COMMAND)Command);
         if (!IsVistaOrHigher || IsDebuggerActive)
-            ok_neq_hex_test(Command, Status, STATUS_INVALID_INFO_CLASS);
+        {
+            /* SysDbgQueryModuleInformation was removed in NT 4: not measured with a debugger */
+            if (Command != 0)
+                ok_neq_hex_test(Command, Status, STATUS_INVALID_INFO_CLASS);
+        }
         else
             ok_eq_hex_test(Command, Status, STATUS_DEBUGGER_INACTIVE);
     }
@@ -140,7 +158,12 @@ START_TEST(NtSystemDebugControl)
         Status = TestSystemDebugControl(SysDbgBreakPoint /* 6 */);
         if (!SharedUserData->KdDebuggerEnabled /*&& (!IsVistaOrHigher || IsDebuggerActive)*/)
         {
-            ok_eq_hex_test(Command, Status, STATUS_UNSUCCESSFUL);
+            /* Not called on the reference (it would break into a debugger); by analogy with every other command
+               (measured) a kernel without a debugger answers STATUS_DEBUGGER_INACTIVE */
+            if (IsVistaOrHigher)
+                ok_eq_hex_test(Command, Status, STATUS_DEBUGGER_INACTIVE);
+            else
+                ok_eq_hex_test(Command, Status, STATUS_UNSUCCESSFUL);
         }
         else
         {
@@ -246,6 +269,8 @@ START_TEST(NtSystemDebugControl)
         Status = TestSystemDebugControl((SYSDBG_COMMAND)Command);
         if (!IsVistaOrHigher || IsDebuggerActive)
             ok_neq_hex_test(Command, Status, STATUS_INVALID_INFO_CLASS);
+        else if (Command == SysDbgGetTriageDump /* 29 */)
+            ok_eq_hex_test(Command, Status, STATUS_INFO_LENGTH_MISMATCH);
         else
             ok_eq_hex_test(Command, Status, STATUS_DEBUGGER_INACTIVE);
     }
@@ -256,9 +281,8 @@ START_TEST(NtSystemDebugControl)
         Status = TestSystemDebugControl((SYSDBG_COMMAND)Command);
         if (!IsVistaOrHigher || IsDebuggerActive)
         {
-            if (Version >= NTDDI_WIN6) // IsVistaOrHigher
-                ok_neq_hex_test(Command, Status, STATUS_INVALID_INFO_CLASS);
-            else
+            /* With a debugger attached nothing was measured; a kernel that does not implement them says INVALID_INFO_CLASS */
+            if (Version < NTDDI_WIN6)
                 ok_eq_hex_test(Command, Status, STATUS_INVALID_INFO_CLASS);
         }
         else
@@ -276,6 +300,10 @@ START_TEST(NtSystemDebugControl)
         else
             ok_eq_hex_test(Command, Status, STATUS_INVALID_INFO_CLASS);
     }
+    else if (Version >= NTDDI_WINBLUE)
+    {
+        ok_eq_hex_test(Command, Status, STATUS_INFO_LENGTH_MISMATCH);
+    }
     else
     {
         ok_eq_hex_test(Command, Status, STATUS_DEBUGGER_INACTIVE);
@@ -285,9 +313,8 @@ START_TEST(NtSystemDebugControl)
     Status = TestSystemDebugControl((SYSDBG_COMMAND)Command);
     if (!IsVistaOrHigher || IsDebuggerActive)
     {
-        if (Version >= NTDDI_WIN10_VB)
-            ok_neq_hex_test(Command, Status, STATUS_INVALID_INFO_CLASS);
-        else
+        /* With a debugger attached nothing was measured; a kernel that does not implement it says INVALID_INFO_CLASS */
+        if (Version < NTDDI_WIN10_VB)
             ok_eq_hex_test(Command, Status, STATUS_INVALID_INFO_CLASS);
     }
     else
