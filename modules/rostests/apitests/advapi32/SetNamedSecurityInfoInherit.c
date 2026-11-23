@@ -108,15 +108,13 @@ static void CheckControl(PSECURITY_DESCRIPTOR Sd, WORD Bits, BOOL Expected, PCST
 static BOOL DaclSupported(PCWSTR Dir)
 {
     WCHAR Root[4] = L"C:\\";
-    WCHAR FsName[MAX_PATH] = L"";
     DWORD Flags = 0;
 
     Root[0] = Dir[0];
-    if (!GetVolumeInformationW(Root, NULL, 0, NULL, NULL, &Flags, FsName, _countof(FsName)))
+    if (!GetVolumeInformationW(Root, NULL, 0, NULL, NULL, &Flags, NULL, 0))
         return FALSE;
 
-    /* ReactOS NTFS does not report FILE_PERSISTENT_ACLS */
-    return (Flags & FILE_PERSISTENT_ACLS) || !_wcsicmp(FsName, L"NTFS");
+    return (Flags & FILE_PERSISTENT_ACLS) != 0;
 }
 
 static void TestSetEntries(PSID Admins, PSID Users)
