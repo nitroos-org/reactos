@@ -808,6 +808,52 @@ UefiHandleIsParentOf(
     return !IsDevicePathEnd(ChildPath);
 }
 
+/*
+ * Make every device the firmware has a driver for show up as a Block I/O handle.
+ *
+ * Firmware that starts a boot option connects only the devices on the path of that option (OVMF does this when
+ * the virtual machine gives a boot order, for instance a CD-ROM first): the other disks have no Block I/O
+ * protocol yet and LocateHandle does not see them. The loader then knew only the disc it was started from:
+ * Setup, started from it, found no firmware disk for the blank hard disk, wrote a scsi() ARC name for the
+ * system partition that this loader cannot open, and the first start of the installed system stopped with
+ * "Could not load SYSTEM.ALT hive!". The firmware's own boot manager does the same walk when it has to
+ * (EfiBootManagerConnectAll): connect every handle recursively until the number of handles stops growing
+ * (a connected controller can add child handles, a disk its partitions). Errors are ignored: a handle that
+ * has no driver, or whose driver refuses, is not a disk the loader can use anyway.
+ */
+static
+VOID
+UefiConnectAllDevices(VOID)
+{
+    EFI_BOOT_SERVICES* BootServices = GlobalSystemTable->BootServices;
+    EFI_HANDLE* HandleList = NULL;
+    UINTN Count, Previous = 0, Index, Round;
+
+    for (Round = 0; Round < 4; Round++)
+    {
+        Count = 0;
+        HandleList = NULL;
+        if (EFI_ERROR(BootServices->LocateHandleBuffer(AllHandles, NULL, NULL, &Count, &HandleList)) ||
+            HandleList == NULL)
+        {
+            return;
+        }
+
+        /* Nothing new since the last walk: everything that can be connected is */
+        if (Count == Previous)
+        {
+            BootServices->FreePool(HandleList);
+            return;
+        }
+        Previous = Count;
+
+        for (Index = 0; Index < Count; Index++)
+            BootServices->ConnectController(HandleList[Index], NULL, NULL, TRUE);
+
+        BootServices->FreePool(HandleList);
+    }
+}
+
 static
 VOID
 UefiSetupBlockDevices(VOID)
@@ -822,6 +868,9 @@ UefiSetupBlockDevices(VOID)
 
     PcBiosDiskCount = 0;
     UefiBootRootIndex = 0;
+
+    /* Step 0: the disks the firmware did not connect because they are not on the boot path */
+    UefiConnectAllDevices();
 
     /* Step 1: Get the size needed for handles buffer - no matter how it fails we're good */
     Status = GlobalSystemTable->BootServices->LocateHandle(
