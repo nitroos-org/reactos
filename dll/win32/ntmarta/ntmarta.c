@@ -950,13 +950,15 @@ AccpDedupInheritedAces(IN OUT PSECURITY_DESCRIPTOR Sd)
  * Explicit that are flagged already are replaced). Without Protected, SE_DACL_AUTO_INHERITED is set.
  */
 static NTSTATUS
-AccpMergeInheritedDacl(IN PSECURITY_DESCRIPTOR ParentSd,
-                       IN PSID Owner OPTIONAL,
-                       IN PSID Group OPTIONAL,
-                       IN PACL Explicit OPTIONAL,
-                       IN BOOLEAN Protected,
-                       IN BOOLEAN Dedup,
-                       OUT PSECURITY_DESCRIPTOR *NewSd)
+AccpMergeInheritedDaclEx(IN PSECURITY_DESCRIPTOR ParentSd,
+                         IN PSID Owner OPTIONAL,
+                         IN PSID Group OPTIONAL,
+                         IN PACL Explicit OPTIONAL,
+                         IN BOOLEAN Protected,
+                         IN BOOLEAN Dedup,
+                         IN PGENERIC_MAPPING Mapping,
+                         IN BOOLEAN IsDirectory,
+                         OUT PSECURITY_DESCRIPTOR *NewSd)
 {
     SECURITY_DESCRIPTOR Creator;
     NTSTATUS Status;
@@ -972,10 +974,23 @@ AccpMergeInheritedDacl(IN PSECURITY_DESCRIPTOR ParentSd,
     if (Protected && !SetSecurityDescriptorControl(&Creator, SE_DACL_PROTECTED, SE_DACL_PROTECTED))
         return STATUS_UNSUCCESSFUL;
 
-    Status = RtlNewSecurityObjectEx(ParentSd, &Creator, NewSd, NULL, TRUE, SEF_DACL_AUTO_INHERIT, NULL, &AccpKeyMapping);
+    Status = RtlNewSecurityObjectEx(ParentSd, &Creator, NewSd, NULL, IsDirectory, SEF_DACL_AUTO_INHERIT, NULL, Mapping);
     if (NT_SUCCESS(Status) && Dedup)
         AccpDedupInheritedAces(*NewSd);
     return Status;
+}
+
+/* AccpMergeInheritedDaclEx for a key */
+static NTSTATUS
+AccpMergeInheritedDacl(IN PSECURITY_DESCRIPTOR ParentSd,
+                       IN PSID Owner OPTIONAL,
+                       IN PSID Group OPTIONAL,
+                       IN PACL Explicit OPTIONAL,
+                       IN BOOLEAN Protected,
+                       IN BOOLEAN Dedup,
+                       OUT PSECURITY_DESCRIPTOR *NewSd)
+{
+    return AccpMergeInheritedDaclEx(ParentSd, Owner, Group, Explicit, Protected, Dedup, &AccpKeyMapping, TRUE, NewSd);
 }
 
 /* TRUE if the ACEs of Dacl flagged INHERITED_ACE form its tail: no explicit ACE follows an inherited one. */
@@ -1065,11 +1080,14 @@ AccpAllowBeforeDeny(IN PACL Dacl)
  * Returns the explicit ACEs as a LocalAlloc'd ACL (free with LocalFree), or NULL if the key is not converted.
  */
 static PACL
-AccpMatchOldInheritedSet(IN PSECURITY_DESCRIPTOR OldParentSd OPTIONAL,
-                         IN PSECURITY_DESCRIPTOR ParentSd,
-                         IN PSID Owner OPTIONAL,
-                         IN PSID Group OPTIONAL,
-                         IN PACL Dacl)
+AccpMatchOldInheritedSetEx(IN PSECURITY_DESCRIPTOR OldParentSd OPTIONAL,
+                           IN PSECURITY_DESCRIPTOR ParentSd,
+                           IN PSID Owner OPTIONAL,
+                           IN PSID Group OPTIONAL,
+                           IN PACL Dacl,
+                           IN BOOLEAN Dedup,
+                           IN PGENERIC_MAPPING Mapping,
+                           IN BOOLEAN IsDirectory)
 {
     PSECURITY_DESCRIPTOR Expected = NULL, Merged = NULL;
     PACL ExpectedDacl = NULL, MergedDacl = NULL, Explicit = NULL, Result = NULL;
@@ -1096,7 +1114,8 @@ AccpMatchOldInheritedSet(IN PSECURITY_DESCRIPTOR OldParentSd OPTIONAL,
     ExpectedDacl = NULL;
     if (Passes)
     {
-        if (!NT_SUCCESS(AccpMergeInheritedDacl(OldParentSd, Owner, Group, NULL, FALSE, TRUE, &Expected)) ||
+        if (!NT_SUCCESS(AccpMergeInheritedDaclEx(OldParentSd, Owner, Group, NULL, FALSE, Dedup, Mapping, IsDirectory,
+                                                 &Expected)) ||
             !GetSecurityDescriptorDacl(Expected, &Present, &ExpectedDacl, &Defaulted))
             goto Cleanup;
     }
@@ -1142,7 +1161,7 @@ AccpMatchOldInheritedSet(IN PSECURITY_DESCRIPTOR OldParentSd OPTIONAL,
             goto Cleanup;
     }
 
-    if (!NT_SUCCESS(AccpMergeInheritedDacl(ParentSd, Owner, Group, Explicit, FALSE, TRUE, &Merged)) ||
+    if (!NT_SUCCESS(AccpMergeInheritedDaclEx(ParentSd, Owner, Group, Explicit, FALSE, Dedup, Mapping, IsDirectory, &Merged)) ||
         !GetSecurityDescriptorDacl(Merged, &Present, &MergedDacl, &Defaulted) || !Present || MergedDacl == NULL ||
         (ExpectedCount != 0 && AccpAllowBeforeDeny(MergedDacl)))
         goto Cleanup;
@@ -1160,6 +1179,17 @@ Cleanup:
     if (Expected != NULL)
         RtlDeleteSecurityObject(&Expected);
     return Result;
+}
+
+/* AccpMatchOldInheritedSetEx for a subkey */
+static PACL
+AccpMatchOldInheritedSet(IN PSECURITY_DESCRIPTOR OldParentSd OPTIONAL,
+                         IN PSECURITY_DESCRIPTOR ParentSd,
+                         IN PSID Owner OPTIONAL,
+                         IN PSID Group OPTIONAL,
+                         IN PACL Dacl)
+{
+    return AccpMatchOldInheritedSetEx(OldParentSd, ParentSd, Owner, Group, Dacl, TRUE, &AccpKeyMapping, TRUE);
 }
 
 /*
@@ -1649,6 +1679,362 @@ Cleanup:
         LocalFree(OldSd);
     LocalFree(ParentSd);
     return Ret;
+}
+
+
+/*
+ * Files and directories: the inheritable ACEs of a directory whose DACL is set go to the files and directories
+ * that exist below it.
+ *
+ * Documented (Microsoft Learn, paraphrased): setting the DACL of an object with SetNamedSecurityInfoW makes the
+ * system propagate its inheritable ACEs to the existing child objects by the ACE inheritance rules (its Remarks);
+ * SetNamedSecurityInfo and SetSecurityInfo impose the current inheritance model on the ACLs of the objects below
+ * the target ("Automatic Propagation of Inheritable ACEs"); SE_DACL_PROTECTED keeps a DACL from being changed by
+ * inheritable ACEs (SECURITY_DESCRIPTOR_CONTROL); SetSecurityInfo's Remarks name cases where the propagation does
+ * not happen, among them a handle opened with MAXIMUM_ALLOWED (not detected here: the access a handle was asked
+ * for is not recorded in it).
+ *
+ * The rules are those of the subkeys (AccpPropagateToSubkeys, measured on Windows Server 2022 for keys), with the
+ * file generic mapping and no deduplication of inherited ACEs:
+ *  - a child whose DACL is protected, and one without a DACL, is left alone with everything below it;
+ *  - an auto-inherited child, or one with an ACE flagged INHERITED_ACE, keeps its ACEs that are not flagged
+ *    inherited (in their order, first) and gets what the new DACL of the directory passes on (flagged inherited,
+ *    after them); an auto-inherited child whose inherited ACEs are not the tail of its DACL is left alone;
+ *  - a child that is neither, whose DACL holds every ACE the OLD DACL of the directory passed on (our file
+ *    systems store what a new file inherits without INHERITED_ACE), is converted: those ACEs are the inherited
+ *    ones (see AccpMatchOldInheritedSetEx);
+ *  - any other child (ACEs of its own only, set by a legacy writer) is left alone with everything below it: no
+ *    ACE is taken away or added, and nothing is reordered;
+ *  - a child that changed and is a directory is walked the same way, with its old and new descriptor;
+ *  - a reparse point (a junction, a symbolic link) gets its own DACL updated, through a handle to the link
+ *    itself, and is never followed; a child that cannot be opened (access denied, a sharing violation) or set is
+ *    skipped with what is below it; the call still succeeds;
+ *  - whether a child is a directory is taken from the object opened, not from the listing; a file with more than
+ *    one name (hard links) is left alone: its other names can lie outside the tree (not measured on Windows; the
+ *    safe choice for a caller such as SYSTEM walking a tree that users can write to).
+ * The walk opens every child relative to its directory's handle (no path length limit), keeps its state in a heap
+ * array of frames (one per level, the depth capped at ACCP_MAX_FILE_DEPTH, deeper levels are not walked) and
+ * stops below a child that already has what it would get.
+ */
+#define ACCP_MAX_FILE_DEPTH 1024
+#define ACCP_FILE_DIR_BUFFER 0x1000
+
+static GENERIC_MAPPING AccpFileMapping = { FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS };
+
+/* The owner, group and DACL of a file handle (LocalAlloc, self-relative), or NULL */
+static PSECURITY_DESCRIPTOR
+AccpQueryFileSd(IN HANDLE File)
+{
+    PSECURITY_DESCRIPTOR Sd;
+    ULONG Size = 0x200, Needed;
+    NTSTATUS Status;
+
+    for (;;)
+    {
+        Sd = LocalAlloc(LMEM_FIXED, Size);
+        if (Sd == NULL)
+            return NULL;
+        Status = NtQuerySecurityObject(File, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                       DACL_SECURITY_INFORMATION, Sd, Size, &Needed);
+        if (NT_SUCCESS(Status))
+            return Sd;
+        LocalFree(Sd);
+        if (Status != STATUS_BUFFER_TOO_SMALL || Needed <= Size)
+            return NULL;
+        Size = Needed;
+    }
+}
+
+/* Opens Name relative to Directory (a name of Length bytes; an empty name reopens Directory itself), never following a reparse point */
+static NTSTATUS
+AccpOpenRelative(IN HANDLE Directory,
+                 IN PCWSTR Name,
+                 IN ULONG Length,
+                 IN ACCESS_MASK Access,
+                 IN ULONG Options,
+                 OUT PHANDLE File)
+{
+    OBJECT_ATTRIBUTES Attributes;
+    UNICODE_STRING String;
+    IO_STATUS_BLOCK Iosb;
+
+    String.Buffer = (PWSTR)Name;
+    String.Length = String.MaximumLength = (USHORT)Length;
+    InitializeObjectAttributes(&Attributes, &String, OBJ_CASE_INSENSITIVE, Directory, NULL);
+    return NtOpenFile(File, Access | SYNCHRONIZE, &Attributes, &Iosb,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                      Options | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT);
+}
+
+/* Sets an auto-inherited DACL on a file handle */
+static BOOLEAN
+AccpSetFileDacl(IN HANDLE File,
+                IN PACL Dacl)
+{
+    SECURITY_DESCRIPTOR Absolute;
+
+    return InitializeSecurityDescriptor(&Absolute, SECURITY_DESCRIPTOR_REVISION) &&
+           SetSecurityDescriptorDacl(&Absolute, TRUE, Dacl, FALSE) &&
+           SetSecurityDescriptorControl(&Absolute,
+                                        SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED,
+                                        SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED) &&
+           NT_SUCCESS(NtSetSecurityObject(File, DACL_SECURITY_INFORMATION, &Absolute));
+}
+
+typedef struct _ACCP_FILE_FRAME
+{
+    HANDLE Directory;                   /* the directory whose entries this level lists (FILE_LIST_DIRECTORY) */
+    PSECURITY_DESCRIPTOR ParentSd;      /* its descriptor now (LocalAlloc) */
+    PSECURITY_DESCRIPTOR OldParentSd;   /* its descriptor before (LocalAlloc) */
+    PUCHAR Buffer;                      /* the entries of the last query (ACCP_FILE_DIR_BUFFER bytes) */
+    ULONG Offset;                       /* the next entry in Buffer, or MAXULONG for a new query */
+    BOOLEAN Restart;                    /* the first query of the directory */
+} ACCP_FILE_FRAME, *PACCP_FILE_FRAME;
+
+/* Statistics of a walk (for a debug line and the tests' cost rows) */
+typedef struct _ACCP_FILE_WALK
+{
+    ULONG Checked, Updated, Skipped, TooDeep;
+} ACCP_FILE_WALK, *PACCP_FILE_WALK;
+
+/*
+ * The walk below Directory (a handle with FILE_LIST_DIRECTORY, which the walk takes over and closes), whose
+ * descriptor was OldSd and is RootSd now (both LocalAlloc'd; the walk frees them).
+ */
+static VOID
+AccpPropagateToFiles(IN HANDLE Directory,
+                     IN PSECURITY_DESCRIPTOR RootSd,
+                     IN PSECURITY_DESCRIPTOR RootOldSd OPTIONAL,
+                     OUT PACCP_FILE_WALK Walk)
+{
+    PACCP_FILE_FRAME Stack;
+    LONG Top;
+
+    RtlZeroMemory(Walk, sizeof(*Walk));
+    Stack = (PACCP_FILE_FRAME)LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, ACCP_MAX_FILE_DEPTH * sizeof(*Stack));
+    if (Stack == NULL || (Stack[0].Buffer = (PUCHAR)LocalAlloc(LMEM_FIXED, ACCP_FILE_DIR_BUFFER)) == NULL)
+    {
+        if (Stack != NULL)
+            LocalFree(Stack);
+        NtClose(Directory);
+        LocalFree(RootSd);
+        if (RootOldSd != NULL)
+            LocalFree(RootOldSd);
+        return;
+    }
+    Stack[0].Directory = Directory;
+    Stack[0].ParentSd = RootSd;
+    Stack[0].OldParentSd = RootOldSd;
+    Stack[0].Offset = MAXULONG;
+    Stack[0].Restart = TRUE;
+    Top = 0;
+
+    while (Top >= 0)
+    {
+        PACCP_FILE_FRAME Frame = &Stack[Top];
+        PFILE_DIRECTORY_INFORMATION Entry;
+        PSECURITY_DESCRIPTOR OldSd = NULL, NewSd = NULL, StoredSd;
+        SECURITY_DESCRIPTOR_CONTROL Control;
+        PACL OldDacl = NULL, NewDacl = NULL, Matched = NULL;
+        PSID Owner = NULL, Group = NULL;
+        BOOL Present, Defaulted;
+        BOOLEAN IsDirectory, IsReparse, Inherits, Changed = FALSE;
+        HANDLE Child = NULL, ChildDirectory = NULL;
+        FILE_STANDARD_INFORMATION Standard;
+        IO_STATUS_BLOCK Iosb;
+        DWORD Revision;
+        NTSTATUS Status;
+
+        /* the next entry of this level, querying the directory again when the buffer is used up */
+        if (Frame->Offset == MAXULONG)
+        {
+            Status = NtQueryDirectoryFile(Frame->Directory, NULL, NULL, NULL, &Iosb, Frame->Buffer,
+                                          ACCP_FILE_DIR_BUFFER, FileDirectoryInformation, FALSE, NULL, Frame->Restart);
+            Frame->Restart = FALSE;
+            if (!NT_SUCCESS(Status))
+            {
+                /* the level is done (STATUS_NO_MORE_FILES, or the directory cannot be listed): back to its parent */
+                NtClose(Frame->Directory);
+                LocalFree(Frame->Buffer);
+                LocalFree(Frame->ParentSd);
+                if (Frame->OldParentSd != NULL)
+                    LocalFree(Frame->OldParentSd);
+                RtlZeroMemory(Frame, sizeof(*Frame));
+                Top--;
+                continue;
+            }
+            Frame->Offset = 0;
+        }
+        Entry = (PFILE_DIRECTORY_INFORMATION)(Frame->Buffer + Frame->Offset);
+        Frame->Offset = Entry->NextEntryOffset ? Frame->Offset + Entry->NextEntryOffset : MAXULONG;
+
+        if ((Entry->FileNameLength == sizeof(WCHAR) && Entry->FileName[0] == L'.') ||
+            (Entry->FileNameLength == 2 * sizeof(WCHAR) && Entry->FileName[0] == L'.' && Entry->FileName[1] == L'.'))
+            continue;
+        IsDirectory = (Entry->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        IsReparse = (Entry->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+        Walk->Checked++;
+
+        if (!NT_SUCCESS(AccpOpenRelative(Frame->Directory, Entry->FileName, Entry->FileNameLength,
+                                         READ_CONTROL | WRITE_DAC, 0, &Child)))
+        {
+            Walk->Skipped++;
+            continue;
+        }
+
+        /*
+         * What was opened, not what the listing said (the name may name another object by now): a directory or not,
+         * and a file with more than one name is left alone. Its other names can lie outside the tree (a hard link
+         * the owner of a directory in the tree made to a file elsewhere): its descriptor is not the tree's to change.
+         */
+        if (!NT_SUCCESS(NtQueryInformationFile(Child, &Iosb, &Standard, sizeof(Standard), FileStandardInformation)) ||
+            (!Standard.Directory && Standard.NumberOfLinks > 1))
+        {
+            Walk->Skipped++;
+            goto Next;
+        }
+        IsDirectory = Standard.Directory;
+
+        OldSd = AccpQueryFileSd(Child);
+        if (OldSd == NULL ||
+            !GetSecurityDescriptorControl(OldSd, &Control, &Revision) || (Control & SE_DACL_PROTECTED) ||
+            !GetSecurityDescriptorDacl(OldSd, &Present, &OldDacl, &Defaulted) || !Present || OldDacl == NULL)
+        {
+            goto Next;
+        }
+        GetSecurityDescriptorOwner(OldSd, &Owner, &Defaulted);
+        GetSecurityDescriptorGroup(OldSd, &Group, &Defaulted);
+
+        if (Control & SE_DACL_AUTO_INHERITED)
+            Inherits = AccpInheritedAcesAreTail(OldDacl);
+        else if (AccpHasInheritedAce(OldDacl))
+            Inherits = TRUE;
+        else
+            Inherits = (Matched = AccpMatchOldInheritedSetEx(Frame->OldParentSd, Frame->ParentSd, Owner, Group, OldDacl,
+                                                             FALSE, &AccpFileMapping, IsDirectory)) != NULL;
+        if (!Inherits)
+            goto Next;
+
+        if (!NT_SUCCESS(AccpMergeInheritedDaclEx(Frame->ParentSd, Owner, Group, Matched != NULL ? Matched : OldDacl,
+                                                 FALSE, FALSE, &AccpFileMapping, IsDirectory, &NewSd)) ||
+            !GetSecurityDescriptorDacl(NewSd, &Present, &NewDacl, &Defaulted) || !Present || NewDacl == NULL)
+        {
+            Walk->Skipped++;
+            goto Next;
+        }
+
+        /* nothing to do, here or below, if it has what it would get */
+        if ((Control & SE_DACL_AUTO_INHERITED) && OldDacl->AclSize == NewDacl->AclSize &&
+            RtlEqualMemory(OldDacl, NewDacl, NewDacl->AclSize))
+            goto Next;
+
+        if (!AccpSetFileDacl(Child, NewDacl))
+        {
+            Walk->Skipped++;
+            goto Next;
+        }
+        Walk->Updated++;
+        Changed = TRUE;
+
+        /* a directory (never a link) that changed: walk it with the descriptor it has now, read back as stored */
+        if (Changed && IsDirectory && !IsReparse)
+        {
+            if (Top + 1 >= ACCP_MAX_FILE_DEPTH)
+            {
+                Walk->TooDeep++;
+                goto Next;
+            }
+            StoredSd = AccpQueryFileSd(Child);
+            if (StoredSd == NULL)
+                goto Next;
+            if (!NT_SUCCESS(AccpOpenRelative(Child, NULL, 0, FILE_LIST_DIRECTORY, FILE_DIRECTORY_FILE, &ChildDirectory)) ||
+                (Stack[Top + 1].Buffer = (PUCHAR)LocalAlloc(LMEM_FIXED, ACCP_FILE_DIR_BUFFER)) == NULL)
+            {
+                if (ChildDirectory != NULL)
+                    NtClose(ChildDirectory);
+                LocalFree(StoredSd);
+                Walk->Skipped++;
+                goto Next;
+            }
+            Stack[Top + 1].Directory = ChildDirectory;
+            Stack[Top + 1].ParentSd = StoredSd;
+            Stack[Top + 1].OldParentSd = OldSd;
+            Stack[Top + 1].Offset = MAXULONG;
+            Stack[Top + 1].Restart = TRUE;
+            OldSd = NULL;
+            Top++;
+        }
+
+Next:
+        if (Matched != NULL)
+            LocalFree(Matched);
+        if (NewSd != NULL)
+            RtlDeleteSecurityObject(&NewSd);
+        if (OldSd != NULL)
+            LocalFree(OldSd);
+        if (Child != NULL)
+            NtClose(Child);
+    }
+
+    LocalFree(Stack);
+}
+
+/*
+ * SetSecurityInfo / SetNamedSecurityInfo on a file object with a DACL. If it is a directory (not a reparse point),
+ * the change goes down to what exists below it (AccpPropagateToFiles) once the set has succeeded.
+ */
+static DWORD
+AccpSetFileSecurity(IN HANDLE File,
+                    IN SECURITY_INFORMATION SecurityInfo,
+                    IN PSECURITY_DESCRIPTOR pSecurityDescriptor)
+{
+    FILE_BASIC_INFORMATION Basic;
+    PSECURITY_DESCRIPTOR OldSd = NULL, NewSd;
+    HANDLE Directory = NULL;
+    IO_STATUS_BLOCK Iosb;
+    ACCP_FILE_WALK Walk;
+    NTSTATUS Status;
+
+    /* the directory, reopened through the handle for the walk; not a link, not a file */
+    if ((SecurityInfo & DACL_SECURITY_INFORMATION) &&
+        NT_SUCCESS(AccpOpenRelative(File, NULL, 0, READ_CONTROL | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES, 0,
+                                    &Directory)))
+    {
+        if (!NT_SUCCESS(NtQueryInformationFile(Directory, &Iosb, &Basic, sizeof(Basic), FileBasicInformation)) ||
+            !(Basic.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (Basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+            (OldSd = AccpQueryFileSd(Directory)) == NULL)
+        {
+            NtClose(Directory);
+            Directory = NULL;
+        }
+    }
+
+    Status = NtSetSecurityObject(File, SecurityInfo, pSecurityDescriptor);
+    if (!NT_SUCCESS(Status))
+    {
+        if (Directory != NULL)
+            NtClose(Directory);
+        if (OldSd != NULL)
+            LocalFree(OldSd);
+        return RtlNtStatusToDosError(Status);
+    }
+
+    if (Directory != NULL)
+    {
+        NewSd = AccpQueryFileSd(Directory);
+        if (NewSd != NULL)
+        {
+            AccpPropagateToFiles(Directory, NewSd, OldSd, &Walk);
+            DPRINT("Propagated: %lu checked, %lu updated, %lu skipped, %lu too deep\n",
+                   Walk.Checked, Walk.Updated, Walk.Skipped, Walk.TooDeep);
+        }
+        else
+        {
+            NtClose(Directory);
+            LocalFree(OldSd);
+        }
+    }
+    return ERROR_SUCCESS;
 }
 
 
@@ -2144,7 +2530,14 @@ AccRewriteSetHandleRights(HANDLE handle,
         }
 
         case SE_FILE_OBJECT:
+        {
             /* FIXME - handle console handles? */
+            Ret = AccpSetFileSecurity(handle,
+                                      SecurityInfo,
+                                      pSecurityDescriptor);
+            break;
+        }
+
         case SE_KERNEL_OBJECT:
         {
             Status = NtSetSecurityObject(handle,

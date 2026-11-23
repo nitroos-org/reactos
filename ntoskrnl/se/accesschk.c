@@ -151,6 +151,84 @@ SepDaclHasOwnerRightsAce(
 
 /**
  * @brief
+ * Tells whether an ACE of a DACL walk lies within the ACL: its header, its
+ * size (at least a header, not past the ACL) and, for the ACE types the access
+ * check evaluates (allow and deny, plain and object), every field the check
+ * reads (mask, flags, object types, the whole SID) within that size.
+ *
+ * @param[in] Ace
+ * The ACE the walk is at; it starts inside the ACL.
+ *
+ * @param[in] AclEnd
+ * The first byte behind the ACL (the ACL plus its AclSize).
+ *
+ * @return
+ * TRUE if the ACE lies within the ACL, FALSE otherwise.
+ *
+ * @remarks
+ * The object opens (SeAccessCheck) pass descriptors that were not captured
+ * here: a file system's descriptor read from the disk is not validated again.
+ * The DACL walks stop at the first ACE that does not lie within the ACL, as
+ * the label walk (SepMandatoryAllowedAccess) and the OWNER RIGHTS scan do:
+ * the ACEs before it count, it and the ACEs after it do not. Stopping early
+ * never grants more than walking on (a later allow ACE can only grant, a
+ * later deny ACE can only refuse what was not granted yet). Captured
+ * descriptors (every user-mode caller: RtlValidAcl at capture) always pass.
+ */
+static
+BOOLEAN
+SepAceWithinAcl(
+    _In_ PACE_HEADER Ace,
+    _In_ PUCHAR AclEnd)
+{
+    ULONG_PTR Left = (ULONG_PTR)(AclEnd - (PUCHAR)Ace);
+    ULONG_PTR SidOffset;
+    PISID Sid;
+    ULONG Flags;
+
+    if (Left < sizeof(ACE_HEADER) || Ace->AceSize < sizeof(ACE_HEADER) || Left < Ace->AceSize)
+        return FALSE;
+
+    /*
+     * The fields the check reads must lie within the ACE itself (as RtlValidAcl
+     * and the label walk require), not only within the ACL: the bytes behind
+     * AceSize belong to the next ACE, and an ACE does not mean something else
+     * depending on what follows it
+     */
+    Left = Ace->AceSize;
+
+    switch (Ace->AceType)
+    {
+        case ACCESS_ALLOWED_ACE_TYPE:
+        case ACCESS_DENIED_ACE_TYPE:
+            SidOffset = FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart);
+            break;
+
+        case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+        case ACCESS_DENIED_OBJECT_ACE_TYPE:
+            if (Left < FIELD_OFFSET(ACCESS_ALLOWED_OBJECT_ACE, ObjectType))
+                return FALSE;
+            Flags = ((PACCESS_ALLOWED_OBJECT_ACE)Ace)->Flags;
+            SidOffset = FIELD_OFFSET(ACCESS_ALLOWED_OBJECT_ACE, ObjectType);
+            if (Flags & ACE_OBJECT_TYPE_PRESENT)
+                SidOffset += sizeof(GUID);
+            if (Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT)
+                SidOffset += sizeof(GUID);
+            break;
+
+        default:
+            /* Passed over by the walks: nothing behind the header is read */
+            return TRUE;
+    }
+
+    if (Left < SidOffset + FIELD_OFFSET(SID, SubAuthority))
+        return FALSE;
+    Sid = (PISID)((PUCHAR)Ace + SidOffset);
+    return Left >= SidOffset + RtlLengthRequiredSid(Sid->SubAuthorityCount);
+}
+
+/**
+ * @brief
  * Tells which restricting SIDs pass a token needs for an access check, and for
  * which rights.
  *
@@ -603,6 +681,10 @@ SepAnalyzeAcesForObjectTypeList(
         if (!Found)
             break;
 
+        /* An ACE that does not lie within the ACL ends the walk (SepAceWithinAcl) */
+        if (!SepAceWithinAcl(&CurrentAce->Header, Cursor.End))
+            break;
+
         if (CurrentAce->Header.AceFlags & INHERIT_ONLY_ACE)
             continue;
 
@@ -885,7 +967,8 @@ SepAnalyzeAcesFromDacl(
      * index, quadratic in the ACE count). Where RtlGetAce fails (a bad revision,
      * an ACE at or beyond the end of the ACL) the walk asserts as before and
      * then ends: the ACE pointer RtlGetAce leaves then lies outside the ACL (or
-     * is not set at all).
+     * is not set at all). An ACE that starts inside the ACL but does not lie
+     * within it (SepAceWithinAcl) ends the walk too.
      */
     SepInitAceCursor(&Cursor, Dacl);
     for (AceIndex = 0; AceIndex < Dacl->AceCount; AceIndex++)
@@ -894,6 +977,9 @@ SepAnalyzeAcesFromDacl(
         Found = SepNextAce(&Cursor, (PVOID*)&CurrentAce);
         ASSERT(Found);
         if (!Found)
+            break;
+
+        if (!SepAceWithinAcl(&CurrentAce->Header, Cursor.End))
             break;
 
         if (CurrentAce->Header.AceFlags & INHERIT_ONLY_ACE)
@@ -2568,6 +2654,13 @@ SeFastTraverseCheck(
          AceIndex < Dacl->AceCount;
          AceIndex++, Ace = (PKNOWN_ACE)((ULONG_PTR)Ace + Ace->Header.AceSize))
     {
+        /* An ACE that does not lie within the ACL: the full check decides */
+        if ((ULONG_PTR)Ace >= (ULONG_PTR)Dacl + Dacl->AclSize ||
+            !SepAceWithinAcl(&Ace->Header, (PUCHAR)Dacl + Dacl->AclSize))
+        {
+            return FALSE;
+        }
+
         if (Ace->Header.AceFlags & INHERIT_ONLY_ACE)
             continue;
 

@@ -74,6 +74,11 @@ WINAPI
 SecureSystemDirectories(VOID);
 
 BOOL
+SecureLegacyUsersJunction(
+    _In_ PCWSTR pszLink,
+    _In_ PCWSTR pszProfilesPath);
+
+BOOL
 WINAPI
 CreateProgramFilesDirectory(
     _In_ PCWSTR pszPath);

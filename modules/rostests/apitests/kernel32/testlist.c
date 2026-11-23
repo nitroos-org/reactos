@@ -94,6 +94,7 @@ extern void func_CallbackCompletion(void);
 extern void func_GetAppContainerNamedObjectPath(void);
 extern void func_CompareObjectHandles(void);
 extern void func_PrivateNamespaceSecurity(void);
+extern void func_PrivateNamespaceBoundary(void);
 extern void func_CancelSynchronousIo(void);
 extern void func_IdnTo(void);
 extern void func_NormalizeString(void);
@@ -387,6 +388,7 @@ const struct test winetest_testlist[] =
     { "GetAppContainerNamedObjectPath", func_GetAppContainerNamedObjectPath },
     { "CompareObjectHandles", func_CompareObjectHandles },
     { "PrivateNamespaceSecurity", func_PrivateNamespaceSecurity },
+    { "PrivateNamespaceBoundary", func_PrivateNamespaceBoundary },
     { "CancelSynchronousIo", func_CancelSynchronousIo },
     { "IdnTo", func_IdnTo },
     { "NormalizeString", func_NormalizeString },

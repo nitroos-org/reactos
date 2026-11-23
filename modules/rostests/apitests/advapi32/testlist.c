@@ -171,6 +171,8 @@ extern void func_SetSecurityInfoKeyInherit(void);
 extern void func_SetSecurityInfoSplit(void);
 extern void func_RegistryRestrictedOpen(void);
 extern void func_SetNamedSecurityInfoInherit(void);
+extern void func_SetNamedSecurityInfoPropagate(void);
+extern void func_SetNamedSecurityInfoPropagatePerf(void);
 extern void func_SddlRights(void);
 extern void func_SddlSids(void);
 
@@ -376,6 +378,8 @@ const struct test winetest_testlist[] =
     { "SetSecurityInfoSplit", func_SetSecurityInfoSplit },
     { "RegistryRestrictedOpen", func_RegistryRestrictedOpen },
     { "SetNamedSecurityInfoInherit", func_SetNamedSecurityInfoInherit },
+    { "SetNamedSecurityInfoPropagate", func_SetNamedSecurityInfoPropagate },
+    { "SetNamedSecurityInfoPropagatePerf", func_SetNamedSecurityInfoPropagatePerf },
     { "SddlRights", func_SddlRights },
     { "SddlSids", func_SddlSids },
     { "ServiceProcess", func_ServiceProcess },

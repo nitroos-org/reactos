@@ -130,6 +130,47 @@ done:
     return Status;
 }
 
+/* \PrivateNamespaces: SYSTEM full, Administrators read; nobody else */
+static
+CODE_SEG("INIT")
+NTSTATUS
+NTAPI
+ObpCreatePrivateNamespacesSD(OUT PSECURITY_DESCRIPTOR *SecurityDescriptor)
+{
+    PSECURITY_DESCRIPTOR Sd;
+    PACL Dacl;
+    ULONG AclSize, SdSize;
+    NTSTATUS Status;
+
+    AclSize = sizeof(ACL) +
+              sizeof(ACE) + RtlLengthSid(SeLocalSystemSid) +
+              sizeof(ACE) + RtlLengthSid(SeAliasAdminsSid);
+    SdSize = sizeof(SECURITY_DESCRIPTOR) + AclSize;
+
+    Sd = ExAllocatePoolWithTag(PagedPool, SdSize, TAG_SD);
+    if (Sd == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Dacl = (PACL)((INT_PTR)Sd + sizeof(SECURITY_DESCRIPTOR));
+    Status = RtlCreateSecurityDescriptor(Sd, SECURITY_DESCRIPTOR_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlCreateAcl(Dacl, AclSize, ACL_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, GENERIC_ALL, SeLocalSystemSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, GENERIC_READ, SeAliasAdminsSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetDaclSecurityDescriptor(Sd, TRUE, Dacl, FALSE);
+
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(Sd, TAG_SD);
+        return Status;
+    }
+    *SecurityDescriptor = Sd;
+    return STATUS_SUCCESS;
+}
+
 CODE_SEG("INIT")
 BOOLEAN
 NTAPI
@@ -358,6 +399,27 @@ ObPostPhase0:
     if (!NT_SUCCESS(Status)) return FALSE;
 
     /* Close the extra handle */
+    Status = NtClose(Handle);
+    if (!NT_SUCCESS(Status)) return FALSE;
+
+    /*
+     * The root of the private namespaces (obnamesp.c): only the kernel creates in it (SYSTEM full, Administrators read),
+     * so no process can make a directory there that a boundary then finds
+     */
+    Status = ObpCreatePrivateNamespacesSD(&KernelObjectsSD);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+    RtlInitUnicodeString(&Name, L"\\PrivateNamespaces");
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &Name,
+                               OBJ_CASE_INSENSITIVE | OBJ_PERMANENT,
+                               NULL,
+                               KernelObjectsSD);
+    Status = NtCreateDirectoryObject(&Handle,
+                                     DIRECTORY_ALL_ACCESS,
+                                     &ObjectAttributes);
+    ExFreePoolWithTag(KernelObjectsSD, TAG_SD);
+    if (!NT_SUCCESS(Status)) return FALSE;
     Status = NtClose(Handle);
     if (!NT_SUCCESS(Status)) return FALSE;
 
