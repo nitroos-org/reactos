@@ -2283,11 +2283,18 @@ NtUserSetSystemCursor(
     PCURICON_OBJECT pcur = NULL, pcurOrig = NULL;
     int i;
     PPROCESSINFO ppi;
-    BOOL Ret = FALSE;
+    BOOL Ret = FALSE, Kept = FALSE;
     UserEnterExclusive();
 
     if (!CheckWinstaAttributeAccess(WINSTA_WRITEATTRIBUTES))
     {
+        goto Exit;
+    }
+
+    if (!hcur)
+    {
+        /* Measured on Windows Server 2022 */
+        EngSetLastError(ERROR_RESOURCE_NAME_NOT_FOUND);
         goto Exit;
     }
 
@@ -2316,19 +2323,65 @@ NtUserSetSystemCursor(
                  pcur->CURSORF_flags |= CURSORF_GLOBAL;
                  pcur->head.ppi = NULL;
                  IntInsertCursorIntoList(pcur);
-                 Ret = TRUE;
+                 Ret = Kept = TRUE;
               }
               break;
            }
         }
         if (pcurOrig)
         {
-           FIXME("Need to copy cursor data or do something! pcurOrig %p new pcur %p\n",pcurOrig,pcur);
+           /* Animated cursors and shared or global ones as the given cursor are not measured: as before */
+           if (pcur != pcurOrig &&
+               !(pcur->CURSORF_flags & (CURSORF_ACON | CURSORF_LRSHARED | CURSORF_GLOBAL)) &&
+               !(pcurOrig->CURSORF_flags & CURSORF_ACON))
+           {
+              /* The system takes the data of the cursor and destroys its handle; the system cursor keeps its
+               * handle (measured on Windows Server 2022). The data is exchanged: the given object, which is
+               * destroyed, frees what the system cursor had. */
+              SHORT x = pcurOrig->xHotspot, y = pcurOrig->yHotspot;
+              HBITMAP hbmMask = pcurOrig->hbmMask, hbmColor = pcurOrig->hbmColor, hbmAlpha = pcurOrig->hbmAlpha;
+              HBITMAP hbmUserAlpha = pcurOrig->hbmUserAlpha;
+              RECT rcBounds = pcurOrig->rcBounds;
+              ULONG bpp = pcurOrig->bpp, cx = pcurOrig->cx, cy = pcurOrig->cy;
+
+              pcurOrig->xHotspot = pcur->xHotspot;
+              pcurOrig->yHotspot = pcur->yHotspot;
+              pcurOrig->hbmMask = pcur->hbmMask;
+              pcurOrig->hbmColor = pcur->hbmColor;
+              pcurOrig->hbmAlpha = pcur->hbmAlpha;
+              pcurOrig->hbmUserAlpha = pcur->hbmUserAlpha;
+              pcurOrig->rcBounds = pcur->rcBounds;
+              pcurOrig->bpp = pcur->bpp;
+              pcurOrig->cx = pcur->cx;
+              pcurOrig->cy = pcur->cy;
+
+              pcur->xHotspot = x;
+              pcur->yHotspot = y;
+              pcur->hbmMask = hbmMask;
+              pcur->hbmColor = hbmColor;
+              pcur->hbmAlpha = hbmAlpha;
+              pcur->hbmUserAlpha = hbmUserAlpha;
+              pcur->rcBounds = rcBounds;
+              pcur->bpp = bpp;
+              pcur->cx = cx;
+              pcur->cy = cy;
+
+              /* The pointer may be showing the system cursor: it shows the new data now, before the old
+               * bitmaps go with the destroyed object */
+              UserRefreshPointerShape(pcurOrig);
+
+              IntDestroyCurIconObject(pcur);
+              Ret = TRUE;
+           }
+           else
+           {
+              FIXME("Need to copy cursor data or do something! pcurOrig %p new pcur %p\n",pcurOrig,pcur);
+           }
         }
     }
 Exit:
     /* The reference that UserGetCurIconObject took is the system cursor table's only when the cursor was kept */
-    if (pcur && !Ret)
+    if (pcur && !Kept)
         UserDereferenceObject(pcur);
     UserLeave();
     return Ret;

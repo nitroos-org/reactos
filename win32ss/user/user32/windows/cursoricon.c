@@ -3521,14 +3521,7 @@ BOOL WINAPI SetSystemCursor(
   _In_  DWORD id
 )
 {
-    if (hcur == NULL)
-    {
-       hcur = LoadImageW(NULL, MAKEINTRESOURCEW(id), IMAGE_CURSOR, 0, 0, LR_DEFAULTSIZE);
-       if (hcur == NULL)
-       {
-          return FALSE;
-       }
-    }
+    /* NULL is not "the default cursor": it fails (ERROR_RESOURCE_NAME_NOT_FOUND, set by win32k), as on Windows */
     return NtUserSetSystemCursor(hcur,id);
 }
 

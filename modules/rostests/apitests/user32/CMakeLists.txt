@@ -138,6 +138,7 @@ list(APPEND SOURCE
     SetActiveWindow.c
     SetCoalescableTimer.c
     SetCursorPos.c
+    SetSystemCursor.c
     SetFocus.c
     SetFocusCallbacks.c
     SetParent.c
