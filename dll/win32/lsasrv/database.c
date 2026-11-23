@@ -207,21 +207,42 @@ Done:
 }
 
 
+/* advapi32: RtlGenRandom (the system random number generator, ksecdd.sys) */
+BOOLEAN WINAPI SystemFunction036(PVOID Buffer, ULONG Length);
+
+/*
+ * The account domain SID is the identity of the machine: three random 32-bit sub-authorities, like Windows.
+ * They come from the system random number generator, not from the clock: an installed disk is copied
+ * to other machines (hypervisor images), whose first start then happens at the same moment of a boot
+ * that is almost the same, and a clock-seeded generator gives them the same SID.
+ */
 static NTSTATUS
 LsapCreateRandomDomainSid(OUT PSID *Sid)
 {
     LARGE_INTEGER SystemTime;
-    PULONG Seed;
+    ULONG SubAuthority[3];
+    ULONG Seed;
+    ULONG i;
 
-    NtQuerySystemTime(&SystemTime);
-    Seed = &SystemTime.u.LowPart;
+    if (!SystemFunction036(SubAuthority, sizeof(SubAuthority)))
+    {
+        /* The generator refuses: the clock and the performance counter (better than nothing, never fails) */
+        LARGE_INTEGER Counter;
+
+        ERR("RtlGenRandom failed, the domain SID is made from the clock\n");
+        NtQuerySystemTime(&SystemTime);
+        NtQueryPerformanceCounter(&Counter, NULL);
+        Seed = SystemTime.u.LowPart ^ Counter.u.LowPart ^ (ULONG)(ULONG_PTR)&Seed;
+        for (i = 0; i < RTL_NUMBER_OF(SubAuthority); i++)
+            SubAuthority[i] = RtlUniform(&Seed);
+    }
 
     return RtlAllocateAndInitializeSid(&NtAuthority,
                                        4,
                                        SECURITY_NT_NON_UNIQUE,
-                                       RtlUniform(Seed),
-                                       RtlUniform(Seed),
-                                       RtlUniform(Seed),
+                                       SubAuthority[0],
+                                       SubAuthority[1],
+                                       SubAuthority[2],
                                        SECURITY_NULL_RID,
                                        SECURITY_NULL_RID,
                                        SECURITY_NULL_RID,
