@@ -888,7 +888,13 @@ NtUserDestroyCursor(
 
         if (CurIcon->CURSORF_flags & CURSORF_CURRENT)
         {
-            WARN("Trying to delete current cursor!\n");
+            /* The cursor that is the pointer: DestroyCursor reports failure (FALSE, last error not set) and
+             * destroys the handle all the same (measured on Windows Server 2022). The queue keeps its reference,
+             * so the pointer shows the cursor until another one replaces it. A shared cursor is not destroyed
+             * (not measured: as before) */
+            WARN("Destroying the current cursor!\n");
+            if (!(CurIcon->CURSORF_flags & CURSORF_LRSHARED))
+                IntDestroyCurIconObject(CurIcon);
             ret = FALSE;
             goto leave;
         }
@@ -1162,7 +1168,9 @@ NtUserSetCursor(
         /* See if it was destroyed in the meantime */
         if (UserObjectInDestroy(hOldCursor))
             hOldCursor = NULL;
-        pcurOld->CURSORF_flags &= ~CURSORF_CURRENT;
+        /* The same cursor set again is still the current one */
+        if (pcurOld != pcurNew)
+            pcurOld->CURSORF_flags &= ~CURSORF_CURRENT;
         UserDereferenceObject(pcurOld);
     }
 
