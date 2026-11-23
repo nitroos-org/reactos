@@ -1214,6 +1214,7 @@ co_IntSetActiveWindow(
    PWND pWndChg, WndPrev; // State changes.
    HWND hWnd = 0;
    BOOL InAAPM;
+   LRESULT Hooked;
    CBTACTIVATESTRUCT cbt;
 
    //ERR("co_IntSetActiveWindow 1\n");
@@ -1258,11 +1259,19 @@ co_IntSetActiveWindow(
 
    if ( Wnd->state & WNDS_BEINGACTIVATED ) return TRUE;
 
+   /* The activation of Wnd is in progress while the CBT hook runs: an activation of Wnd from inside the
+      hook (SetFocus on one of its children, a click on one of its buttons) does not call the hook again.
+      It did, each time one level deeper on the kernel stack, until no callback fitted any more (and the
+      number of HCBT_ACTIVATE calls was the number of levels that fitted). Wnd is held by the caller. */
+   Wnd->state |= WNDS_BEINGACTIVATED;
+
    /* Call CBT hook chain */
    cbt.fMouse     = bMouse;
    /* Windows gives the hook the window that is being activated, not the one that was active */
    cbt.hWndActive = hWnd;
-   if (co_HOOK_CallHooks( WH_CBT, HCBT_ACTIVATE, (WPARAM)hWnd, (LPARAM)&cbt))
+   Hooked = co_HOOK_CallHooks( WH_CBT, HCBT_ACTIVATE, (WPARAM)hWnd, (LPARAM)&cbt);
+   Wnd->state &= ~WNDS_BEINGACTIVATED;
+   if (Hooked)
    {
       ERR("SetActiveWindow: WH_CBT Call Hook return!\n");
       return FALSE;
