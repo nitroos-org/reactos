@@ -556,6 +556,93 @@ UnpackParam(LPARAM lParamPacked, UINT Msg, WPARAM wParam, LPARAM lParam, BOOL No
     return STATUS_INVALID_PARAMETER;
 }
 
+/* lParam of a message that another thread sends is a kernel buffer of the sender: its stack for a send from
+   win32k code (WM_GETMINMAXINFO, WM_NCCALCSIZE, WM_WINDOWPOSCHANGING of a SetWindowPos), the copy of
+   NtUserMessageCall otherwise. The sender can leave while the window procedure runs (its thread ends, or its
+   timeout expires), and the write-back after the procedure must not go to that buffer then. The receiver
+   works on a copy of its own (NULL: no copy needed, or none possible) and hands the result back only to a
+   sender that still waits. */
+LPARAM FASTCALL
+IntCopySentMessageLParam(UINT Msg, WPARAM wParam, LPARAM lParam)
+{
+    PMSGMEMORY MsgMemoryEntry = FindMsgMemory(Msg);
+    NCCALCSIZE_PARAMS *Params;
+    PVOID Copy;
+    UINT Size;
+
+    if (!lParam || (ULONG_PTR)lParam < (ULONG_PTR)MmSystemRangeStart ||
+        !MsgMemoryEntry || !(MsgMemoryEntry->Flags & MMS_FLAG_WRITE) ||
+        Msg == WM_CREATE || Msg == WM_NCCREATE)
+    {
+        return 0;
+    }
+
+    Size = MsgMemorySize(MsgMemoryEntry, wParam, lParam);
+    if (!Size)
+        return 0;
+
+    Copy = ExAllocatePoolWithTag(PagedPool, Size, TAG_MSG);
+    if (!Copy)
+        return 0;
+
+    _SEH2_TRY
+    {
+        if (Msg == WM_NCCALCSIZE && wParam)
+        {
+            Params = Copy;
+            RtlCopyMemory(Params, (PVOID)lParam, sizeof(NCCALCSIZE_PARAMS));
+            Params->lppos = (PWINDOWPOS)(Params + 1);
+            RtlCopyMemory(Params->lppos, ((NCCALCSIZE_PARAMS *)lParam)->lppos, sizeof(WINDOWPOS));
+        }
+        else
+        {
+            RtlCopyMemory(Copy, (PVOID)lParam, Size);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ExFreePoolWithTag(Copy, TAG_MSG);
+        _SEH2_YIELD(return 0);
+    }
+    _SEH2_END;
+
+    return (LPARAM)Copy;
+}
+
+VOID FASTCALL
+IntReturnSentMessageLParam(UINT Msg, WPARAM wParam, LPARAM lParam, LPARAM Copy, BOOL SenderWaits)
+{
+    PMSGMEMORY MsgMemoryEntry = FindMsgMemory(Msg);
+    NCCALCSIZE_PARAMS *Params;
+    PWINDOWPOS WindowPos;
+
+    if (SenderWaits && MsgMemoryEntry)
+    {
+        _SEH2_TRY
+        {
+            if (Msg == WM_NCCALCSIZE && wParam)
+            {
+                Params = (NCCALCSIZE_PARAMS *)lParam;
+                WindowPos = Params->lppos;
+                RtlCopyMemory(Params, (PVOID)Copy, sizeof(NCCALCSIZE_PARAMS));
+                Params->lppos = WindowPos;
+                RtlCopyMemory(WindowPos, (NCCALCSIZE_PARAMS *)Copy + 1, sizeof(WINDOWPOS));
+            }
+            else
+            {
+                RtlCopyMemory((PVOID)lParam, (PVOID)Copy, MsgMemorySize(MsgMemoryEntry, wParam, Copy));
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            ERR("Bad lParam of the sender, message 0x%x\n", Msg);
+        }
+        _SEH2_END;
+    }
+
+    ExFreePoolWithTag((PVOID)Copy, TAG_MSG);
+}
+
 static NTSTATUS FASTCALL
 CopyMsgToKernelMem(MSG *KernelModeMsg, MSG *UserModeMsg, PMSGMEMORY MsgMemoryEntry)
 {

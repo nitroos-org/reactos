@@ -1048,6 +1048,9 @@ MsqRemoveWindowMessagesFromQueue(PWND Window)
    }
 }
 
+LPARAM FASTCALL IntCopySentMessageLParam(UINT Msg, WPARAM wParam, LPARAM lParam);
+VOID FASTCALL IntReturnSentMessageLParam(UINT Msg, WPARAM wParam, LPARAM lParam, LPARAM Copy, BOOL SenderWaits);
+
 BOOLEAN FASTCALL
 co_MsqDispatchOneSentMessage(
     _In_ PTHREADINFO pti)
@@ -1135,10 +1138,26 @@ co_MsqDispatchOneSentMessage(
    }
    else
    {  /* Call the window procedure. */
+      LPARAM lParamCopy = 0;
+
+      /* The sender can be gone when the procedure returns (it ended, or its timeout expired): the window
+         procedure writes to a copy, which goes back only to a sender that still waits */
+      if (Message->ptiSender && Message->ptiSender != pti && !Message->HasPackedLParam &&
+          !(Message->flags & SMF_RECEIVERFREE))
+      {
+         lParamCopy = IntCopySentMessageLParam(Message->Msg.message, Message->Msg.wParam, Message->Msg.lParam);
+      }
+
       Result = co_IntSendMessage( Message->Msg.hwnd,
                                   Message->Msg.message,
                                   Message->Msg.wParam,
-                                  Message->Msg.lParam);
+                                  lParamCopy ? lParamCopy : Message->Msg.lParam);
+
+      if (lParamCopy)
+      {
+         IntReturnSentMessageLParam(Message->Msg.message, Message->Msg.wParam, Message->Msg.lParam, lParamCopy,
+                                    !(Message->flags & (SMF_SENDERDIED | SMF_RECEIVERFREE)));
+      }
    }
 
    /* If the message is a callback, insert it in the callback senders MessageQueue */
@@ -1342,6 +1361,17 @@ MsqWithdrawSentMessagesOf(
             }
          }
       }
+   }
+
+   /* A message of this thread that a receiver processes right now (on the trouble list) keeps its lParam
+      pointing into this thread's stack, which goes when the thread is reaped, before the cleanup of the
+      THREADINFO marks the message. Mark it now: the receiver then writes nothing back (the cleanup of the
+      THREADINFO still decides who frees the message). */
+   for (Entry = usmList.Flink; Entry != &usmList; Entry = Entry->Flink)
+   {
+      Message = CONTAINING_RECORD(Entry, USER_SENT_MESSAGE, ListEntry);
+      if (Message->ptiSender == ptiSender)
+         Message->flags |= SMF_SENDERDIED;
    }
 }
 
