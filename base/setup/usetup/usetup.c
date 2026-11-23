@@ -3001,6 +3001,23 @@ FsVolCallback(
             // or use an external drive as the system drive/partition
             // (e.g. floppy, USB drive, etc...)
             //
+            if (InstallPartition && InstallPartition->DiskEntry && PartitionList && !PartitionList->IsUefi &&
+                InstallPartition->DiskEntry->MediaType == FixedMedia && !InstallPartition->DiskEntry->BiosFound)
+            {
+                /* The disk is there for the system, but the firmware does not know it: a BIOS has no way to start
+                   from it (VirtualBox's BIOS has no NVMe or USB driver, for example). */
+                PopupError("The disk chosen for " BRAND_PRODUCT_NAME " is not visible to the firmware (BIOS) of\n"
+                           "this computer, so the computer could not start from it. Some virtual\n"
+                           "machines have a BIOS that cannot start from an NVMe or USB disk: choose\n"
+                           "a disk on another controller (SATA or IDE), or use the EFI (UEFI)\n"
+                           "firmware of the machine.\n"
+                           "Press ENTER to return to the partition selection list.",
+                           MUIGetString(STRING_CONTINUE),
+                           Ir, POPUP_WAIT_ENTER);
+
+                FsVolContext->NextPageOnAbort = SELECT_PARTITION_PAGE;
+                break;
+            }
             PopupError("The " BRAND_PRODUCT_NAME " Setup could not find a supported system partition\n"
                        "on your system or could not create a new one. Without such a partition\n"
                        "the Setup program cannot install " BRAND_PRODUCT_NAME ".\n"
