@@ -1926,6 +1926,46 @@ PartMgrPnp(
     }
 }
 
+/**
+ * @brief
+ * TRUE when a write to the byte range of the disk lies in (or reaches into) a partition that has a
+ * file system mounted that is not RAW, and that is neither locked nor dismounted. Windows refuses such
+ * a write through a disk handle (STATUS_ACCESS_DENIED): the file system does not see it.
+ **/
+static
+CODE_SEG("PAGE")
+BOOLEAN
+PartMgrWriteHitsMountedVolume(
+    _In_ PFDO_EXTENSION FdoExtension,
+    _In_ UINT64 Start,
+    _In_ UINT64 Length)
+{
+    static const UNICODE_STRING rawName = RTL_CONSTANT_STRING(L"\\FileSystem\\RAW");
+    BOOLEAN hit = FALSE;
+
+    PAGED_CODE();
+
+    PartMgrAcquireLayoutLock(FdoExtension);
+    for (PSINGLE_LIST_ENTRY cur = FdoExtension->PartitionList.Next; cur != NULL && !hit; cur = cur->Next)
+    {
+        PPARTITION_EXTENSION pe = CONTAINING_RECORD(cur, PARTITION_EXTENSION, ListEntry);
+        PVPB vpb = pe->DeviceObject->Vpb;
+
+        if (Start >= pe->StartingOffset + pe->PartitionLength || Start + Length <= pe->StartingOffset)
+            continue;
+
+        if (vpb && (vpb->Flags & VPB_MOUNTED) && !(vpb->Flags & VPB_LOCKED) && vpb->DeviceObject &&
+            vpb->DeviceObject->DriverObject &&
+            !RtlEqualUnicodeString(&vpb->DeviceObject->DriverObject->DriverName, &rawName, TRUE))
+        {
+            hit = TRUE;
+        }
+    }
+    PartMgrReleaseLayoutLock(FdoExtension);
+
+    return hit;
+}
+
 static
 NTSTATUS
 NTAPI
@@ -1950,14 +1990,40 @@ PartMgrReadWrite(
     }
     else
     {
+        PIO_STACK_LOCATION ioStack = IoGetCurrentIrpStackLocation(Irp);
+
         stats = &((PFDO_EXTENSION)partExt)->IoStats;
+
+        /* A write through the disk into a mounted volume: refused as on Windows, unless the volume is
+           locked or dismounted, or the caller sets SL_FORCE_DIRECT_WRITE (what the partition devices set on the
+           writes of the file systems, which reach this device through them). Only at PASSIVE_LEVEL (a user's
+           write is; a driver at a higher level is not one that writes a disk by hand) */
+        if (ioStack->MajorFunction == IRP_MJ_WRITE &&
+            KeGetCurrentIrql() == PASSIVE_LEVEL &&
+            !(ioStack->Flags & SL_FORCE_DIRECT_WRITE) &&
+            PartMgrWriteHitsMountedVolume((PFDO_EXTENSION)partExt,
+                                          (UINT64)ioStack->Parameters.Write.ByteOffset.QuadPart,
+                                          ioStack->Parameters.Write.Length))
+        {
+            Irp->IoStatus.Status = STATUS_ACCESS_DENIED;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_ACCESS_DENIED;
+        }
     }
 
     // the next driver gets the request (a partition's moved to its place on the disk); this
     // location keeps the original and the time the request started
     IoCopyCurrentIrpStackLocationToNext(Irp);
     if (!partExt->IsFDO)
-        IoGetNextIrpStackLocation(Irp)->Parameters.Read.ByteOffset.QuadPart += partExt->StartingOffset;
+    {
+        PIO_STACK_LOCATION next = IoGetNextIrpStackLocation(Irp);
+
+        next->Parameters.Read.ByteOffset.QuadPart += partExt->StartingOffset;
+        /* a write that comes through a partition is the file system's (or a volume handle's): the disk device
+           does not look at it */
+        if (next->MajorFunction == IRP_MJ_WRITE)
+            next->Flags |= SL_FORCE_DIRECT_WRITE;
+    }
 
     return PartMgrIoStatsCallDriver(stats, partExt->LowerDevice, Irp);
 }
