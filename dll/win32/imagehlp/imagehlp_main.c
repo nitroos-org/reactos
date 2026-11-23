@@ -26,6 +26,32 @@
 #include "imagehlp.h"
 #include "wine/debug.h"
 
+#ifdef __REACTOS__
+#include <delayimp.h>
+
+/*
+ * The symbol functions of this module are dbghelp's, delay-loaded. Windows' imagehlp has its own and never loads
+ * dbghelp.dll, so a program may have a dbghelp.dll of its own next to it (the debuggers do), which LoadLibrary by name
+ * and its import table give it (dbghelp.dll is not a known DLL). This module takes the system one by its full path,
+ * a module of its own beside a program's copy, whatever the program loaded.
+ */
+static FARPROC WINAPI ImagehlpDelayLoadHook(unsigned Notify, PDelayLoadInfo Info)
+{
+    WCHAR Path[MAX_PATH];
+    UINT Length;
+
+    if (Notify != dliNotePreLoadLibrary || !Info->szDll || lstrcmpiA(Info->szDll, "dbghelp.dll") != 0)
+        return NULL;
+    Length = GetSystemDirectoryW(Path, MAX_PATH);
+    if (!Length || Length >= MAX_PATH - 13)
+        return NULL;
+    lstrcpyW(Path + Length, L"\\dbghelp.dll");
+    return (FARPROC)LoadLibraryW(Path);
+}
+
+PfnDliHook __pfnDliNotifyHook2 = ImagehlpDelayLoadHook;
+#endif
+
 
 /***********************************************************************
  *           MarkImageAsRunFromSwap (IMAGEHLP.@)
