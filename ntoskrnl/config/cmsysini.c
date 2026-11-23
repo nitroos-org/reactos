@@ -148,8 +148,8 @@ CmpDeleteKeyObject(PVOID DeletedObject)
             /* Delist the key */
             DelistKeyBodyFromKCB(KeyBody, KeyBody->KcbLocked);
 
-            /* Dereference the KCB */
-            CmpDelayDerefKeyControlBlock(Kcb);
+            /* Dereference the KCB (delayed, or here when the delayed queue is long) */
+            CmpDerefKeyControlBlockOnClose(Kcb, KeyBody->KcbLocked);
         }
     }
 
