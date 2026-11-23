@@ -5,8 +5,8 @@
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * The expected statuses are those of Windows Server 2022 (x64 and x86), probe rpcauth: no server is needed, the
- * status is given when the authentication is set. Not asserted: the services Negotiate, Kerberos and schannel on
- * ncalrpc (Windows answers 1747; the ReactOS code accepts them on purpose, see the ticket).
+ * status is given when the authentication is set. On ncalrpc Windows takes NTLM and the default service only:
+ * Negotiate, Kerberos and schannel are unknown services (1747) at every level.
  */
 
 #include <apitest.h>
@@ -71,6 +71,11 @@ START_TEST(SetAuthInfoRows)
         CheckRow(Seqs[s], Endpoints[s], 0x44, 1747, 1747, 1747, 1748, 1748);
         CheckRow(Seqs[s], Endpoints[s], 0x64, 1747, 1747, 1747, 1748, 1748);
     }
+
+    /* ncalrpc takes NTLM and the default service only */
+    CheckRow(L"ncalrpc", L"kbauthep", RPC_C_AUTHN_GSS_NEGOTIATE, 1747, 1747, 1747, 1748, 1748);
+    CheckRow(L"ncalrpc", L"kbauthep", RPC_C_AUTHN_GSS_KERBEROS, 1747, 1747, 1747, 1748, 1748);
+    CheckRow(L"ncalrpc", L"kbauthep", RPC_C_AUTHN_GSS_SCHANNEL, 1747, 1747, 1747, 1748, 1748);
 
     /* over the network: Negotiate and schannel are accepted, Kerberos needs a principal name or an identity (1749) */
     CheckRow(L"ncacn_np", L"\\pipe\\kbauthep", RPC_C_AUTHN_GSS_NEGOTIATE, 0, 0, 0, 1748, 1748);
