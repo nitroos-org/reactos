@@ -710,6 +710,37 @@ static int parse_version(const char *text, unsigned int *major, unsigned int *mi
     return 1;
 }
 
+/* The image's time stamp: the file header and every entry of the debug directory carry it (so that the
+   debugger's image key, <TimeDateStamp><SizeOfImage>, and the directory agree). */
+static int set_image_timestamp(unsigned char *buffer, size_t len, PIMAGE_NT_HEADERS nt_header, ULONG timestamp)
+{
+    PIMAGE_DATA_DIRECTORY dir;
+    PIMAGE_DEBUG_DIRECTORY entry;
+    unsigned int count, i;
+
+    nt_header->FileHeader.TimeDateStamp = timestamp;
+
+    if (nt_header->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_DEBUG)
+        return 0;
+    dir = &nt_header->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG];
+    if (dir->VirtualAddress == 0 || dir->Size == 0)
+        return 0;
+
+    entry = rva_to_ptr(buffer, nt_header, dir->VirtualAddress);
+    if (entry == NULL || (unsigned char *)entry < buffer ||
+        dir->Size > len - (size_t)((unsigned char *)entry - buffer))
+    {
+        error("Debug directory is outside of the image\n");
+        return 1;
+    }
+
+    count = dir->Size / sizeof(IMAGE_DEBUG_DIRECTORY);
+    for (i = 0; i < count; i++)
+        entry[i].TimeDateStamp = timestamp;
+
+    return 0;
+}
+
 static
 void
 print_usage(void)
@@ -728,6 +759,8 @@ print_usage(void)
            "                        changing its name and its alignment;\n"
            "  --linkerversion=major.minor\n"
            "                        Sets the linker version of the image header;\n"
+           "  --timestamp=seconds   Sets the TimeDateStamp of the image header and of every entry of its\n"
+           "                        debug directory (seconds since the epoch, decimal);\n"
            "  --require-supportedos=win10\n"
            "                        Only check (the file is not modified): fail if a GUI or console\n"
            "                        executable has no manifest naming Windows 10.\n"
@@ -748,6 +781,8 @@ int main(int argc, char **argv)
     PIMAGE_NT_HEADERS nt_header;
     unsigned int linker_major = 0, linker_minor = 0;
     int set_linker_version = 0;
+    unsigned long timestamp = 0;
+    int set_timestamp = 0;
     int require_supportedos = 0;
     int check_unwind_data = 0;
 
@@ -804,6 +839,18 @@ int main(int argc, char **argv)
         else if (strcmp(&argv[i][2], "check-unwind") == 0)
         {
             check_unwind_data = 1;
+        }
+        else if (strncmp(&argv[i][2], "timestamp=", 10) == 0)
+        {
+            char *end;
+
+            timestamp = strtoul(&argv[i][12], &end, 10);
+            if (end == &argv[i][12] || *end != '\0' || timestamp > 0xFFFFFFFFUL)
+            {
+                fprintf(stderr, "%s ERROR: Invalid time stamp: '%s'.\n", g_ApplicationName, argv[i]);
+                goto failure;
+            }
+            set_timestamp = 1;
         }
         else if (strncmp(&argv[i][2], "linkerversion=", 14) == 0)
         {
@@ -913,6 +960,10 @@ int main(int argc, char **argv)
         nt_header->OptionalHeader.MajorLinkerVersion = (UCHAR)linker_major;
         nt_header->OptionalHeader.MinorLinkerVersion = (UCHAR)linker_minor;
     }
+
+    /* Apply the time stamp override (header and debug directory entries) */
+    if (set_timestamp && (result == 0))
+        result = set_image_timestamp(buffer, len, nt_header, (ULONG)timestamp);
 
     /* Apply any section attributes override */
     for (i = 1; (i < argc) && (result == 0); ++i)

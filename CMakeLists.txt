@@ -162,7 +162,7 @@ if(NOT CMAKE_CROSSCOMPILING)
 
     set(NATIVE_TARGETS asmpp bin2c widl gendib cabman fatten hpp isohybrid mkhive mkisofs obj2bin spec2def geninc mkshelllink utf16le xml2sdb)
     if(NOT MSVC)
-        list(APPEND NATIVE_TARGETS pefixup)
+        list(APPEND NATIVE_TARGETS pefixup pdbfix)
         if (ARCH STREQUAL "i386")
             list(APPEND NATIVE_TARGETS rsym)
         endif()
@@ -456,6 +456,31 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
                 -DOUT=${REACTOS_BINARY_DIR}/pdb/MANIFEST.txt
                 -P ${REACTOS_SOURCE_DIR}/sdk/cmake/pdb_manifest.cmake
             DEPENDS ${_pdb_targets}
+            VERBATIM)
+
+        # The symbols package (ninja nitro_symbols): a symbol store of the PDB files and images, with the manifest, and its archives
+        # next to the build output, named after the release: nitroos-symbols-<NITRO_VERSION>-<arch> (dev builds add the commit).
+        # It is not part of "all": a release build asks for it.
+        set(NITRO_SYMBOLS_NAME "" CACHE STRING "name of the symbols package (default: nitroos-symbols-<NITRO_VERSION>-<arch>)")
+        set(_symbols_name "${NITRO_SYMBOLS_NAME}")
+        if(_symbols_name STREQUAL "")
+            if(NITRO_IS_RELEASE)
+                set(_symbols_name "nitroos-symbols-${NITRO_VERSION}-${ARCH}")
+            else()
+                set(_symbols_name "nitroos-symbols-${NITRO_VERSION}-${NITRO_SHA}-${ARCH}")
+            endif()
+        endif()
+        add_custom_target(nitro_symbols
+            COMMAND ${CMAKE_COMMAND}
+                -DMANIFEST=${REACTOS_BINARY_DIR}/pdb/MANIFEST.txt
+                -DLIST=${CMAKE_BINARY_DIR}/pdb_modules.txt
+                -DPDB_ROOT=${REACTOS_BINARY_DIR}/pdb
+                -DOUT=${REACTOS_BINARY_DIR}/symbols
+                -DNAME=${_symbols_name}
+                -DEPOCH=${NITRO_PDB_TIMESTAMP_VALUE}
+                "-DFORMATS=zip$<SEMICOLON>tar.xz"
+                -P ${REACTOS_SOURCE_DIR}/sdk/cmake/pdb_package.cmake
+            DEPENDS nitro_pdb_manifest
             VERBATIM)
     endif()
 

@@ -377,7 +377,64 @@ if(NITRO_PDB_PUBLICS)
     if(NOT _nitro_ld_help MATCHES "--pdb=")
         message(FATAL_ERROR "NITRO_PDB_PUBLICS=ON needs GNU ld 2.40 or later (option --pdb); the linker of this toolchain is '${_nitro_ld}' (${_nitro_ld_version}) and does not have it. Use a toolchain with binutils 2.40 or later or configure with -DNITRO_PDB_PUBLICS=OFF.")
     endif()
-    message(STATUS "NITRO_PDB_PUBLICS: PDB publics for kernel-mode images, linker ${_nitro_ld_version}")
+    # TimeDateStamp of the images that get a PDB. The linker would write the link time (the images of two builds of one commit
+    # differ, and so do their debugger keys: <TimeDateStamp><SizeOfImage>) or, with --no-insert-timestamp, 0 (every version of an
+    # image has the same key). The commit date (or SOURCE_DATE_EPOCH) is a stamp that is the same for every build of one source
+    # state and differs between versions: the stamp is set after the link by pefixup.
+    set(NITRO_PDB_TIMESTAMP "" CACHE STRING "TimeDateStamp (seconds since the epoch) of the images that get a PDB with NITRO_PDB_PUBLICS (default: SOURCE_DATE_EPOCH, else the commit date of HEAD)")
+    set(_nitro_pdb_stamp "${NITRO_PDB_TIMESTAMP}")
+    if(_nitro_pdb_stamp STREQUAL "")
+        set(_nitro_pdb_stamp "${SOURCE_DATE_EPOCH}")
+    endif()
+    if(_nitro_pdb_stamp STREQUAL "")
+        set(_nitro_pdb_stamp "$ENV{SOURCE_DATE_EPOCH}")
+    endif()
+    if(_nitro_pdb_stamp STREQUAL "")
+        find_package(Git)
+        if(GIT_FOUND AND EXISTS "${REACTOS_SOURCE_DIR}/.git")
+            execute_process(COMMAND "${GIT_EXECUTABLE}" log -1 --format=%ct HEAD
+                WORKING_DIRECTORY ${REACTOS_SOURCE_DIR} OUTPUT_VARIABLE _nitro_pdb_stamp RESULT_VARIABLE _nitro_pdb_stamp_rc
+                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+            if(NOT _nitro_pdb_stamp_rc EQUAL 0)
+                set(_nitro_pdb_stamp "")
+            endif()
+        endif()
+    endif()
+    if(NOT _nitro_pdb_stamp MATCHES "^[0-9]+$")
+        message(FATAL_ERROR "NITRO_PDB_PUBLICS=ON needs a time stamp for the images: set -DNITRO_PDB_TIMESTAMP=<seconds since the epoch> or SOURCE_DATE_EPOCH, or build from a git checkout")
+    endif()
+    set(NITRO_PDB_TIMESTAMP_VALUE "${_nitro_pdb_stamp}")
+    # The linker writes no time (the PDB info stream and the PE header would carry it, and the GUID is a hash of the image).
+    foreach(_nitro_lf CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS CMAKE_MODULE_LINKER_FLAGS)
+        if(NOT ${_nitro_lf} MATCHES "--no-insert-timestamp")
+            set(${_nitro_lf} "${${_nitro_lf}} -Wl,--no-insert-timestamp")
+        endif()
+    endforeach()
+
+    # Paths of the build host in the PDB files: the build and source directories become fixed prefixes, other absolute paths
+    # (the linker) lose their directory (pdbfix). The toolchain directory must not remain anywhere.
+    get_filename_component(_nitro_cc_dir "${CMAKE_C_COMPILER}" DIRECTORY)
+    get_filename_component(_nitro_cc_root "${_nitro_cc_dir}/.." REALPATH)
+    set(NITRO_PDBFIX_ARGS --map "${REACTOS_BINARY_DIR}=C:\\nitroos\\build" --map "${REACTOS_SOURCE_DIR}=C:\\nitroos\\src"
+                          --forbid "${_nitro_cc_root}"
+                          --signature "${NITRO_PDB_TIMESTAMP_VALUE}")
+    # User-mode images that get a PDB as well (the kernel-mode images always do): "core" = the system libraries and servers that show
+    # in the stacks of a driver developer, "all" = every user-mode module outside the tests, "none" or empty = none, or a list of
+    # module names. The 32-bit guest of SYSWOW64 is a separate configuration and has none.
+    set(NITRO_PDB_USER_MODULES "core" CACHE STRING "user-mode modules that get a PDB with NITRO_PDB_PUBLICS: core, all, none or a list of module names")
+    set(NITRO_PDB_USER_ALL FALSE)
+    if(NITRO_PDB_USER_MODULES STREQUAL "core")
+        set(NITRO_PDB_USER_LIST ntdll kernel32 kernelbase advapi32 user32 gdi32 win32u msvcrt rpcrt4 ws2_32 conhost
+                                csrss csrsrv basesrv winsrv smss services lsass winlogon wow64 wow64cpu wow64win)
+    elseif(NITRO_PDB_USER_MODULES STREQUAL "all")
+        set(NITRO_PDB_USER_ALL TRUE)
+        set(NITRO_PDB_USER_LIST "")
+    elseif(NITRO_PDB_USER_MODULES STREQUAL "none")
+        set(NITRO_PDB_USER_LIST "")
+    else()
+        string(REPLACE "," ";" NITRO_PDB_USER_LIST "${NITRO_PDB_USER_MODULES}")
+    endif()
+    message(STATUS "NITRO_PDB_PUBLICS: PDB publics for kernel-mode images, linker ${_nitro_ld_version}, image time stamp ${NITRO_PDB_TIMESTAMP_VALUE}, user-mode: ${NITRO_PDB_USER_MODULES}")
     file(MAKE_DIRECTORY ${REACTOS_BINARY_DIR}/pdb)
 endif()
 
@@ -462,11 +519,41 @@ function(set_module_type_toolchain MODULE TYPE)
         #  - INIT section is made discardable
         #  - .rsrc is made read-only and discardable
         #  - PAGE & .edata sections are made pageable.
-        add_custom_command(TARGET ${MODULE} POST_BUILD
-            COMMAND native-pefixup --${TYPE} $<TARGET_FILE:${MODULE}>)
+        if(NITRO_PDB_PUBLICS)
+            # the same command sets the time stamp of the header and of the debug directory, then the checksum is computed
+            add_custom_command(TARGET ${MODULE} POST_BUILD
+                COMMAND native-pefixup --${TYPE} --timestamp=${NITRO_PDB_TIMESTAMP_VALUE} $<TARGET_FILE:${MODULE}>)
+        else()
+            add_custom_command(TARGET ${MODULE} POST_BUILD
+                COMMAND native-pefixup --${TYPE} $<TARGET_FILE:${MODULE}>)
+        endif()
 
         # Believe it or not, cmake doesn't do that
         set_property(TARGET ${MODULE} APPEND PROPERTY LINK_DEPENDS $<TARGET_PROPERTY:native-pefixup,IMPORTED_LOCATION>)
+
+        if(NITRO_PDB_PUBLICS)
+            # The PDB as the linker wrote it is not accepted by Microsoft's debugger libraries (stream 0 has content) and names the
+            # directories of the build host: pdbfix repairs the first and replaces the second (see sdk/tools/pdbfix/pdbfix.c)
+            add_custom_command(TARGET ${MODULE} POST_BUILD
+                COMMAND native-pdbfix ${NITRO_PDBFIX_ARGS} "${REACTOS_BINARY_DIR}/pdb/${_nitro_pdb_rel}/$<TARGET_FILE_BASE_NAME:${MODULE}>.pdb"
+                VERBATIM)
+            set_property(TARGET ${MODULE} APPEND PROPERTY LINK_DEPENDS $<TARGET_PROPERTY:native-pdbfix,IMPORTED_LOCATION>)
+        endif()
+    elseif(NITRO_PDB_PUBLICS AND (TYPE STREQUAL win32dll OR TYPE STREQUAL win32ocx OR TYPE STREQUAL cpl OR TYPE STREQUAL win32cui
+                                  OR TYPE STREQUAL win32gui OR TYPE STREQUAL nativecui OR TYPE STREQUAL nativedll)
+           AND (NITRO_PDB_USER_ALL OR MODULE IN_LIST NITRO_PDB_USER_LIST)
+           AND NOT CMAKE_CURRENT_SOURCE_DIR MATCHES "/modules/rostests(/|$)")
+        # the same for a user-mode image of the selected set
+        file(RELATIVE_PATH _nitro_pdb_rel "${REACTOS_BINARY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+        file(MAKE_DIRECTORY "${REACTOS_BINARY_DIR}/pdb/${_nitro_pdb_rel}")
+        target_link_options(${MODULE} PRIVATE "-Wl,--pdb=${REACTOS_BINARY_DIR}/pdb/${_nitro_pdb_rel}/$<TARGET_FILE_BASE_NAME:${MODULE}>.pdb")
+        set_property(GLOBAL APPEND PROPERTY NITRO_PDB_MODULE_LIST "${MODULE}|${_nitro_pdb_rel}")
+        add_custom_command(TARGET ${MODULE} POST_BUILD
+            COMMAND native-pefixup --timestamp=${NITRO_PDB_TIMESTAMP_VALUE} $<TARGET_FILE:${MODULE}>
+            COMMAND native-pdbfix ${NITRO_PDBFIX_ARGS} "${REACTOS_BINARY_DIR}/pdb/${_nitro_pdb_rel}/$<TARGET_FILE_BASE_NAME:${MODULE}>.pdb"
+            VERBATIM)
+        set_property(TARGET ${MODULE} APPEND PROPERTY LINK_DEPENDS
+            $<TARGET_PROPERTY:native-pefixup,IMPORTED_LOCATION> $<TARGET_PROPERTY:native-pdbfix,IMPORTED_LOCATION>)
     endif()
 endfunction()
 
