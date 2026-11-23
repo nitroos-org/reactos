@@ -73,6 +73,7 @@ list(APPEND SOURCE
     SetParentKillOrder.c
     SetWindowPosLastError.c
     WmCancelModeLastError.c
+    LastInputInfo.c
     WmGetDlgCode.c
     WmDdeml.c
     WmDde.c

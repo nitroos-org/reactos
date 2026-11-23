@@ -1208,11 +1208,18 @@ NtUserSendInput(
         {
             case INPUT_MOUSE:
                 if (UserSendMouseInput(&SafeInput.mi, TRUE))
+                {
+                    /* Windows counts injected input as last input (GetLastInputInfo, screen saver, idle) */
+                    IntLastInputTick(TRUE);
                     uRet++;
+                }
                 break;
             case INPUT_KEYBOARD:
                 if (UserSendKeyboardInput(&SafeInput.ki, TRUE))
+                {
+                    IntLastInputTick(TRUE);
                     uRet++;
+                }
                 break;
             case INPUT_HARDWARE:
                 /* Not a message of ours to log: the caller supplies as many of these as it likes,

@@ -676,10 +676,10 @@ ChildProcess(DWORD ParentPid)
        g_Shared->ChildHookCalls);
     ok(g_Shared->ChildRawInput == 0, "child: the raw input sink of a background process got %ld WM_INPUT for keys typed on the other desktop\n",
        g_Shared->ChildRawInput);
-    /* Extras row: GetLastInputInfo is global; here the keys of B are SendInput keys, which ReactOS does not count
-       as input for GetLastInputInfo (only the keyboard and mouse themselves), Windows does */
+    /* Extras row: GetLastInputInfo is global; the keys of B are SendInput keys, which count as input for it (Windows
+       Server 2022, and since the SendInput stamp here too) */
     GetLastInputInfo(&lii2);
-    todo_ros ok(lii2.dwTime != lii.dwTime, "extras child: GetLastInputInfo did not change while keys were typed on the other desktop\n");
+    ok(lii2.dwTime != lii.dwTime, "extras child: GetLastInputInfo did not change while keys were typed on the other desktop\n");
     SetEvent(hAck);
 
     /* Phase 5: A has the input again */
