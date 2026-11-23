@@ -13,8 +13,10 @@
  *                                                           count, answers a stop, shutdown or preshutdown
  *                                                           with STOP_PENDING for DELAYMS milliseconds and
  *                                                           then STOPPED; "keep": a preshutdown control is
- *                                                           only logged, the service keeps running
+ *                                                           only logged, the service keeps running;
+ *                                                           "hang": it is logged and the handler never returns
  *                svcaccept cfg NAME                         SERVICE_CONFIG_PRESHUTDOWN_INFO of a service
+ *                svcaccept setcfg NAME MS                   sets the preshutdown timeout of a service
  *
  *              Output: the file of "svc" (one line per event, flushed at once), stdout for "cfg".
  * COPYRIGHT:   Copyright 2026 Tomas Srnka
@@ -49,6 +51,7 @@ static char g_Mode[16] = "";
 static DWORD g_Mask = SERVICE_ACCEPT_STOP;
 static DWORD g_Delay;
 static BOOL g_Keep;     /* a preshutdown control is logged and the service keeps running */
+static BOOL g_Hang;     /* a preshutdown control is logged and the handler never returns */
 static HANDLE g_Stop;
 
 static void
@@ -106,6 +109,11 @@ CtlHandler(DWORD Control, DWORD EventType, LPVOID EventData, LPVOID Context)
         case SERVICE_CONTROL_PRESHUTDOWN:
             if (g_Keep)
                 return NO_ERROR;
+            if (g_Hang)
+            {
+                Sleep(INFINITE);
+                return NO_ERROR;
+            }
             /* fall through */
         case SERVICE_CONTROL_SHUTDOWN:
         case SERVICE_CONTROL_STOP:
@@ -290,6 +298,28 @@ ShowConfig(const char *Name)
     CloseServiceHandle(Scm);
 }
 
+static void
+SetConfig(const char *Name, DWORD Timeout)
+{
+    SC_HANDLE Scm, Svc;
+    MY_PRESHUTDOWN_INFO Info;
+
+    Scm = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+    Svc = Scm ? OpenServiceA(Scm, Name, SERVICE_CHANGE_CONFIG) : NULL;
+    if (!Svc)
+    {
+        printf("SETCFG %s open failed %lu\n", Name, GetLastError());
+        return;
+    }
+    Info.dwPreshutdownTimeout = Timeout;
+    if (ChangeServiceConfig2A(Svc, SERVICE_CONFIG_PRESHUTDOWN_INFO, &Info))
+        printf("SETCFG %s preshutdown timeout %lu ms ok\n", Name, Timeout);
+    else
+        printf("SETCFG %s ChangeServiceConfig2 failed %lu\n", Name, GetLastError());
+    CloseServiceHandle(Svc);
+    CloseServiceHandle(Scm);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -305,6 +335,7 @@ main(int argc, char **argv)
         if (argc >= 7)
             g_Delay = strtoul(argv[6], NULL, 10);
         g_Keep = argc >= 8 && !strcmp(argv[7], "keep");
+        g_Hang = argc >= 8 && !strcmp(argv[7], "hang");
         Table[0].lpServiceName = g_Name;
         Table[0].lpServiceProc = ServiceMain;
         Table[1].lpServiceName = NULL;
@@ -316,6 +347,11 @@ main(int argc, char **argv)
     if (argc >= 3 && !strcmp(argv[1], "cfg"))
     {
         ShowConfig(argv[2]);
+        return 0;
+    }
+    if (argc >= 4 && !strcmp(argv[1], "setcfg"))
+    {
+        SetConfig(argv[2], strtoul(argv[3], NULL, 10));
         return 0;
     }
 
