@@ -236,7 +236,6 @@ START_TEST(SeOwnerRights)
     NTSTATUS Status;
     PSID User, World, Other, Admins;
     POR_SD Sd;
-    const ACCESS_MASK All = STANDARD_RIGHTS_ALL | 0x7;
 
     SeCaptureSubjectContext(&SubjectContext);
     Token = SeQuerySubjectContextToken(&SubjectContext);
@@ -289,12 +288,16 @@ START_TEST(SeOwnerRights)
         if (Sd) ExFreePoolWithTag(Sd, 'rOmK');
     }
 
-    /* 4. Allow OWNER RIGHTS GENERIC_ALL: mapped */
+    /*
+     * 4. Allow OWNER RIGHTS GENERIC_ALL: the access check does not map generic rights inside an ACE
+     * (as AccessCheck on Windows Server 2022, the user-mode OwnerRightsAccess row): it grants nothing
+     * (and the owner gets no implicit rights), MAXIMUM_ALLOWED returns the bit as it is
+     */
     {
         OR_ACE Aces[] = { { OR_ALLOW, 0, GENERIC_ALL, &OwnerRightsSid } };
         Sd = OrMakeSd(User, RTL_NUMBER_OF(Aces), Aces);
-        OrCheck(&SubjectContext, Sd, OR_WD | 0x7, TRUE, OR_WD | 0x7);
-        OrCheck(&SubjectContext, Sd, MAXIMUM_ALLOWED, TRUE, All);
+        OrCheck(&SubjectContext, Sd, OR_WD | 0x7, FALSE, 0);
+        OrCheck(&SubjectContext, Sd, MAXIMUM_ALLOWED, TRUE, GENERIC_ALL);
         if (Sd) ExFreePoolWithTag(Sd, 'rOmK');
     }
 

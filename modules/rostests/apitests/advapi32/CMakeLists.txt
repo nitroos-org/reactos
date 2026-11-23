@@ -6,6 +6,7 @@ list(APPEND SOURCE
     AccessCheckDifferential.c
     AccessCheckMandatory.c
     AccessCheckNoAccess.c
+    AccessCheckGenericAce.c
     AccessCheckObjectTypeList.c
     AddMandatoryAce.c
     RegSaveKeyExFormat.c

@@ -14,9 +14,10 @@
  * The expectations follow Microsoft's public documentation of the OWNER RIGHTS SID (Windows
  * Vista and later): an ACE for OWNER RIGHTS applies to the owner of the object, and when the
  * DACL has one for the object, the owner does not get its implicit READ_CONTROL | WRITE_DAC;
- * an inherit-only ACE does not apply to the object. Not measured on Windows yet (the rows
- * marked "verify" are points the documentation leaves open): see the harness evidence
- * ownerrights-20261114.
+ * an inherit-only ACE does not apply to the object. Built stand-alone for Windows, the test
+ * passes on Windows Server 2022 (x64 and x86 under WoW64; the rows marked "verify" included),
+ * once the generic ACE row expects what Windows returns: the access check does not map generic
+ * rights inside ACE masks. See also the harness evidence ownerrights-20261114.
  */
 
 #define RC READ_CONTROL
@@ -143,8 +144,6 @@ static void Check_(int Line, HANDLE Token, CALL_KIND Kind, PSID Owner, const ACE
 
 static void TestPlain(HANDLE Token, CALL_KIND Kind)
 {
-    const ACCESS_MASK All = STANDARD_RIGHTS_ALL | 7;
-
     /* No OWNER RIGHTS ACE: implicit READ_CONTROL | WRITE_DAC */
     {
         ACE_SPEC Aces[] = { { 'A', 0, 1, &Everyone } };
@@ -169,8 +168,9 @@ static void TestPlain(HANDLE Token, CALL_KIND Kind)
         CHECK(Token, Kind, User, Aces, MAXIMUM_ALLOWED, TRUE, RC | 2);
     }
     {
+        /* Generic rights in the ACE are not mapped by the check (Windows Server 2022): returned as they are */
         ACE_SPEC Aces[] = { { 'A', 0, GENERIC_ALL, &OwnerRights } };
-        CHECK(Token, Kind, User, Aces, MAXIMUM_ALLOWED, TRUE, All);
+        CHECK(Token, Kind, User, Aces, MAXIMUM_ALLOWED, TRUE, GENERIC_ALL);
     }
 
     /* Inherit-only OWNER RIGHTS ACE: does not apply, the implicit rights stay */

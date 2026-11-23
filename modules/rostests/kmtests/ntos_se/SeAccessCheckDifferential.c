@@ -38,8 +38,9 @@
 #define AD_SAMPLE_HEAD          4
 #define AD_SAMPLE_STRIDE        61
 #define AD_SAMPLE_GOLDEN_ROWS   28960UL
-#define AD_SAMPLE_GOLDEN_A      0x4b92ea48UL
-#define AD_SAMPLE_GOLDEN_B      0xa71dc73cUL
+/* Generic rights inside ACE masks are not mapped by the check (as on Windows): before that change 0x4b92ea48, 0xa71dc73c */
+#define AD_SAMPLE_GOLDEN_A      0x5784c864UL
+#define AD_SAMPLE_GOLDEN_B      0x6cd0eaa4UL
 
 #define AD_RC READ_CONTROL
 #define AD_WD WRITE_DAC

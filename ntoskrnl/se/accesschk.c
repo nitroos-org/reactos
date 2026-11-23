@@ -655,11 +655,8 @@ SepAnalyzeAcesForObjectTypeList(
             continue;
         }
 
+        /* The ACE's mask as stored: generic rights in it are not mapped (see SepAnalyzeAcesFromDacl) */
         Access = CurrentAce->AccessMask;
-        if ((Access & GENERIC_ACCESS) && GenericMapping)
-        {
-            RtlMapGenericMask(&Access, GenericMapping);
-        }
 
         SepApplyAceToObjectTypeList(ObjectTypeList,
                                     ObjectTypeListLength,
@@ -930,12 +927,16 @@ SepAnalyzeAcesFromDacl(
             }
         }
 
-        /* Get this access right from the ACE and map it if it has a generic mask right */
+        /*
+         * The ACE's mask as stored. Generic rights in it are not mapped: on
+         * Windows (Server 2022, measured with every access check service) an
+         * allow or deny ACE grants or denies nothing for GENERIC_READ/WRITE/
+         * EXECUTE/ALL bits in its mask, and MAXIMUM_ALLOWED returns them as
+         * they are. Generic rights are mapped when a descriptor is assigned
+         * (SeAssignSecurity, inheritance) or set (SeSetSecurityDescriptorInfoEx,
+         * RtlSetSecurityObject), so stored effective ACEs carry none.
+         */
         Access = CurrentAce->AccessMask;
-        if ((Access & GENERIC_ACCESS) && GenericMapping)
-        {
-            RtlMapGenericMask(&Access, GenericMapping);
-        }
 
         if (ActionType == AccessCheckMaximum)
         {

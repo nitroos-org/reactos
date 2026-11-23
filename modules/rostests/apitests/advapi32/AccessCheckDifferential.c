@@ -50,8 +50,12 @@
 #define DACLS_SAMPLE_HEAD   4
 #define DACLS_SAMPLE_STRIDE 389
 #define SAMPLE_GOLDEN_ROWS  42480UL
-/* The rows with a DesiredAccess of 0 are denied (as on Windows Server 2022): before that change 0xba617c3863a2ebba */
-#define SAMPLE_GOLDEN_HASH  0x4b8d4b8864de503aULL
+/*
+ * The rows with a DesiredAccess of 0 are denied (as on Windows Server 2022): before that change 0xba617c3863a2ebba.
+ * Generic rights inside ACE masks are not mapped by the check (as on Windows Server 2022): before that change
+ * 0x4b8d4b8864de503a.
+ */
+#define SAMPLE_GOLDEN_HASH  0x82aaa8b3d05bfd41ULL
 
 #define RC READ_CONTROL
 #define WD WRITE_DAC
