@@ -721,6 +721,7 @@ typedef enum _JUNCTION_RESULT
     JunctionNotThere,       /* no such object, or it cannot be opened */
     JunctionNotJunction,    /* a plain directory or file, or a reparse point of another kind or target: left alone */
     JunctionProtected,      /* its DACL is protected already: nothing to do */
+    JunctionForeignOwner,   /* owned by neither SYSTEM nor Administrators (not what setup made): left alone */
     JunctionSecured,        /* it got the DACL */
     JunctionFailed          /* setting the DACL failed */
 } JUNCTION_RESULT;
@@ -811,8 +812,8 @@ JunctionPointsTo(
 /*
  * A junction object gets the DACL of the directory it points to (the template of that directory), protected. Only the
  * object is opened, never what it points to (FILE_FLAG_OPEN_REPARSE_POINT, and the security is set through that
- * handle). Nothing happens for a plain directory, for a reparse point that is not a junction to pszTarget (when given)
- * or for one whose DACL is protected already.
+ * handle). Nothing happens for a plain directory, for a reparse point that is not a junction to pszTarget (when given),
+ * for one whose DACL is protected already or for one that neither SYSTEM nor Administrators own (not setup's).
  */
 static JUNCTION_RESULT
 SecureJunctionObject(
@@ -826,6 +827,7 @@ SecureJunctionObject(
     SECURITY_DESCRIPTOR_CONTROL Control;
     PSECURITY_DESCRIPTOR pSd = NULL;
     PACL pAcl = NULL;
+    PSID pOwner = NULL;
     DWORD dwRevision, dwError = ERROR_SUCCESS;
     JUNCTION_RESULT Result = JunctionNotJunction;
     HANDLE hLink;
@@ -847,7 +849,8 @@ SecureJunctionObject(
 
     /* The DACL of the object itself: nothing to do when it is protected */
     Result = JunctionFailed;
-    dwError = GetSecurityInfo(hLink, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &pAcl, NULL, &pSd);
+    dwError = GetSecurityInfo(hLink, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                              &pOwner, NULL, &pAcl, NULL, &pSd);
     if (dwError != ERROR_SUCCESS)
         goto done;
     if (!GetSecurityDescriptorControl(pSd, &Control, &dwRevision))
@@ -858,6 +861,20 @@ SecureJunctionObject(
     if (Control & SE_DACL_PROTECTED)
     {
         Result = JunctionProtected;
+        goto done;
+    }
+
+    /*
+     * Setup (SYSTEM) made the junction: its owner is SYSTEM or Administrators. One with another owner was put there
+     * by someone else (a user who deleted the junction and made a link of their own, which may point anywhere when no
+     * target is checked): giving it a protected DACL would make it look like the system's, and its owner could still
+     * change it. It is left alone.
+     */
+    if (!pOwner || (!IsWellKnownSid(pOwner, WinLocalSystemSid) && !IsWellKnownSid(pOwner, WinBuiltinAdministratorsSid)))
+    {
+        DPRINT1("%S: not owned by SYSTEM or Administrators, left alone\n", pszLink);
+        Result = JunctionForeignOwner;
+        dwError = ERROR_SUCCESS;
         goto done;
     }
 
