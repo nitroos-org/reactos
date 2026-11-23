@@ -24,10 +24,8 @@ extern KSPIN_LOCK KiReverseStallIpiLock;
  * makes these pile up into a vector-0xE1 IPI storm that pegs a core at idle
  * (ticket T79). Dropping the redundant sends removes ~85% of the storm's IPIs
  * with no missed reschedule (the first setter of the request always sends, so a
- * dispatch interrupt is still guaranteed). Default on; cleared by the boot
- * option NOIPICOALESCE.
+ * dispatch interrupt is still guaranteed).
  */
-BOOLEAN KiSmpIpiCoalesce = TRUE;
 
 /*
  * The packet fields. x64 has no SignalDone and keeps the packet in a request
@@ -211,7 +209,7 @@ KiIpiSend(IN KAFFINITY TargetProcessors,
            bit means no service has consumed it yet) - drop the redundant send.
            The first setter of a bit (Old had it clear) always sends, so the
            target is still guaranteed to take a dispatch interrupt. */
-        if (KiSmpIpiCoalesce && ((Old & IpiRequest) == IpiRequest))
+        if ((Old & IpiRequest) == IpiRequest)
             NeedIpi &= ~AFFINITY_MASK(Processor);
     }
 

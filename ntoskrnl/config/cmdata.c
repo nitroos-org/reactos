@@ -383,13 +383,6 @@ DATA_SEG("INITDATA") CM_SYSTEM_CONTROL_VECTOR CmControlVector[] =
     },
     {
         L"Session Manager\\Memory Management",
-        L"NitroPager",
-        &MiNitroPagerMode,
-        NULL,
-        NULL
-    },
-    {
-        L"Session Manager\\Memory Management",
         L"NitroPagerDebug",
         &MiNitroPagerDebug,
         NULL,

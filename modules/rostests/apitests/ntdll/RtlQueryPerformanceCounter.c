@@ -31,20 +31,6 @@ static const char *PathName(void)
     return Name;
 }
 
-/* The Session Manager\Kernel DisableUserQpc value that makes the kernel withdraw the bypass */
-static BOOL QueryDisableUserQpc(void)
-{
-    RTL_QUERY_REGISTRY_TABLE Table[2];
-    ULONG Disable = 0;
-
-    RtlZeroMemory(Table, sizeof(Table));
-    Table[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
-    Table[0].Name = L"DisableUserQpc";
-    Table[0].EntryContext = &Disable;
-    RtlQueryRegistryValues(RTL_REGISTRY_CONTROL, L"Session Manager\\Kernel", Table, NULL, NULL);
-    return Disable != 0;
-}
-
 #define MONOTONIC_THREADS 8
 #define MONOTONIC_SAMPLES 2000000
 #define CONSISTENCY_SAMPLES 200000
@@ -173,10 +159,8 @@ static void TestFrequency(void)
        user-mode counter is only enabled with it */
     Shared = ROS_QPC_FREQUENCY;
     Bypass = ROS_QPC_BYPASS;
-    trace("QueryPerformanceCounter path: %s; DisableUserQpc %d\n", PathName(), QueryDisableUserQpc());
+    trace("QueryPerformanceCounter path: %s\n", PathName());
     trace("Frequency %I64d, shared %I64u, bypass flags 0x%02x\n", Frequency.QuadPart, Shared, Bypass);
-    if (QueryDisableUserQpc())
-        ok((Bypass & 1) == 0, "DisableUserQpc is set but the bypass is on (flags 0x%02x)\n", Bypass);
     if (Shared)
         ok((ULONGLONG)Frequency.QuadPart == Shared, "Frequency %I64d, shared %I64u\n", Frequency.QuadPart, Shared);
     if (Bypass & 1)

@@ -13,11 +13,9 @@
 
 /*
  * Design: harness process/PAGER-DESIGN.md rev 2, phases P0/P1. Everything here is
- * reached only when the NitroPager mode (Session Manager\Memory Management
- * value NitroPager, read once at boot) is not 0. The default (the kernel's own
- * value when the registry has none, and what setup writes) is 1 on amd64 and 0
- * on other architectures (MI_NITRO_PAGER_DEFAULT); 0 keeps the behaviour the
- * memory manager had before, the LiveCD sets it.
+ * reached only when the pager mode (MiNitroPagerMode, mm.h) is not 0. The mode is
+ * a constant of the architecture: 1 on amd64 and 0 on i386 (the i386 gate is not met
+ * yet); no registry value selects it.
  *
  * States of a private page (PrototypePte == 0):
  *   valid                  PTE valid; OriginalPte = demand zero with the
@@ -56,16 +54,10 @@ extern MMPFNLIST MmBadPageListHead;
 extern ULONG MmTotalPagesForPagingFile;
 
 /*
- * NitroPager / NitroPagerDebug (CmControlVector, read once at boot; an absent NitroPager value leaves the
- * default). The default is 1 on amd64 (2026.11-1) and 0 elsewhere: i386 has not passed its gate yet (the
- * 2 h soak at 512 MB, review rvpagerdef). Setup writes the same value per architecture (hivesys_ARCH.inf).
+ * NitroPagerDebug (CmControlVector, read once at boot; a free build honours it only with /NITROPAGERDEBUG).
+ * The pager mode itself is the constant MiNitroPagerMode of mm.h: 1 on amd64 (2026.11-1), 0 on i386, which has
+ * not passed its gate yet (the 2 h soak at 512 MB, review rvpagerdef).
  */
-#if defined(_M_AMD64)
-#define MI_NITRO_PAGER_DEFAULT 1
-#else
-#define MI_NITRO_PAGER_DEFAULT 0
-#endif
-ULONG MiNitroPagerMode = MI_NITRO_PAGER_DEFAULT;
 ULONG MiNitroPagerDebug;
 
 /* Private pages on the standby lists: repurposable */

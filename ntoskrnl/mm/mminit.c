@@ -226,13 +226,7 @@ MmInitSystem(IN ULONG Phase,
     /* Initialize the kernel address space */
     ASSERT(Phase == 1);
 
-    /*
-     * NitroPager, read once with the control vector (a change needs a reboot):
-     * 0 off, 1 private paging; 2 behaves as 1 until its commit ceiling exists.
-     * Values above 2 were made 0 right after the control vector was read
-     * (ExpInitializeExecutive), before ARM3 phase 0.
-     */
-    ASSERT(MiNitroPagerMode <= 2);
+    /* NitroPager: the pager mode is a constant of the architecture (mm.h). */
     if (MiNitroPagerMode != 0)
         DPRINT1("NitroPager %lu (test commands %s)\n", MiNitroPagerMode, MiNitroPagerDebug ? "on" : "off");
 

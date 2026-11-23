@@ -940,7 +940,12 @@ MiReadPageFileCluster(
 
 /* NitroPager slot layer (pagefile.c) and pager (ARM3/pager.c) */
 extern KSPIN_LOCK MiPagingFileSlotLock;
-extern ULONG MiNitroPagerMode;
+/* The pager mode is a constant of the architecture: 1 = ARM3 private memory is paged to the paging file (amd64), 0 = not (i386). */
+#if defined(_M_AMD64)
+#define MiNitroPagerMode ((ULONG)1)
+#else
+#define MiNitroPagerMode ((ULONG)0)
+#endif
 extern ULONG MiNitroPagerDebug;
 extern ULONG MmNitroSessions;
 

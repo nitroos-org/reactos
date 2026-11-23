@@ -1159,14 +1159,6 @@ ExpInitializeExecutive(IN ULONG Cpu,
     CmGetSystemControlValues(LoaderBlock->RegistryBase, CmControlVector);
 
     /*
-     * NitroPager: 0 off, 1 private paging, 2 behaves as 1 until its commit ceiling exists; any other
-     * value is off. Clamped here, before MmArmInitSystem phase 0 reads it (the value is in the SYSTEM
-     * hive, which any user can write until registry ACLs are enforced).
-     */
-    if (MiNitroPagerMode > 2)
-        MiNitroPagerMode = 0;
-
-    /*
      * NitroPagerDebug (fault injection, test commands) is a test value: a free build honours it only
      * when booted with the /NITROPAGERDEBUG option, so that a value planted in the SYSTEM hive (writable
      * by any user until registry ACLs are enforced) cannot make every paging write fail or force a
@@ -1439,42 +1431,6 @@ VOID
 NTAPI
 MmFreeLoaderBlock(IN PLOADER_PARAMETER_BLOCK LoaderBlock);
 
-/*
- * HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Kernel, DisableUserQpc
- * (REG_DWORD, ReactOS): 1 makes user mode call NtQueryPerformanceCounter
- * instead of reading the TSC itself (the counter and its frequency stay as
- * they are), so that the system call path can be tested and used on its own.
- * The HAL decides before the registry exists (it runs when all processors
- * have started), so the kernel withdraws the bypass here, before any user
- * mode code runs.
- */
-static
-CODE_SEG("INIT")
-VOID
-ExpApplyUserQpcPolicy(VOID)
-{
-    RTL_QUERY_REGISTRY_TABLE QueryTable[2];
-    ULONG Disable = 0;
-
-    RtlZeroMemory(QueryTable, sizeof(QueryTable));
-    QueryTable[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
-    QueryTable[0].Name = L"DisableUserQpc";
-    QueryTable[0].EntryContext = &Disable;
-    RtlQueryRegistryValues(RTL_REGISTRY_CONTROL,
-                           L"Session Manager\\Kernel",
-                           QueryTable,
-                           NULL,
-                           NULL);
-
-#if defined(_M_IX86) || defined(_M_AMD64)
-    if (Disable)
-    {
-        SharedUserData->QpcBypassEnabled = 0;
-        DPRINT1("QPC: user mode bypass disabled by DisableUserQpc\n");
-    }
-#endif
-}
-
 CODE_SEG("INIT")
 VOID
 NTAPI
@@ -1700,17 +1656,6 @@ Phase1InitializationDiscard(IN PVOID Context)
         KeBootTimeBias = 0;
     }
 
-    /* Check for NOHANDLECACHE (ReactOS, nitro SMP, T44): kill-switch that
-     * disables the per-CPU free-handle cache fast path so handle
-     * allocation/free use the shared FirstFree list (pre-T44 behaviour).
-     * Parsed outside CONFIG_SMP: the global exists in both kernels, and this
-     * lets the SMP test matrix sweep the kill-switch. */
-    if (CommandLine && strstr(CommandLine, "NOHANDLECACHE"))
-    {
-        ExpHandleCpuCacheEnabled = FALSE;
-        DPRINT1("T44: per-CPU handle cache DISABLED (NOHANDLECACHE)\n");
-    }
-
 #ifdef CONFIG_SMP
     /*
      * IMPORTANT NOTE:
@@ -1738,23 +1683,6 @@ Phase1InitializationDiscard(IN PVOID Context)
          * as existing the maximum number of processors that can be handled */
         if (strstr(CommandLine, "MAXPROC"))
             KeMaximumProcessors = MAXIMUM_PROCESSORS;
-
-        /* Check for NOIPICOALESCE (ReactOS, nitro SMP): kill-switch that
-         * restores the pre-T79 behaviour of always sending reschedule/DPC IPIs
-         * even when the target already has the request pending */
-        if (strstr(CommandLine, "NOIPICOALESCE"))
-            KiSmpIpiCoalesce = FALSE;
-
-        /* Check for MCSDISPATCH (ReactOS, nitro SMP, T72): route the global
-         * dispatcher lock through the MCS queued spinlock instead of the default
-         * test-and-set, to de-livelock high-core-count SMP (FIFO, bounded
-         * acquire). Off by default while the hottest kernel lock soaks; this is
-         * latched here at boot and must not be toggled at runtime. */
-        if (strstr(CommandLine, "MCSDISPATCH"))
-        {
-            KiDispatcherLockMcsEnabled = TRUE;
-            DPRINT1("T72: MCS dispatcher lock ENABLED (MCSDISPATCH)\n");
-        }
 
         /* Check for IDLEPOLL (ReactOS): microseconds an idle processor
          * looks for work before it halts, 0 disables, at most 1000 */
@@ -1912,9 +1840,6 @@ Phase1InitializationDiscard(IN PVOID Context)
 
     /* Initialize the Registry */
     if (!CmInitSystem1()) KeBugCheck(CONFIG_INITIALIZATION_FAILED);
-
-    /* The user-mode performance counter policy, from the registry */
-    ExpApplyUserQpcPolicy();
 
     /* Initialize Prefetcher */
     CcPfInitializePrefetcher();
