@@ -57,6 +57,7 @@ list(APPEND _keyboard_layouts
     kbdhela3
     kbdhept
     kbdhu
+    kbdhu1
     kbdibm02
     kbdic
     kbdinasa
@@ -81,6 +82,7 @@ list(APPEND _keyboard_layouts
     kbdlv1
     kbdmac
     kbdmaori
+    kbdmon
     kbdne
     kbdnec
     kbdnec95
