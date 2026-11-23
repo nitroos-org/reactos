@@ -99,7 +99,8 @@ typedef struct _REGSD_TEMPLATE
 #define REGSD_T_INHPLAIN    11  /* keys Windows 10 holds with their own, not auto-inherited, copy of the hive's DACL (control 0x8004) */
 #define REGSD_T_INHPAI      12  /* keys Windows 10 holds with their own, protected and auto-inherited, copy of it (control 0x9404) */
 #define REGSD_T_INHAI       13  /* keys Windows 10 holds with their own, auto-inherited but not protected, copy (control 0x8404, ACEs marked inherited) */
-#define REGSD_T_COUNT       14
+#define REGSD_T_USERPOLICY  14  /* HKU\<user SID>\Software\Policies (needs the SID) */
+#define REGSD_T_COUNT       15
 
 static const REGSD_TEMPLATE RegSdTemplates[REGSD_T_COUNT] =
 {
@@ -207,6 +208,19 @@ static const REGSD_TEMPLATE RegSdTemplates[REGSD_T_COUNT] =
         { REGSD_CI | REGSD_ID, REGSD_SID_SY, REGSD_KA }, { REGSD_ID, REGSD_SID_BA, REGSD_KA },
         { REGSD_CI | REGSD_IO | REGSD_ID, REGSD_SID_CO, REGSD_KA },
         { REGSD_CI | REGSD_ID, REGSD_SID_AC, REGSD_KR }, { REGSD_CI | REGSD_ID, REGSD_SID_LPAC, REGSD_KR } } },
+
+    /*
+     * HKU\<user SID>\Software\Policies: the policy an administrator sets for the account. Measured on Windows
+     * Server 2022: neither the user nor an administrator with a filtered token can write there (reg add: Access is
+     * denied), an administrator can. The exact Windows descriptor is not captured: this is the HKU\<SID> default
+     * with the account's ACE reduced to read and without the root's own AC/LPAC read (cmacl.c CmpAclSdUserPolicy
+     * is the same).
+     * O:BAG:SYD:P(A;OICI;KR;;;<user>)(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)(A;OICI;KR;;;RC)S:AINO_ACCESS_CONTROL
+     */
+    { "user policies", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_SACL_PRESENT | REGSD_SACL_AUTOINH,
+      REGSD_SID_BA, REGSD_SID_SY, 4,
+      { { REGSD_OI | REGSD_CI, REGSD_SID_USER, REGSD_KR }, { REGSD_OI | REGSD_CI, REGSD_SID_SY, REGSD_KA },
+        { REGSD_OI | REGSD_CI, REGSD_SID_BA, REGSD_KA }, { REGSD_OI | REGSD_CI, REGSD_SID_RC, REGSD_KR } } },
 };
 
 /* A SID as authority (last byte of the 48-bit value) and sub-authorities */

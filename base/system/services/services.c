@@ -244,6 +244,57 @@ ShutdownHandlerRoutine(DWORD dwCtrlType)
 }
 
 
+/*
+ * The boot that took the system from unenforced to enforced registry key security (AuditStats Transition 1: the
+ * kernel checked the machine hives this boot) starts regaclreview /transition once, as SYSTEM, after the auto-start
+ * services (the event log among them): a report of the settings in every account's hive that start programs,
+ * which nothing can judge (a value carries no author), for the administrator (LogFiles\RegAcl\transition-review.txt
+ * and an event). It changes nothing; nothing waits for it.
+ */
+static
+VOID
+ScmStartRegistryReview(VOID)
+{
+    WCHAR szPath[MAX_PATH], szCommand[MAX_PATH + 32];
+    STARTUPINFOW StartupInfo;
+    PROCESS_INFORMATION ProcessInfo;
+    DWORD dwTransition = 0, dwSize = sizeof(dwTransition), dwType;
+    HKEY hKey;
+    UINT uLength;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl\\AuditStats", 0,
+                      KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+        return;
+    if (RegQueryValueExW(hKey, L"Transition", NULL, &dwType, (LPBYTE)&dwTransition, &dwSize) != ERROR_SUCCESS ||
+        dwType != REG_DWORD)
+        dwTransition = 0;
+    RegCloseKey(hKey);
+    if (dwTransition != 1)
+        return;
+
+    uLength = GetSystemDirectoryW(szPath, ARRAYSIZE(szPath));
+    if (uLength == 0 || uLength >= ARRAYSIZE(szPath) - 20)
+        return;
+    wcscat(szPath, L"\\regaclreview.exe");
+    _snwprintf(szCommand, ARRAYSIZE(szCommand) - 1, L"\"%s\" /transition", szPath);
+    szCommand[ARRAYSIZE(szCommand) - 1] = UNICODE_NULL;
+
+    ZeroMemory(&StartupInfo, sizeof(StartupInfo));
+    StartupInfo.cb = sizeof(StartupInfo);
+    if (CreateProcessW(szPath, szCommand, NULL, NULL, FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS,
+                       NULL, NULL, &StartupInfo, &ProcessInfo))
+    {
+        DPRINT1("SERVICES: registry transition: started the review report (pid %lu)\n", ProcessInfo.dwProcessId);
+        CloseHandle(ProcessInfo.hThread);
+        CloseHandle(ProcessInfo.hProcess);
+    }
+    else
+    {
+        DPRINT1("SERVICES: registry transition: the review report did not start (error %lu)\n", GetLastError());
+    }
+}
+
+
 int WINAPI
 wWinMain(HINSTANCE hInstance,
          HINSTANCE hPrevInstance,
@@ -374,6 +425,9 @@ wWinMain(HINSTANCE hInstance,
 
     /* Initialization finished */
     ScmInitialize = FALSE;
+
+    /* The boot that ran the transition to registry enforcement: the administrator's review report */
+    ScmStartRegistryReview();
 
     DPRINT("SERVICES: Running\n");
 

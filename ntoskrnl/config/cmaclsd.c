@@ -265,6 +265,16 @@ CmpAclUserHiveSdVerdict(
     {
         Reasons |= CMP_ACL_UH_OWNER;
     }
+    /*
+     * The policy keys (Software\Policies) hold what an administrator decides for
+     * the account: there the account itself only reads (measured on Windows
+     * Server 2022: the user cannot write HKCU\Software\Policies). It may
+     * neither own them nor hold a write right in them.
+     */
+    else if ((Place & CMP_ACL_UH_PLACE_POLICY) && RtlEqualSid(OwnerSid, OwnSid))
+    {
+        Reasons |= CMP_ACL_UH_POLICY;
+    }
     if (Owner)
         *Owner = OwnerSid;
 
@@ -325,6 +335,11 @@ CmpAclUserHiveSdVerdict(
             if (!Sid)
             {
                 Reasons |= CMP_ACL_UH_ACETYPE;
+                continue;
+            }
+            if ((Place & CMP_ACL_UH_PLACE_POLICY) && (Mask & CMP_ACL_UH_WRITE_RIGHTS) && RtlEqualSid(Sid, OwnSid))
+            {
+                Reasons |= CMP_ACL_UH_POLICY;
                 continue;
             }
             if (CmpAclUhTrusted(Sid, OwnSid))

@@ -800,6 +800,34 @@ CmpParseKey(
 //
 // Registry access control audit (cmacl.c)
 //
+
+/*
+ * The ACEs of an ACL one after the other. RtlGetAce walks from the first ACE
+ * for every index, so "for (i = 0; i < AceCount; i++) RtlGetAce(Acl, i)" is
+ * quadratic, and an ACL of 64 KB (a descriptor in a hive file any user may
+ * have written) holds thousands of ACEs. *Offset starts at sizeof(ACL); the
+ * caller stops after AceCount ACEs. Returns the ACE at *Offset and moves
+ * *Offset behind it, or NULL when that ACE does not lie wholly inside the ACL
+ * (where RtlGetAce would fail or hand out an ACE running past the ACL's end).
+ */
+FORCEINLINE
+PACE_HEADER
+CmpAclNextAce(
+    _In_ PACL Acl,
+    _Inout_ PULONG Offset)
+{
+    ULONG Size = Acl->AclSize, At = *Offset;
+    PACE_HEADER Ace;
+
+    if (At < sizeof(ACL) || At > Size || Size - At < sizeof(ACE_HEADER))
+        return NULL;
+    Ace = (PACE_HEADER)((PUCHAR)Acl + At);
+    if (Ace->AceSize < sizeof(ACE_HEADER) || Ace->AceSize > Size - At)
+        return NULL;
+    *Offset = At + Ace->AceSize;
+    return Ace;
+}
+
 VOID
 NTAPI
 CmpAclInitialize(VOID);
@@ -880,6 +908,20 @@ NTAPI
 CmpAclCheckUserHive(
     _In_ PCMHIVE CmHive,
     _In_ PCM_KEY_CONTROL_BLOCK RootKcb
+);
+
+PVOID
+NTAPI
+CmpAclUserHiveUnloading(
+    _In_ PCMHIVE CmHive,
+    _In_ PCM_KEY_CONTROL_BLOCK RootKcb
+);
+
+VOID
+NTAPI
+CmpAclUserHiveUnloaded(
+    _In_opt_ PVOID UnloadNote,
+    _In_ BOOLEAN Unloaded
 );
 
 NTSTATUS

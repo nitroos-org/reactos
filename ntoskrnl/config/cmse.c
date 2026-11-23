@@ -438,7 +438,7 @@ CmpAdjustSetDacl(IN PSECURITY_DESCRIPTOR NewSd,
     ULONG Revision;
     PACE_HEADER Ace;
     PACL Dacl;
-    ULONG i;
+    ULONG i, Offset = sizeof(ACL);
 
     if (!NT_SUCCESS(RtlGetControlSecurityDescriptor(CallerSd, &CallerControl, &Revision)))
         CallerControl = 0;
@@ -455,7 +455,9 @@ CmpAdjustSetDacl(IN PSECURITY_DESCRIPTOR NewSd,
     Dacl = (PACL)((PUCHAR)Sd + Sd->Dacl);
     for (i = 0; i < Dacl->AceCount; i++)
     {
-        if (!NT_SUCCESS(RtlGetAce(Dacl, i, (PVOID *)&Ace)))
+        /* One pass (CmpAclNextAce): the caller may set a DACL of thousands of ACEs */
+        Ace = CmpAclNextAce(Dacl, &Offset);
+        if (!Ace)
             break;
         if (Ace->AceFlags & INHERIT_ONLY_ACE)
             continue;
