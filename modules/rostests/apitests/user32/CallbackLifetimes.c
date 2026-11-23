@@ -1090,6 +1090,8 @@ START_TEST(LifetimeCallbackExitLeak)
     CelRun(WM_NCCREATE, "WM_NCCREATE", "Usho");
     CelRun(WM_CREATE, "WM_CREATE", "Usho");
     CelRun(WM_ACTIVATEAPP, "WM_ACTIVATEAPP", "Uswl");
+    /* the visible regions of the SetWindowPos that shows the window, kept across its activation */
+    CelRun(WM_ACTIVATE, "WM_ACTIVATE", "Gla4");
 }
 
 /*
