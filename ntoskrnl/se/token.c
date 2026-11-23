@@ -2442,31 +2442,57 @@ SepCreateSystemProcessToken(VOID)
         {SeCreateSymbolicLinkPrivilege, SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED},
     };
 
-    /* Setup the object attributes */
-    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
-    ASSERT(SeSystemDefaultDacl != NULL);
+    /*
+     * The descriptor of the token object of the System process: only the local
+     * system is granted anything. Windows Server 2022, measured: the System
+     * process's token (and the Registry process's) is
+     * O:BAG:SYD:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)S:AI(ML;;NW;;;SI), without
+     * the Administrators ACE (A;;CCDCLCSWRPRC;;;BA) of the tokens of the other
+     * system processes (smss, csrss, wininit, winlogon, services, lsass), so an
+     * elevated administrator gets READ_CONTROL on it and nothing else: the
+     * owner's implicit right (the owner is Administrators) and the System
+     * label that denies the write rights. The label is added with the token.
+     */
+    {
+        UCHAR AclBuffer[sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) + 16];
+        SECURITY_DESCRIPTOR SystemSd;
+        PACL SystemAcl = (PACL)AclBuffer;
 
-    /* Create the token */
-    Status = SepCreateToken((PHANDLE)&Token,
-                            KernelMode,
-                            0,
-                            &ObjectAttributes,
-                            TokenPrimary,
-                            SecurityAnonymous,
-                            &SeSystemAuthenticationId,
-                            &Expiration,
-                            &UserSid,
-                            RTL_NUMBER_OF(Groups),
-                            Groups,
-                            GroupsLength,
-                            RTL_NUMBER_OF(Privileges),
-                            Privileges,
-                            Owner,
-                            PrimaryGroup,
-                            SeSystemDefaultDacl,
-                            &SeSystemTokenSource,
-                            TRUE);
-    ASSERT(Status == STATUS_SUCCESS);
+        Status = RtlCreateAcl(SystemAcl, sizeof(AclBuffer), ACL_REVISION);
+        ASSERT(NT_SUCCESS(Status));
+        Status = RtlAddAccessAllowedAce(SystemAcl, ACL_REVISION, GENERIC_ALL, SeLocalSystemSid);
+        ASSERT(NT_SUCCESS(Status));
+        Status = RtlCreateSecurityDescriptor(&SystemSd, SECURITY_DESCRIPTOR_REVISION);
+        ASSERT(NT_SUCCESS(Status));
+        Status = RtlSetDaclSecurityDescriptor(&SystemSd, TRUE, SystemAcl, FALSE);
+        ASSERT(NT_SUCCESS(Status));
+
+        /* Setup the object attributes */
+        InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, &SystemSd);
+        ASSERT(SeSystemDefaultDacl != NULL);
+
+        /* Create the token */
+        Status = SepCreateToken((PHANDLE)&Token,
+                                KernelMode,
+                                0,
+                                &ObjectAttributes,
+                                TokenPrimary,
+                                SecurityAnonymous,
+                                &SeSystemAuthenticationId,
+                                &Expiration,
+                                &UserSid,
+                                RTL_NUMBER_OF(Groups),
+                                Groups,
+                                GroupsLength,
+                                RTL_NUMBER_OF(Privileges),
+                                Privileges,
+                                Owner,
+                                PrimaryGroup,
+                                SeSystemDefaultDacl,
+                                &SeSystemTokenSource,
+                                TRUE);
+        ASSERT(Status == STATUS_SUCCESS);
+    }
 
     /* Return the token */
     return Token;

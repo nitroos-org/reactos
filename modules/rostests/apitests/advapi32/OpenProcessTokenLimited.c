@@ -19,6 +19,7 @@
 
 #include "precomp.h"
 #include <tlhelp32.h>
+#include <ndk/obfuncs.h>
 
 typedef NTSTATUS (NTAPI *PFN_NtOpenProcessToken)(HANDLE, ACCESS_MASK, PHANDLE);
 
@@ -34,11 +35,13 @@ static const struct { DWORD Access; PCSTR Name; } TokenAccesses[] =
 /* bit n: TokenAccesses[n] is granted */
 #define ALL_GRANTED     0xFFF
 #define SYSTEM_GRANTED  0x51F       /* QUERY, QUERY_SOURCE, DUPLICATE, IMPERSONATE, ASSIGN_PRIMARY, READ_CONTROL, MAXIMUM_ALLOWED */
+/* The token of the System process has no Administrators ACE: the owner's READ_CONTROL (and MAXIMUM_ALLOWED, which is that) only */
+#define SYSPROC_GRANTED 0x500
 
 static PFN_NtOpenProcessToken pNtOpenProcessToken;
 
 static VOID
-CheckHandle(PCSTR What, HANDLE hProcess, DWORD Granted, BOOL System)
+CheckHandle(PCSTR What, HANDLE hProcess, DWORD Granted)
 {
     ULONG i;
     HANDLE hToken;
@@ -50,12 +53,6 @@ CheckHandle(PCSTR What, HANDLE hProcess, DWORD Granted, BOOL System)
         Status = pNtOpenProcessToken(hProcess, TokenAccesses[i].Access, &hToken);
         if (Granted & (1UL << i))
             ok(Status == STATUS_SUCCESS, "%s: %s: 0x%lx, expected success\n", What, TokenAccesses[i].Name, Status);
-        else if (System && TokenAccesses[i].Access == WRITE_DAC)
-        {
-            /* The descriptor of the token of a SYSTEM process grants the administrators WRITE_DAC here (not on Windows) */
-            todo_ros
-            ok(Status == STATUS_ACCESS_DENIED, "%s: %s: 0x%lx, expected STATUS_ACCESS_DENIED\n", What, TokenAccesses[i].Name, Status);
-        }
         else
             ok(Status == STATUS_ACCESS_DENIED, "%s: %s: 0x%lx, expected STATUS_ACCESS_DENIED\n", What, TokenAccesses[i].Name, Status);
         if (NT_SUCCESS(Status))
@@ -152,7 +149,7 @@ START_TEST(OpenProcessTokenLimited)
         ok(hProcess != NULL, "OpenProcess(%s) failed with %lu\n", Handles[i].Name, GetLastError());
         if (!hProcess)
             continue;
-        CheckHandle(Handles[i].Name, hProcess, Handles[i].Works ? ALL_GRANTED : 0, FALSE);
+        CheckHandle(Handles[i].Name, hProcess, Handles[i].Works ? ALL_GRANTED : 0);
         CloseHandle(hProcess);
     }
 
@@ -201,7 +198,28 @@ START_TEST(OpenProcessTokenLimited)
             trace("%ls: no limited handle (%lu)\n", SystemProcesses[i], GetLastError());
             continue;
         }
-        CheckHandle("system process, limited handle", hProcess, SYSTEM_GRANTED, TRUE);
+        CheckHandle("system process, limited handle", hProcess, SYSTEM_GRANTED);
         CloseHandle(hProcess);
     }
+
+    /* The System process (4): its token's descriptor grants only the local system, so an elevated administrator gets
+       READ_CONTROL (the owner's implicit right) and nothing else; MAXIMUM_ALLOWED is 0x20000 (Windows Server 2022) */
+    hProcess = Open(4, PROCESS_QUERY_LIMITED_INFORMATION);
+    if (hProcess)
+    {
+        HANDLE hToken = NULL;
+        OBJECT_BASIC_INFORMATION Basic;
+
+        CheckHandle("System process, limited handle", hProcess, SYSPROC_GRANTED);
+        if (NT_SUCCESS(pNtOpenProcessToken(hProcess, MAXIMUM_ALLOWED, &hToken)))
+        {
+            ZeroMemory(&Basic, sizeof(Basic));
+            ok(NT_SUCCESS(NtQueryObject(hToken, ObjectBasicInformation, &Basic, sizeof(Basic), NULL)), "NtQueryObject\n");
+            ok(Basic.GrantedAccess == READ_CONTROL, "System process token: MAXIMUM_ALLOWED granted 0x%lx, expected 0x20000\n", Basic.GrantedAccess);
+            CloseHandle(hToken);
+        }
+        CloseHandle(hProcess);
+    }
+    else
+        trace("the System process: no limited handle (%lu)\n", GetLastError());
 }
