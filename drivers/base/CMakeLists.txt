@@ -11,6 +11,10 @@ if(_WINKD_)
     endif()
 else()
     add_subdirectory(kdrosdbg)
+    if(KDKIT)
+        # The real transport of the kernel debugging kit, in place of the stub on the media
+        add_subdirectory(kdcom)
+    endif()
 endif()
 add_subdirectory(kdstub)
 
