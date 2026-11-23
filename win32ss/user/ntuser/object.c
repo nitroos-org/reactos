@@ -851,12 +851,33 @@ UserDestroyObjectsForOwner(PUSER_HANDLE_TABLE Table, PVOID Owner)
             continue;
         }
 
-        /* Call destructor */
-        if (!ObjectCallbacks[Entry->type].ObjectDestroy(Entry->ptr))
+        /* Call destructor. The object is held across it, as every other caller of co_UserDestroyWindow holds
+           the window (NtUserDestroyWindow): destroying a window sends messages and runs the activation of
+           another window, and the window's storage can be freed meanwhile; without the reference its memory
+           went with it while co_UserDestroyWindow still read it. */
         {
-            ERR("Failed destructing object %p, type %u.\n", Entry->ptr, Entry->type);
-            /* Don't return immediately, we must continue destroying the other objects */
-            Ret = FALSE;
+            USER_REFERENCE_ENTRY Ref;
+            PVOID Object = Entry->ptr;
+            HANDLE_TYPE Type = Entry->type;
+            BOOLEAN bDestroyed;
+
+            /* Windows are destroyed in their thread's cleanup (a Co reference, as co_UserDestroyWindow
+               expects); process objects maybe from a thread without a Win32 thread (a plain one) */
+            if (Type == TYPE_WINDOW)
+                UserRefObjectCo(Object, &Ref);
+            else
+                UserReferenceObject(Object);
+            bDestroyed = ObjectCallbacks[Type].ObjectDestroy(Object);
+            if (Type == TYPE_WINDOW)
+                UserDerefObjectCo(Object);
+            else
+                UserDereferenceObject(Object);
+            if (!bDestroyed)
+            {
+                ERR("Failed destructing object %p.\n", Object);
+                /* Don't return immediately, we must continue destroying the other objects */
+                Ret = FALSE;
+            }
         }
     }
 
