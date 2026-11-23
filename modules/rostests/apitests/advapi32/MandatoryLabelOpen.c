@@ -64,13 +64,16 @@ static BOOL FileAcls = TRUE, ProfileAcls = TRUE;
 
 static BOOL VolumeKeepsAcls(PCWSTR Path)
 {
-    WCHAR Root[4];
+    WCHAR Root[4], FsName[MAX_PATH];
     DWORD Flags = 0;
 
     if (!Path[0] || Path[1] != L':')
         return TRUE;
     Root[0] = Path[0]; Root[1] = L':'; Root[2] = L'\\'; Root[3] = 0;
-    return GetVolumeInformationW(Root, NULL, 0, NULL, NULL, &Flags, NULL, 0) && (Flags & FILE_PERSISTENT_ACLS);
+    if (!GetVolumeInformationW(Root, NULL, 0, NULL, NULL, &Flags, FsName, _countof(FsName)))
+        return FALSE;
+    /* the NTFS driver of this system does not report FILE_PERSISTENT_ACLS */
+    return (Flags & FILE_PERSISTENT_ACLS) || !_wcsicmp(FsName, L"NTFS");
 }
 
 static VOID DetectVolumes(VOID)
