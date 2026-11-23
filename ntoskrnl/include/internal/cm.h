@@ -95,16 +95,7 @@
 #define CMP_OPEN_KCB_NO_CREATE                          0x4
 
 //
-// Registry access control mode (cmacl.c): /REGACL=LEGACY|AUDIT|ENFORCE boot
-// option, else Configuration Manager\RegistryAclMode. ENFORCE decides key
-// opens and creates by the keys' own security descriptors.
-//
-#define CM_REGACL_MODE_LEGACY                           0
-#define CM_REGACL_MODE_AUDIT                            1
-#define CM_REGACL_MODE_ENFORCE                          2
-
-//
-// Operations the shadow access check records
+// Operations the registry access control log records (cmacl.c)
 //
 #define CM_REGACL_OP_OPEN                               0
 #define CM_REGACL_OP_CREATE                             1
@@ -113,6 +104,7 @@
 #define CM_REGACL_OP_FOLLOWLINK                         4
 #define CM_REGACL_OP_RESTAMP                            5   /* a stored descriptor reset at boot */
 #define CM_REGACL_OP_KEPTGRANT                          6   /* kept at boot although others may change the key */
+#define CM_REGACL_OP_VALUEREMOVED                       7   /* the value RegistryAclMode of earlier kernels, deleted at boot */
 
 //
 // EnlistKeyBodyWithKCB Flags
@@ -828,7 +820,7 @@ CmpAclNextAce(
     return Ace;
 }
 
-VOID
+BOOLEAN
 NTAPI
 CmpAclInitialize(VOID);
 
@@ -840,20 +832,6 @@ VOID
 NTAPI
 CmpAclBootHivesLoaded(
     _In_ BOOLEAN SetupBoot
-);
-
-VOID
-NTAPI
-CmpShadowAccessCheck(
-    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
-    _In_opt_ PCUNICODE_STRING ChildName,
-    _In_ ULONG Operation,
-    _In_ PACCESS_STATE AccessState,
-    _In_ ACCESS_MASK Desired,
-    _In_ ACCESS_MASK Previous,
-    _In_ ACCESS_MASK LegacyGranted,
-    _In_ KPROCESSOR_MODE AccessMode,
-    _In_ ULONG Options
 );
 
 BOOLEAN
@@ -1853,11 +1831,6 @@ extern UNICODE_STRING CmpSystemStartOptions;
 extern UNICODE_STRING CmpLoadOptions;
 extern ULONG CmpBootType;
 extern ULONG CmSelfHeal;
-extern ULONG CmpRegistryAclMode;
-extern ULONG CmpRegistryAclEffectiveMode;
-extern ULONG CmpRegistryAclModeValue;
-extern ULONG CmpRegistryAclModeValueLength;
-extern ULONG CmpRegistryAclModeValueType;
 extern BOOLEAN CmpSelfHeal;
 extern HANDLE CmpRegistryRootHandle;
 extern BOOLEAN ExpInTextModeSetup;

@@ -1,7 +1,7 @@
 /*
  * PROJECT:     NitroOS
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     Configuration Manager - registry access control audit mode (shadow access check)
+ * PURPOSE:     Configuration Manager - registry key access control and its denial log
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -9,32 +9,23 @@
  * Key access control. One function (CmpAclDecide) takes the access decision
  * on a key's own descriptor (its effective one, below) for a user-mode open
  * (the desired access) or create (KEY_CREATE_SUB_KEY, or KEY_CREATE_LINK for
- * a link, on the parent), with Windows' REG_OPTION_BACKUP_RESTORE rules. What
- * happens with the decision depends on the mode:
+ * a link, on the parent), with Windows' REG_OPTION_BACKUP_RESTORE rules. The
+ * decision stands, always (there is no mode and no switch): CmpAclCheckKeyOpen
+ * before the handle, CmpAclCheckKeyCreate before anything is created, and every
+ * denial is logged, so the log of a workload lists what is refused.
+ * Kernel-mode callers (previous mode KernelMode without OBJ_FORCE_ACCESS_CHECK)
+ * are not checked, as on Windows. Everything else a handle does (set value,
+ * delete, enumerate, notify, rename, save, set security) is checked against the
+ * access granted at the open, as always.
  *
- * - Audit (1): the decision is only recorded. Opens are decided
- *   by CmpCheckKeyOpenAccess against the legacy Everyone:GENERIC_ALL
- *   descriptor, creates check nothing on the parent, and every open or create
- *   that the key's descriptor denies is logged after the real decision (the
- *   shadow check); none of its outcomes reaches the caller.
- * - Enforce (2, the default): the decision stands (CmpAclCheckKeyOpen before the handle,
- *   CmpAclCheckKeyCreate before anything is created) and every denial is
- *   logged the same way, so an audit log of a workload lists what enforcement
- *   denies. Kernel-mode callers (previous mode KernelMode without
- *   OBJ_FORCE_ACCESS_CHECK) are not checked, as on Windows. Everything else a
- *   handle does (set value, delete, enumerate, notify, rename, save, set
- *   security) is checked against the access granted at the open, as always.
- *   If SYSTEM would not get full control of a key the boot needs, the stored
- *   descriptor responsible is replaced (CmpAclSystemHasFullControl); only if
- *   that fails does the boot fall back to audit. The first enforcing boot after
- *   boots that did not enforce checks the machine hives for descriptors only a
- *   non-administrator could have stored meanwhile (CmpAclTransition).
- * - Legacy (0): no decision on key descriptors at all, nothing stored.
- *
- * The boot option /REGACL=LEGACY|AUDIT|ENFORCE wins over the REG_DWORD value
- * Control\Session Manager\Configuration Manager\RegistryAclMode, which is
- * honoured only from a key only administrators can change (see below), and
- * never below enforcement where enforcement is the compiled default.
+ * If SYSTEM would not get full control of a key the boot needs, the stored
+ * descriptor responsible is replaced (CmpAclSystemHasFullControl); if that
+ * fails the boot goes on enforcing and says so (AuditStats BootKeysUnrepaired,
+ * the debug output). The first boot that enforces on an install made before
+ * enforcement checks the machine hives for descriptors only a
+ * non-administrator could have stored meanwhile (CmpAclTransition). The value
+ * RegistryAclMode, which earlier kernels read as a mode, is not read: it is
+ * deleted at boot where it is found (CmpAclRemoveModeValue) and logged once.
  *
  * Effective descriptor of a key (CmpGetEffectiveKeySd):
  *  1. the key's stored 'sk' cell;
@@ -56,29 +47,20 @@
  * from the caller's buffers, and a descriptor stored in a hive is copied
  * under the hive's security lock and only the copy is validated and used.
  *
- * Keys created while the mode is not legacy get a stored descriptor: the
- * effective descriptor of their parent, inherited (CmpCaptureParentSecurity,
- * used by CmpDoCreateChild). /REGACL=LEGACY turns that off too.
+ * Keys created get a stored descriptor: the effective descriptor of their
+ * parent, inherited (CmpCaptureParentSecurity, used by CmpDoCreateChild),
+ * except while setup runs.
  *
- * Two switches change storage, the audit or enforcement for a whole boot,
- * and both are read at boot: the mode (above) and setup
- * (CmpAclSetupRunning). The boot option and text-mode setup come from the
- * loader block, which only an administrator can change. The two registry
- * values (RegistryAclMode, any value; SYSTEM\Setup\SystemSetupInProgress != 0) are
- * honoured only when the key that holds the value has an effective
- * descriptor that lets nobody but SYSTEM and Administrators (and
- * TrustedInstaller) change it (CmpAclKeyAdminWriteOnly): no allow ACE for
- * anyone else with KEY_SET_VALUE, DELETE, WRITE_DAC or WRITE_OWNER, an owner
- * from that set, a DACL. Otherwise the value is ignored, storage (and the
- * audit) stay on, and the boot log, the debug output and AuditStats
- * (SwitchesIgnored) say so. The effective descriptor of those keys is the
- * Windows one (the policy table) unless a descriptor was stored for them or
- * an ancestor, so this changes nothing on an installed system; it stops a
- * descriptor that a non-administrator could plant on such a key (delete and
- * re-create it with an explicit descriptor, which works while access is not
- * enforced) from carrying the switch into the time when it is. In audit mode
- * anyone can still write the values themselves; under enforcement the keys'
- * descriptors keep non-administrators from writing them.
+ * Setup (CmpAclSetupRunning) is the one state that changes what is stored for
+ * a whole boot (never what is decided): text-mode setup comes from the loader
+ * block, which only an administrator can change; the registry value
+ * SYSTEM\Setup\SystemSetupInProgress != 0 (second-stage setup, a value Windows
+ * defines) counts only when the key that holds it has an effective descriptor
+ * that lets nobody but SYSTEM and Administrators (and TrustedInstaller) change
+ * it (CmpAclKeyAdminWriteOnly): no allow ACE for anyone else with
+ * KEY_SET_VALUE, DELETE, WRITE_DAC or WRITE_OWNER, an owner from that set, a
+ * DACL. Otherwise the value is ignored and the boot log, the debug output and
+ * AuditStats (SetupValueIgnored) say so.
  */
 
 /* INCLUDES ******************************************************************/
@@ -152,20 +134,15 @@ static const PCSTR CmpAclRuleNames[CmpAclRuleMax] =
     "taskcache", "eventlog", "default", "user", "user-unknown", "other", "user-unchecked", "user-policy"
 };
 
-static const PCSTR CmpAclOpNames[] = { "open", "create", "createlink", "linknode", "followlink", "restamp", "keptgrant" };
-C_ASSERT(RTL_NUMBER_OF(CmpAclOpNames) == CM_REGACL_OP_KEPTGRANT + 1);
-static const PCSTR CmpAclModeNames[] = { "legacy", "audit", "enforce" };
-static const PCSTR CmpAclSourceNames[] = { "default", "registry", "bootoption" };
+static const PCSTR CmpAclOpNames[] =
+{
+    "open", "create", "createlink", "linknode", "followlink", "restamp", "keptgrant", "valueremoved"
+};
+C_ASSERT(RTL_NUMBER_OF(CmpAclOpNames) == CM_REGACL_OP_VALUEREMOVED + 1);
 
-/* AuditStats SwitchesIgnored: a registry value that would turn storage off was not honoured */
-#define CMP_ACL_IGNORED_MODE_VALUE  0x1
-#define CMP_ACL_IGNORED_SETUP_VALUE 0x2
-/* RegistryAclMode asked for less than enforcement where enforcement is the default */
-#define CMP_ACL_IGNORED_MODE_LOWER  0x4
-
-/* AuditStats EnforceFallback: why a boot that should enforce does not */
-#define CMP_ACL_FALLBACK_SYSTEM     0x1     /* a SYSTEM-hive boot key: SYSTEM lacks full control, not repaired */
-#define CMP_ACL_FALLBACK_HIVES      0x2     /* the same for a key of another machine hive */
+/* AuditStats BootKeysUnrepaired: a key the boot needs that SYSTEM cannot get full control of, not repaired (enforcement goes on) */
+#define CMP_ACL_UNREPAIRED_SYSTEM   0x1     /* a SYSTEM-hive boot key */
+#define CMP_ACL_UNREPAIRED_HIVES    0x2     /* a key of another machine hive */
 
 /* Well-known SIDs the policy descriptors use */
 typedef enum _CMP_ACL_SID
@@ -372,7 +349,6 @@ typedef struct _CMP_ACL_ENTRY
     BOOLEAN Restricted;
     BOOLEAN Impersonating;
     LONG WrittenCount;
-    ULONG Count;            /* restamp of a user hive in audit mode: the descriptors that would be replaced */
     LARGE_INTEGER Time;
     USHORT KeyChars;
     USHORT ChildChars;
@@ -383,29 +359,12 @@ typedef struct _CMP_ACL_ENTRY
 
 /* GLOBALS *******************************************************************/
 
-/* Read by CmGetSystemControlValues (phase 0) from the SYSTEM hive */
-ULONG CmpRegistryAclModeValue = MAXULONG;
-ULONG CmpRegistryAclModeValueLength = sizeof(ULONG);
-ULONG CmpRegistryAclModeValueType = REG_NONE;
-
-/*
- * The mode without a boot option or an honoured RegistryAclMode value. Enforce:
- * key access is decided by the keys' own descriptors, as on Windows.
- */
-#define CMP_REGACL_DEFAULT_MODE     CM_REGACL_MODE_ENFORCE
-
-/* Configured mode, the mode that runs, and where it came from */
-ULONG CmpRegistryAclMode = CMP_REGACL_DEFAULT_MODE;
-ULONG CmpRegistryAclEffectiveMode = CM_REGACL_MODE_LEGACY;
-static ULONG CmpRegistryAclModeSource;
-
 /* Counters (published in AuditStats) */
 static LONG CmpAclChecks;
 static LONG CmpAclDenials;
 static LONG CmpAclEntryCount;
 static LONG CmpAclDropped;
 static LONG CmpAclErrors;
-static LONG CmpAclMaxAllowedReduced;
 static LONG CmpAclLinesWritten;
 static LONG CmpAclFileErrors;
 static LONG CmpAclSaturated;
@@ -420,11 +379,15 @@ static BOOLEAN CmpAclReady;
 /* Setup is running (text mode, or SYSTEM\Setup\SystemSetupInProgress at boot): no stored descriptors */
 static BOOLEAN CmpAclSetupRunning;
 
-/* CMP_ACL_IGNORED_*: switches read at boot and not honoured (see the top of the file) */
-static ULONG CmpAclSwitchesIgnored;
+/* SystemSetupInProgress was set but its key is not administrators-only: not honoured (see the top of the file) */
+static BOOLEAN CmpAclSetupValueIgnored;
 
-/* Enforcement was asked for, but SYSTEM would not get full control of a boot key: audit runs */
-static ULONG CmpAclEnforceFallback;      /* CMP_ACL_FALLBACK_* */
+/* A boot key that SYSTEM cannot get full control of and that was not repaired (CMP_ACL_UNREPAIRED_*): still enforcing */
+static ULONG CmpAclBootKeysUnrepaired;
+
+/* The value RegistryAclMode of earlier kernels, found and deleted at this boot (CmpAclRemoveModeValue) */
+static BOOLEAN CmpAclModeValueRemoved;
+static ULONG CmpAclModeValueWas = MAXULONG;     /* its data when a REG_DWORD, else MAXULONG */
 
 /* Dedup table */
 static LONG64 CmpAclSlotKey[CMP_ACL_TABLE_SIZE];
@@ -1440,28 +1403,26 @@ CmpAclKeyAdminWriteOnly(
 }
 
 /*
- * New keys get a stored descriptor while the mode is not legacy and the
- * policy table exists (CmInitSystem1 on), except while setup runs (see
- * CmpAclInitialize). /REGACL=LEGACY gives the old behaviour back: keys are
- * created without one, as before audit mode.
+ * New keys get a stored descriptor once the policy table exists
+ * (CmInitSystem1 on), except while setup runs (see CmpAclInitialize).
  */
 BOOLEAN
 NTAPI
 CmpStoreKeySecurity(VOID)
 {
-    return CmpAclReady && !CmpAclSetupRunning && CmpRegistryAclEffectiveMode != CM_REGACL_MODE_LEGACY;
+    return CmpAclReady && !CmpAclSetupRunning;
 }
 
 /*
  * A descriptor the creator names is stored even while setup runs (the inherited ones are
  * not): setup gives the roots of the hives it builds the Windows descriptors this way. Only
- * legacy mode (nothing stored) and the time before the policy table exists are excluded.
+ * the time before the policy table exists is excluded.
  */
 BOOLEAN
 NTAPI
 CmpStoreExplicitKeySecurity(VOID)
 {
-    return CmpAclReady && CmpRegistryAclEffectiveMode != CM_REGACL_MODE_LEGACY;
+    return CmpAclReady;
 }
 
 /* SYSTEM\Setup\SystemSetupInProgress (REG_DWORD) is not zero: second-stage setup */
@@ -1515,8 +1476,8 @@ CmpCaptureParentSecurity(
  * stored one, else the one it would have on Windows (inherited from the
  * nearest ancestor that has one, else the policy for its place). It is what
  * the key reports (NtQuerySecurityObject) and what a set merges into. Free
- * it with CmpFreeParentSecurity. NULL before the tables exist (early boot,
- * legacy mode) or without memory. The caller holds the KCB lock.
+ * it with CmpFreeParentSecurity. NULL before the tables exist (early boot)
+ * or without memory. The caller holds the KCB lock.
  */
 DECLSPEC_NOINLINE
 PSECURITY_DESCRIPTOR
@@ -1625,7 +1586,7 @@ CmpAclStampTarget(
  * with the hive file. Keys below without a descriptor of their own inherit
  * from the stored root from then on (CmpGetEffectiveKeySd, rule 2), with the
  * same access for every token. Only while new keys get stored descriptors
- * (not in legacy mode, not while setup runs). Never fails the link.
+ * (not while setup runs). Never fails the link.
  */
 VOID
 NTAPI
@@ -2027,13 +1988,13 @@ CmpAclRecordDenial(
  * repair (boot self-check, CmpAclSystemHasFullControl and CmpAclBootHivesLoaded;
  * transition to enforcement, CmpAclTransition).
  *
- * While a boot runs without enforcement (audit or legacy mode, every install
- * released before enforcement became the default) every user can open every
+ * While a boot runs without enforcement (every install released before
+ * enforcement became the default) every user can open every
  * key for WRITE_DAC and WRITE_OWNER and so store any DACL on it (the owner can
  * only become the user itself: SepCheckOwnerSid), and create keys anywhere
  * (owned by the user). Such a descriptor outlives the switch to enforcement
  * and keeps granting what it was planted to grant (write access to a service's
- * key, a Run key), or makes the boot self-check fall back to audit. Who stored a
+ * key, a Run key), or keeps SYSTEM from a key the boot needs. Who stored a
  * descriptor is not recorded anywhere; what it grants is. A stored descriptor
  * of a machine key is "planted" (CMP_ACL_PLANTED_*) when
  *  - its owner is not a trusted principal (CmpAclTrustedSid), or
@@ -2074,7 +2035,7 @@ CmpAclRecordDenial(
 #define CMP_ACL_WALK_MAX_DEPTH      512
 
 /* AuditStats Transition: what the transition check did this boot */
-#define CMP_ACL_TRANSITION_NONE     0   /* not enforcing, or before the machine hives were loaded */
+#define CMP_ACL_TRANSITION_NONE     0   /* before the machine hives were loaded */
 #define CMP_ACL_TRANSITION_WALKED   1   /* the machine hives were checked and the marker written */
 #define CMP_ACL_TRANSITION_TRUSTED  2   /* the marker says enforcement ran since the last check */
 #define CMP_ACL_TRANSITION_SETUP    3   /* setup runs: checked after it */
@@ -2111,7 +2072,6 @@ typedef struct _CMP_ACL_USER_CHECK
 /* Counters of the user-hive checks (AuditStats) */
 static LONG CmpAclUserHivesChecked;     /* checked at their load (enforce mode) */
 static LONG CmpAclUserHivesSkipped;     /* a valid record: checked since the transition */
-static LONG CmpAclUserHivesFlagged;     /* audit mode: a load that would replace descriptors */
 static LONG CmpAclUserHiveRestamped;    /* descriptors replaced, links deleted */
 static LONG CmpAclUserHiveFailed;       /* checks that could not be completed (hive marked unchecked) */
 static ULONG CmpAclUserHiveMs;          /* how long the last check took */
@@ -2263,9 +2223,8 @@ CmpAclSdPlanted(
  * CM_REGACL_OP_RESTAMP), or kept although it lets others than administrators
  * change the key (CM_REGACL_OP_KEPTGRANT): counted, printed (capped) and logged.
  * User: a key of a user hive checked at its load (counted there, logged with
- * "hive":"user","applied":1). Without User, AuditCount > 0: a user hive loaded
- * in audit mode (KeyName its root) that has AuditCount descriptors the check
- * would replace under enforcement; nothing was changed ("applied":0).
+ * "hive":"user","applied":1). CM_REGACL_OP_VALUEREMOVED: the value
+ * RegistryAclMode found and deleted (Reasons: its data), logged once.
  */
 static
 VOID
@@ -2275,8 +2234,7 @@ CmpAclRecordRestamp(
     _In_ ULONG Reasons,
     _In_opt_ PSID OldOwner,
     _In_ NTSTATUS Status,
-    _Inout_opt_ PCMP_ACL_USER_CHECK User,
-    _In_ ULONG AuditCount)
+    _Inout_opt_ PCMP_ACL_USER_CHECK User)
 {
     PCMP_ACL_ENTRY Entry;
     UNICODE_STRING Owner = {0};
@@ -2296,9 +2254,9 @@ CmpAclRecordRestamp(
             InterlockedIncrement(&User->Failed);
         }
     }
-    else if (AuditCount)
+    else if (Operation == CM_REGACL_OP_VALUEREMOVED)
     {
-        /* Counted by the caller */
+        /* Counted by the caller (CmpAclModeValueRemoved) */
     }
     else if (Operation == CM_REGACL_OP_KEPTGRANT)
     {
@@ -2312,19 +2270,18 @@ CmpAclRecordRestamp(
     {
         InterlockedIncrement(&CmpAclRestampFailed);
     }
-    if (!User && !AuditCount && Operation == CM_REGACL_OP_RESTAMP && (Reasons & CMP_ACL_PLANTED_OWNER))
+    if (!User && Operation == CM_REGACL_OP_RESTAMP && (Reasons & CMP_ACL_PLANTED_OWNER))
         InterlockedIncrement(&CmpAclRestampUserOwned);
 
     RtlInitEmptyUnicodeString(&Owner, OwnerBuffer, sizeof(OwnerBuffer));
     if (!OldOwner || !NT_SUCCESS(RtlConvertSidToUnicodeString(&Owner, OldOwner, FALSE)))
         Owner.Length = 0;
 
-    if (AuditCount)
+    if (Operation == CM_REGACL_OP_VALUEREMOVED)
     {
         DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL,
-                   "CM-ACL-AUDIT: user hive %wZ: %lu stored descriptors would be replaced under enforcement "
-                   "(reasons 0x%lx), nothing changed\n",
-                   KeyName, AuditCount, Reasons);
+                   "CM-ACL: %wZ: the value RegistryAclMode (data 0x%lx) has no effect and was deleted\n",
+                   KeyName, Reasons);
     }
     else if (InterlockedIncrement(&CmpAclRestampPrinted) <= CMP_ACL_RESTAMP_PRINT_MAX)
     {
@@ -2357,9 +2314,8 @@ CmpAclRecordRestamp(
     Entry->Slot = MAXULONG;
     Entry->Operation = Operation;
     /* A user hive's entry: rule "user", Granted 1 when the descriptor was replaced */
-    Entry->Rule = (User || AuditCount) ? CmpAclRuleUser : CmpAclRuleCell;
+    Entry->Rule = User ? CmpAclRuleUser : CmpAclRuleCell;
     Entry->Granted = User ? 1 : 0;
-    Entry->Count = AuditCount;
     Entry->Desired = Reasons;
     Entry->ShadowStatus = Status;
     KeQuerySystemTime(&Entry->Time);
@@ -2638,7 +2594,7 @@ CmpAclCheckStoredKey(
     {
         if (Name)
         {
-            CmpAclRecordRestamp(CM_REGACL_OP_KEPTGRANT, Name, Kept, Owner, STATUS_SUCCESS, NULL, 0);
+            CmpAclRecordRestamp(CM_REGACL_OP_KEPTGRANT, Name, Kept, Owner, STATUS_SUCCESS, NULL);
             CmpFree(Name, 0);
         }
         return 0;
@@ -2653,7 +2609,7 @@ CmpAclCheckStoredKey(
             Reasons |= CMP_ACL_LINK_DELETED;
             if (Name)
             {
-                CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons & ~CMP_ACL_LINK_DELETED, Owner, Status, User, 0);
+                CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons & ~CMP_ACL_LINK_DELETED, Owner, Status, User);
                 CmpFree(Name, 0);
             }
             else if (User)
@@ -2668,7 +2624,7 @@ CmpAclCheckStoredKey(
          * key there gets, so that its owner can no longer change its target.
          */
         if (Name)
-            CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons, Owner, Status, User, 0);
+            CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons, Owner, Status, User);
         else if (User)
             InterlockedIncrement(&User->Failed);
         Reasons &= ~CMP_ACL_PLANTED_LINK;
@@ -2694,7 +2650,7 @@ CmpAclCheckStoredKey(
     }
     if (Name)
     {
-        CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons, Owner, Status, User, 0);
+        CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, Reasons, Owner, Status, User);
         CmpFree(Name, 0);
     }
     else if (User)
@@ -2900,7 +2856,7 @@ CmpAclStampPolicySd(
     if (Name)
     {
         CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, Name, CMP_ACL_PLANTED_SYSTEM | CMP_ACL_PLANTED_INHERIT, NULL, Status,
-                            NULL, 0);
+                            NULL);
         CmpFree(Name, 0);
     }
 }
@@ -3511,7 +3467,6 @@ CmpAclUserHiveUnloading(
     BOOLEAN Classes;
 
     if (!CmpAclReady || CmpAclSetupRunning || !CmpAclGeneration ||
-        CmpRegistryAclEffectiveMode != CM_REGACL_MODE_ENFORCE ||
         (CmHive->Hive.HiveFlags & HIVE_VOLATILE) || (CmHive->Flags & CMHIVE_FLAG_ACL_UNCHECKED) ||
         !CmpAclUserHiveTarget(RootKcb, (PSID)SidBuffer, &Classes))
     {
@@ -3622,8 +3577,6 @@ CmpAclUserHiveTarget(
  * it). *Flagged: descriptors that would be replaced where a key may have
  * them (the root's own cell, used by the root alone, is judged as the
  * root's: the load recounted the references); *Reasons their reasons;
- * *Certain: those of them that are wrong at any place (not a package grant
- * that is right below AppContainer\Storage, which only the walk can tell);
  * *Unjudged: cells that could not be copied (no memory). A cache that does
  * not hold every cell of the hive counts as one unjudged cell. The hive is
  * reachable by the loading thread only.
@@ -3635,8 +3588,7 @@ CmpAclUserHivePass1(
     _In_ PSID OwnSid,
     _Out_ PULONG Flagged,
     _Out_ PULONG Reasons,
-    _Out_ PULONG Unjudged,
-    _Out_ PULONG Certain)
+    _Out_ PULONG Unjudged)
 {
     ULONG Buffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
     PHHIVE Hive = &CmHive->Hive;
@@ -3650,7 +3602,7 @@ CmpAclUserHivePass1(
     PVOID Pool;
     BOOLEAN Acquired;
 
-    *Flagged = *Reasons = *Unjudged = *Certain = 0;
+    *Flagged = *Reasons = *Unjudged = 0;
 
     Root = (PCM_KEY_NODE)HvGetCell(Hive, Hive->BaseBlock->RootCell);
     if (Root)
@@ -3714,12 +3666,6 @@ CmpAclUserHivePass1(
                     /* Also a package grant that is right below AppContainer\Storage: only the keys can tell */
                     (*Flagged)++;
                     *Reasons |= Verdict;
-                    /* Wrong wherever it is (not only where it may be right): what audit mode reports */
-                    if (CmpAclUserHiveSdVerdict(Copy, OwnSid, CMP_ACL_UH_PLACE_ROOT | CMP_ACL_UH_PLACE_APPCONTAINER,
-                                                &CmpKeyObjectType->TypeInfo.GenericMapping, NULL))
-                    {
-                        (*Certain)++;
-                    }
                 }
             }
             if (Pool)
@@ -3782,13 +3728,12 @@ CmpAclCheckUserPolicyKeys(
  * CreatorOwner: no other thread can open a key of it (CmpDoOpen) or make a
  * KCB for one, so nobody sees a half-checked hive. Never fails the load.
  *
- * Enforce mode, no valid record: pass 1 (the stored descriptors), and only
+ * No valid record: pass 1 (the stored descriptors), and only
  * if it found something, pass 2 (the walk of the keys, replacing top-down),
  * the hive written to its file, then the record. A check that could not be
  * completed marks the hive unchecked (CMHIVE_FLAG_ACL_UNCHECKED: only its
  * account and the system get in, see CmpAclDecide) and writes no record.
- * Audit mode: pass 1, one log entry when it found something, nothing
- * changed, no record. Legacy mode and setup: nothing.
+ * Setup: nothing.
  */
 VOID
 NTAPI
@@ -3803,10 +3748,10 @@ CmpAclCheckUserHive(
     LARGE_INTEGER Start, End, Frequency, HiveTime;
     PUNICODE_STRING RootName = NULL;
     PWCHAR RootPath = NULL;
-    ULONG Flagged, Reasons, Unjudged, Certain, Cells;
+    ULONG Flagged, Reasons, Unjudged, Cells;
     BOOLEAN Classes, Synced = TRUE, Complete;
 
-    if (!CmpAclReady || CmpAclSetupRunning || CmpRegistryAclEffectiveMode == CM_REGACL_MODE_LEGACY ||
+    if (!CmpAclReady || CmpAclSetupRunning ||
         !CmHive || !RootKcb || (CmHive->Hive.HiveFlags & HIVE_VOLATILE))
     {
         return;
@@ -3827,8 +3772,7 @@ CmpAclCheckUserHive(
      * record says: a copy keeps the time stamp of the file it was made from.
      */
     HiveTime = CmHive->Hive.BaseBlock->TimeStamp;
-    if (CmpRegistryAclEffectiveMode == CM_REGACL_MODE_ENFORCE &&
-        !(CmHive->Flags & CMHIVE_FLAG_NO_ROOT_STAMP) &&
+    if (!(CmHive->Flags & CMHIVE_FLAG_NO_ROOT_STAMP) &&
         CmpAclUserRecordValid(&Name, HiveTime))
     {
         InterlockedIncrement(&CmpAclUserHivesSkipped);
@@ -3836,22 +3780,9 @@ CmpAclCheckUserHive(
     }
 
     Start = KeQueryPerformanceCounter(&Frequency);
-    CmpAclUserHivePass1(CmHive, (PSID)SidBuffer, &Flagged, &Reasons, &Unjudged, &Certain);
+    CmpAclUserHivePass1(CmHive, (PSID)SidBuffer, &Flagged, &Reasons, &Unjudged);
     Cells = CmHive->SecurityCount;
     RootName = CmpConstructName(RootKcb);
-
-    if (CmpRegistryAclEffectiveMode != CM_REGACL_MODE_ENFORCE)
-    {
-        /* Audit: what enforcement would replace, nothing changed */
-        if (Certain && RootName)
-        {
-            InterlockedIncrement(&CmpAclUserHivesFlagged);
-            CmpAclRecordRestamp(CM_REGACL_OP_RESTAMP, RootName, Reasons, NULL, STATUS_SUCCESS, NULL, Certain);
-        }
-        if (RootName)
-            CmpFree(RootName, 0);
-        return;
-    }
 
     InterlockedIncrement(&CmpAclUserHivesChecked);
     RtlZeroMemory(&User, sizeof(User));
@@ -4008,12 +3939,60 @@ CmpAclTransition(VOID)
 }
 
 /*
+ * Earlier kernels read a REG_DWORD RegistryAclMode in Control\Session Manager\
+ * Configuration Manager as the mode of key access control. It has no meaning
+ * now and nothing reads it, but an install that still carries it (set by an
+ * administrator, or planted by any account while access was not enforced)
+ * should not keep a setting that looks like a switch: it is deleted where it
+ * is found, its data logged once (debug output, audit.log op "valueremoved",
+ * AuditStats ModeValueRemoved / ModeValueWas), and the report of the first
+ * enforcing boot says so. Boot only, kernel handle (not checked).
+ */
+static
+VOID
+CmpAclRemoveModeValue(VOID)
+{
+    static UNICODE_STRING KeyName = RTL_CONSTANT_STRING(
+        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Configuration Manager");
+    static UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"RegistryAclMode");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    ULONG Length, Data = MAXULONG;
+    NTSTATUS Status;
+    HANDLE Key;
+
+    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    if (!NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE | KEY_SET_VALUE, &ObjectAttributes)))
+        return;
+
+    Status = ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+    {
+        ZwClose(Key);
+        return;
+    }
+    if (NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+        Data = *(PULONG)Info->Data;
+
+    /* Present, whatever it holds (a value too big for the buffer is present too) */
+    Status = ZwDeleteValueKey(Key, &ValueName);
+    ZwClose(Key);
+    if (NT_SUCCESS(Status))
+    {
+        CmpAclModeValueRemoved = TRUE;
+        CmpAclModeValueWas = Data;
+    }
+    CmpAclRecordRestamp(CM_REGACL_OP_VALUEREMOVED, &KeyName, Data, NULL, Status, NULL);
+}
+
+/*
  * The machine hives other than SYSTEM are linked (NtInitializeRegistry, before
  * any process but smss runs), and the file system is there: the self-check of
  * their keys that SYSTEM needs (the rule of the SYSTEM hive's at CmInitSystem1:
- * a stored descriptor that keeps SYSTEM from full control is replaced, and
- * only if that fails does the boot fall back to audit), then the transition
- * check. Not for a setup boot (text mode: the hives are setup's own).
+ * a stored descriptor that keeps SYSTEM from full control is replaced; if that
+ * fails the boot goes on enforcing and says so), then the transition check.
+ * Not for a setup boot (text mode: the hives are setup's own).
  */
 VOID
 NTAPI
@@ -4043,8 +4022,11 @@ CmpAclBootHivesLoaded(
     if (SetupBoot)
         return;
 
-    if (CmpAclReady && CmpRegistryAclEffectiveMode == CM_REGACL_MODE_ENFORCE)
+    if (CmpAclReady)
     {
+        /* The value that earlier kernels read as a mode has no effect: delete it, once */
+        CmpAclRemoveModeValue();
+
         for (i = 0; i < RTL_NUMBER_OF(Keys); i++)
         {
             RtlInitUnicodeString(&Path, Keys[i]);
@@ -4056,23 +4038,16 @@ CmpAclBootHivesLoaded(
         }
         if (Failed)
         {
-            CmpAclEnforceFallback |= CMP_ACL_FALLBACK_HIVES;
-            CmpRegistryAclEffectiveMode = CM_REGACL_MODE_AUDIT;
+            CmpAclBootKeysUnrepaired |= CMP_ACL_UNREPAIRED_HIVES;
             DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL,
-                       "CM-ACL-AUDIT: NOT ENFORCED: SYSTEM lacks full control of a machine hive key\n");
+                       "CM-ACL: SYSTEM lacks full control of a machine hive key and it could not be repaired (enforcing)\n");
         }
     }
 
-    if (!CmpAclReady || CmpRegistryAclEffectiveMode != CM_REGACL_MODE_ENFORCE)
-    {
-        /* Legacy or audit: users may change keys from now on, the next enforcing boot checks again */
-        CmpAclMarkerDelete();
-        CmpAclUserRecordsDelete();
-        CmpAclTransitionState = CMP_ACL_TRANSITION_NONE;
-        if (!CmpAclReady)
-            return;
-    }
-    else if (CmpAclSetupRunning)
+    if (!CmpAclReady)
+        return;
+
+    if (CmpAclSetupRunning)
     {
         CmpAclTransitionState = CMP_ACL_TRANSITION_SETUP;
     }
@@ -4408,13 +4383,12 @@ CmpAclPublish(VOID)
     if (!NT_SUCCESS(Status))
         return;
 
-    CmpAclSetDword(Key, L"Mode", CmpRegistryAclEffectiveMode);
-    CmpAclSetDword(Key, L"ConfiguredMode", CmpRegistryAclMode);
-    CmpAclSetDword(Key, L"ModeSource", CmpRegistryAclModeSource);
     CmpAclSetDword(Key, L"StoresDescriptors", CmpStoreKeySecurity() ? 1 : 0);
     CmpAclSetDword(Key, L"SetupExclusion", CmpAclSetupRunning ? 1 : 0);
-    CmpAclSetDword(Key, L"SwitchesIgnored", CmpAclSwitchesIgnored);
-    CmpAclSetDword(Key, L"EnforceFallback", CmpAclEnforceFallback);
+    CmpAclSetDword(Key, L"SetupValueIgnored", CmpAclSetupValueIgnored ? 1 : 0);
+    CmpAclSetDword(Key, L"BootKeysUnrepaired", CmpAclBootKeysUnrepaired);
+    CmpAclSetDword(Key, L"ModeValueRemoved", CmpAclModeValueRemoved ? 1 : 0);
+    CmpAclSetDword(Key, L"ModeValueWas", CmpAclModeValueWas);
     CmpAclSetDword(Key, L"ShareDropped", (ULONG)CmpAclShareDropped);
     CmpAclSetDword(Key, L"Transition", CmpAclTransitionState);
     CmpAclSetDword(Key, L"TransitionMs", CmpAclTransitionMs);
@@ -4425,7 +4399,6 @@ CmpAclPublish(VOID)
     CmpAclSetDword(Key, L"KeptGrants", (ULONG)CmpAclKeptGrants);
     CmpAclSetDword(Key, L"UserHivesChecked", (ULONG)CmpAclUserHivesChecked);
     CmpAclSetDword(Key, L"UserHivesSkipped", (ULONG)CmpAclUserHivesSkipped);
-    CmpAclSetDword(Key, L"UserHivesFlagged", (ULONG)CmpAclUserHivesFlagged);
     CmpAclSetDword(Key, L"UserHiveRestamped", (ULONG)CmpAclUserHiveRestamped);
     CmpAclSetDword(Key, L"UserHiveFailed", (ULONG)CmpAclUserHiveFailed);
     CmpAclSetDword(Key, L"UserHiveMs", CmpAclUserHiveMs);
@@ -4434,7 +4407,6 @@ CmpAclPublish(VOID)
     CmpAclSetDword(Key, L"Entries", (ULONG)CmpAclEntryCount);
     CmpAclSetDword(Key, L"Dropped", (ULONG)CmpAclDropped);
     CmpAclSetDword(Key, L"Errors", (ULONG)CmpAclErrors);
-    CmpAclSetDword(Key, L"MaxAllowedReduced", (ULONG)CmpAclMaxAllowedReduced);
     CmpAclSetDword(Key, L"LinesWritten", (ULONG)CmpAclLinesWritten);
     CmpAclSetDword(Key, L"FileErrors", (ULONG)CmpAclFileErrors);
     ZwClose(Key);
@@ -4453,6 +4425,13 @@ CmpAclFormatEntry(
     CmpAclLineFormat(Line, ",\"id\":%lu,\"op\":\"%s\",\"key\":", Entry->Id, CmpAclOpNames[Entry->Operation]);
     CmpAclLineString(Line, p, Entry->KeyChars, CMP_ACL_LINE_KEY_BYTES);
     p += Entry->KeyChars;
+    if (Entry->Operation == CM_REGACL_OP_VALUEREMOVED)
+    {
+        /* The value RegistryAclMode deleted at boot: reasons is its data (0xffffffff: not a REG_DWORD) */
+        CmpAclLineFormat(Line, ",\"reasons\":\"0x%lx\",\"status\":\"0x%08lx\"}\n",
+                         Entry->Desired, (ULONG)Entry->ShadowStatus);
+        return;
+    }
     if (Entry->Operation == CM_REGACL_OP_RESTAMP || Entry->Operation == CM_REGACL_OP_KEPTGRANT)
     {
         /* A stored descriptor replaced at boot: why (CMP_ACL_PLANTED_*), its owner, the set's status */
@@ -4461,12 +4440,10 @@ CmpAclFormatEntry(
         CmpAclLineString(Line, p, Entry->UserChars, CMP_ACL_LINE_USER_BYTES);
         if (Entry->Rule == CmpAclRuleUser)
         {
-            /* A user hive checked at its load: replaced (applied 1), or only found in audit mode */
+            /* A user hive checked at its load: its descriptor was replaced */
             CmpAclLineFormat(Line, ",\"hive\":\"user\",\"applied\":%lu", Entry->Granted);
-            if (!Entry->Granted)
-                CmpAclLineFormat(Line, ",\"descriptors\":%lu", Entry->Count);
         }
-        CmpAclLineFormat(Line, ",\"mode\":\"%s\"}\n", CmpAclModeNames[CmpRegistryAclMode]);
+        CmpAclLineAppend(Line, "}\n");
         return;
     }
     if (Entry->Operation != CM_REGACL_OP_OPEN)
@@ -4481,9 +4458,8 @@ CmpAclFormatEntry(
     p += Entry->ImageChars;
     CmpAclLineFormat(Line, ",\"pid\":%lu,\"user\":", Entry->Pid);
     CmpAclLineString(Line, p, Entry->UserChars, CMP_ACL_LINE_USER_BYTES);
-    CmpAclLineFormat(Line, ",\"il\":\"0x%04lx\",\"admin\":%u,\"restricted\":%u,\"imp\":%u,\"mode\":\"%s\"}\n",
-                     Entry->IntegrityRid, Entry->Admin, Entry->Restricted, Entry->Impersonating,
-                     CmpAclModeNames[CmpRegistryAclMode]);
+    CmpAclLineFormat(Line, ",\"il\":\"0x%04lx\",\"admin\":%u,\"restricted\":%u,\"imp\":%u}\n",
+                     Entry->IntegrityRid, Entry->Admin, Entry->Restricted, Entry->Impersonating);
 }
 
 /* Append a line to the output buffer; FALSE when the buffer is full */
@@ -4575,13 +4551,9 @@ CmpAclRun(
             if (!CmpAclBootHeaderWritten)
             {
                 CmpAclLineStart(&Line, &Now);
-                CmpAclLineFormat(&Line, ",\"event\":\"start\",\"mode\":\"%s\",\"configured\":\"%s\",\"source\":\"%s\","
-                                 "\"setup\":%s,\"switchesIgnored\":%lu}\n",
-                                 CmpAclModeNames[CmpRegistryAclEffectiveMode],
-                                 CmpAclModeNames[CmpRegistryAclMode],
-                                 CmpAclSourceNames[CmpRegistryAclModeSource],
+                CmpAclLineFormat(&Line, ",\"event\":\"start\",\"setup\":%s,\"setupValueIgnored\":%s}\n",
                                  CmpAclSetupRunning ? "true" : "false",
-                                 CmpAclSwitchesIgnored);
+                                 CmpAclSetupValueIgnored ? "true" : "false");
                 CmpAclOut(&Out, &Line);
             }
 
@@ -4825,69 +4797,26 @@ CmpAclShutdownSystem(VOID)
     }
 }
 
-/* Find /REGACL=<mode> in the (upper-cased) load options */
-static
-BOOLEAN
-CmpAclParseBootOption(
-    _In_opt_ PCSTR Options,
-    _Out_ PULONG Mode)
-{
-    static const CHAR Name[] = "REGACL=";
-    PCSTR p = Options, Value;
-    SIZE_T Length;
-
-    if (!p)
-        return FALSE;
-    while (*p)
-    {
-        while (*p == ' ' || *p == '\t' || *p == '/')
-            p++;
-        if (_strnicmp(p, Name, sizeof(Name) - 1) == 0)
-        {
-            Value = p + sizeof(Name) - 1;
-            for (Length = 0; Value[Length] && Value[Length] != ' ' && Value[Length] != '\t' && Value[Length] != '/'; Length++)
-                ;
-            if (Length == 6 && !_strnicmp(Value, "LEGACY", 6))
-                *Mode = CM_REGACL_MODE_LEGACY;
-            else if (Length == 5 && !_strnicmp(Value, "AUDIT", 5))
-                *Mode = CM_REGACL_MODE_AUDIT;
-            else if (Length == 7 && !_strnicmp(Value, "ENFORCE", 7))
-                *Mode = CM_REGACL_MODE_ENFORCE;
-            else
-                return FALSE;
-            return TRUE;
-        }
-        while (*p && *p != ' ' && *p != '\t' && *p != '/')
-            p++;
-    }
-    return FALSE;
-}
-
 /* PUBLIC FUNCTIONS **********************************************************/
 
 /*
- * Decide the mode and prepare the shadow check. Called at the end of
+ * Build the policy tables and start key access control. Called at the end of
  * CmInitSystem1 (system process, SYSTEM hive and CurrentControlSet present).
- * Never fails the boot: anything missing leaves the legacy behaviour.
+ * Access control is not optional: if the tables or the worker cannot be set up
+ * (no memory this early) the boot stops (CONFIG_INITIALIZATION_FAILED), it
+ * never runs with the keys open.
  */
-VOID
+BOOLEAN
 NTAPI
 CmpAclInitialize(VOID)
 {
-    static UNICODE_STRING ModeKey = RTL_CONSTANT_STRING(
-        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Configuration Manager");
     static UNICODE_STRING SetupKey = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SYSTEM\\Setup");
-    ULONG Mode, BootMode, i;
+    ULONG i;
     ULONG Rule;
     UCHAR Buffer[CMP_ACL_SD_BUFFER];
     const CMP_ACL_SD_SPEC *Spec;
     PVOID Copy;
-    BOOLEAN BootOption, Tables = TRUE;
-
-    /* The boot option decides alone; legacy from it builds nothing, as before */
-    BootOption = KeLoaderBlock && CmpAclParseBootOption(KeLoaderBlock->LoadOptions, &BootMode);
-    if (BootOption && BootMode == CM_REGACL_MODE_LEGACY)
-        Tables = FALSE;
+    BOOLEAN Tables = TRUE;
 
     /* The SIDs and descriptors */
     for (i = 0; i < CmpAclSidMax && Tables; i++)
@@ -4931,55 +4860,8 @@ CmpAclInitialize(VOID)
         ExInitializePushLock(&CmpAclUserCacheLock);
     }
 
-    /*
-     * Mode: the default, then the registry value, then the boot option. The
-     * value is honoured, whatever it is, only if the key that holds it is one
-     * only administrators can change (see the top of the file): any value
-     * other than the compiled default could lower the mode (legacy below
-     * audit, and audit below enforce once enforce is the default), and a value
-     * a non-administrator could have planted is no switch at all. The boot
-     * option (loader block) always wins.
-     */
-    CmpRegistryAclMode = CMP_REGACL_DEFAULT_MODE;
-    CmpRegistryAclModeSource = 0;
-    if (CmpRegistryAclModeValueType == REG_DWORD &&
-        CmpRegistryAclModeValueLength == sizeof(ULONG) &&
-        CmpRegistryAclModeValue <= CM_REGACL_MODE_ENFORCE &&
-        !BootOption)
-    {
-        /*
-         * Where enforcement is the default, the value never takes the mode below it: the
-         * value lives in the registry, which every user could write while an earlier boot
-         * ran without enforcement (an install that ran audit mode), and nothing tells a
-         * value an administrator set from one a user planted then. Leaving enforcement is
-         * the boot option's job (/REGACL=AUDIT or LEGACY in the boot configuration, which
-         * only administrators can change). The value can still ask for enforcement where
-         * audit is the default.
-         */
-        if (CMP_REGACL_DEFAULT_MODE == CM_REGACL_MODE_ENFORCE &&
-            CmpRegistryAclModeValue < CM_REGACL_MODE_ENFORCE)
-        {
-            CmpAclSwitchesIgnored |= CMP_ACL_IGNORED_MODE_LOWER;
-        }
-        else if (Tables && CmpAclKeyAdminWriteOnly(&ModeKey))
-        {
-            CmpRegistryAclMode = CmpRegistryAclModeValue;
-            CmpRegistryAclModeSource = 1;
-        }
-        else
-        {
-            CmpAclSwitchesIgnored |= CMP_ACL_IGNORED_MODE_VALUE;
-        }
-    }
-    if (BootOption)
-    {
-        CmpRegistryAclMode = BootMode;
-        CmpRegistryAclModeSource = 2;
-    }
-
-    Mode = CmpRegistryAclMode;
     if (!Tables)
-        Mode = CM_REGACL_MODE_LEGACY;
+        return FALSE;
 
     /*
      * While setup runs, new keys get no stored descriptor, as before. Setup's
@@ -4993,69 +4875,47 @@ CmpAclInitialize(VOID)
      * place in the namespace (the policy table above), which is the Windows
      * value. Text-mode setup comes from the loader block; the second stage
      * (SystemSetupInProgress) only counts from a SYSTEM\Setup key that only
-     * administrators can change. Decided before the mode is published (and
-     * before CmpAclReady), so that no create sees the one without the other.
+     * administrators can change. Decided before CmpAclReady, so that no create
+     * sees the one without the other.
      */
-    if (Mode != CM_REGACL_MODE_LEGACY)
+    if (ExpInTextModeSetup)
     {
-        if (ExpInTextModeSetup)
-        {
+        CmpAclSetupRunning = TRUE;
+    }
+    else if (CmpAclSystemSetupInProgress())
+    {
+        if (CmpAclKeyAdminWriteOnly(&SetupKey))
             CmpAclSetupRunning = TRUE;
-        }
-        else if (CmpAclSystemSetupInProgress())
-        {
-            if (CmpAclKeyAdminWriteOnly(&SetupKey))
-                CmpAclSetupRunning = TRUE;
-            else
-                CmpAclSwitchesIgnored |= CMP_ACL_IGNORED_SETUP_VALUE;
-        }
+        else
+            CmpAclSetupValueIgnored = TRUE;
     }
 
-    if (Mode != CM_REGACL_MODE_LEGACY)
-    {
-        KeInitializeSpinLock(&CmpAclQueueLock);
-        InitializeSListHead(&CmpAclQueue);
-        KeInitializeTimer(&CmpAclTimer);
-        KeInitializeDpc(&CmpAclDpc, CmpAclTimerDpc, NULL);
-        ExInitializeWorkItem(&CmpAclWorkItem, CmpAclWorker, NULL);
-        KeInitializeEvent(&CmpAclWorkIdle, NotificationEvent, TRUE);
-        CmpAclReady = TRUE;
-    }
-    else if (CmpRegistryAclMode != CM_REGACL_MODE_LEGACY)
-    {
-        DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL, "CM-ACL-AUDIT: cannot set up audit mode, legacy\n");
-    }
+    KeInitializeSpinLock(&CmpAclQueueLock);
+    InitializeSListHead(&CmpAclQueue);
+    KeInitializeTimer(&CmpAclTimer);
+    KeInitializeDpc(&CmpAclDpc, CmpAclTimerDpc, NULL);
+    ExInitializeWorkItem(&CmpAclWorkItem, CmpAclWorker, NULL);
+    KeInitializeEvent(&CmpAclWorkIdle, NotificationEvent, TRUE);
+    CmpAclReady = TRUE;
 
     /*
      * Enforcement must never lock SYSTEM out of the keys the boot needs: if
-     * the descriptor of one of them (as enforcement would read it) does not
-     * give SYSTEM full control, the stored descriptor responsible is replaced
-     * (stores are on from here, no user-mode process runs yet); only if that
-     * fails does the boot run in audit mode, and say so.
+     * the descriptor of one of them does not give SYSTEM full control, the
+     * stored descriptor responsible is replaced (stores are on from here, no
+     * user-mode process runs yet); if that fails the boot goes on enforcing
+     * and says so.
      */
-    CmpRegistryAclEffectiveMode = Mode;
-    if (Mode == CM_REGACL_MODE_ENFORCE && !CmpAclSystemHasFullControl(TRUE))
-    {
-        Mode = CM_REGACL_MODE_AUDIT;
-        CmpAclEnforceFallback |= CMP_ACL_FALLBACK_SYSTEM;
-    }
+    if (!CmpAclSystemHasFullControl(TRUE))
+        CmpAclBootKeysUnrepaired |= CMP_ACL_UNREPAIRED_SYSTEM;
 
-    CmpRegistryAclEffectiveMode = Mode;
-    DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL, "CM-ACL-AUDIT: mode %s (configured %s, from %s)%s%s%s%s%s\n",
-               CmpAclModeNames[CmpRegistryAclEffectiveMode],
-               CmpAclModeNames[CmpRegistryAclMode],
-               CmpAclSourceNames[CmpRegistryAclModeSource],
-               CmpAclEnforceFallback ? ", NOT ENFORCED: SYSTEM lacks full control of a boot key" : "",
+    DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL, "CM-ACL: key access control on%s%s%s\n",
+               CmpAclBootKeysUnrepaired ? ", SYSTEM lacks full control of a boot key (not repaired)" : "",
                CmpAclSetupRunning ? ", setup: keys get no stored descriptor" : "",
-               (CmpAclSwitchesIgnored & CMP_ACL_IGNORED_MODE_LOWER) ?
-                   ", RegistryAclMode below enforce ignored (use the boot option)" : "",
-               (CmpAclSwitchesIgnored & CMP_ACL_IGNORED_MODE_VALUE) ?
-                   ", RegistryAclMode ignored (its key is not administrators-only)" : "",
-               (CmpAclSwitchesIgnored & CMP_ACL_IGNORED_SETUP_VALUE) ?
-                   ", SystemSetupInProgress ignored (its key is not administrators-only)" : "");
+               CmpAclSetupValueIgnored ? ", SystemSetupInProgress ignored (its key is not administrators-only)" : "");
 
-    /* Publish the mode now; the worker refreshes the counters */
+    /* Publish the state now; the worker refreshes the counters */
     CmpAclPublish();
+    return TRUE;
 }
 
 /*
@@ -5137,9 +4997,8 @@ CmpAclUncheckedHiveAllows(
 
 /*
  * The access decision on a key's own descriptor, the one function behind
- * both the audit (mode 1: the result is only recorded) and enforcement
- * (mode 2: the result stands), so that the audit log lists exactly what
- * enforcement denies.
+ * every open and create of a user-mode caller; a denial is logged (the log of
+ * refused opens), and stands.
  *
  *  Kcb        the key opened, or the parent of a key being created
  *  ChildName  the new key's name (creates), for the log
@@ -5237,7 +5096,6 @@ CmpAclDecide(
 
     if (Kcb->KeyHive &&
         (CONTAINING_RECORD(Kcb->KeyHive, CMHIVE, Hive)->Flags & CMHIVE_FLAG_ACL_UNCHECKED) &&
-        CmpRegistryAclEffectiveMode == CM_REGACL_MODE_ENFORCE &&
         !CmpAclUncheckedHiveAllows(Kcb, &AccessState->SubjectSecurityContext))
     {
         /* A user hive whose check failed: others than its account and the system stay out */
@@ -5301,48 +5159,14 @@ CmpAclDecide(
     return Result;
 }
 
-/* Key access is enforced (mode 2 running): the decision above stands */
-static
-BOOLEAN
-CmpAclEnforcing(VOID)
-{
-    return CmpAclReady && CmpRegistryAclEffectiveMode == CM_REGACL_MODE_ENFORCE;
-}
-
 /*
- * Is the subject of an open a restricted token (restricting SIDs, or write restricted) while key access
- * is not enforced but not off (audit mode)? The legacy descriptor that the open is otherwise decided
- * against grants Everyone and nobody else, so a second pass over restricting SIDs that are not Everyone
- * (S-1-5-33, the logon SID, a group of the account) would refuse every open, where Windows decides by
- * the key's own descriptor (measured on Windows Server 2022: a key that grants S-1-5-33 is opened by a
- * restricted and by a write restricted token holding that restricting SID, with every access mask). The
- * open of such a subject is therefore decided like an enforced one. Legacy mode has no decision on key
- * descriptors at all and is left alone.
- */
-static
-BOOLEAN
-CmpAclRestrictedSubject(
-    _In_ PACCESS_STATE AccessState)
-{
-    PACCESS_TOKEN Token;
-
-    if (!CmpAclReady || CmpRegistryAclEffectiveMode == CM_REGACL_MODE_LEGACY)
-        return FALSE;
-
-    Token = SeQuerySubjectContextToken(&AccessState->SubjectSecurityContext);
-    return Token && SeTokenIsRestricted(Token);
-}
-
-/*
- * The access decision of a key open (CmpDoOpen). Kernel-mode opens, and every
- * open unless key access is enforced, are decided by CmpCheckKeyOpenAccess
- * (the descriptor keys always had: it grants what it always granted), and the
- * audit records what the key's own descriptor would decide. When it is
- * enforced (mode 2), the key's own descriptor decides (CmpAclDecide, the same
- * function the audit uses), with the same steps as CmpCheckKeyOpenAccess:
- * the privileges used go into the access state, the granted access moves
- * from the remaining to the granted mask, ACCESS_SYSTEM_SECURITY without
- * SeSecurityPrivilege fails with STATUS_ACCESS_DENIED.
+ * The access decision of a key open (CmpDoOpen). Kernel-mode opens are decided
+ * by CmpCheckKeyOpenAccess (the descriptor keys always had: it grants what it
+ * always granted). Every other open is decided by the key's own descriptor
+ * (CmpAclDecide), with the same steps as CmpCheckKeyOpenAccess: the privileges
+ * used go into the access state, the granted access moves from the remaining
+ * to the granted mask, ACCESS_SYSTEM_SECURITY without SeSecurityPrivilege
+ * fails with STATUS_ACCESS_DENIED.
  */
 BOOLEAN
 NTAPI
@@ -5360,17 +5184,9 @@ CmpAclCheckKeyOpen(
     PPRIVILEGE_SET Privileges;
     BOOLEAN Result;
 
-    if (AccessMode == KernelMode || !(CmpAclEnforcing() || CmpAclRestrictedSubject(AccessState)))
-    {
-        Result = CmpCheckKeyOpenAccess(Object, AccessState, AccessMode, AccessStatus);
-        if (Result)
-        {
-            /* Registry ACL audit: what the key's own descriptor decides (logged only, the open stands) */
-            CmpShadowAccessCheck(Kcb, NULL, CM_REGACL_OP_OPEN, AccessState, Desired, Previous,
-                                 AccessState->PreviouslyGrantedAccess, AccessMode, Options);
-        }
-        return Result;
-    }
+    /* Kernel mode, and the time before the policy tables exist (no user-mode process runs then) */
+    if (AccessMode == KernelMode || !CmpAclReady)
+        return CmpCheckKeyOpenAccess(Object, AccessState, AccessMode, AccessStatus);
 
     Result = CmpAclDecide(Kcb, NULL, CM_REGACL_OP_OPEN, AccessState, Desired, Previous,
                           Options, Object, &Granted, AccessStatus, &Privileges);
@@ -5397,16 +5213,13 @@ CmpAclCheckKeyOpen(
 }
 
 /*
- * The right a create needs on the parent key, when key access is enforced:
- * KEY_CREATE_SUB_KEY, or KEY_CREATE_LINK for a symbolic link (Operation
- * CM_REGACL_OP_CREATELINK); CM_REGACL_OP_LINKNODE (a hive link) needs
- * KEY_CREATE_SUB_KEY. Checked before anything is created. The creator then
- * gets the access it asked for on the new key, whatever the new key's DACL
- * says (oracle, design 2.2): the handle of a new key is not checked again.
- * STATUS_SUCCESS when allowed or not enforced (mode 1: the create checks
- * nothing, except for a restricted token, which is decided like its opens,
- * and the audit records the decision after it), else the status of the
- * denial.
+ * The right a create needs on the parent key: KEY_CREATE_SUB_KEY, or
+ * KEY_CREATE_LINK for a symbolic link (Operation CM_REGACL_OP_CREATELINK);
+ * CM_REGACL_OP_LINKNODE (a hive link) needs KEY_CREATE_SUB_KEY. Checked before
+ * anything is created. The creator then gets the access it asked for on the
+ * new key, whatever the new key's DACL says (oracle, design 2.2): the handle of
+ * a new key is not checked again. STATUS_SUCCESS when allowed (or a kernel-mode
+ * caller), else the status of the denial.
  */
 NTSTATUS
 NTAPI
@@ -5421,11 +5234,7 @@ CmpAclCheckKeyCreate(
     ACCESS_MASK Granted;
     NTSTATUS AccessStatus;
 
-    if (AccessMode == KernelMode || !ParentKcb || !AccessState)
-        return STATUS_SUCCESS;
-
-    /* A restricted token is decided by the descriptor also while key access is not enforced, as its opens are */
-    if (!CmpAclEnforcing() && !CmpAclRestrictedSubject(AccessState))
+    if (AccessMode == KernelMode || !ParentKcb || !AccessState || !CmpAclReady)
         return STATUS_SUCCESS;
 
     if (CmpAclDecide(ParentKcb, ChildName, Operation, AccessState,
@@ -5448,9 +5257,8 @@ CmpAclCheckKeyCreate(
  * hive loaded at \REGISTRY\USER\<name> (not .DEFAULT, not S-1-5-18) is followed
  * only to \REGISTRY\USER\<name> or \REGISTRY\USER\<name>_Classes and below
  * (<name> without a _Classes suffix). Links elsewhere (machine hives, which only
- * administrators can change) are not judged. A refused link is logged in both
- * modes and refused only when key access is enforced (mode 2). The caller holds
- * the registry lock (names cannot change).
+ * administrators can change) are not judged. A refused link is logged and
+ * refused. The caller holds the registry lock (names cannot change).
  */
 BOOLEAN
 NTAPI
@@ -5466,7 +5274,7 @@ CmpAclCheckLinkFollow(
     PCM_KEY_CONTROL_BLOCK Walk, HiveKey;
     ULONG Depth = 0, Chars, BaseChars, TargetChars, Pos, i;
 
-    if (!CmpAclReady || CmpRegistryAclEffectiveMode == CM_REGACL_MODE_LEGACY || !LinkKcb || !Target)
+    if (!CmpAclReady || !LinkKcb || !Target)
         return TRUE;
 
     /* The key at \REGISTRY\<USER>\<name> above the link */
@@ -5531,55 +5339,7 @@ Refuse:
     SeCaptureSubjectContext(&Subject);
     CmpAclRecordDenial(LinkKcb, Target, CM_REGACL_OP_FOLLOWLINK, &Subject, 0, 0, STATUS_ACCESS_DENIED, CmpAclRuleUser);
     SeReleaseSubjectContext(&Subject);
-    return !CmpAclEnforcing();
-}
-
-/*
- * The shadow access check. Called after the real decision granted the open or
- * create; records what Windows would have decided. Never fails, never changes
- * the caller's result or the access state.
- *
- *  Kcb       the key opened, or the parent of a key being created
- *  ChildName the new key's name (creates)
- *  Desired   access checked: the open's remaining desired access as it was
- *            before the real check, or KEY_CREATE_SUB_KEY/KEY_CREATE_LINK
- *  Previous  access granted before the real check
- *  LegacyGranted what the real check granted (for MAXIMUM_ALLOWED opens)
- *  Options   REG_OPTION_BACKUP_RESTORE of the open or create
- */
-VOID
-NTAPI
-CmpShadowAccessCheck(
-    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
-    _In_opt_ PCUNICODE_STRING ChildName,
-    _In_ ULONG Operation,
-    _In_ PACCESS_STATE AccessState,
-    _In_ ACCESS_MASK Desired,
-    _In_ ACCESS_MASK Previous,
-    _In_ ACCESS_MASK LegacyGranted,
-    _In_ KPROCESSOR_MODE AccessMode,
-    _In_ ULONG Options)
-{
-    ACCESS_MASK Granted;
-    NTSTATUS AccessStatus;
-
-    /*
-     * Kernel-mode callers are not checked on Windows either. When access is
-     * enforced, the decision was taken (and logged) before the operation by
-     * the same function (CmpAclCheckKeyOpen, CmpAclCheckKeyCreate).
-     */
-    if (CmpRegistryAclEffectiveMode != CM_REGACL_MODE_AUDIT || !CmpAclReady || AccessMode == KernelMode)
-        return;
-    if (!Kcb || !AccessState || Operation > CM_REGACL_OP_LINKNODE)
-        return;
-
-    if (CmpAclDecide(Kcb, ChildName, Operation, AccessState, Desired, Previous, Options, NULL,
-                     &Granted, &AccessStatus, NULL) &&
-        (Desired & MAXIMUM_ALLOWED) && LegacyGranted && (Granted & LegacyGranted) != LegacyGranted)
-    {
-        /* Opened for MAXIMUM_ALLOWED: Windows hands out less (counted, not logged) */
-        InterlockedIncrement(&CmpAclMaxAllowedReduced);
-    }
+    return FALSE;
 }
 
 /* EOF */

@@ -1865,8 +1865,12 @@ CmInitSystem1(VOID)
         KeBugCheckEx(CONFIG_INITIALIZATION_FAILED, 1, 15, Status, 0);
     }
 
-    /* Registry access control mode and the audit shadow check (never fails the boot) */
-    CmpAclInitialize();
+    /* Registry key access control (the boot does not go on without it) */
+    if (!CmpAclInitialize())
+    {
+        /* Bugcheck */
+        KeBugCheckEx(CONFIG_INITIALIZATION_FAILED, 1, 16, STATUS_INSUFFICIENT_RESOURCES, 0);
+    }
 
     /* Free the load options */
     ExFreePoolWithTag(CmpLoadOptions.Buffer, TAG_CM);

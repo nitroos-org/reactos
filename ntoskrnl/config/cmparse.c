@@ -697,8 +697,7 @@ CmpDoCreate(IN PHHIVE Hive,
 
     /*
      * The right Windows checks on the parent (KEY_CREATE_SUB_KEY, or
-     * KEY_CREATE_LINK for a link) before anything is created, when key
-     * access is enforced; otherwise the audit after the create records it
+     * KEY_CREATE_LINK for a link) before anything is created
      */
     Status = CmpAclCheckKeyCreate(ParentKcb,
                                   Name,
@@ -816,18 +815,6 @@ CmpDoCreate(IN PHHIVE Hive,
             CellData->u.KeyNode.Flags |= KEY_SYM_LINK;
             KeyBody->KeyControlBlock->Flags = CellData->u.KeyNode.Flags;
             HvReleaseCell(Hive, KeyCell);
-        }
-
-        /* Registry ACL audit: the right Windows checks on the parent (logged only, the create stands) */
-        if (ParseContext->CreateOptions & REG_OPTION_CREATE_LINK)
-        {
-            CmpShadowAccessCheck(ParentKcb, Name, CM_REGACL_OP_CREATELINK, AccessState,
-                                 KEY_CREATE_LINK, 0, 0, AccessMode, ParseContext->CreateOptions);
-        }
-        else
-        {
-            CmpShadowAccessCheck(ParentKcb, Name, CM_REGACL_OP_CREATE, AccessState,
-                                 KEY_CREATE_SUB_KEY, 0, 0, AccessMode, ParseContext->CreateOptions);
         }
     }
 
@@ -1052,9 +1039,8 @@ CmpDoOpen(IN PHHIVE Hive,
         /*
          * The open decision is the configuration manager's, not a check of
          * the descriptor the key reports through the object manager: see
-         * CmpAclCheckKeyOpen. Unless key access is enforced (registry ACL
-         * mode 2), it grants what opens always got and the audit records
-         * what the key's own descriptor decides.
+         * CmpAclCheckKeyOpen: the key's own descriptor decides for a
+         * user-mode caller.
          */
         if (!CmpAclCheckKeyOpen(*Object,
                                 Kcb,
@@ -1231,10 +1217,6 @@ CmpCreateLinkNode(IN PHHIVE Hive,
         {
             /* Setup root pointer */
             Context->ChildHive.KeyHive->BaseBlock->RootCell = ChildCell;
-
-            /* Registry ACL audit (hive links are made from kernel mode, so normally not checked) */
-            CmpShadowAccessCheck(ParentKcb, &Name, CM_REGACL_OP_LINKNODE, AccessState,
-                                 KEY_CREATE_SUB_KEY, 0, 0, AccessMode, Context->CreateOptions);
         }
     }
 

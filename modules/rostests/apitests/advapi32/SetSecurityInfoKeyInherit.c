@@ -28,28 +28,6 @@ static LSTATUS (WINAPI *pRegDeleteTreeW)(HKEY, LPCWSTR);
 
 static BOOL RestoreSddl(HKEY Root, PCWSTR Path, SECURITY_INFORMATION Info, PCWSTR Sddl);
 
-/* Are key opens and creates decided by the keys' DACLs: Windows, or NitroOS in registry ACL mode 2 */
-static BOOL KeysEnforced(void)
-{
-    static int Enforced = -1;
-    HKEY Key;
-    DWORD Mode = 0, Size = sizeof(Mode), Type;
-
-    if (Enforced < 0)
-    {
-        Enforced = !is_reactos();
-        if (!Enforced &&
-            RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl\\AuditStats",
-                          0, KEY_QUERY_VALUE, &Key) == ERROR_SUCCESS)
-        {
-            Enforced = RegQueryValueExW(Key, L"Mode", NULL, &Type, (LPBYTE)&Mode, &Size) == ERROR_SUCCESS &&
-                       Type == REG_DWORD && Mode == 2;
-            RegCloseKey(Key);
-        }
-    }
-    return Enforced;
-}
-
 /* Is the NETWORK SID in the caller's token (a remote shell on the Windows peer has it) */
 static BOOL CallerIsNetwork(void)
 {
@@ -438,11 +416,11 @@ static void TestExtraCases(void)
         FreeDacl(&D);
         /*
          * The deny ACE for Users (KEY_WRITE includes KEY_CREATE_SUB_KEY) applies to a caller in Users, as
-         * administrators are: where key access is enforced (Windows; NitroOS in registry ACL mode 2) the
-         * create of the new subkey is refused
+         * administrators are: key access is enforced (Windows and NitroOS), so the create of the new subkey
+         * is refused
          */
         Error = RegCreateKeyExW(DenyP, L"c2", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &C2, NULL);
-        ok(Error == ERROR_SUCCESS || (Error == ERROR_ACCESS_DENIED && KeysEnforced()),
+        ok(Error == ERROR_SUCCESS || Error == ERROR_ACCESS_DENIED,
            "deny: create of the new subkey: %lu\n", Error);
         if (Error == ERROR_SUCCESS)
         {
@@ -2076,7 +2054,7 @@ static void TestParentSetMatch(void)
          * which several new DACLs of s grant read. Where key access is enforced and s no longer lets this
          * caller read it, g is left as it was, on Windows as here.
          */
-        if (Rows[i].ExpectedG && KeysEnforced() && !CallerIsNetwork() &&
+        if (Rows[i].ExpectedG && !CallerIsNetwork() &&
             !KeyOpens(HKEY_CURRENT_USER, Path, KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS))
         {
             skip("%ls: s does not let this caller read it (no NETWORK SID): no descent to g\n", Rows[i].Name);
@@ -2450,7 +2428,7 @@ START_TEST(SetSecurityInfoKeyInherit)
      * access is enforced, a caller without it (a standard user) is left with keys it can neither
      * change nor delete, and every later test fails on them
      */
-    if (KeysEnforced() && !EnableRestorePrivileges(TRUE))
+    if (!EnableRestorePrivileges(TRUE))
     {
         EnableRestorePrivileges(FALSE);
         skip("key access is enforced and the caller cannot enable SeRestorePrivilege (run as an administrator)\n");

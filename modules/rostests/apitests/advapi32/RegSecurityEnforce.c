@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS API tests
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
- * PURPOSE:     Registry key access as the kernel enforces it (registry ACL mode 2), for a standard
+ * PURPOSE:     Registry key access as the kernel enforces it, for a standard
  *              user and for restricted tokens: the keys a standard user must not write, what it may
  *              read, HKCU, backup/restore opens, OWNER RIGHTS on a key
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
@@ -13,11 +13,8 @@
  * Windows' descriptor for that key would be. The descriptor rows of the keys a standard user must not write
  * also assert that the descriptor does not let it write (a finding if it does).
  *
- * The NitroOS kernel enforces key descriptors only in registry ACL mode 2 (boot option /REGACL=ENFORCE or
- * Configuration Manager\RegistryAclMode). In mode 1 (audit) and 0 (legacy) every open the rows make
- * succeeds, and that is what the rows assert there, except the opens of the restricted tokens (restricting
- * SIDs): in mode 1 their opens are decided by the key's descriptor too, as on Windows. On Windows the rows
- * always use the enforced values.
+ * The NitroOS kernel enforces key descriptors always (there is no mode and no switch), as Windows does, so
+ * the rows use the enforced values on both.
  *
  * The "standard user" is the process itself when it does not run as an administrator; otherwise a thread
  * token made from the process token with Administrators deny-only and no privileges. The restricted tokens
@@ -33,25 +30,6 @@
 #include <ndk/cmfuncs.h>
 
 #define KEY_R   0x20019     /* KEY_READ */
-
-/* ------------------------------------------------------------------------ mode */
-
-static BOOL Enforced;   /* the kernel enforces key descriptors (or this is Windows) */
-static DWORD AclMode;   /* registry ACL mode of the kernel (this system): 0 legacy, 1 audit, 2 enforce */
-
-static DWORD ReadAclMode(void)
-{
-    HKEY Key;
-    DWORD Mode = MAXDWORD, Size = sizeof(Mode), Type;
-
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl\\AuditStats",
-                      0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
-        return MAXDWORD;
-    if (RegQueryValueExW(Key, L"Mode", NULL, &Type, (LPBYTE)&Mode, &Size) != ERROR_SUCCESS || Type != REG_DWORD)
-        Mode = MAXDWORD;
-    RegCloseKey(Key);
-    return Mode;
-}
 
 /* ---------------------------------------------------------------------- tokens */
 
@@ -259,11 +237,11 @@ static void Measured(HANDLE Token, const char *Who, HKEY Root, PCWSTR Path, REGS
         skip("%s: %ls does not exist\n", Who, Path);
         return;
     }
-    ok(Error == (Enforced ? Expected : ERROR_SUCCESS), "%s %ls 0x%lx: error %ld, expected %ld (measured)\n",
-       Who, Path, (ULONG)Sam, Error, Enforced ? Expected : ERROR_SUCCESS);
+    ok(Error == Expected, "%s %ls 0x%lx: error %ld, expected %ld (measured)\n",
+       Who, Path, (ULONG)Sam, Error, Expected);
 }
 
-/* A measured MAXIMUM_ALLOWED row: the granted access when enforced */
+/* A measured MAXIMUM_ALLOWED row: the granted access */
 static void MeasuredMax(HANDLE Token, const char *Who, HKEY Root, PCWSTR Path, ACCESS_MASK Expected)
 {
     ACCESS_MASK Granted;
@@ -272,11 +250,6 @@ static void MeasuredMax(HANDLE Token, const char *Who, HKEY Root, PCWSTR Path, A
     if (Error == ERROR_FILE_NOT_FOUND)
     {
         skip("%s: %ls does not exist\n", Who, Path);
-        return;
-    }
-    if (!Enforced)
-    {
-        ok(Error == ERROR_SUCCESS, "%s %ls MAXIMUM_ALLOWED: error %ld\n", Who, Path, Error);
         return;
     }
     if (Expected == 0)
@@ -290,7 +263,7 @@ static void MeasuredMax(HANDLE Token, const char *Who, HKEY Root, PCWSTR Path, A
 }
 
 /*
- * A descriptor row: when enforced, the open as Token succeeds exactly when the key's descriptor grants it.
+ * A descriptor row: the open as Token succeeds exactly when the key's descriptor grants it.
  * MustDeny: the descriptor must not grant it either (a write a standard user must not have).
  */
 static void ByDescriptor(HANDLE Token, const char *Who, HKEY Root, PCWSTR Path, REGSAM Sam, BOOL MustDeny)
@@ -307,11 +280,8 @@ static void ByDescriptor(HANDLE Token, const char *Who, HKEY Root, PCWSTR Path, 
     if (MustDeny)
         ok(Grants == 0, "%s: the descriptor of %ls grants 0x%lx (it must not)\n", Who, Path, (ULONG)Sam);
     Error = OpenAs(Token, Root, Path, Sam, NULL);
-    if (!Enforced)
-        ok(Error == ERROR_SUCCESS, "%s %ls 0x%lx: error %ld (not enforced)\n", Who, Path, (ULONG)Sam, Error);
-    else
-        ok(Error == (Grants ? ERROR_SUCCESS : ERROR_ACCESS_DENIED), "%s %ls 0x%lx: error %ld, the descriptor %s it\n",
-           Who, Path, (ULONG)Sam, Error, Grants ? "grants" : "denies");
+    ok(Error == (Grants ? ERROR_SUCCESS : ERROR_ACCESS_DENIED), "%s %ls 0x%lx: error %ld, the descriptor %s it\n",
+       Who, Path, (ULONG)Sam, Error, Grants ? "grants" : "denies");
 }
 
 /* ------------------------------------------------------------- standard user */
@@ -385,7 +355,7 @@ static void TestStandardUser(void)
                 ok(0, "the descriptor of %ls lets a standard user set values (ImagePath)\n", Path);
             }
             Error = OpenAs(StdToken, HKEY_LOCAL_MACHINE, Path, KEY_SET_VALUE, &Unused);
-            ok(Error == ((!Enforced || Grants) ? ERROR_SUCCESS : ERROR_ACCESS_DENIED),
+            ok(Error == (Grants ? ERROR_SUCCESS : ERROR_ACCESS_DENIED),
                "standard %ls KEY_SET_VALUE: error %ld\n", Path, Error);
         }
         RegCloseKey(Key);
@@ -543,8 +513,7 @@ static void RestrictedChild(const WCHAR *Kind, const WCHAR *Expect)
         }
         if (Error == ERROR_SUCCESS)
             RegCloseKey(Key);
-        /* a restricted token is decided by the descriptor in audit mode too, not in legacy mode */
-        Wanted = (((!Enforced && AclMode != 1) || Expect[i] == L'1')) ? ERROR_SUCCESS : ERROR_ACCESS_DENIED;
+        Wanted = (Expect[i] == L'1') ? ERROR_SUCCESS : ERROR_ACCESS_DENIED;
         ok(Error == Wanted, "%ls child: %ls 0x%lx: error %ld, expected %ld (the descriptor %s it)\n", Kind,
            RRows[i].Path, (ULONG)RRows[i].Sam, Error, Wanted, Expect[i] == L'1' ? "grants" : "denies");
     }
@@ -736,11 +705,6 @@ static void TestBackupRestore(void)
         skip("not an administrator: no backup/restore rows\n");
         return;
     }
-    if (!Enforced)
-    {
-        skip("key access is not enforced: the backup/restore rows need it\n");
-        return;
-    }
     for (i = 0; i < RTL_NUMBER_OF(Rows); i++)
     {
         Token = AdminWithPrivileges(Rows[i].Backup, Rows[i].Restore);
@@ -810,7 +774,7 @@ static void TestOwnerRights(void)
             if (!Error)
                 RegCloseKey(Child);
             Error = RegOpenKeyExW(HKEY_CURRENT_USER, ChildPath, 0, WRITE_DAC, &Child);
-            ok(Error == (Enforced ? ERROR_ACCESS_DENIED : ERROR_SUCCESS),
+            ok(Error == ERROR_ACCESS_DENIED,
                "owner with (A;;KR;;;OW): WRITE_DAC open error %ld\n", Error);
             if (!Error)
                 RegCloseKey(Child);
@@ -827,11 +791,8 @@ static void TestOwnerRights(void)
 
 START_TEST(RegSecurityEnforce)
 {
-    DWORD Mode = ReadAclMode();
     WCHAR Child[16], Expect[32];
 
-    AclMode = Mode;
-    Enforced = !is_reactos() || Mode == 2;
     if (GetEnvironmentVariableW(L"REGACL_ENFORCE_CHILD", Child, RTL_NUMBER_OF(Child)) &&
         GetEnvironmentVariableW(L"REGACL_ENFORCE_EXPECT", Expect, RTL_NUMBER_OF(Expect)))
     {
@@ -839,7 +800,6 @@ START_TEST(RegSecurityEnforce)
         RestrictedChild(Child, Expect);
         return;
     }
-    trace("registry ACL mode %ld: rows use the %s values\n", (LONG)Mode, Enforced ? "enforced" : "not-enforced");
     if (!InitTokens())
         return;
     if (!ProcessIsAdmin)

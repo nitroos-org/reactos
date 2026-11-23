@@ -21,8 +21,8 @@
  *  - the primary group is not checked.
  * A create that fails leaves no key. (Windows created the key and still
  * returned STATUS_PRIVILEGE_NOT_HELD for a NULL SACL; this kernel creates
- * nothing.) In legacy mode (/REGACL=LEGACY) and while setup runs nothing is
- * stored and nothing is checked: every create succeeds, as before.
+ * nothing.) While setup runs nothing is stored and nothing is checked: every
+ * create succeeds, as before.
  */
 
 #include <kmt_test.h>
@@ -103,7 +103,7 @@ AdminOwner(
     return FALSE;
 }
 
-/* AuditStats\StoresDescriptors: 0 in legacy mode and while setup runs; missing on a kernel without it */
+/* AuditStats\StoresDescriptors: 0 while setup runs; missing on a kernel without it */
 static
 ULONG
 StoresDescriptors(VOID)
