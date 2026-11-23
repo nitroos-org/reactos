@@ -1314,6 +1314,14 @@ co_IntSetParent(PWND Wnd, PWND WndNewParent)
       return NULL;
    }
 
+   /* A window in destroy (SetParent from its own WM_NCDESTROY) gets no new parent: the user32 winetest
+      win.c ncdestroy_test_proc expects 0 and ERROR_INVALID_PARAMETER, and nothing is hidden first */
+   if ((Wnd->state & WNDS_DESTROYED) || (Wnd->state2 & WNDS2_INDESTROY))
+   {
+      EngSetLastError(ERROR_INVALID_PARAMETER);
+      return NULL;
+   }
+
    /* Some applications try to set a child as a parent */
    if (IntIsChildWindow(Wnd, WndNewParent))
    {
