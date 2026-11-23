@@ -1310,6 +1310,74 @@ START_TEST(LifetimeSendSenderEnds)
     UnregisterClassW(L"SseClass", wc.hInstance);
 }
 
+/*
+ * FreeExitClass: a thread destroys its window and ends inside the window's WM_NCDESTROY (or WM_DESTROY of a
+ * child). The window must be gone after the thread, and its class must have no window left: UnregisterClass
+ * succeeds. Before the fix the free of the window stopped with the thread, and the thread cleanup did not finish
+ * it (the window kept its handle and its class).
+ */
+#define FEC_ROUNDS 10
+static UINT gFecMsg;
+
+static LRESULT CALLBACK FecWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (msg == gFecMsg && !(GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CHILD) == (gFecMsg == WM_NCDESTROY))
+        ExitThread(0x77);
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static DWORD WINAPI FecThread(LPVOID Param)
+{
+    HWND *phwnd = Param;
+    HWND hwnd = CreateWindowExW(0, L"FecClass", L"fec", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 60, 60, 150, 100, NULL,
+                                NULL, GetModuleHandleW(NULL), NULL);
+
+    phwnd[0] = hwnd;
+    phwnd[1] = CreateWindowExW(0, L"FecClass", L"fec-child", WS_CHILD | WS_VISIBLE, 5, 5, 50, 40, hwnd, NULL,
+                               GetModuleHandleW(NULL), NULL);
+    ClPump();
+    DestroyWindow(hwnd);
+    return 0;
+}
+
+START_TEST(LifetimeFreeExitClass)
+{
+    static const UINT Msgs[] = { WM_NCDESTROY, WM_DESTROY };
+    WNDCLASSW wc = { 0 };
+    HWND hwnd[2];
+    HANDLE hThread;
+    DWORD Code;
+    int m, Round;
+
+    for (m = 0; m < 2; m++)
+    {
+        gFecMsg = Msgs[m];
+        wc.lpfnWndProc = FecWndProc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.lpszClassName = L"FecClass";
+        ok(RegisterClassW(&wc) != 0, "msg %u: RegisterClass failed (%lu)\n", gFecMsg, GetLastError());
+        for (Round = 0; Round < FEC_ROUNDS; Round++)
+        {
+            hwnd[0] = hwnd[1] = NULL;
+            hThread = CreateThread(NULL, 0, FecThread, hwnd, 0, NULL);
+            ok(hThread != NULL, "no thread\n");
+            if (!hThread)
+                break;
+            ok(ClWait(hThread, 10000), "msg %u round %d: the thread did not end\n", gFecMsg, Round);
+            Code = 0;
+            GetExitCodeThread(hThread, &Code);
+            ok(Code == 0x77, "msg %u round %d: exit code 0x%lx, the thread did not end in the message\n",
+               gFecMsg, Round, Code);
+            CloseHandle(hThread);
+            ok(!IsWindow(hwnd[0]), "msg %u round %d: the window %p is still there\n", gFecMsg, Round, hwnd[0]);
+            ok(!IsWindow(hwnd[1]), "msg %u round %d: the child %p is still there\n", gFecMsg, Round, hwnd[1]);
+        }
+        SetLastError(0xdeadbeef);
+        ok(UnregisterClassW(L"FecClass", wc.hInstance), "msg %u: UnregisterClass failed (%lu)\n", gFecMsg,
+           GetLastError());
+    }
+}
+
 START_TEST(LifetimeKeyboardLayoutWalk)
 {
     HKL hklOld, hklNew, hklRet;
