@@ -93,6 +93,13 @@
  *     is rejected and reported. A Block rule with one is sent with the name, which is ignored (it blocks more
  *     than written). The same holds for every other condition the filter cannot match (connection security,
  *     authorised machines or users, local user owner, package, interfaces).
+ *     "*" on an Allow rule is the exception where the filter reports NITROFW_FEATURE_SERVICE_ANY: the rule applies
+ *     to the packets of a program that runs with a service logon token (NT AUTHORITY\SERVICE enabled in its token
+ *     groups; measured on Windows Server 2022: a service of any account, and a SYSTEM scheduled task; not a batch
+ *     logon); an owner that is not known (no port, IPv6) does not match. The service sends that rule with "*" as
+ *     the name. A Block rule with "*" is still sent without it and blocks every program: the processes of NitroOS
+ *     services do not carry the SERVICE group yet (the service controller starts them with its own token), so a
+ *     Block rule that skipped programs without it would block less than written.
  *  9. IPv6 (only while tcpip has IPv6 on, Tcpip\Parameters\Ipv6Enable; NITROFW_FEATURE_IPV6 says so): the same
  *     rules, profiles and defaults apply to IPv6 packets. A rule's address lists are per family: a rule with
  *     only IPv4 addresses never matches an IPv6 packet, one with only IPv6 addresses never matches an IPv4
@@ -141,6 +148,7 @@
 #define NITROFW_FEATURE_OUTBOUND       0x00000002
 #define NITROFW_FEATURE_SERVICE_MATCH  0x00000004
 #define NITROFW_FEATURE_IPV6           0x00000008
+#define NITROFW_FEATURE_SERVICE_ANY    0x00000010   /* ServiceNameOffset "*" (services only) is matched; names are not */
 
 typedef struct _NITROFW_VERSION_INFO
 {
