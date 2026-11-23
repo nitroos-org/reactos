@@ -19,8 +19,8 @@ Origin of the device interface
 
 The 53C1030 uses the same messages. What differs is what PORT FACTS reports (port type SCSI instead of SAS: the
 targets are SCSI ids 0..15 of one bus, the adapter has id 7) and the device ids. Facts about it were checked in
-the open source of VirtualBox's device model (src/VBox/Devices/Storage/DevLsiLogicSCSI.cpp and .h; GPL-3.0 or
-CDDL-1.0; read for the device ids (0x0030, subsystem 1000:8000), the port facts it returns, the frame size (128
+the open source of VirtualBox's device model (src/VBox/Devices/Storage/DevLsiLogicSCSI.cpp and .h; GPL-3.0-only;
+read for the device ids (0x0030, subsystem 1000:8000), the port facts it returns, the frame size (128
 bytes) and the SCSI I/O request fields it accepts (TargetID below 16, Bus 0), and not copied) and in the
 OpenBSD mpi(4) driver, which drives the 1030 with the same code as the SAS1068.
 
