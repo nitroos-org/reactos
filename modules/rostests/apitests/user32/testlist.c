@@ -137,6 +137,7 @@ extern void func_SendMessageGetText(void);
 extern void func_SetActiveWindow(void);
 extern void func_SetCoalescableTimer(void);
 extern void func_SetCursorPos(void);
+extern void func_SetSystemCursor(void);
 extern void func_SetFocus(void);
 extern void func_SetFocusCallbacks(void);
 extern void func_SetParent(void);
@@ -321,6 +322,7 @@ const struct test winetest_testlist[] =
     { "SetActiveWindow", func_SetActiveWindow },
     { "SetCoalescableTimer", func_SetCoalescableTimer },
     { "SetCursorPos", func_SetCursorPos },
+    { "SetSystemCursor", func_SetSystemCursor },
     { "SetFocus", func_SetFocus },
     { "SetFocusCallbacks", func_SetFocusCallbacks },
     { "SetParent", func_SetParent },
