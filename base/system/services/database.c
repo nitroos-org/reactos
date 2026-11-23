@@ -4698,6 +4698,306 @@ ScmAutoStartServices(VOID)
 }
 
 
+/*
+ * The preshutdown phase. A running service that accepts SERVICE_ACCEPT_PRESHUTDOWN gets
+ * SERVICE_CONTROL_PRESHUTDOWN before any service gets SERVICE_CONTROL_SHUTDOWN, and no SHUTDOWN afterwards
+ * (as on Windows, measured). The controls go out to all of them at once, one thread each (the services of one
+ * process answer one control at a time, so those are sent in turn). The phase ends for a service when it is
+ * STOPPED, when its control could not be delivered, or when its timeout (the PreshutdownTimeout of the
+ * service, 10 000 ms when it has none) has passed without a change of its state or check point: a service
+ * that reports progress is waited for. The wait is bounded: no service can hold the shutdown longer than
+ * SCM_PRESHUTDOWN_MAX_WAIT, and a control that is still unanswered at the end of its wait is cancelled.
+ */
+#define SCM_PRESHUTDOWN_DEFAULT_TIMEOUT 10000
+#define SCM_PRESHUTDOWN_MAX_WAIT        300000
+#define SCM_PRESHUTDOWN_POLL            50
+#define SCM_PRESHUTDOWN_THREAD_WAIT     10000
+
+typedef struct _SCM_PRESHUTDOWN_ITEM
+{
+    PSERVICE Service;
+    PSERVICE_IMAGE Image;
+    HANDLE hPipe;
+    DWORD dwTimeout;
+    HANDLE hThread;         /* The sender; NULL when it could not be created */
+    HANDLE hPrevThread;     /* The sender of the previous service of the same image: this one waits for it */
+    HANDLE hCancel;         /* Set: stop waiting for the answer to the control */
+    volatile LONG bSent;    /* The sender is about to write the control */
+    volatile LONG bFinished;
+    DWORD dwSentTick;
+    DWORD dwSendError;
+    BOOL bTimed;            /* The monitor has taken the start of the wait */
+    BOOL bDone;
+    DWORD dwProgressTick;
+    DWORD dwLastState;
+    DWORD dwLastCheckPoint;
+} SCM_PRESHUTDOWN_ITEM, *PSCM_PRESHUTDOWN_ITEM;
+
+
+static
+DWORD
+WINAPI
+ScmPreshutdownSender(
+    _In_ LPVOID pParam)
+{
+    PSCM_PRESHUTDOWN_ITEM Item = pParam;
+    PCWSTR pszName = Item->Service->lpServiceName;
+    PSCM_CONTROL_PACKET ControlPacket = NULL;
+    SCM_REPLY_PACKET ReplyPacket;
+    OVERLAPPED Overlapped = {0};
+    DWORD dwError, dwRead = 0, PacketSize;
+    HANDLE Handles[2];
+
+    /* The services of one process answer one control at a time */
+    if (Item->hPrevThread != NULL)
+    {
+        Handles[0] = Item->hPrevThread;
+        Handles[1] = Item->hCancel;
+        if (WaitForMultipleObjects(2, Handles, FALSE, INFINITE) != WAIT_OBJECT_0)
+        {
+            dwError = ERROR_OPERATION_ABORTED;
+            goto Done;
+        }
+    }
+
+    PacketSize = sizeof(SCM_CONTROL_PACKET) + (DWORD)((wcslen(pszName) + 1) * sizeof(WCHAR));
+    ControlPacket = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, PacketSize);
+    Overlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (ControlPacket == NULL || Overlapped.hEvent == NULL)
+    {
+        dwError = ERROR_NOT_ENOUGH_MEMORY;
+        goto Done;
+    }
+
+    ControlPacket->dwSize = PacketSize;
+    ControlPacket->dwControl = SERVICE_CONTROL_PRESHUTDOWN;
+    ControlPacket->hServiceStatus = Item->Service->dwStatusHandle;
+    ControlPacket->dwServiceNameOffset = sizeof(SCM_CONTROL_PACKET);
+    wcscpy((PWSTR)((ULONG_PTR)ControlPacket + ControlPacket->dwServiceNameOffset), pszName);
+
+    Item->dwSentTick = GetTickCount();
+    InterlockedExchange(&Item->bSent, 1);
+
+    dwError = ERROR_SUCCESS;
+    if (!TransactNamedPipe(Item->hPipe, ControlPacket, PacketSize, &ReplyPacket, sizeof(ReplyPacket),
+                           &dwRead, &Overlapped))
+    {
+        dwError = GetLastError();
+        if (dwError == ERROR_IO_PENDING)
+        {
+            Handles[0] = Overlapped.hEvent;
+            Handles[1] = Item->hCancel;
+            if (WaitForMultipleObjects(2, Handles, FALSE, INFINITE) == WAIT_OBJECT_0)
+            {
+                dwError = GetOverlappedResult(Item->hPipe, &Overlapped, &dwRead, TRUE) ? ERROR_SUCCESS : GetLastError();
+            }
+            else
+            {
+                /* Wait for the cancelled request to end: the packet and the reply buffer are in use until then */
+                CancelIo(Item->hPipe);
+                GetOverlappedResult(Item->hPipe, &Overlapped, &dwRead, TRUE);
+                dwRead = 0;
+                dwError = ERROR_SERVICE_REQUEST_TIMEOUT;
+            }
+        }
+    }
+
+    if (dwError == ERROR_SUCCESS && dwRead == sizeof(ReplyPacket))
+        dwError = ReplyPacket.dwError;
+
+Done:
+    if (Overlapped.hEvent != NULL)
+        CloseHandle(Overlapped.hEvent);
+    if (ControlPacket != NULL)
+        HeapFree(GetProcessHeap(), 0, ControlPacket);
+    Item->dwSendError = dwError;
+    InterlockedExchange(&Item->bFinished, 1);
+    return 0;
+}
+
+
+VOID
+ScmPreshutdownServices(VOID)
+{
+    PLIST_ENTRY ServiceEntry;
+    PSERVICE CurrentService;
+    PSCM_PRESHUTDOWN_ITEM Items;
+    DWORD Count = 0, i, j, dwNow, dwValue, dwSize, dwType;
+    BOOL bAllDone;
+    HKEY hKey;
+
+    DPRINT("ScmPreshutdownServices() called\n");
+
+    ScmLockDatabaseExclusive();
+
+    ServiceEntry = ServiceListHead.Flink;
+    while (ServiceEntry != &ServiceListHead)
+    {
+        Count++;
+        ServiceEntry = ServiceEntry->Flink;
+    }
+
+    Items = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)Count * sizeof(*Items));
+    if (Items == NULL)
+    {
+        ScmUnlockDatabase();
+        DPRINT1("ScmPreshutdownServices(): out of memory\n");
+        return;
+    }
+
+    /* Same rules as the SHUTDOWN: reference the service and the image under the lock, send without it */
+    Count = 0;
+    ServiceEntry = ServiceListHead.Flink;
+    while (ServiceEntry != &ServiceListHead)
+    {
+        CurrentService = CONTAINING_RECORD(ServiceEntry, SERVICE, ServiceListEntry);
+
+        if ((CurrentService->Status.dwControlsAccepted & SERVICE_ACCEPT_PRESHUTDOWN) &&
+            (CurrentService->Status.dwCurrentState == SERVICE_RUNNING ||
+             CurrentService->Status.dwCurrentState == SERVICE_START_PENDING) &&
+            CurrentService->lpImage != NULL)
+        {
+            Items[Count].Image = ScmAcquireImageForControl(CurrentService, &Items[Count].hPipe);
+            if (Items[Count].Image != NULL)
+            {
+                ScmReferenceService(CurrentService);
+                Items[Count++].Service = CurrentService;
+            }
+        }
+
+        ServiceEntry = ServiceEntry->Flink;
+    }
+
+    ScmUnlockDatabase();
+
+    /* The timeout of each service, then one sender each */
+    for (i = 0; i < Count; i++)
+    {
+        PSCM_PRESHUTDOWN_ITEM Item = &Items[i];
+
+        Item->dwTimeout = SCM_PRESHUTDOWN_DEFAULT_TIMEOUT;
+        if (ScmOpenServiceKey(Item->Service->lpServiceName, KEY_READ, &hKey) == ERROR_SUCCESS)
+        {
+            dwSize = sizeof(dwValue);
+            if (RegQueryValueExW(hKey, L"PreshutdownTimeout", NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS &&
+                dwType == REG_DWORD)
+                Item->dwTimeout = dwValue;
+            RegCloseKey(hKey);
+        }
+
+        for (j = i; j > 0; j--)
+        {
+            if (Items[j - 1].Image == Item->Image)
+            {
+                Item->hPrevThread = Items[j - 1].hThread;
+                break;
+            }
+        }
+
+        Item->hCancel = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (Item->hCancel != NULL)
+            Item->hThread = CreateThread(NULL, 0, ScmPreshutdownSender, Item, 0, NULL);
+        if (Item->hThread == NULL)
+        {
+            Item->dwSendError = ERROR_NOT_ENOUGH_MEMORY;
+            InterlockedExchange(&Item->bFinished, 1);
+        }
+    }
+
+    /* Wait while the services make progress */
+    for (;;)
+    {
+        bAllDone = TRUE;
+        dwNow = GetTickCount();
+
+        for (i = 0; i < Count; i++)
+        {
+            PSCM_PRESHUTDOWN_ITEM Item = &Items[i];
+            DWORD dwState = Item->Service->Status.dwCurrentState;
+            DWORD dwCheckPoint = Item->Service->Status.dwCheckPoint;
+
+            if (Item->bDone)
+                continue;
+
+            if (dwState == SERVICE_STOPPED ||
+                (Item->bFinished && Item->dwSendError != ERROR_SUCCESS))
+            {
+                Item->bDone = TRUE;
+                continue;
+            }
+
+            bAllDone = FALSE;
+            if (!Item->bSent)
+                continue;
+
+            if (!Item->bTimed)
+            {
+                Item->bTimed = TRUE;
+                Item->dwProgressTick = Item->dwSentTick;
+                Item->dwLastState = dwState;
+                Item->dwLastCheckPoint = dwCheckPoint;
+            }
+            else if (dwState != Item->dwLastState || dwCheckPoint != Item->dwLastCheckPoint)
+            {
+                Item->dwProgressTick = dwNow;
+                Item->dwLastState = dwState;
+                Item->dwLastCheckPoint = dwCheckPoint;
+            }
+
+            if (dwNow - Item->dwProgressTick >= Item->dwTimeout ||
+                dwNow - Item->dwSentTick >= SCM_PRESHUTDOWN_MAX_WAIT)
+            {
+                DPRINT1("Preshutdown of %S: no progress, going on\n", Item->Service->lpServiceName);
+                SetEvent(Item->hCancel);
+                Item->bDone = TRUE;
+            }
+        }
+
+        if (bAllDone)
+            break;
+        Sleep(SCM_PRESHUTDOWN_POLL);
+    }
+
+    /* End every sender that is still waiting for an answer, and wait for the senders */
+    for (i = 0; i < Count; i++)
+    {
+        if (Items[i].hCancel != NULL)
+            SetEvent(Items[i].hCancel);
+    }
+    for (i = 0; i < Count; i++)
+    {
+        if (Items[i].hThread != NULL &&
+            WaitForSingleObject(Items[i].hThread, SCM_PRESHUTDOWN_THREAD_WAIT) != WAIT_OBJECT_0)
+        {
+            /* Still using the pipe: keep the image and the service (a leak at shutdown) */
+            Items[i].Image = NULL;
+        }
+    }
+
+    ScmLockDatabaseExclusive();
+    for (i = 0; i < Count; i++)
+    {
+        if (Items[i].Image != NULL)
+        {
+            ScmReleaseImageAfterControlLocked(Items[i].Image);
+            ScmDereferenceService(Items[i].Service);
+        }
+    }
+    ScmUnlockDatabase();
+
+    for (i = 0; i < Count; i++)
+    {
+        if (Items[i].hThread != NULL)
+            CloseHandle(Items[i].hThread);
+        if (Items[i].hCancel != NULL)
+            CloseHandle(Items[i].hCancel);
+    }
+    HeapFree(GetProcessHeap(), 0, Items);
+
+    DPRINT("ScmPreshutdownServices() done\n");
+}
+
+
 VOID
 ScmAutoShutdownServices(VOID)
 {
@@ -4743,7 +5043,9 @@ ScmAutoShutdownServices(VOID)
     {
         CurrentService = CONTAINING_RECORD(ServiceEntry, SERVICE, ServiceListEntry);
 
+        /* A service that accepts the preshutdown control got that one (ScmPreshutdownServices) and gets no SHUTDOWN */
         if ((CurrentService->Status.dwControlsAccepted & SERVICE_ACCEPT_SHUTDOWN) &&
+            !(CurrentService->Status.dwControlsAccepted & SERVICE_ACCEPT_PRESHUTDOWN) &&
             (CurrentService->Status.dwCurrentState == SERVICE_RUNNING ||
              CurrentService->Status.dwCurrentState == SERVICE_START_PENDING) &&
             CurrentService->lpImage != NULL)
