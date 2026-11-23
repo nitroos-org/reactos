@@ -12,6 +12,7 @@ list(APPEND SOURCE
     ReadConfigHandles.c
     SchannelHandshake.c
     SchannelServerCert.c
+    SchannelAttributes.c
     SetCredentialsAttributes.c
     SspiAuthIdentityExports.c
     SspiInitRace.c
