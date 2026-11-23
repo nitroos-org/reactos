@@ -20,13 +20,16 @@ remove_main(
     WCHAR DriveLetter = UNICODE_NULL;
     INT i, nExclusive = 0;
     BOOL bResult;
+    BOOLEAN bNoErr = ArgsHaveNoErr(argc, argv);
 
     DPRINT("remove_main()\n");
 
+    /* the level of a failure in a script (Windows Server 2022): 0x80070057 for no volume (noerr hides it) and for invalid
+       arguments (not hidden), 0x80042416 for a letter the volume does not have */
     if (GetFocusVolume() == NULL)
     {
         ConResPuts(StdOut, IDS_SELECT_NO_VOLUME);
-        return EXIT_SUCCESS;
+        return FAIL_LEVEL(bNoErr, TRUE, EXIT_CMD_FAILED);
     }
 
     if (CurrentVolume->DriveLetter == UNICODE_NULL)
@@ -47,7 +50,7 @@ remove_main(
             else
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                return EXIT_SUCCESS; 
+                return EXIT_CMD_FAILED;
             }
         }
         else if (HasPrefix(argv[i], L"mount=", &pszSuffix))
@@ -57,7 +60,8 @@ remove_main(
         }
         else if (_wcsicmp(argv[i], L"all") == 0)
         {
-            return RefuseUnsupportedOption(L"ALL");
+            /* all: every drive letter and mount point; this system has the drive letter only, the one that is removed below */
+            nExclusive++;
         }
         else if (_wcsicmp(argv[i], L"dismount") == 0)
         {
@@ -65,12 +69,12 @@ remove_main(
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr: a failure does not stop the script; this command never sets an error level */
+            /* noerr: hides the failures that Windows hides (see FAIL_LEVEL) */
         }
         else
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return EXIT_SUCCESS;
+            return EXIT_CMD_FAILED;
         }
     }
 
@@ -83,7 +87,7 @@ remove_main(
     if (nExclusive > 1)
     {
         ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
     }
 
     DPRINT("VolumeName: %S\n", CurrentVolume->VolumeName);
@@ -97,13 +101,13 @@ remove_main(
         if ((DriveLetter < L'C') || (DriveLetter > L'Z'))
         {
             ConResPuts(StdOut, IDS_ASSIGN_INVALID_LETTER);
-            return EXIT_SUCCESS;
+            return EXIT_CMD_FAILED;
         }
 
         if (DriveLetter != CurrentVolume->DriveLetter)
         {
             ConResPuts(StdOut, IDS_REMOVE_WRONG_LETTER);
-            return EXIT_SUCCESS;
+            return FAIL_LEVEL(bNoErr, TRUE, EXIT_CMD_NOT_FOUND);
         }
     }
     else

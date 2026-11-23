@@ -17,6 +17,8 @@
 #define OUT_SIZE 16384
 
 static char DiskNumber[16];
+/* the exit code of the last diskpart /s: the error level of the first command that failed (0x80070057 = -2147024809) */
+static DWORD g_ExitCode;
 
 /* Runs "diskpart /s" with the script text; the output goes to Out. Returns FALSE when diskpart could not run. */
 static BOOL RunScript(const char *Text, char *Out, size_t OutSize)
@@ -59,6 +61,8 @@ static BOOL RunScript(const char *Text, char *Out, size_t OutSize)
         TerminateProcess(Pi.hProcess, 99);
         ok(0, "diskpart /s did not end\n");
     }
+    g_ExitCode = 0;
+    GetExitCodeProcess(Pi.hProcess, &g_ExitCode);
     CloseHandle(Pi.hProcess);
     CloseHandle(Pi.hThread);
     CloseHandle(h);
@@ -226,8 +230,11 @@ static void TestOptions(void)
     ok(strstr(Out, "Partition 1") != NULL, "set id noerr stops the script:\n%s\n", Out);
 
     /* an id that is not 1 or 2 hex digits, or is 0, is a format error and changes nothing */
-    ok(RunOnDisk("select partition 1\r\nset id=0\r\nset id=g1\r\nset id=100\r\ndetail partition\r\n", Out, sizeof(Out)),
-       "no set id\n");
+    /* each one stops the script of its own (0x80070057), so each is a script of its own */
+    ok(RunOnDisk("select partition 1\r\nset id=0\r\n", Out, sizeof(Out)), "no set id\n");
+    ok(RunOnDisk("select partition 1\r\nset id=g1\r\n", Out, sizeof(Out)), "no set id\n");
+    ok(RunOnDisk("select partition 1\r\nset id=100\r\n", Out, sizeof(Out)), "no set id\n");
+    ok(RunOnDisk("select partition 1\r\ndetail partition\r\n", Out, sizeof(Out)), "no detail\n");
     Value = DetailValue(Out, "Type");
     ok(Value && _strnicmp(Value, "00", 2) != 0, "an invalid id has changed the type: %.20s\n", Value ? Value : "(none)");
     ok(RunOnDisk("select partition 1\r\nset id=7\r\ndetail partition\r\n", Out, sizeof(Out)), "no set id\n");
@@ -245,6 +252,112 @@ static void TestOptions(void)
 
     ok(RunOnDisk("clean\r\n", Out, sizeof(Out)), "no clean\n");
     ok(ListCount() == 0, "no partition expected after clean: %d\n", ListCount());
+}
+
+
+#define LEVEL_BADARGS ((DWORD)0x80070057)
+#define LEVEL_NOSPACE ((DWORD)0x8004240F)
+#define LEVEL_BADTYPE ((DWORD)0x80042565)
+
+/* The text of the row of "list partition" for the partition: its size and offset as listed ("6000 KB  3000 KB") */
+static int HasRow(const char *Out, const char *SizeText, const char *OffsetText)
+{
+    char Pattern[64];
+    const char *p;
+
+    sprintf(Pattern, "%s  %s", SizeText, OffsetText);
+    p = strstr(Out, Pattern);
+    return p != NULL;
+}
+
+/*
+ * What the Windows DiskPart does with align= and offset= (Windows Server 2022, rows of kbatch8): the start is rounded UP and the size
+ * DOWN to the alignment (size=8 align=3000: 3000 KB, 6000 KB), an offset= is rounded DOWN at the start and offset + size UP at the
+ * end (offset=40000 size=8 align=4096: 36 MB, 12 MB; offset=1100 size=8 with the 64 KB default: 1088 KB, 8256 KB), and the error
+ * level of a command of a script that fails: 0x80070057 for invalid arguments (noerr does not hide it), 0x8004240F for no room that
+ * an align= or offset= asks for, and with noerr the next command runs after a failure that Windows lets pass.
+ */
+static void TestAlignAndLevels(void)
+{
+    static char Out[OUT_SIZE];
+
+    ok(RunOnDisk("clean\r\nconvert mbr\r\n", Out, sizeof(Out)), "no clean\n");
+
+    ok(RunOnDisk("create partition primary size=8 align=3000\r\nlist partition\r\n", Out, sizeof(Out)), "no create\n");
+    ok(g_ExitCode == 0, "align=3000: level 0x%08lx\n", g_ExitCode);
+    ok(HasRow(Out, "6000 KB", "3000 KB"), "size=8 align=3000 is not 6000 KB at 3000 KB:\n%s\n", Out);
+
+    ok(RunOnDisk("clean\r\nconvert mbr\r\ncreate partition primary size=8 align=4096\r\nlist partition\r\n", Out, sizeof(Out)), "no create\n");
+    ok(HasRow(Out, "8192 KB", "4096 KB"), "size=8 align=4096 is not 8192 KB at 4096 KB:\n%s\n", Out);
+
+    ok(RunOnDisk("clean\r\nconvert mbr\r\ncreate partition primary size=8 offset=40000 align=4096\r\nlist partition\r\n", Out, sizeof(Out)),
+       "no create\n");
+    ok(HasRow(Out, "  12 MB", "  36 MB"), "offset=40000 size=8 align=4096 is not 12 MB at 36 MB:\n%s\n", Out);
+
+    ok(RunOnDisk("clean\r\nconvert mbr\r\ncreate partition primary size=8 offset=1100\r\nlist partition\r\n", Out, sizeof(Out)), "no create\n");
+    ok(HasRow(Out, "8256 KB", "1088 KB"), "offset=1100 size=8 is not 8256 KB at 1088 KB:\n%s\n", Out);
+
+    /* align=0 is no align=; abc and -5 are not valid arguments; no room for an align that does not fit is not enough usable space */
+    ok(RunOnDisk("clean\r\nconvert mbr\r\ncreate partition primary size=8 align=0\r\n", Out, sizeof(Out)), "no create\n");
+    ok(g_ExitCode == 0, "align=0: level 0x%08lx\n%s\n", g_ExitCode, Out);
+    ok(RunOnDisk("clean\r\nconvert mbr\r\ncreate partition primary size=8 align=abc\r\n", Out, sizeof(Out)), "no create\n");
+    ok(g_ExitCode == LEVEL_BADARGS, "align=abc: level 0x%08lx\n", g_ExitCode);
+    ok(RunOnDisk("clean\r\nconvert mbr\r\ncreate partition primary size=8 align=-5\r\n", Out, sizeof(Out)), "no create\n");
+    ok(g_ExitCode == LEVEL_BADARGS, "align=-5: level 0x%08lx\n", g_ExitCode);
+    ok(RunOnDisk("clean\r\nconvert mbr\r\ncreate partition primary size=8 align=100000000\r\n", Out, sizeof(Out)), "no create\n");
+    ok(g_ExitCode == LEVEL_NOSPACE, "an align that leaves no room: level 0x%08lx\n", g_ExitCode);
+
+    /* invalid arguments are not hidden by noerr: the script stops, the next command does not run */
+    ok(RunOnDisk("clean\r\nconvert mbr\r\ncreate partition primary size=abc noerr\r\ncreate partition primary size=8\r\n", Out, sizeof(Out)),
+       "no create\n");
+    ok(g_ExitCode == LEVEL_BADARGS, "size=abc noerr: level 0x%08lx\n", g_ExitCode);
+    ok(strstr(Out, "succeeded in creating") == NULL, "size=abc noerr did not stop the script:\n%s\n", Out);
+    ok(RunOnDisk("clean\r\nconvert mbr\r\ncreate partition primary size=8 noerr noerr\r\n", Out, sizeof(Out)), "no create\n");
+    ok(g_ExitCode == LEVEL_BADARGS, "noerr noerr: level 0x%08lx\n", g_ExitCode);
+
+    /* no room for the size: 0x80070057, which noerr hides (the next command runs) */
+    ok(RunOnDisk("clean\r\nconvert mbr\r\ncreate partition primary size=99999\r\n", Out, sizeof(Out)), "no create\n");
+    ok(g_ExitCode == LEVEL_BADARGS, "size=99999: level 0x%08lx\n", g_ExitCode);
+    ok(RunOnDisk("clean\r\nconvert mbr\r\ncreate partition primary size=99999 noerr\r\ncreate partition primary size=8\r\n", Out, sizeof(Out)),
+       "no create\n");
+    ok(g_ExitCode == 0 && strstr(Out, "succeeded in creating") != NULL, "size=99999 noerr: level 0x%08lx\n%s\n", g_ExitCode, Out);
+
+    /* set id=42 is a Virtual Disk Service error, an id that is not hex is a format error; noerr hides both */
+    ok(RunOnDisk("select partition 1\r\nset id=42\r\n", Out, sizeof(Out)), "no set id\n");
+    ok(g_ExitCode == LEVEL_BADTYPE, "set id=42: level 0x%08lx\n", g_ExitCode);
+    ok(RunOnDisk("select partition 1\r\nset id=42 noerr\r\nlist partition\r\n", Out, sizeof(Out)), "no set id\n");
+    ok(g_ExitCode == 0 && strstr(Out, "Partition 1") != NULL, "set id=42 noerr: level 0x%08lx\n", g_ExitCode);
+    ok(RunOnDisk("select partition 1\r\nset id=zz\r\n", Out, sizeof(Out)), "no set id\n");
+    ok(g_ExitCode == LEVEL_BADARGS, "set id=zz: level 0x%08lx\n", g_ExitCode);
+    ok(RunOnDisk("select partition 1\r\nset id=07 override\r\ndetail partition\r\n", Out, sizeof(Out)), "no set id\n");
+    ok(g_ExitCode == 0 && strstr(Out, "not supported") == NULL, "set id=07 override: level 0x%08lx\n%s\n", g_ExitCode, Out);
+
+    /* nothing selected: 0x80070057; noerr hides it for delete partition, uniqueid and assign, not for set id */
+    ok(RunOnDisk("select partition 1\r\ndelete partition override\r\n", Out, sizeof(Out)), "no delete\n");
+    ok(RunOnDisk("delete partition\r\n", Out, sizeof(Out)), "no delete\n");
+    ok(g_ExitCode == LEVEL_BADARGS, "delete partition with none selected: level 0x%08lx\n", g_ExitCode);
+    ok(RunOnDisk("delete partition noerr\r\nlist partition\r\n", Out, sizeof(Out)), "no delete\n");
+    ok(g_ExitCode == 0, "delete partition noerr with none selected: level 0x%08lx\n", g_ExitCode);
+    ok(RunOnDisk("set id=07 noerr\r\n", Out, sizeof(Out)), "no set id\n");
+    ok(g_ExitCode == LEVEL_BADARGS, "set id noerr with none selected: level 0x%08lx\n", g_ExitCode);
+    ok(RunOnDisk("uniqueid disk id=zz\r\n", Out, sizeof(Out)), "no uniqueid\n");
+    ok(g_ExitCode == LEVEL_BADARGS, "uniqueid disk id=zz: level 0x%08lx\n", g_ExitCode);
+    ok(RunOnDisk("uniqueid disk id=zz noerr\r\nlist partition\r\n", Out, sizeof(Out)), "no uniqueid\n");
+    ok(g_ExitCode == 0, "uniqueid disk id=zz noerr: level 0x%08lx\n", g_ExitCode);
+    ok(RunOnDisk("assign letter=1\r\n", Out, sizeof(Out)), "no assign\n");
+    ok(g_ExitCode == LEVEL_BADARGS, "assign with no volume: level 0x%08lx\n", g_ExitCode);
+    ok(RunOnDisk("format fs=fat32 quick revision=1\r\n", Out, sizeof(Out)), "no format\n");
+    ok(g_ExitCode == LEVEL_BADARGS, "format with no volume: level 0x%08lx\n", g_ExitCode);
+    ok(RunOnDisk("format fs=fat32 quick noerr\r\n", Out, sizeof(Out)), "no format\n");
+    ok(g_ExitCode == LEVEL_BADARGS, "format noerr with no volume: noerr hides nothing here, level 0x%08lx\n", g_ExitCode);
+    ok(RunOnDisk("extend disk=1 size=8\r\n", Out, sizeof(Out)), "no extend\n");
+    ok(g_ExitCode == LEVEL_BADARGS, "extend disk=: level 0x%08lx\n", g_ExitCode);
+
+    /* list partition cuts the offset off: 64000 KB is 62 MB */
+    ok(RunOnDisk("clean\r\nconvert mbr\r\ncreate partition primary size=8 offset=64000\r\nlist partition\r\n", Out, sizeof(Out)), "no create\n");
+    ok(strstr(Out, "62 MB") != NULL && strstr(Out, "63 MB") == NULL, "the offset 64000 KB is not listed as 62 MB:\n%s\n", Out);
+
+    ok(RunOnDisk("clean\r\n", Out, sizeof(Out)), "no clean\n");
 }
 
 START_TEST(diskpart_write)
@@ -269,4 +382,5 @@ START_TEST(diskpart_write)
     TestGptDelete();
     TestMbrChanges();
     TestOptions();
+    TestAlignAndLevels();
 }

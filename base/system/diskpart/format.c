@@ -107,12 +107,14 @@ format_main(
 //    FMIFS_MEDIA_FLAG MediaType = FMIFS_HARDDISK;
     INT i;
     BOOLEAN Success = FALSE;
+    BOOLEAN bUdp = FALSE, bRevision = FALSE, bDuplicate = FALSE;
 
-
+    /* the level of a failure in a script (Windows Server 2022): 0x80070057 for no volume, which noerr does NOT hide here, and for
+       arguments that are not valid */
     if (GetFocusVolume() == NULL)
     {
         ConResPuts(StdOut, IDS_SELECT_NO_VOLUME);
-        return EXIT_SUCCESS;
+        return EXIT_CMD_FAILED;
     }
 
     for (i = 1; i < argc; i++)
@@ -124,8 +126,9 @@ format_main(
         }
         else if (HasPrefix(argv[i], L"revision=", &pszSuffix))
         {
-            /* revision=<X.XX> */
-            return RefuseUnsupportedOption(L"REVISION");
+            /* revision=<X.XX>: only for UDF, which this system does not have: not valid for any other file system (Windows
+               Server 2022: format fs=ntfs quick revision=1 gives "The arguments specified for this command are not valid") */
+            bRevision = TRUE;
         }
         else if (HasPrefix(argv[i], L"label=", &pszSuffix))
         {
@@ -139,13 +142,12 @@ format_main(
             if ((ulClusterSize == 0) && (errno == ERANGE))
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-                goto done;
+                return EXIT_CMD_FAILED;
             }
         }
         else if (_wcsicmp(argv[i], L"recommended") == 0)
         {
-            /* recommended */
-            return RefuseUnsupportedOption(L"RECOMMENDED");
+            /* recommended: takes the settings the system recommends, which are the defaults here */
         }
         else if (_wcsicmp(argv[i], L"quick") == 0)
         {
@@ -154,33 +156,39 @@ format_main(
         }
         else if (_wcsicmp(argv[i], L"compress") == 0)
         {
-            /* compress */
+            /* compress: not implemented (the format of this system has no compression of the volume) */
             return RefuseUnsupportedOption(L"COMPRESS");
         }
         else if (_wcsicmp(argv[i], L"override") == 0)
         {
-            /* override */
-            return RefuseUnsupportedOption(L"OVERRIDE");
+            /* override: forces a dismount of a volume that is in use; the format of this system dismounts it anyway */
         }
         else if (_wcsicmp(argv[i], L"duplicate") == 0)
         {
-            /* duplicate */
-            return RefuseUnsupportedOption(L"DUPLICATE");
+            /* duplicate: only for UDF, which this system does not have (Windows Server 2022: "The DUPLICATE parameter is
+               supported only with the UDF file system type", 0x80070057) */
+            bDuplicate = TRUE;
         }
         else if (_wcsicmp(argv[i], L"nowait") == 0)
         {
-            /* nowait */
-            return RefuseUnsupportedOption(L"NOWAIT");
+            /* nowait: the command does not wait for the end of the format; here it does */
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr: a failure does not stop the script; this command never sets an error level */
+            /* noerr: hides the failures that Windows hides (see FAIL_LEVEL); not a missing volume */
         }
         else
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return EXIT_SUCCESS;
+            return EXIT_CMD_FAILED;
         }
+    }
+
+    (void)bUdp;
+    if (bRevision || bDuplicate)
+    {
+        ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+        return EXIT_CMD_FAILED;
     }
 
     DPRINT("VolumeName    : %S\n", CurrentVolume->VolumeName);

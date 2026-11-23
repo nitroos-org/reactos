@@ -280,26 +280,28 @@ DeletePartition(
 {
     INT i;
     BOOL bOverride = FALSE;
+    BOOLEAN bNoErr = ArgsHaveNoErr(argc, argv);
 
     DPRINT("DeletePartition()\n");
 
+    /* no partition selected: 0x80070057 in a script, which noerr hides (Windows Server 2022, measured) */
     if (CurrentDisk == NULL)
     {
         ConResPuts(StdOut, IDS_SELECT_NO_DISK);
-        return EXIT_SUCCESS;
+        return FAIL_LEVEL(bNoErr, TRUE, EXIT_CMD_FAILED);
     }
 
     if (CurrentPartition == NULL)
     {
         ConResPuts(StdOut, IDS_SELECT_NO_PARTITION);
-        return EXIT_SUCCESS;
+        return FAIL_LEVEL(bNoErr, TRUE, EXIT_CMD_FAILED);
     }
 
     for (i = 2; i < argc; i++)
     {
         if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr: a failure does not stop the script; this command never sets an error level */
+            /* noerr: hides the failures that Windows hides (see FAIL_LEVEL) */
         }
         else if (_wcsicmp(argv[i], L"override") == 0)
         {
@@ -310,7 +312,7 @@ DeletePartition(
         else
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
-            return EXIT_SUCCESS;
+            return EXIT_CMD_FAILED;
         }
     }
 
