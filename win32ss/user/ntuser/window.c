@@ -559,15 +559,18 @@ static void IntSendDestroyMsg(HWND hWnd)
    if (IntIsWindow(hWnd))
    {
       HWND* pWndArray;
+      USER_HELD_POOL_ENTRY HeldList;
       int i;
 
       if (!(pWndArray = IntWinListChildren( Window ))) return;
 
+      /* The children's WM_DESTROY: the list goes with the thread if it ends in one */
+      UserHoldPoolCo(pWndArray, USERTAG_WINDOWLIST, &HeldList);
       for (i = 0; pWndArray[i]; i++)
       {
          if (IntIsWindow( pWndArray[i] )) IntSendDestroyMsg( pWndArray[i] );
       }
-      ExFreePoolWithTag(pWndArray, USERTAG_WINDOWLIST);
+      UserFreePoolCo(&HeldList);
    }
    else
    {
