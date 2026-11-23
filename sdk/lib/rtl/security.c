@@ -20,12 +20,17 @@
  * Windows Server 2022: DACL ACEs with or without inheritance flags mapped,
  * inherit-only ACEs keep their generic rights). The kernel's set path does the
  * same (SepMapGenericAcl in ntoskrnl/se/sd.c).
+ * Restrict (the DACL): the rights of an allow or deny ACE that is not
+ * inherit-only are reduced to the object type's GenericAll as well (Windows
+ * Server 2022, SetPrivateObjectSecurity with a mapping whose GenericAll is
+ * 0x1F00FF stores (A;;0x1F01FF;;;SY) as 0x1F00FF; see SepMapGenericAcl).
  */
 static
 VOID
 RtlpMapGenericAcl(
     _Inout_opt_ PACL Acl,
-    _In_opt_ PGENERIC_MAPPING GenericMapping)
+    _In_opt_ PGENERIC_MAPPING GenericMapping,
+    _In_ BOOLEAN Restrict)
 {
     PUCHAR End;
     PACE_HEADER Ace;
@@ -51,6 +56,12 @@ RtlpMapGenericAcl(
             Mask = (PACCESS_MASK)(Ace + 1);
             if (*Mask & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL))
                 RtlMapGenericMask(Mask, GenericMapping);
+
+            if (Restrict && GenericMapping->GenericAll != 0 &&
+                (Ace->AceType == ACCESS_ALLOWED_ACE_TYPE || Ace->AceType == ACCESS_DENIED_ACE_TYPE))
+            {
+                *Mask &= GenericMapping->GenericAll;
+            }
         }
 
         Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize);
@@ -207,7 +218,7 @@ RtlpSetSecurityObject(IN PVOID Object OPTIONAL,
         RtlCopyMemory(pDest, pSacl, ulSaclSize);
         pNewSd->Sacl = (ULONG_PTR)pDest - (ULONG_PTR)pNewSd;
         if (SecurityInformation & SACL_SECURITY_INFORMATION)
-            RtlpMapGenericAcl((PACL)pDest, GenericMapping);
+            RtlpMapGenericAcl((PACL)pDest, GenericMapping, FALSE);
         pDest = pDest + ROUND_UP(ulSaclSize, sizeof(ULONG));
     }
 
@@ -217,7 +228,7 @@ RtlpSetSecurityObject(IN PVOID Object OPTIONAL,
         RtlCopyMemory(pDest, pDacl, ulDaclSize);
         pNewSd->Dacl = (ULONG_PTR)pDest - (ULONG_PTR)pNewSd;
         if (SecurityInformation & DACL_SECURITY_INFORMATION)
-            RtlpMapGenericAcl((PACL)pDest, GenericMapping);
+            RtlpMapGenericAcl((PACL)pDest, GenericMapping, TRUE);
         pDest = pDest + ROUND_UP(ulDaclSize, sizeof(ULONG));
     }
 

@@ -146,6 +146,7 @@ list(APPEND SOURCE
     ServiceNetwork.c
     SetEntriesInAclOld.c
     SetSecurityGenericMap.c
+    SetSecurityTypeMask.c
     SetSecurityInfoKey.c
     SetSecurityInfoKeyInherit.c
     RegistryRestrictedOpen.c
