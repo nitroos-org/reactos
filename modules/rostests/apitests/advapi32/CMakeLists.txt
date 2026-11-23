@@ -33,6 +33,7 @@ list(APPEND SOURCE
     CreateService.c
     CreateProcessAsUserToken.c
     CreateProcessWithLogon.c
+    CreateProcessWithToken.c
     CreateEnvironmentBlockProfile.c
     CloseTrace.c
     DuplicateTokenEx.c
