@@ -971,6 +971,16 @@ static SECURITY_STATUS client_authenticate(PNegoHelper h, const BYTE *challenge,
         FIXME("server does not offer unicode, or 128 bit keys for the session security: 0x%08x\n", flags);
         return SEC_E_UNSUPPORTED_FUNCTION;
     }
+    /* A CHALLENGE without target info, or one that asks for the LM session key instead of extended session
+     * security, asks for a weaker answer than the NTLMv2 one over the server's target info: Windows Server 2022 as
+     * a client sends no AUTHENTICATE to such a server (measured against a test server for each, 2026-11-23/24);
+     * so does this client. Without extended session security and without the LM key it answers, as Windows does. */
+    if (!(flags & NTLMSSP_NEGOTIATE_TARGET_INFO) || !target_info_len ||
+        ((flags & NTLMSSP_NEGOTIATE_LM_SESSION_KEY) && !(flags & NTLMSSP_NEGOTIATE_NTLM2)))
+    {
+        WARN("server asks for an answer without target info or with the LM session key: 0x%08x\n", flags);
+        return SEC_E_UNSUPPORTED_FUNCTION;
+    }
     /* what the server did not accept of the sign and seal request is not available */
     if ((h->offered_flags & NTLMSSP_NEGOTIATE_SIGN) && !(flags & NTLMSSP_NEGOTIATE_SIGN))
         return SEC_E_UNSUPPORTED_FUNCTION;
