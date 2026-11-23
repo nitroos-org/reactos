@@ -18,6 +18,99 @@
 
 /* FUNCTIONS *****************************************************************/
 
+/* Check the client's access to the mailslot; updates the access state as an access check of the object manager does */
+static NTSTATUS
+MsfsCheckClientAccess(PMSFS_FCB Fcb,
+                      PIO_SECURITY_CONTEXT SecurityContext,
+                      PFILE_OBJECT FileObject,
+                      KPROCESSOR_MODE PreviousMode)
+{
+    PACCESS_STATE AccessState;
+    PSECURITY_SUBJECT_CONTEXT SubjectContext;
+    PPRIVILEGE_SET Privileges = NULL;
+    ACCESS_MASK GrantedAccess = 0;
+    UNICODE_STRING ObjectTypeName = RTL_CONSTANT_STRING(L"Mailslot");
+    BOOLEAN AccessGranted;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    if (SecurityContext == NULL || SecurityContext->AccessState == NULL || Fcb->SecurityDescriptor == NULL)
+        return STATUS_SUCCESS;
+
+    AccessState = SecurityContext->AccessState;
+    SubjectContext = &AccessState->SubjectSecurityContext;
+    SeLockSubjectContext(SubjectContext);
+
+    AccessGranted = SeAccessCheck(Fcb->SecurityDescriptor,
+                                  SubjectContext,
+                                  TRUE,
+                                  SecurityContext->DesiredAccess,
+                                  0,
+                                  &Privileges,
+                                  IoGetFileObjectGenericMapping(),
+                                  PreviousMode,
+                                  &GrantedAccess,
+                                  &Status);
+    if (Privileges)
+    {
+        SeAppendPrivileges(AccessState, Privileges);
+        SeFreePrivileges(Privileges);
+    }
+
+    if (AccessGranted)
+    {
+        AccessState->PreviouslyGrantedAccess |= GrantedAccess;
+        AccessState->RemainingDesiredAccess &= ~(GrantedAccess | MAXIMUM_ALLOWED);
+    }
+
+    SeOpenObjectAuditAlarm(&ObjectTypeName,
+                           NULL,
+                           &FileObject->FileName,
+                           Fcb->SecurityDescriptor,
+                           AccessState,
+                           FALSE,
+                           AccessGranted,
+                           PreviousMode,
+                           &AccessState->GenerateOnClose);
+    SeUnlockSubjectContext(SubjectContext);
+
+    return AccessGranted ? STATUS_SUCCESS : Status;
+}
+
+/* The descriptor of a new mailslot: the one the creator gave, else the default of its token (SeAssignSecurity) */
+static NTSTATUS
+MsfsAssignSecurity(PIO_SECURITY_CONTEXT SecurityContext,
+                   PSECURITY_DESCRIPTOR *Descriptor)
+{
+    PSECURITY_DESCRIPTOR Assigned, Cached;
+    PSECURITY_SUBJECT_CONTEXT SubjectContext;
+    NTSTATUS Status;
+
+    *Descriptor = NULL;
+    if (SecurityContext == NULL || SecurityContext->AccessState == NULL)
+        return STATUS_SUCCESS;
+
+    SubjectContext = &SecurityContext->AccessState->SubjectSecurityContext;
+    SeLockSubjectContext(SubjectContext);
+    Status = SeAssignSecurity(NULL,
+                              SecurityContext->AccessState->SecurityDescriptor,
+                              &Assigned,
+                              FALSE,
+                              SubjectContext,
+                              IoGetFileObjectGenericMapping(),
+                              PagedPool);
+    SeUnlockSubjectContext(SubjectContext);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = ObLogSecurityDescriptor(Assigned, &Cached, 1);
+    ExFreePoolWithTag(Assigned, 0);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    *Descriptor = Cached;
+    return STATUS_SUCCESS;
+}
+
 /* Creates the client side */
 NTSTATUS DEFAULTAPI
 MsfsCreate(PDEVICE_OBJECT DeviceObject,
@@ -31,6 +124,7 @@ MsfsCreate(PDEVICE_OBJECT DeviceObject,
     PMSFS_FCB current = NULL;
     PLIST_ENTRY current_entry;
     KIRQL oldIrql;
+    NTSTATUS Status;
 
     DPRINT("MsfsCreate(DeviceObject %p Irp %p)\n", DeviceObject, Irp);
 
@@ -79,6 +173,23 @@ MsfsCreate(PDEVICE_OBJECT DeviceObject,
 
     Fcb = current;
 
+    /* The client end is access checked against the descriptor of the mailslot, as the named pipe file system
+     * does for the client end of a pipe (Windows Server 2022: a mailslot that grants the caller nothing, or
+     * whose label is above the caller's, refuses the open) */
+    Status = MsfsCheckClientAccess(Fcb, IoStack->Parameters.Create.SecurityContext, FileObject, Irp->RequestorMode);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(Ccb, 'cFsM');
+        KeUnlockMutex(&DeviceExtension->FcbListLock);
+
+        Irp->IoStatus.Status = Status;
+        Irp->IoStatus.Information = 0;
+
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+        return Status;
+    }
+
     KeAcquireSpinLock(&Fcb->CcbListLock, &oldIrql);
     InsertTailList(&Fcb->CcbListHead, &Ccb->CcbListEntry);
     KeReleaseSpinLock(&Fcb->CcbListLock, oldIrql);
@@ -116,6 +227,7 @@ MsfsCreateMailslot(PDEVICE_OBJECT DeviceObject,
     PLIST_ENTRY current_entry;
     PMSFS_FCB current = NULL;
     PMAILSLOT_CREATE_PARAMETERS Buffer;
+    NTSTATUS Status;
 
     DPRINT("MsfsCreateMailslot(DeviceObject %p Irp %p)\n", DeviceObject, Irp);
 
@@ -170,6 +282,21 @@ MsfsCreateMailslot(PDEVICE_OBJECT DeviceObject,
         return STATUS_NO_MEMORY;
     }
 
+    Status = MsfsAssignSecurity(IoStack->Parameters.CreateMailslot.SecurityContext, &Fcb->SecurityDescriptor);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(Ccb, 'cFsM');
+        ExFreePoolWithTag(Fcb->Name.Buffer, 'NFsM');
+        ExFreePoolWithTag(Fcb, 'fFsM');
+
+        Irp->IoStatus.Status = Status;
+        Irp->IoStatus.Information = 0;
+
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+        return Status;
+    }
+
     Fcb->ReferenceCount = 0;
     InitializeListHead(&Fcb->CcbListHead);
     KeInitializeSpinLock(&Fcb->CcbListLock);
@@ -207,6 +334,8 @@ MsfsCreateMailslot(PDEVICE_OBJECT DeviceObject,
 
     if (current_entry != &DeviceExtension->FcbListHead)
     {
+        if (Fcb->SecurityDescriptor)
+            ObDereferenceSecurityDescriptor(Fcb->SecurityDescriptor, 1);
         ExFreePoolWithTag(Fcb->Name.Buffer, 'NFsM');
         ExFreePoolWithTag(Fcb, 'fFsM');
         ExFreePoolWithTag(Ccb, 'cFsM');
@@ -318,6 +447,8 @@ MsfsClose(PDEVICE_OBJECT DeviceObject,
     {
         DPRINT("ReferenceCount == 0: Deleting mailslot data\n");
         RemoveEntryList(&Fcb->FcbListEntry);
+        if (Fcb->SecurityDescriptor)
+            ObDereferenceSecurityDescriptor(Fcb->SecurityDescriptor, 1);
         ExFreePoolWithTag(Fcb->Name.Buffer, 'NFsM');
         ExFreePoolWithTag(Fcb, 'fFsM');
     }

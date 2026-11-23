@@ -11,6 +11,7 @@
 #define __DRIVERS_FS_MS_MSFS_H
 
 #include <ntifs.h>
+#include <ndk/obfuncs.h>
 
 #define DEFAULTAPI NTAPI
 
@@ -38,6 +39,7 @@ typedef struct _MSFS_FCB
     IO_CSQ CancelSafeQueue;
     KSPIN_LOCK QueueLock;
     LIST_ENTRY PendingIrpQueue;
+    PSECURITY_DESCRIPTOR SecurityDescriptor;
 } MSFS_FCB, *PMSFS_FCB;
 
 
@@ -94,6 +96,12 @@ NTSTATUS DEFAULTAPI MsfsRead(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 
 DRIVER_DISPATCH MsfsWrite;
 NTSTATUS DEFAULTAPI MsfsWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+
+DRIVER_DISPATCH MsfsQuerySecurity;
+NTSTATUS DEFAULTAPI MsfsQuerySecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+
+DRIVER_DISPATCH MsfsSetSecurity;
+NTSTATUS DEFAULTAPI MsfsSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 
 DRIVER_DISPATCH MsfsFileSystemControl;
 NTSTATUS DEFAULTAPI MsfsFileSystemControl(PDEVICE_OBJECT DeviceObject, PIRP Irp);
