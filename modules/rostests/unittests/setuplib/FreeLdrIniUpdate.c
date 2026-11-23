@@ -1,0 +1,204 @@
+/*
+ * PROJECT:     ReactOS Setup Library - Unit-tests
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     Setup updating an existing freeldr.ini (repair, upgrade, a second installation): the boot entry of
+ *              the installation and the kernel debugging entry
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
+#include "precomp.h"
+
+extern HANDLE ProcessHeap;
+
+#define ARC_A "multi(0)disk(0)rdisk(0)partition(1)\\ReactOS"
+#define ARC_B "multi(0)disk(0)rdisk(0)partition(2)\\Other"
+
+static const char Head[] =
+    "[FREELOADER]\r\n"
+    "TimeOut=5\r\n"
+    "DefaultOS=ReactOS\r\n"
+    "\r\n"
+    "[Operating Systems]\r\n"
+    "ReactOS=\"NitroOS\"\r\n"
+    "ReactOS_Debug=\"NitroOS (Debug)\"\r\n";
+static const char Sections[] =
+    "\r\n"
+    "[ReactOS]\r\n"
+    "BootType=Windows2003\r\n"
+    "SystemPath=" ARC_A "\r\n"
+    "Options=/FASTDETECT\r\n"
+    "\r\n"
+    "[ReactOS_Debug]\r\n"
+    "BootType=Windows2003\r\n"
+    "SystemPath=" ARC_A "\r\n"
+    "Options=/DEBUG /DEBUGPORT=COM1 /BAUDRATE=115200 /SOS\r\n";
+
+static WCHAR Dir[MAX_PATH], IniFile[MAX_PATH], NtDir[MAX_PATH + 8];
+static char Text[8192];
+
+static const char *FindNoCase(const char *Haystack, const char *Needle)
+{
+    size_t Length = strlen(Needle);
+
+    for (; *Haystack; Haystack++)
+    {
+        if (!_strnicmp(Haystack, Needle, Length))
+            return Haystack;
+    }
+    return NULL;
+}
+
+static BOOL WriteIni(const char *ListExtra, const char *SectionExtra)
+{
+    HANDLE File;
+    DWORD Written;
+    char Buffer[4096];
+
+    /* Setup saves the file hidden, system and read-only */
+    SetFileAttributesW(IniFile, FILE_ATTRIBUTE_NORMAL);
+    File = CreateFileW(IniFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (File == INVALID_HANDLE_VALUE)
+        return FALSE;
+    _snprintf(Buffer, sizeof(Buffer), "%s%s%s%s", Head, ListExtra, Sections, SectionExtra);
+    WriteFile(File, Buffer, (DWORD)strlen(Buffer), &Written, NULL);
+    CloseHandle(File);
+    return TRUE;
+}
+
+static BOOL ReadIni(void)
+{
+    HANDLE File = CreateFileW(IniFile, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    DWORD Read = 0;
+
+    Text[0] = 0;
+    if (File == INVALID_HANDLE_VALUE)
+        return FALSE;
+    ReadFile(File, Text, sizeof(Text) - 1, &Read, NULL);
+    Text[Read] = 0;
+    CloseHandle(File);
+    return TRUE;
+}
+
+/* Number of lines that start with Prefix (case-insensitive) */
+static int Lines(const char *Prefix)
+{
+    const char *Line = Text;
+    size_t Length = strlen(Prefix);
+    int Count = 0;
+
+    while (*Line)
+    {
+        if (!_strnicmp(Line, Prefix, Length))
+            Count++;
+        Line = strchr(Line, '\n');
+        if (!Line)
+            break;
+        Line++;
+    }
+    return Count;
+}
+
+/* The value of Key in Section, or "" */
+static const char *Value(const char *Section, const char *Key, char *Out, size_t OutSize)
+{
+    char Header[64];
+    const char *Line, *End;
+    size_t KeyLength = strlen(Key);
+
+    Out[0] = 0;
+    _snprintf(Header, sizeof(Header), "[%s]", Section);
+    Line = FindNoCase(Text, Header);
+    if (!Line)
+        return Out;
+    for (Line = strchr(Line, '\n'); Line && *++Line && *Line != '['; Line = strchr(Line, '\n'))
+    {
+        if (!_strnicmp(Line, Key, KeyLength) && Line[KeyLength] == '=')
+        {
+            Line += KeyLength + 1;
+            End = Line + strcspn(Line, "\r\n");
+            _snprintf(Out, OutSize, "%.*s", (int)(End - Line), Line);
+            break;
+        }
+    }
+    return Out;
+}
+
+static NTSTATUS Update(PCWSTR ArcPath)
+{
+    return UpdateFreeLoaderIni(NtDir, ArcPath);
+}
+
+#define ARC_AW L"multi(0)disk(0)rdisk(0)partition(1)\\ReactOS"
+#define ARC_BW L"multi(0)disk(0)rdisk(0)partition(2)\\Other"
+
+START_TEST(FreeLdrIniUpdate)
+{
+    WCHAR Temp[MAX_PATH];
+    char Buffer[256];
+    NTSTATUS Status;
+#ifdef NITRO_KDKIT
+    const int Kit = 1;
+#else
+    const int Kit = 0;
+#endif
+
+    ProcessHeap = RtlGetProcessHeap();
+    GetTempPathW(_countof(Temp), Temp);
+    _snwprintf(Dir, _countof(Dir), L"%lsfldrini%lu", Temp, GetCurrentProcessId());
+    CreateDirectoryW(Dir, NULL);
+    _snwprintf(IniFile, _countof(IniFile), L"%ls\\freeldr.ini", Dir);
+    _snwprintf(NtDir, _countof(NtDir), L"\\??\\%ls", Dir);
+
+    /* An existing freeldr.ini without the entry (repair or upgrade of an older installation): it is added after the
+     * others, the default entry and the timeout stay */
+    ok(WriteIni("", ""), "cannot write %ls\n", IniFile);
+    Status = Update(ARC_AW);
+    ok(Status == STATUS_SUCCESS, "UpdateFreeLoaderIni 0x%08lx\n", Status);
+    ok(ReadIni(), "cannot read the result\n");
+    ok(Lines("[ReactOS_KdKit]") == Kit, "missing: %d kit sections\n", Lines("[ReactOS_KdKit]"));
+    ok(Lines("ReactOS_KdKit=") == Kit, "missing: %d kit entries in the list\n", Lines("ReactOS_KdKit="));
+    ok(Lines("[ReactOS]") == 1 && Lines("[ReactOS_1]") == 0, "missing: the installation's entry was added again\n");
+    ok(!strcmp(Value("FREELOADER", "DefaultOS", Buffer, sizeof(Buffer)), "ReactOS"), "DefaultOS is '%s'\n", Buffer);
+    ok(!strcmp(Value("FREELOADER", "TimeOut", Buffer, sizeof(Buffer)), "5"), "TimeOut is '%s'\n", Buffer);
+    if (Kit)
+    {
+        ok(!strcmp(Value("ReactOS_KdKit", "SystemPath", Buffer, sizeof(Buffer)), ARC_A), "kit SystemPath '%s'\n", Buffer);
+        ok(FindNoCase(Value("ReactOS_KdKit", "Options", Buffer, sizeof(Buffer)), "/KERNEL=ntkrnlkd.exe") != NULL,
+           "kit Options '%s'\n", Buffer);
+    }
+
+    /* Setup over that again: no second entry */
+    Status = Update(ARC_AW);
+    ok(Status == STATUS_SUCCESS, "UpdateFreeLoaderIni (again) 0x%08lx\n", Status);
+    ReadIni();
+    ok(Lines("[ReactOS_KdKit]") == Kit, "present: %d kit sections\n", Lines("[ReactOS_KdKit]"));
+    ok(Lines("ReactOS_KdKit=") == Kit, "present: %d kit entries in the list\n", Lines("ReactOS_KdKit="));
+
+    /* An entry the user edited (another name, port and speed, other case of the key): left as it is */
+    ok(WriteIni("reactos_kdkit=\"My debug entry\"\r\n",
+                "\r\n[reactos_kdkit]\r\nBootType=Windows2003\r\nSystemPath=" ARC_A "\r\n"
+                "Options=/KERNEL=ntkrnlkd.exe /DEBUG /DEBUGPORT=COM2 /BAUDRATE=57600\r\n"), "cannot write %ls\n", IniFile);
+    Status = Update(ARC_AW);
+    ok(Status == STATUS_SUCCESS, "UpdateFreeLoaderIni (edited) 0x%08lx\n", Status);
+    ReadIni();
+    ok(Lines("[ReactOS_KdKit]") == 1, "edited: %d kit sections\n", Lines("[ReactOS_KdKit]"));
+    ok(Lines("ReactOS_KdKit=") == 1, "edited: %d kit entries in the list\n", Lines("ReactOS_KdKit="));
+    ok(FindNoCase(Text, "\"My debug entry\"") != NULL, "edited: the user's name is gone\n");
+    ok(FindNoCase(Value("ReactOS_KdKit", "Options", Buffer, sizeof(Buffer)), "COM2 /BAUDRATE=57600") != NULL,
+       "edited: Options '%s'\n", Buffer);
+
+    /* A second installation on another partition: its own entry, and the kit entry for it when there is none */
+    ok(WriteIni("", ""), "cannot write %ls\n", IniFile);
+    Status = Update(ARC_BW);
+    ok(Status == STATUS_SUCCESS, "UpdateFreeLoaderIni (second) 0x%08lx\n", Status);
+    ReadIni();
+    ok(Lines("[ReactOS_1]") == 1, "second: %d entries ReactOS_1\n", Lines("[ReactOS_1]"));
+    ok(Lines("[ReactOS_KdKit]") == Kit, "second: %d kit sections\n", Lines("[ReactOS_KdKit]"));
+    if (Kit)
+        ok(!strcmp(Value("ReactOS_KdKit", "SystemPath", Buffer, sizeof(Buffer)), ARC_B), "second: kit SystemPath '%s'\n", Buffer);
+    ok(!strcmp(Value("FREELOADER", "DefaultOS", Buffer, sizeof(Buffer)), "ReactOS"), "second: DefaultOS is '%s'\n", Buffer);
+
+    SetFileAttributesW(IniFile, FILE_ATTRIBUTE_NORMAL);
+    DeleteFileW(IniFile);
+    RemoveDirectoryW(Dir);
+}
