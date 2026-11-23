@@ -930,6 +930,77 @@ CsrApiRequestThread(
     return Status;
 }
 
+/*
+ * The DACL of the API port: what the port got from \Windows until now (the world and the restricted code
+ * may connect, the administrators and the system have all access), and ALL APPLICATION PACKAGES, which may
+ * connect too: the AppContainer pass of the access check grants a lowbox token only what such an ACE
+ * grants it, and without it no process in an AppContainer (Edge's renderers) can connect to the server.
+ */
+static
+NTSTATUS
+CsrpCreateApiPortDacl(OUT PACL *Dacl)
+{
+    SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY PackageAuthority = {SECURITY_APP_PACKAGE_AUTHORITY};
+    PSID WorldSid = NULL, RestrictedSid = NULL, AdminSid = NULL, SystemSid = NULL, PackageSid = NULL;
+    const ACCESS_MASK Connect = READ_CONTROL | SYNCHRONIZE | 1; /* PORT_CONNECT */
+    const ACCESS_MASK All = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 1;
+    ULONG Length;
+    NTSTATUS Status;
+    PACL Acl;
+
+    *Dacl = NULL;
+
+    Status = RtlAllocateAndInitializeSid(&WorldAuthority, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &WorldSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAllocateAndInitializeSid(&NtAuthority, 1, SECURITY_RESTRICTED_CODE_RID, 0, 0, 0, 0, 0, 0, 0, &RestrictedSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+                                             0, 0, 0, 0, 0, 0, &AdminSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &SystemSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAllocateAndInitializeSid(&PackageAuthority, 2, SECURITY_APP_PACKAGE_BASE_RID,
+                                             SECURITY_BUILTIN_PACKAGE_ANY_PACKAGE, 0, 0, 0, 0, 0, 0, &PackageSid);
+    if (NT_SUCCESS(Status))
+    {
+        Length = sizeof(ACL) + 5 * (sizeof(ACCESS_ALLOWED_ACE) - sizeof(ULONG)) +
+                 RtlLengthSid(WorldSid) + RtlLengthSid(RestrictedSid) + RtlLengthSid(AdminSid) +
+                 RtlLengthSid(SystemSid) + RtlLengthSid(PackageSid);
+        Acl = RtlAllocateHeap(CsrHeap, 0, Length);
+        if (!Acl)
+        {
+            Status = STATUS_NO_MEMORY;
+        }
+        else
+        {
+            Status = RtlCreateAcl(Acl, Length, ACL_REVISION2);
+            if (NT_SUCCESS(Status))
+                Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, Connect, WorldSid);
+            if (NT_SUCCESS(Status))
+                Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, Connect, RestrictedSid);
+            if (NT_SUCCESS(Status))
+                Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, All, AdminSid);
+            if (NT_SUCCESS(Status))
+                Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, All, SystemSid);
+            if (NT_SUCCESS(Status))
+                Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, Connect, PackageSid);
+            if (NT_SUCCESS(Status))
+                *Dacl = Acl;
+            else
+                RtlFreeHeap(CsrHeap, 0, Acl);
+        }
+    }
+
+    if (WorldSid) RtlFreeHeap(RtlGetProcessHeap(), 0, WorldSid);
+    if (RestrictedSid) RtlFreeHeap(RtlGetProcessHeap(), 0, RestrictedSid);
+    if (AdminSid) RtlFreeHeap(RtlGetProcessHeap(), 0, AdminSid);
+    if (SystemSid) RtlFreeHeap(RtlGetProcessHeap(), 0, SystemSid);
+    if (PackageSid) RtlFreeHeap(RtlGetProcessHeap(), 0, PackageSid);
+    return Status;
+}
+
 /*++
  * @name CsrApiPortInitialize
  *
@@ -955,6 +1026,9 @@ CsrApiPortInitialize(VOID)
     CLIENT_ID ClientId;
     PLIST_ENTRY ListHead, NextEntry;
     PCSR_THREAD ServerThread;
+    SECURITY_DESCRIPTOR PortSdBody;
+    PSECURITY_DESCRIPTOR PortSd;
+    PACL PortDacl = NULL;
 
     /* Calculate how much space we'll need for the Port Name */
     Size = CsrDirectoryName.Length + sizeof(CSR_PORT_NAME) + sizeof(WCHAR);
@@ -976,14 +1050,26 @@ CsrApiPortInitialize(VOID)
                 sizeof(CSR_API_CONNECTINFO), sizeof(CSR_API_MESSAGE));
     }
 
-    /* FIXME: Create a Security Descriptor */
+    /* Create the Security Descriptor (without one the port keeps the descriptor it gets from \Windows, as before) */
+    PortSd = NULL;
+    Status = CsrpCreateApiPortDacl(&PortDacl);
+    if (NT_SUCCESS(Status))
+    {
+        Status = RtlCreateSecurityDescriptor(&PortSdBody, SECURITY_DESCRIPTOR_REVISION);
+        if (NT_SUCCESS(Status))
+            Status = RtlSetDaclSecurityDescriptor(&PortSdBody, TRUE, PortDacl, FALSE);
+        if (NT_SUCCESS(Status))
+            PortSd = &PortSdBody;
+    }
+    if (!PortSd)
+        DPRINT1("CSRSRV: cannot build the descriptor of the API port, Status=%lx\n", Status);
 
     /* Initialize the Attributes */
     InitializeObjectAttributes(&ObjectAttributes,
                                &CsrApiPortName,
                                0,
                                NULL,
-                               NULL /* FIXME: Use the Security Descriptor */);
+                               PortSd);
 
     /* Create the Port Object */
     Status = NtCreatePort(&CsrApiPort,
@@ -991,6 +1077,7 @@ CsrApiPortInitialize(VOID)
                           sizeof(CSR_API_CONNECTINFO),
                           sizeof(CSR_API_MESSAGE),
                           16 * PAGE_SIZE);
+    if (PortDacl) RtlFreeHeap(CsrHeap, 0, PortDacl);
     if (NT_SUCCESS(Status))
     {
         /* Create the event the Port Thread will use */
