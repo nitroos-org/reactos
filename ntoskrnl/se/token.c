@@ -1607,6 +1607,29 @@ SeIsTokenSibling(
 
 /**
  * @brief
+ * Returns the integrity level of the primary token of the current process.
+ */
+ULONG
+NTAPI
+SeGetCurrentProcessIntegrityLevel(VOID)
+{
+    PTOKEN ProcessToken;
+    ULONG ProcessLevel;
+
+    ProcessToken = PsReferencePrimaryToken(PsGetCurrentProcess());
+    if (!ProcessToken)
+        return SECURITY_MANDATORY_UNTRUSTED_RID;
+
+    SepAcquireTokenLockShared(ProcessToken);
+    ProcessLevel = ProcessToken->IntegrityLevel;
+    SepReleaseTokenLock(ProcessToken);
+    ObFastDereferenceObject(&PsGetCurrentProcess()->Token, ProcessToken);
+
+    return ProcessLevel;
+}
+
+/**
+ * @brief
  * Whether a token has a higher integrity level than the primary token of
  * the current process.
  *

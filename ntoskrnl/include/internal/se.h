@@ -618,6 +618,10 @@ SeIsTokenSibling(
     _In_ PTOKEN Token,
     _Out_ PBOOLEAN IsSibling);
 
+ULONG
+NTAPI
+SeGetCurrentProcessIntegrityLevel(VOID);
+
 BOOLEAN
 NTAPI
 SeIsTokenAboveProcessIntegrity(
