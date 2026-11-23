@@ -6523,6 +6523,10 @@ MmCreateSection (OUT PVOID  * Section,
         /* Did the caller pass a file object ? */
         if (FileObject)
         {
+            /* The same rule as for a handle below: no section object pointers, no section */
+            if (FileObject->SectionObjectPointer == NULL)
+                return STATUS_INVALID_FILE_FOR_SECTION;
+
             /* Reference the object directly */
             ObReferenceObject(FileObject);
             HaveFileObject = TRUE;
@@ -6540,6 +6544,15 @@ MmCreateSection (OUT PVOID  * Section,
             {
                 DPRINT1("Failed to get a handle to the FO: %lx\n", Status);
                 return Status;
+            }
+
+            /* Only a file whose file system gave it section object pointers can back a section. Any other file
+             * object (a handle to a device that is not a file system, or to a driver that keeps something else in
+             * FsContext) is refused here, before the acquire below treats its FsContext as an FCB header */
+            if (FileObject->SectionObjectPointer == NULL)
+            {
+                ObDereferenceObject(FileObject);
+                return STATUS_INVALID_FILE_FOR_SECTION;
             }
 
             /* Lock the file */
