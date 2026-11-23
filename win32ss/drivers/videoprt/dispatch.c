@@ -376,6 +376,23 @@ IntVideoPortDispatchOpen(
 
     TRACE_(VIDEOPRT, "IntVideoPortDispatchOpen\n");
 
+    /*
+     * Only the graphics subsystem (win32k, from kernel mode) opens a video
+     * device. A device it does not use, such as the firmware framebuffer
+     * device next to the display hardware's own driver, would otherwise be
+     * open to user mode, and the open and the close of a user handle
+     * initialize the miniport, register and then drop the boot video
+     * display reset callback and reset the adapters (IntVideoPortInbvCleanup).
+     */
+    if (Irp->RequestorMode != KernelMode)
+    {
+        WARN_(VIDEOPRT, "Refusing an open of a video device from user mode\n");
+        Irp->IoStatus.Status = STATUS_ACCESS_DENIED;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_ACCESS_DENIED;
+    }
+
     if (!CsrProcess)
     {
         /* We know the first open call is from the CSRSS process.
