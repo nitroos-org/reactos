@@ -948,7 +948,7 @@ static VOID ChildRowsV13V7(DWORD Level)
     if (Level >= SECURITY_MANDATORY_LOW_RID)
         ok(Error == ERROR_PRIVILEGE_NOT_HELD, "V13-pipe level %lx: %lu\n", Level, Error);
     else
-        todo_ros ok(Error == ERROR_ACCESS_DENIED, "V13-pipe level %lx: %lu (Windows 5)\n", Level, Error);
+        ok(Error == ERROR_ACCESS_DENIED, "V13-pipe level %lx: %lu (Windows 5)\n", Level, Error);
     if (Handle != INVALID_HANDLE_VALUE) CloseHandle(Handle);
 
     /* V13-key (below the Low key): Low 1314, Untrusted 5 (keys: under enforcement) */
@@ -996,8 +996,30 @@ static VOID ChildRowsV13V7(DWORD Level)
     }
     else
     {
-        todo_ros ok(Handle == INVALID_HANDLE_VALUE && Error == ERROR_ACCESS_DENIED, "V7-pipe level %lx: %lu (Windows 5)\n", Level, Error);
+        ok(Handle == INVALID_HANDLE_VALUE && Error == ERROR_ACCESS_DENIED, "V7-pipe level %lx: %lu (Windows 5)\n", Level, Error);
     }
+    if (Handle != INVALID_HANDLE_VALUE)
+        CloseHandle(Handle);
+
+    /* V7-pipe-anon: an anonymous pipe is made at every level (an Untrusted process creates no named pipe but CreatePipe
+       works: the pipe has no name) and carries data */
+    {
+        HANDLE Read = NULL, Write = NULL;
+        BYTE Byte = 0x5a, Back = 0;
+        DWORD Done = 0;
+
+        SetLastError(0xdeadbeef);
+        Ok = CreatePipe(&Read, &Write, NULL, 0);
+        ok(Ok, "V7-pipe-anon level %lx: CreatePipe %lu\n", Level, GetLastError());
+        if (Ok)
+        {
+            ok(WriteFile(Write, &Byte, 1, &Done, NULL) && Done == 1, "V7-pipe-anon level %lx: write %lu\n", Level, GetLastError());
+            ok(ReadFile(Read, &Back, 1, &Done, NULL) && Done == 1 && Back == Byte, "V7-pipe-anon level %lx: read %lu\n", Level, GetLastError());
+            CloseHandle(Read);
+            CloseHandle(Write);
+        }
+    }
+    Handle = INVALID_HANDLE_VALUE;
     if (Handle != INVALID_HANDLE_VALUE) CloseHandle(Handle);
 
     /* V7-file-label: a file in the Low (OICI) directory inherits (ML;ID;NW;;;LW) */

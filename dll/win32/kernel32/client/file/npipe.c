@@ -16,7 +16,6 @@ DEBUG_CHANNEL(kernel32file);
 
 /* GLOBALS ********************************************************************/
 
-LONG ProcessPipeId;
 
 /* FUNCTIONS ******************************************************************/
 
@@ -119,15 +118,14 @@ CreatePipe(PHANDLE hReadPipe,
            LPSECURITY_ATTRIBUTES lpPipeAttributes,
            DWORD nSize)
 {
-    WCHAR Buffer[64];
     UNICODE_STRING PipeName;
     OBJECT_ATTRIBUTES ObjectAttributes;
     IO_STATUS_BLOCK StatusBlock;
     LARGE_INTEGER DefaultTimeout;
     NTSTATUS Status;
+    HANDLE RootHandle;
     HANDLE ReadPipeHandle;
     HANDLE WritePipeHandle;
-    LONG PipeId;
     ULONG Attributes;
     PSECURITY_DESCRIPTOR SecurityDescriptor = NULL;
 
@@ -137,15 +135,22 @@ CreatePipe(PHANDLE hReadPipe,
     /* Use default buffer size if desired */
     if (!nSize) nSize = 0x1000;
 
-    /* Increase the Pipe ID */
-    PipeId = InterlockedIncrement(&ProcessPipeId);
-
-    /* Create the pipe name */
-    _swprintf(Buffer,
-              L"\\Device\\NamedPipe\\Win32Pipes.%p.%08x",
-              NtCurrentTeb()->ClientId.UniqueProcess,
-              PipeId);
-    RtlInitUnicodeString(&PipeName, Buffer);
+    /* The pipe has no name (as on Windows): it is made with an empty name relative to the root of the pipe
+       file system, and its other end is opened relative to the first. Nobody can open it by name. */
+    RtlInitUnicodeString(&PipeName, L"\\Device\\NamedPipe\\");
+    InitializeObjectAttributes(&ObjectAttributes, &PipeName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&RootHandle,
+                        GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,
+                        &ObjectAttributes,
+                        &StatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!NT_SUCCESS(Status))
+    {
+        WARN("Status: %lx\n", Status);
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
 
     /* Always use case insensitive */
     Attributes = OBJ_CASE_INSENSITIVE;
@@ -160,14 +165,17 @@ CreatePipe(PHANDLE hReadPipe,
         if (lpPipeAttributes->bInheritHandle) Attributes |= OBJ_INHERIT;
     }
 
-    /* Initialize the attributes */
+    /* Initialize the attributes: no name, the root of the pipe file system */
+    PipeName.Length = 0;
+    PipeName.MaximumLength = 0;
+    PipeName.Buffer = NULL;
     InitializeObjectAttributes(&ObjectAttributes,
                                &PipeName,
                                Attributes,
-                               NULL,
+                               RootHandle,
                                SecurityDescriptor);
 
-    /* Create the named pipe */
+    /* Create the pipe */
     Status = NtCreateNamedPipeFile(&ReadPipeHandle,
                                    GENERIC_READ | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
                                    &ObjectAttributes,
@@ -182,6 +190,7 @@ CreatePipe(PHANDLE hReadPipe,
                                    nSize,
                                    nSize,
                                    &DefaultTimeout);
+    NtClose(RootHandle);
     if (!NT_SUCCESS(Status))
     {
         /* Convert error and fail */
@@ -190,7 +199,12 @@ CreatePipe(PHANDLE hReadPipe,
         return FALSE;
     }
 
-    /* Now try opening it for write access */
+    /* Now open the other end, relative to the first one, for write access */
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &PipeName,
+                               Attributes,
+                               ReadPipeHandle,
+                               NULL);
     Status = NtOpenFile(&WritePipeHandle,
                         FILE_GENERIC_WRITE,
                         &ObjectAttributes,

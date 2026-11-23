@@ -492,6 +492,10 @@ NpRemoveFcbName(IN PNP_FCB Fcb,
 
 NTSTATUS
 NTAPI
+NpInitializeCreateCheckSd(VOID);
+
+NTSTATUS
+NTAPI
 NpFsdCreateNamedPipe(IN PDEVICE_OBJECT DeviceObject,
                      IN PIRP Irp);
 

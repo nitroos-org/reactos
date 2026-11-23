@@ -656,6 +656,102 @@ NpCreateExistingNamedPipe(IN PNP_FCB Fcb,
     return IoStatus;
 }
 
+/*
+ * The creation of a named pipe is checked against the root of the pipe file system, which is labelled Low with
+ * NO_WRITE_UP and has no DACL (Windows Server 2022, measured: a Low process creates pipes with any name, an Untrusted
+ * one gets ERROR_ACCESS_DENIED for every name; an unnamed pipe, made with an empty name relative to the root, is allowed
+ * to both). Only the creator's integrity level decides.
+ */
+static PSECURITY_DESCRIPTOR NpCreateCheckSd;
+
+NTSTATUS
+NTAPI
+NpInitializeCreateCheckSd(VOID)
+{
+    struct
+    {
+        ACL Acl;
+        ACE_HEADER Header;
+        ACCESS_MASK Mask;
+        SID Sid;
+    } Label;
+    static const SID_IDENTIFIER_AUTHORITY LabelAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
+    SECURITY_DESCRIPTOR Absolute;
+    PSECURITY_DESCRIPTOR Relative;
+    ULONG Length = 0;
+    NTSTATUS Status;
+
+    RtlCreateSecurityDescriptor(&Absolute, SECURITY_DESCRIPTOR_REVISION);
+    RtlCreateAcl(&Label.Acl, sizeof(Label), ACL_REVISION);
+    Label.Header.AceType = SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+    Label.Header.AceFlags = 0;
+    Label.Header.AceSize = (USHORT)(sizeof(Label) - sizeof(ACL));
+    Label.Mask = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
+    Label.Sid.Revision = SID_REVISION;
+    Label.Sid.SubAuthorityCount = 1;
+    Label.Sid.IdentifierAuthority = LabelAuthority;
+    Label.Sid.SubAuthority[0] = SECURITY_MANDATORY_LOW_RID;
+    Label.Acl.AceCount = 1;
+    Label.Acl.AclSize = sizeof(Label);
+
+    Status = RtlSetOwnerSecurityDescriptor(&Absolute, SeExports->SeLocalSystemSid, FALSE);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Status = RtlSetSaclSecurityDescriptor(&Absolute, TRUE, &Label.Acl, FALSE);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = RtlAbsoluteToSelfRelativeSD(&Absolute, NULL, &Length);
+    if (Status != STATUS_BUFFER_TOO_SMALL)
+        return NT_SUCCESS(Status) ? STATUS_UNSUCCESSFUL : Status;
+    Relative = ExAllocatePoolWithTag(NonPagedPool, Length, 'cSpN');
+    if (Relative == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    Status = RtlAbsoluteToSelfRelativeSD(&Absolute, Relative, &Length);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(Relative, 'cSpN');
+        return Status;
+    }
+
+    NpCreateCheckSd = Relative;
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+NpCheckCreateNamedPipe(IN PACCESS_STATE AccessState,
+                       IN KPROCESSOR_MODE PreviousMode)
+{
+    PSECURITY_SUBJECT_CONTEXT SubjectContext;
+    ACCESS_MASK Granted = 0;
+    NTSTATUS AccessStatus = STATUS_SUCCESS;
+    BOOLEAN Allowed;
+    PAGED_CODE();
+
+    /* Kernel callers are trusted */
+    if (PreviousMode == KernelMode)
+        return STATUS_SUCCESS;
+    if (NpCreateCheckSd == NULL)
+        return STATUS_ACCESS_DENIED;
+
+    SubjectContext = &AccessState->SubjectSecurityContext;
+    SeLockSubjectContext(SubjectContext);
+    Allowed = SeAccessCheck(NpCreateCheckSd,
+                            SubjectContext,
+                            TRUE,
+                            FILE_CREATE_PIPE_INSTANCE,
+                            0,
+                            NULL,
+                            IoGetFileObjectGenericMapping(),
+                            PreviousMode,
+                            &Granted,
+                            &AccessStatus);
+    SeUnlockSubjectContext(SubjectContext);
+
+    return Allowed ? STATUS_SUCCESS : (NT_SUCCESS(AccessStatus) ? STATUS_ACCESS_DENIED : AccessStatus);
+}
+
 NTSTATUS
 NTAPI
 NpCreateNewNamedPipe(IN PNP_DCB Dcb,
@@ -896,6 +992,13 @@ NpFsdCreateNamedPipe(IN PDEVICE_OBJECT DeviceObject,
     {
         if (Fcb->NodeType == NPFS_NTC_ROOT_DCB)
         {
+            /* A new name: the creator's level decides (the creation of an unnamed pipe is not checked) */
+            IoStatus.Status = NpCheckCreateNamedPipe(IoStack->Parameters.CreatePipe.SecurityContext->AccessState,
+                                                     IoStack->Flags & SL_FORCE_ACCESS_CHECK ?
+                                                     UserMode : Irp->RequestorMode);
+            if (!NT_SUCCESS(IoStatus.Status))
+                goto Quickie;
+
             IoStatus.Status = NpCreateNewNamedPipe((PNP_DCB)Fcb,
                                                    FileObject,
                                                    FileName,
