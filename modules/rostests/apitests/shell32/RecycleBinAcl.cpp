@@ -130,5 +130,39 @@ START_TEST(RecycleBinAcl)
         }
         LocalFree(Sd);
     }
+
+    /* The label (measured on the same machine): one mandatory label ACE, Low, NO_WRITE_UP, inherited by containers and
+     * objects and inherit-only, i.e. S:AI(ML;OICIIO;NW;;;LW); what is created in the folder inherits it (ML;ID;NW;;;LW) */
+    {
+        static const PCWSTR Checked[] = { L"", L"\\desktop.ini" };
+        UINT n;
+
+        for (n = 0; n < _countof(Checked); n++)
+        {
+            WCHAR Path[MAX_PATH];
+            PACL Sacl = NULL;
+            PSECURITY_DESCRIPTOR LabelSd = NULL;
+            SYSTEM_MANDATORY_LABEL_ACE *Label = NULL;
+            BYTE Flags = n == 0 ? (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE) : INHERITED_ACE;
+
+            wsprintfW(Path, L"%ls%ls", Dir, Checked[n]);
+            if (GetFileAttributesW(Path) == INVALID_FILE_ATTRIBUTES)
+                continue;
+            Err = GetNamedSecurityInfoW(Path, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL, &Sacl, &LabelSd);
+            ok(Err == ERROR_SUCCESS, "%ls: GetNamedSecurityInfo (label) failed %lu\n", Path, Err);
+            if (Err != ERROR_SUCCESS)
+                continue;
+            ok(Sacl != NULL && Sacl->AceCount == 1, "%ls: %u entries in the label ACL, expected 1\n", Path, Sacl ? Sacl->AceCount : 0);
+            if (Sacl && Sacl->AceCount == 1 && GetAce(Sacl, 0, (PVOID *)&Label))
+            {
+                ok(Label->Header.AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE, "%ls: label ACE of type %u\n", Path, Label->Header.AceType);
+                ok(Label->Header.AceFlags == Flags, "%ls: label ACE flags 0x%x, expected 0x%x\n", Path, Label->Header.AceFlags, Flags);
+                ok(Label->Mask == SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, "%ls: label policy 0x%lx\n", Path, Label->Mask);
+                ok(*GetSidSubAuthority((PSID)&Label->SidStart, 0) == SECURITY_MANDATORY_LOW_RID, "%ls: label level 0x%lx\n", Path,
+                   *GetSidSubAuthority((PSID)&Label->SidStart, 0));
+            }
+            LocalFree(LabelSd);
+        }
+    }
     LocalFree(StringSid);
 }
