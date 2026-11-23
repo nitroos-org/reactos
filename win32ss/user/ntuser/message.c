@@ -2947,21 +2947,49 @@ NtUserMessageCall( HWND hWnd,
                  parm.recipients == BSM_ALLCOMPONENTS )
             {
                PLIST_ENTRY DesktopEntry;
-               PDESKTOP rpdesk;
-               HWND *List, hwndDenied = NULL;
+               PDESKTOP rpdesk, Visited[64];
+               HWND *List, hwndDenied = NULL, hwndDesk;
                HDESK hDesk = NULL;
                PWND pwnd, pwndDesk;
-               ULONG i;
+               ULONG i, cVisited = 0;
                UINT fuFlags;
 
-               for (DesktopEntry = InputWindowStation->DesktopListHead.Flink;
-                    DesktopEntry != &InputWindowStation->DesktopListHead;
-                    DesktopEntry = DesktopEntry->Flink)
+               /* The USER lock is released while the windows of a desktop get the message, and a desktop
+                  can leave the list and be freed meanwhile (IntDesktopObjectDelete, also one whose last
+                  reference went before the walk and that waits for the lock): no desktop, list entry or
+                  desktop window is kept across the sends. The walk starts again at the head of the list
+                  for each desktop and takes the first one not visited yet (pointers compared only) */
+               for (;;)
                {
-                  rpdesk = CONTAINING_RECORD(DesktopEntry, DESKTOP, ListEntry);
+                  rpdesk = NULL;
+                  for (DesktopEntry = InputWindowStation->DesktopListHead.Flink;
+                       DesktopEntry != &InputWindowStation->DesktopListHead;
+                       DesktopEntry = DesktopEntry->Flink)
+                  {
+                     PDESKTOP pdeskTry = CONTAINING_RECORD(DesktopEntry, DESKTOP, ListEntry);
+
+                     for (i = 0; i < cVisited && Visited[i] != pdeskTry; i++)
+                        ;
+                     if (i == cVisited)
+                     {
+                        rpdesk = pdeskTry;
+                        break;
+                     }
+                  }
+                  if (!rpdesk)
+                     break;
+                  if (cVisited == ARRAYSIZE(Visited))
+                  {
+                     ERR("BroadcastSystemMessage: more than %u desktops, the others are not sent the message\n",
+                         (unsigned)ARRAYSIZE(Visited));
+                     break;
+                  }
+                  Visited[cVisited++] = rpdesk;
+
                   pwndDesk = rpdesk->pDeskInfo->spwnd;
                   if (!pwndDesk) /* CSRSS has exited (IntDesktopThreadProcessExit) */
                       continue;
+                  hwndDesk = UserHMGetHandle(pwndDesk);
                   List = IntWinListChildren(pwndDesk);
 
                   if (parm.flags & BSF_QUERY)
@@ -3018,7 +3046,8 @@ NtUserMessageCall( HWND hWnd,
                            if (RetVal == BROADCAST_QUERY_DENY)
                            {
                               hwndDenied = List[i];
-                              hDesk = UserHMGetHandle(pwndDesk);
+                              /* after the sends: the handle taken before them (pwndDesk can be gone) */
+                              hDesk = (HDESK)hwndDesk;
                               Ret = FALSE;
                            }
                         }
