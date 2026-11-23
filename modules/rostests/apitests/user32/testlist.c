@@ -65,6 +65,7 @@ extern void func_WindowRgnHandles(void);
 extern void func_PowerSettingNotification(void);
 extern void func_ScreenSaverSecurePolicy(void);
 extern void func_OwnerZOrderNotice(void);
+extern void func_OwnedWindowThreadExit(void);
 extern void func_NcPaintLayered(void);
 extern void func_SetWindowPosFlags(void);
 extern void func_SetParentCrossProcess(void);
@@ -134,6 +135,7 @@ extern void func_SetActiveWindow(void);
 extern void func_SetCoalescableTimer(void);
 extern void func_SetCursorPos(void);
 extern void func_SetFocus(void);
+extern void func_SetFocusCallbacks(void);
 extern void func_SetParent(void);
 extern void func_SetProp(void);
 extern void func_SetScrollInfo(void);
@@ -244,6 +246,7 @@ const struct test winetest_testlist[] =
     { "PowerSettingNotification", func_PowerSettingNotification },
     { "ScreenSaverSecurePolicy", func_ScreenSaverSecurePolicy },
     { "OwnerZOrderNotice", func_OwnerZOrderNotice },
+    { "OwnedWindowThreadExit", func_OwnedWindowThreadExit },
     { "NcPaintLayered", func_NcPaintLayered },
     { "SetWindowPosFlags", func_SetWindowPosFlags },
     { "SetParentCrossProcess", func_SetParentCrossProcess },
@@ -313,6 +316,7 @@ const struct test winetest_testlist[] =
     { "SetCoalescableTimer", func_SetCoalescableTimer },
     { "SetCursorPos", func_SetCursorPos },
     { "SetFocus", func_SetFocus },
+    { "SetFocusCallbacks", func_SetFocusCallbacks },
     { "SetParent", func_SetParent },
     { "SetProp", func_SetProp },
     { "SetScrollInfo", func_SetScrollInfo },

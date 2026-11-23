@@ -1006,8 +1006,15 @@ static LRESULT handle_internal_events( PTHREADINFO pti, PWND pWnd, DWORD dwQEven
        break;
        case POSTEVENT_SAW:
        {
+          PWND pwndActivate = (PWND)pMsg->wParam;
+
           //ERR("HIE : SAW : pti 0x%p hWnd 0x%p\n",pti,pMsg->hwnd);
-          IntActivateWindow((PWND)pMsg->wParam, pti, (HANDLE)pMsg->lParam, (DWORD)ExtraInfo);
+          /* The event carries the window pointer (wParam) and its handle (hwnd), taken when it was
+             posted. Use the pointer only while the handle still names that window: it is not held
+             by the event. */
+          if (pwndActivate && ValidateHwndNoErr(pMsg->hwnd) != pwndActivate)
+             break;
+          IntActivateWindow(pwndActivate, pti, (HANDLE)pMsg->lParam, (DWORD)ExtraInfo);
        }
        break;
        case POSTEVENT_DAW:
