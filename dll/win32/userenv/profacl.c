@@ -969,6 +969,383 @@ GetSystemPartitionRoot(
 }
 
 /*
+ * Program Files and Program Files (x86), for setup: created with the DACL of Windows (ProfileDirSystem), so that what
+ * is installed in them while setup runs (PowerShell 7 on amd64, Common Files) inherits that DACL and not the one of
+ * the volume root (Authenticated Users: Modify on what is created below the root). A directory that is there
+ * already gets the DACL if it is not protected; then the function fails with ERROR_ALREADY_EXISTS, as
+ * CreateDirectoryW.
+ */
+BOOL
+WINAPI
+CreateProgramFilesDirectory(
+    _In_ PCWSTR pszPath)
+{
+    if (CreateSecuredProfileDir(pszPath, ProfileDirSystem, NULL))
+        return TRUE;
+    if (GetLastError() != ERROR_ALREADY_EXISTS)
+        return FALSE;
+
+    SecureExistingProfileDirectory(pszPath, ProfileDirSystem, NULL, FALSE);
+    SetLastError(ERROR_ALREADY_EXISTS);
+    return FALSE;
+}
+
+/*
+ * The repair of the installs whose setup created Program Files without that DACL (2026.11-1, 2026.11-2 and main up to
+ * this change): the folder got the DACL of Windows at the next start (SecureSystemDirectories), but what setup had
+ * installed in it by then kept the entries of the volume root: Authenticated Users: Modify, on PowerShell 7 (in the
+ * machine Path) and Common Files among them. Such an object has an unprotected DACL holding the copies of the root's
+ * inheritable entries (as a directory gets them: the inheritance flags without inherit-only; as a file: no flags).
+ * Exactly those objects lose the copies and inherit from their parent afresh (top down, so the parent is repaired
+ * first); entries put there on purpose stay; protected DACLs and what is below them, and reparse points, are left.
+ * Once, after setup: the log in System32\LogFiles\FolderAcl is the mark that it ran (SYSTEM or the Administrators
+ * own it; a file in System32 nobody else can create).
+ */
+#define PF_REPAIR_LOG L"%SystemRoot%\\System32\\LogFiles\\FolderAcl\\program-files-repair.txt"
+
+typedef struct _PF_REPAIR
+{
+    HANDLE hLog;
+    PACL pRootAcl;                          /* the DACL setup gives the volume root (RootAces) */
+    BYTE AuthSid[SECURITY_MAX_SID_SIZE];    /* Authenticated Users */
+    ULONG Checked, Repaired, Failed, Skipped;
+} PF_REPAIR, *PPF_REPAIR;
+
+static VOID
+PfRepairLog(
+    _In_ PPF_REPAIR pCtx,
+    _In_ PCWSTR pszFormat,
+    ...)
+{
+    WCHAR szLine[MAX_PATH + 200];
+    CHAR szUtf8[3 * (MAX_PATH + 200)];
+    va_list Args;
+    DWORD dwWritten;
+    int n;
+
+    va_start(Args, pszFormat);
+    StringCchVPrintfW(szLine, ARRAYSIZE(szLine) - 2, pszFormat, Args);
+    va_end(Args);
+    StringCchCatW(szLine, ARRAYSIZE(szLine), L"\r\n");
+    DPRINT1("%S", szLine);
+
+    n = WideCharToMultiByte(CP_UTF8, 0, szLine, -1, szUtf8, sizeof(szUtf8), NULL, NULL);
+    if (pCtx->hLog != INVALID_HANDLE_VALUE && n > 1)
+        WriteFile(pCtx->hLog, szUtf8, n - 1, &dwWritten, NULL);
+}
+
+/* An ACE that is a copy of an inheritable entry of the root's DACL, as a directory (or a file) below the root gets it */
+static BOOL
+IsRootCopyAce(
+    _In_ PACE_HEADER pAce,
+    _In_ PACL pRootAcl)
+{
+    BYTE Flags = pAce->AceFlags & ~INHERITED_ACE, Inherit;
+    PACCESS_ALLOWED_ACE pRoot;
+    DWORD i;
+
+    if (pAce->AceType != ACCESS_ALLOWED_ACE_TYPE)
+        return FALSE;
+
+    for (i = 0; i < pRootAcl->AceCount; i++)
+    {
+        if (!GetAce(pRootAcl, i, (PVOID *)&pRoot) || pRoot->Header.AceType != ACCESS_ALLOWED_ACE_TYPE)
+            continue;
+        Inherit = pRoot->Header.AceFlags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
+        if (!Inherit || pRoot->Mask != ((PACCESS_ALLOWED_ACE)pAce)->Mask ||
+            !EqualSid((PSID)&pRoot->SidStart, (PSID)&((PACCESS_ALLOWED_ACE)pAce)->SidStart))
+        {
+            continue;
+        }
+        if (Flags == Inherit || Flags == 0)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* Repair one object (see above). FALSE: its DACL is protected, leave what is below it alone */
+static BOOL
+RepairProgramFilesObject(
+    _In_ PCWSTR pszPath,
+    _Inout_ PPF_REPAIR pCtx)
+{
+    PSECURITY_DESCRIPTOR pSd;
+    SECURITY_DESCRIPTOR_CONTROL Control;
+    PACL pOldAcl = NULL, pNewAcl;
+    PACE_HEADER pAce;
+    BOOL bPresent, bDefaulted, bCopies = FALSE, bResult = TRUE;
+    DWORD dwSize = 0, dwRevision, dwError, i, nRemoved = 0;
+
+    pCtx->Checked++;
+    GetFileSecurityW(pszPath, DACL_SECURITY_INFORMATION, NULL, 0, &dwSize);
+    if (dwSize == 0)
+    {
+        pCtx->Failed++;
+        PfRepairLog(pCtx, L"not read (error %lu): %s", GetLastError(), pszPath);
+        return TRUE;
+    }
+    pSd = LocalAlloc(LMEM_FIXED, dwSize);
+    if (!pSd)
+        return TRUE;
+
+    if (!GetFileSecurityW(pszPath, DACL_SECURITY_INFORMATION, pSd, dwSize, &dwSize) ||
+        !GetSecurityDescriptorControl(pSd, &Control, &dwRevision) ||
+        !GetSecurityDescriptorDacl(pSd, &bPresent, &pOldAcl, &bDefaulted))
+    {
+        pCtx->Failed++;
+        PfRepairLog(pCtx, L"not read (error %lu): %s", GetLastError(), pszPath);
+        goto done;
+    }
+    if (Control & SE_DACL_PROTECTED)
+    {
+        bResult = FALSE;
+        goto done;
+    }
+    if (!bPresent || !pOldAcl)
+        goto done;
+
+    /* only the objects with the root's Authenticated Users entry are the ones setup left behind */
+    for (i = 0; i < pOldAcl->AceCount; i++)
+    {
+        if (GetAce(pOldAcl, i, (PVOID *)&pAce) && IsRootCopyAce(pAce, pCtx->pRootAcl) &&
+            EqualSid((PSID)&((PACCESS_ALLOWED_ACE)pAce)->SidStart, (PSID)pCtx->AuthSid))
+        {
+            bCopies = TRUE;
+            break;
+        }
+    }
+    if (!bCopies)
+        goto done;
+
+    pNewAcl = LocalAlloc(LMEM_FIXED, pOldAcl->AclSize);
+    if (!pNewAcl || !InitializeAcl(pNewAcl, pOldAcl->AclSize, ACL_REVISION))
+    {
+        pCtx->Failed++;
+        if (pNewAcl)
+            LocalFree(pNewAcl);
+        goto done;
+    }
+
+    for (i = 0; i < pOldAcl->AceCount; i++)
+    {
+        if (!GetAce(pOldAcl, i, (PVOID *)&pAce))
+            break;
+        if ((pAce->AceFlags & INHERITED_ACE) || IsRootCopyAce(pAce, pCtx->pRootAcl))
+        {
+            nRemoved++;
+            continue;
+        }
+        if (!AddAce(pNewAcl, ACL_REVISION, MAXDWORD, pAce, pAce->AceSize))
+            break;
+    }
+
+    if (i < pOldAcl->AceCount)
+    {
+        pCtx->Failed++;
+        PfRepairLog(pCtx, L"not repaired (its DACL could not be copied): %s", pszPath);
+    }
+    else
+    {
+        /* the kept entries, then what the parent passes on */
+        dwError = SetNamedSecurityInfoW((PWSTR)pszPath,
+                                        SE_FILE_OBJECT,
+                                        DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                        NULL, NULL, pNewAcl, NULL);
+        if (dwError == ERROR_SUCCESS)
+        {
+            pCtx->Repaired++;
+            PfRepairLog(pCtx, L"repaired: %s (%lu entries of the volume root removed, %lu kept, the rest inherited)",
+                        pszPath, nRemoved, pNewAcl->AceCount);
+        }
+        else
+        {
+            pCtx->Failed++;
+            PfRepairLog(pCtx, L"not repaired (error %lu): %s", dwError, pszPath);
+        }
+    }
+    LocalFree(pNewAcl);
+
+done:
+    LocalFree(pSd);
+    return bResult;
+}
+
+static VOID
+RepairProgramFilesTree(
+    _In_ PCWSTR pszDirectory,
+    _Inout_ PPF_REPAIR pCtx,
+    _In_ UINT uDepth)
+{
+    WCHAR szPath[MAX_PATH];
+    WIN32_FIND_DATAW FindData;
+    HANDLE hFind;
+
+    if (uDepth > 64 || FAILED(StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\*", pszDirectory)))
+    {
+        pCtx->Skipped++;
+        PfRepairLog(pCtx, L"not checked (too deep or path too long): %s", pszDirectory);
+        return;
+    }
+
+    hFind = FindFirstFileW(szPath, &FindData);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return;
+
+    do
+    {
+        if (!wcscmp(FindData.cFileName, L".") || !wcscmp(FindData.cFileName, L".."))
+            continue;
+        if (FindData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+            continue;
+        if (FAILED(StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\%s", pszDirectory, FindData.cFileName)))
+        {
+            pCtx->Skipped++;
+            PfRepairLog(pCtx, L"not checked (path too long): %s\\%s", pszDirectory, FindData.cFileName);
+            continue;
+        }
+
+        if (!RepairProgramFilesObject(szPath, pCtx))
+            continue;
+
+        if (FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            RepairProgramFilesTree(szPath, pCtx, uDepth + 1);
+    } while (FindNextFileW(hFind, &FindData));
+
+    FindClose(hFind);
+}
+
+/* TRUE when setup is still running (the second stage): Program Files is not finished yet */
+static BOOL
+IsSetupInProgress(VOID)
+{
+    DWORD dwValue = 0, dwSize = sizeof(dwValue), dwType;
+    HKEY hKey;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\Setup", 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+        return FALSE;
+    if (RegQueryValueExW(hKey, L"SystemSetupInProgress", NULL, &dwType, (PBYTE)&dwValue, &dwSize) != ERROR_SUCCESS ||
+        dwType != REG_DWORD)
+    {
+        dwValue = 0;
+    }
+    RegCloseKey(hKey);
+    return dwValue != 0;
+}
+
+/* The log file exists and SYSTEM or the Administrators own it */
+static BOOL
+RepairLogExists(
+    _In_ PCWSTR pszLog)
+{
+    PSECURITY_DESCRIPTOR pSd = NULL;
+    PSID pOwner = NULL;
+    BOOL bResult;
+
+    if (GetFileAttributesW(pszLog) == INVALID_FILE_ATTRIBUTES)
+        return FALSE;
+    if (GetNamedSecurityInfoW((PWSTR)pszLog, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &pOwner, NULL, NULL, NULL,
+                              &pSd) != ERROR_SUCCESS)
+    {
+        /* a volume without security: nothing to repair there */
+        return TRUE;
+    }
+    bResult = pOwner && IsValidSid(pOwner) && IsSystemOrAdministrators(pOwner);
+    LocalFree(pSd);
+    return bResult;
+}
+
+static VOID
+RepairProgramFiles(VOID)
+{
+    static const PCWSTR Values[] = { L"ProgramFilesDir", L"ProgramFilesDir (x86)" };
+    WCHAR szLog[MAX_PATH], szTemp[MAX_PATH], szDir[MAX_PATH], szPath[MAX_PATH];
+    PSECURITY_DESCRIPTOR pRootSd;
+    BOOL bPresent, bDefaulted;
+    DWORD cbSid, dwSize;
+    PF_REPAIR Ctx;
+    SYSTEMTIME st;
+    PWCHAR p;
+    UINT i;
+
+    if (IsSetupInProgress())
+        return;
+    if (!ExpandEnvironmentStringsW(PF_REPAIR_LOG, szLog, ARRAYSIZE(szLog)) || RepairLogExists(szLog))
+        return;
+
+    ZeroMemory(&Ctx, sizeof(Ctx));
+    Ctx.hLog = INVALID_HANDLE_VALUE;
+    cbSid = sizeof(Ctx.AuthSid);
+    if (!CreateWellKnownSid(WinAuthenticatedUserSid, NULL, Ctx.AuthSid, &cbSid))
+        return;
+    pRootSd = BuildProfileDescriptor(ProfileDirRoot, NULL);
+    if (!pRootSd)
+        return;
+    if (!GetSecurityDescriptorDacl(pRootSd, &bPresent, &Ctx.pRootAcl, &bDefaulted) || !bPresent || !Ctx.pRootAcl)
+        goto done;
+
+    /* the log's folder below System32\LogFiles (both inherit the DACL of the system folder) */
+    StringCchCopyW(szDir, ARRAYSIZE(szDir), szLog);
+    p = wcsrchr(szDir, L'\\');
+    if (!p)
+        goto done;
+    *p = UNICODE_NULL;
+    p = wcsrchr(szDir, L'\\');
+    if (p)
+    {
+        *p = UNICODE_NULL;
+        CreateDirectoryW(szDir, NULL);
+        *p = L'\\';
+    }
+    CreateDirectoryW(szDir, NULL);
+
+    /* written under another name and renamed when the pass is complete: a pass cut short runs again */
+    if (FAILED(StringCchPrintfW(szTemp, ARRAYSIZE(szTemp), L"%s.tmp", szLog)))
+        goto done;
+    Ctx.hLog = CreateFileW(szTemp, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (Ctx.hLog == INVALID_HANDLE_VALUE)
+    {
+        DPRINT1("Cannot create %S (error %lu): Program Files not checked\n", szTemp, GetLastError());
+        goto done;
+    }
+
+    GetSystemTime(&st);
+    PfRepairLog(&Ctx, L"%04u-%02u-%02uT%02u:%02u:%02uZ userenv: Program Files: objects that still have the entries of the "
+                L"volume root (Authenticated Users: Modify) inherit from their folder", st.wYear, st.wMonth, st.wDay,
+                st.wHour, st.wMinute, st.wSecond);
+
+    for (i = 0; i < ARRAYSIZE(Values); i++)
+    {
+        if (!ReadPathValue(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion", Values[i], szPath, ARRAYSIZE(szPath)) ||
+            GetFileAttributesW(szPath) == INVALID_FILE_ATTRIBUTES)
+        {
+            continue;
+        }
+        /* A volume without access control lists (FAT): nothing to repair there */
+        dwSize = 0;
+        GetFileSecurityW(szPath, DACL_SECURITY_INFORMATION, NULL, 0, &dwSize);
+        if (dwSize == 0)
+        {
+            PfRepairLog(&Ctx, L"%s: no access control list to read (error %lu), nothing to repair", szPath, GetLastError());
+            continue;
+        }
+        PfRepairLog(&Ctx, L"checking %s", szPath);
+        RepairProgramFilesTree(szPath, &Ctx, 0);
+    }
+
+    PfRepairLog(&Ctx, L"done: %lu objects checked, %lu repaired, %lu failed, %lu not checked",
+                Ctx.Checked, Ctx.Repaired, Ctx.Failed, Ctx.Skipped);
+    CloseHandle(Ctx.hLog);
+    Ctx.hLog = INVALID_HANDLE_VALUE;
+    if (!MoveFileExW(szTemp, szLog, MOVEFILE_REPLACE_EXISTING))
+        DPRINT1("Cannot rename %S (error %lu)\n", szTemp, GetLastError());
+
+done:
+    if (Ctx.hLog != INVALID_HANDLE_VALUE)
+        CloseHandle(Ctx.hLog);
+    LocalFree(pRootSd);
+}
+
+/*
  * Called by winlogon at every start: an install from before the well-known folders had the DACLs of Windows has the
  * one of the volume root on them (Authenticated Users: Modify, for ProgramData, Program Files, Windows and the
  * root itself). Each of them gets the DACL of Windows and what is in it inherits it afresh, entries put there on purpose
@@ -1008,6 +1385,9 @@ SecureSystemDirectories(VOID)
         SecureExistingProfileDirectory(szPath, ProfileDirSystem, NULL, TRUE);
     if (ReadPathValue(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion", L"ProgramFilesDir (x86)", szPath, ARRAYSIZE(szPath)))
         SecureExistingProfileDirectory(szPath, ProfileDirSystem, NULL, TRUE);
+
+    /* What setup installed in them before it gave them their DACL (once) */
+    RepairProgramFiles();
 
     /* The root of the system volume, itself only */
     if (GetWindowsDirectoryW(szWindows, ARRAYSIZE(szWindows)) && szWindows[1] == L':' && szWindows[2] == L'\\')
