@@ -4041,6 +4041,126 @@ reconnect:
 }
 
 
+/*
+ * The descriptor of the token of a service process that the controller made the token for (not LocalSystem's own, which
+ * is the controller's). Measured on Windows Server 2022 (own-process and shared-process services of LocalSystem with a
+ * service SID, LocalService and NetworkService with and without one): SYSTEM has every token right; without a service SID
+ * the account has them too; with service SIDs the account has none (OWNER RIGHTS gets READ_CONTROL) and each service SID
+ * has them all; the Administrators may query the token and nothing else. Owner and group of the descriptor are the
+ * account. The tokens of the descendants of the service process keep what the kernel derives from the default DACL.
+ */
+static
+VOID
+ScmSetServiceTokenSd(
+    _In_ HANDLE hProcess)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY CreatorAuthority = {SECURITY_CREATOR_SID_AUTHORITY};
+    ULONG SystemSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    ULONG OwnerRightsSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    ULONG AdminsSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    PSID pSystemSid = (PSID)SystemSidBuffer, pOwnerRightsSid = (PSID)OwnerRightsSidBuffer;
+    PSID pAdminsSid = (PSID)AdminsSidBuffer;
+    PTOKEN_USER pUser = NULL;
+    PTOKEN_GROUPS pGroups = NULL;
+    SECURITY_DESCRIPTOR Sd;
+    HANDLE hToken = NULL;
+    PACL pDacl = NULL;
+    DWORD dwSize = 0, dwAclSize, i, cEnabledSids = 0;
+
+    if (!OpenProcessToken(hProcess, TOKEN_QUERY | WRITE_DAC, &hToken))
+        return;
+
+    GetTokenInformation(hToken, TokenUser, NULL, 0, &dwSize);
+    if (dwSize != 0)
+        pUser = HeapAlloc(GetProcessHeap(), 0, dwSize);
+    if (pUser == NULL || !GetTokenInformation(hToken, TokenUser, pUser, dwSize, &dwSize))
+        goto done;
+    dwSize = 0;
+    GetTokenInformation(hToken, TokenGroups, NULL, 0, &dwSize);
+    if (dwSize != 0)
+        pGroups = HeapAlloc(GetProcessHeap(), 0, dwSize);
+    if (pGroups == NULL || !GetTokenInformation(hToken, TokenGroups, pGroups, dwSize, &dwSize))
+        goto done;
+
+    RtlInitializeSid(pSystemSid, &NtAuthority, 1);
+    *RtlSubAuthoritySid(pSystemSid, 0) = SECURITY_LOCAL_SYSTEM_RID;
+    RtlInitializeSid(pOwnerRightsSid, &CreatorAuthority, 1);
+    *RtlSubAuthoritySid(pOwnerRightsSid, 0) = SECURITY_CREATOR_OWNER_RIGHTS_RID;
+    RtlInitializeSid(pAdminsSid, &NtAuthority, 2);
+    *RtlSubAuthoritySid(pAdminsSid, 0) = SECURITY_BUILTIN_DOMAIN_RID;
+    *RtlSubAuthoritySid(pAdminsSid, 1) = DOMAIN_ALIAS_RID_ADMINS;
+
+    /* the service SIDs of the token: NT AUTHORITY, S-1-5-80-<five sub-authorities> */
+    for (i = 0; i < pGroups->GroupCount; i++)
+    {
+        PSID pSid = pGroups->Groups[i].Sid;
+
+        if (RtlSubAuthorityCountSid(pSid) && *RtlSubAuthorityCountSid(pSid) == 6 &&
+            !memcmp(RtlIdentifierAuthoritySid(pSid), &NtAuthority, sizeof(NtAuthority)) &&
+            *RtlSubAuthoritySid(pSid, 0) == SECURITY_SERVICE_ID_BASE_RID)
+        {
+            if (pGroups->Groups[i].Attributes & SE_GROUP_ENABLED)
+                cEnabledSids++;
+        }
+    }
+
+    /*
+     * The form depends on the service that starts the process: one with a service SID has it enabled in the token (0xe),
+     * the SIDs of the other services of a shared process are not (0xa) and give the process no access to its own token.
+     * A process started by a service without one (measured: its account reads the token) has the form without SIDs.
+     * SYSTEM's own account without an enabled service SID: nothing was measured, the token stays as it is.
+     */
+    if (cEnabledSids == 0 && RtlEqualSid(pUser->User.Sid, pSystemSid))
+        goto done;
+
+    dwAclSize = sizeof(ACL) + 3 * FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + RtlLengthSid(pSystemSid) +
+                RtlLengthSid(pAdminsSid) + (cEnabledSids ? RtlLengthSid(pOwnerRightsSid) : RtlLengthSid(pUser->User.Sid));
+    for (i = 0; i < pGroups->GroupCount && cEnabledSids; i++)
+        dwAclSize += FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + RtlLengthSid(pGroups->Groups[i].Sid);
+    dwAclSize = (dwAclSize + 3) & ~3;
+    pDacl = HeapAlloc(GetProcessHeap(), 0, dwAclSize);
+    if (pDacl == NULL || !InitializeAcl(pDacl, dwAclSize, ACL_REVISION) ||
+        !AddAccessAllowedAce(pDacl, ACL_REVISION, TOKEN_ALL_ACCESS, pSystemSid))
+        goto done;
+    if (cEnabledSids)
+    {
+        if (!AddAccessAllowedAce(pDacl, ACL_REVISION, READ_CONTROL, pOwnerRightsSid))
+            goto done;
+        for (i = 0; i < pGroups->GroupCount; i++)
+        {
+            PSID pSid = pGroups->Groups[i].Sid;
+
+            if (RtlSubAuthorityCountSid(pSid) && *RtlSubAuthorityCountSid(pSid) == 6 &&
+                !memcmp(RtlIdentifierAuthoritySid(pSid), &NtAuthority, sizeof(NtAuthority)) &&
+                *RtlSubAuthoritySid(pSid, 0) == SECURITY_SERVICE_ID_BASE_RID &&
+                !AddAccessAllowedAce(pDacl, ACL_REVISION, TOKEN_ALL_ACCESS, pSid))
+                goto done;
+        }
+    }
+    else if (!AddAccessAllowedAce(pDacl, ACL_REVISION, TOKEN_ALL_ACCESS, pUser->User.Sid))
+        goto done;
+    if (!AddAccessAllowedAce(pDacl, ACL_REVISION, TOKEN_QUERY, pAdminsSid))
+        goto done;
+
+    if (InitializeSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION) &&
+        SetSecurityDescriptorDacl(&Sd, TRUE, pDacl, FALSE) &&
+        !SetKernelObjectSecurity(hToken, DACL_SECURITY_INFORMATION, &Sd))
+    {
+        DPRINT1("SetKernelObjectSecurity(token) failed (Error %lu)\n", GetLastError());
+    }
+
+done:
+    if (pDacl)
+        HeapFree(GetProcessHeap(), 0, pDacl);
+    if (pGroups)
+        HeapFree(GetProcessHeap(), 0, pGroups);
+    if (pUser)
+        HeapFree(GetProcessHeap(), 0, pUser);
+    CloseHandle(hToken);
+}
+
+
 static DWORD
 ScmStartUserModeService(PSERVICE Service,
                         DWORD argc,
@@ -4220,6 +4340,10 @@ SdQuit:
 
     /* Notice when the process ends without the service having stopped */
     ScmWatchServiceProcess(Service->lpImage);
+
+    /* The token of a process the controller made the token for has the descriptor Windows gives it (before it runs) */
+    if (Service->lpImage->hToken != NULL || Service->lpImage->hProcessToken != NULL)
+        ScmSetServiceTokenSd(ProcessInformation.hProcess);
 
     /* Resume the main thread and close its handle */
     ResumeThread(ProcessInformation.hThread);

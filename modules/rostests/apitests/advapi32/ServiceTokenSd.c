@@ -334,6 +334,9 @@ RunRow(SC_HANDLE hScm, PCSTR Dir, const ROW *Row, ULONG Number)
             Replace(Text, sizeof(Text), Sid, "SVC");
             ok(!strcmp(Text, Row->DefaultDacl), "%s: default DACL %s, expected %s\n", Row->Tag, Text, Row->DefaultDacl);
         }
+        StringCbCopyA(Text, sizeof(Text), Facts.TokenSd);
+        Replace(Text, sizeof(Text), Sid, "SVC");
+        ok(!strcmp(Text, Row->TokenSd), "%s: the descriptor of the token is %s, expected %s\n", Row->Tag, Text, Row->TokenSd);
     }
     ControlService(hService, SERVICE_CONTROL_STOP, &Status);
     WaitState(hService, SERVICE_STOPPED);
