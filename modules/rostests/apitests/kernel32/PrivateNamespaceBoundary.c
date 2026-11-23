@@ -307,6 +307,29 @@ START_TEST(PrivateNamespaceBoundary)
     Error = TryCreate(Name2, L"S-1-1-0", L"S-1-16-4096", L"Lower");
     ok(Error == 0, "create with a label below the caller's level: error %lu\n", Error);
 
+    /* 4b. A thread impersonating below SecurityImpersonation is not within anyone's boundary: refused, as an
+       access check refuses it (Windows not measured: the stricter choice). At SecurityImpersonation it is
+       judged by the token it impersonates (here its own) */
+    {
+        static const SECURITY_IMPERSONATION_LEVEL Levels[] = { SecurityAnonymous, SecurityIdentification, SecurityImpersonation };
+        ULONG i;
+
+        for (i = 0; i < _countof(Levels); i++)
+        {
+            if (!ImpersonateSelf(Levels[i]))
+            {
+                skip("ImpersonateSelf(%d) failed: %lu\n", Levels[i], GetLastError());
+                continue;
+            }
+            Error = TryCreate(Name2, L"S-1-1-0", NULL, L"Imp");
+            RevertToSelf();
+            if (Levels[i] < SecurityImpersonation)
+                ok(Error == ERROR_BAD_IMPERSONATION_LEVEL, "create impersonating at level %d: error %lu\n", Levels[i], Error);
+            else
+                ok(Error == 0, "create impersonating at level %d: error %lu\n", Levels[i], Error);
+        }
+    }
+
     /* 5. The Low child against the first namespace (held open here) */
     if (StartLowChild(Name, &ExitCode))
         ok(ExitCode == 0, "the child reported %lu failures\n", ExitCode);
