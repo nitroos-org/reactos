@@ -251,6 +251,7 @@ extern const LUID SeRelabelPrivilege;
 extern const LUID SeIncreaseWorkingSetPrivilege;
 extern const LUID SeTimeZonePrivilege;
 extern const LUID SeCreateSymbolicLinkPrivilege;
+extern const LUID SeDelegateSessionUserImpersonatePrivilege;
 
 //
 // DACLs
@@ -617,6 +618,10 @@ NTAPI
 SeIsTokenSibling(
     _In_ PTOKEN Token,
     _Out_ PBOOLEAN IsSibling);
+
+ULONG
+NTAPI
+SeGetCurrentProcessIntegrityLevel(VOID);
 
 BOOLEAN
 NTAPI

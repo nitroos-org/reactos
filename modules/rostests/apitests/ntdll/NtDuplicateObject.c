@@ -296,6 +296,114 @@ TestDenyAllDaclWidening(void)
     NtClose(hSection);
 }
 
+/*
+ * A target process handle that cannot be used (measured on Windows Server 2022, DuplicateHandle): ERROR_INVALID_HANDLE for a
+ * handle that is none and for a handle that is no process, ERROR_ACCESS_DENIED for a process handle without
+ * PROCESS_DUP_HANDLE; with DUPLICATE_CLOSE_SOURCE the source handle is closed all the same and the error is returned,
+ * with a NULL target process handle the call succeeds and closes the source.
+ */
+static HANDLE
+MakeEvent(void)
+{
+    HANDLE Event = NULL;
+    NTSTATUS Status = NtCreateEvent(&Event, EVENT_ALL_ACCESS, NULL, NotificationEvent, FALSE);
+
+    ok_hex(Status, STATUS_SUCCESS);
+    return Event;
+}
+
+static BOOLEAN
+IsOpen(HANDLE Handle)
+{
+    OBJECT_HANDLE_FLAG_INFORMATION Flags;
+
+    return NT_SUCCESS(NtQueryObject(Handle, ObjectHandleFlagInformation, &Flags, sizeof(Flags), NULL));
+}
+
+static void
+TestTargetProcessStatus(void)
+{
+    static const struct
+    {
+        const char *Name;
+        int Kind;           /* 0 invalid value, 1 process without PROCESS_DUP_HANDLE, 2 an event, 3 NULL */
+        NTSTATUS Expected;
+    } Rows[] =
+    {
+        { "invalid handle", 0, STATUS_INVALID_HANDLE },
+        { "process without PROCESS_DUP_HANDLE", 1, STATUS_ACCESS_DENIED },
+        { "event", 2, STATUS_OBJECT_TYPE_MISMATCH },
+        { "NULL", 3, STATUS_SUCCESS },
+    };
+    HANDLE LimitedProcess = NULL, Event2 = MakeEvent();
+    CLIENT_ID Cid;
+    OBJECT_ATTRIBUTES Oa;
+    NTSTATUS Status;
+    ULONG Row, Close;
+
+    InitializeObjectAttributes(&Oa, NULL, 0, NULL, NULL);
+    Cid.UniqueProcess = (HANDLE)(ULONG_PTR)GetCurrentProcessId();
+    Cid.UniqueThread = NULL;
+    Status = NtOpenProcess(&LimitedProcess, PROCESS_QUERY_LIMITED_INFORMATION, &Oa, &Cid);
+    ok_hex(Status, STATUS_SUCCESS);
+
+    for (Row = 0; Row < RTL_NUMBER_OF(Rows); Row++)
+    {
+        for (Close = 0; Close < 2; Close++)
+        {
+            HANDLE Source = MakeEvent(), Target, Out = (HANDLE)(ULONG_PTR)0x77;
+            BOOLEAN Open;
+
+            switch (Rows[Row].Kind)
+            {
+                case 0: Target = (HANDLE)(ULONG_PTR)0x1234; break;
+                case 1: Target = LimitedProcess; break;
+                case 2: Target = Event2; break;
+                default: Target = NULL; break;
+            }
+
+            Status = NtDuplicateObject(NtCurrentProcess(), Source, Target, &Out, 0, 0,
+                                       Close ? DUPLICATE_CLOSE_SOURCE : 0);
+            Open = IsOpen(Source);
+            if (Rows[Row].Kind == 3 && !Close)
+            {
+                /* No target at all and nothing to close: not a request */
+                ok_hex(Status, STATUS_INVALID_PARAMETER);
+            }
+            else
+            {
+                ok(Status == Rows[Row].Expected, "%s, close source %lu: status 0x%08lx, expected 0x%08lx\n",
+                   Rows[Row].Name, Close, Status, Rows[Row].Expected);
+            }
+            ok(Out == NULL, "%s, close source %lu: the target handle is %p\n", Rows[Row].Name, Close, Out);
+            ok(Open == !Close, "%s, close source %lu: the source handle is %s\n", Rows[Row].Name, Close,
+               Open ? "open" : "closed");
+            if (Open)
+                NtClose(Source);
+        }
+    }
+
+    /* The same through kernel32: the errors Windows gives */
+    {
+        HANDLE Source = MakeEvent(), Out = (HANDLE)(ULONG_PTR)0x77;
+        BOOL Ret;
+
+        SetLastError(0xdeadbeef);
+        Ret = DuplicateHandle(GetCurrentProcess(), Source, (HANDLE)(ULONG_PTR)0x1234, &Out, 0, FALSE, DUPLICATE_CLOSE_SOURCE);
+        ok(!Ret && GetLastError() == ERROR_INVALID_HANDLE, "invalid target: ret %d, error %lu\n", Ret, GetLastError());
+        ok(!IsOpen(Source), "invalid target: the source handle is still open\n");
+
+        Source = MakeEvent();
+        SetLastError(0xdeadbeef);
+        Ret = DuplicateHandle(GetCurrentProcess(), Source, LimitedProcess, &Out, 0, FALSE, DUPLICATE_CLOSE_SOURCE);
+        ok(!Ret && GetLastError() == ERROR_ACCESS_DENIED, "limited process target: ret %d, error %lu\n", Ret, GetLastError());
+        ok(!IsOpen(Source), "limited process target: the source handle is still open\n");
+    }
+
+    NtClose(LimitedProcess);
+    NtClose(Event2);
+}
+
 START_TEST(NtDuplicateObject)
 {
     NTSTATUS Status;
@@ -326,4 +434,7 @@ START_TEST(NtDuplicateObject)
 
     /* Deny-all DACL (empty DACL): a widening duplicate is DENIED. */
     TestDenyAllDaclWidening();
+
+    /* A target process handle that cannot be used */
+    TestTargetProcessStatus();
 }

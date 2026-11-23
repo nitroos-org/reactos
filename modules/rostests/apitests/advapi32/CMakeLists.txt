@@ -11,6 +11,7 @@ list(APPEND SOURCE
     AddMandatoryAce.c
     RegSaveKeyExFormat.c
     RegSaveKeyBigValue.c
+    SddlLabelAce.c
     SddlNullAcl.c
     AuditCategories.c
     CveEventWrite.c
@@ -52,6 +53,7 @@ list(APPEND SOURCE
     GetUserNameImpersonated.c
     IsTextUnicode.c
     LockServiceDatabase.c
+    LookupPrivilegeNames.c
     LookupAccountSidCaller.c
     LogonUser.c
     LogonUserCleartext.c
@@ -70,6 +72,8 @@ list(APPEND SOURCE
     LsaLogonUserFailure.c
     LsaLogonUserLocalGroups.c
     LsaPortClients.c
+    LsaPrivateDataCaller.c
+    LsaSubmitLength.c
     LsaLogonUserS4U.c
     LsaTrustedClientToken.c
     LsaManageSidNameMapping.c

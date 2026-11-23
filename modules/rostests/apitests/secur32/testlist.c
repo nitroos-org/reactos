@@ -20,6 +20,7 @@ extern void func_NegotiateSpnego(void);
 extern void func_ReadConfigHandles(void);
 extern void func_SchannelHandshake(void);
 extern void func_SchannelServerCert(void);
+extern void func_SchannelAttributes(void);
 extern void func_SetCredentialsAttributes(void);
 extern void func_SspiAuthIdentityExports(void);
 extern void func_SspiInitRace(void);
@@ -48,6 +49,7 @@ const struct test winetest_testlist[] =
     { "ReadConfigHandles", func_ReadConfigHandles },
     { "SchannelHandshake", func_SchannelHandshake },
     { "SchannelServerCert", func_SchannelServerCert },
+    { "SchannelAttributes", func_SchannelAttributes },
     { "SetCredentialsAttributes", func_SetCredentialsAttributes },
     { "SspiAuthIdentityExports", func_SspiAuthIdentityExports },
     { "SspiInitRace", func_SspiInitRace },

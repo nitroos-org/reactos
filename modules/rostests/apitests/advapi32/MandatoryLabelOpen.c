@@ -58,6 +58,31 @@ static GENERIC_MAPPING Mappings[KindCount + 3];   /* + process, thread, token */
 #define IDX_TOKEN (KindCount + 2)
 
 static WCHAR BaseDir[MAX_PATH];
+/* Whether the volume of the scratch directory / of the profile keeps security descriptors (NTFS does, FAT does not:
+   there no file carries a label or a DACL, and every file row would fail) */
+static BOOL FileAcls = TRUE, ProfileAcls = TRUE;
+
+static BOOL VolumeKeepsAcls(PCWSTR Path)
+{
+    WCHAR Root[4], FsName[MAX_PATH];
+    DWORD Flags = 0;
+
+    if (!Path[0] || Path[1] != L':')
+        return TRUE;
+    Root[0] = Path[0]; Root[1] = L':'; Root[2] = L'\\'; Root[3] = 0;
+    if (!GetVolumeInformationW(Root, NULL, 0, NULL, NULL, &Flags, FsName, _countof(FsName)))
+        return FALSE;
+    /* the NTFS driver of this system does not report FILE_PERSISTENT_ACLS */
+    return (Flags & FILE_PERSISTENT_ACLS) || !_wcsicmp(FsName, L"NTFS");
+}
+
+static VOID DetectVolumes(VOID)
+{
+    WCHAR Profile[MAX_PATH];
+
+    FileAcls = VolumeKeepsAcls(BaseDir);
+    ProfileAcls = !GetEnvironmentVariableW(L"USERPROFILE", Profile, _countof(Profile)) || VolumeKeepsAcls(Profile);
+}
 static DWORD ParentPid;
 
 static BOOL GetMapping(HANDLE Handle, PGENERIC_MAPPING Mapping)
@@ -239,6 +264,9 @@ static VOID CloseKind(OBJ_KIND Kind, HANDLE Handle)
 
 static VOID ChildObjectRows(DWORD Level)
 {
+    if (!FileAcls)
+        skip("level %lx: the volume keeps no security descriptors: the file rows are not run\n", Level);
+
     static const ACCESS_MASK Requests[] = {GENERIC_READ, GENERIC_WRITE, GENERIC_EXECUTE, DELETE, WRITE_DAC, MAXIMUM_ALLOWED};
     static const PCSTR RequestNames[] = {"read", "write", "execute", "delete", "write_dac", "maximum"};
     BOOL KeysEnforced = (RegAclMode() == 2);
@@ -262,6 +290,8 @@ static VOID ChildObjectRows(DWORD Level)
 
                 /* A pipe has no MAXIMUM_ALLOWED row and no DELETE / WRITE_DAC rows (the server end decides those) */
                 if (Kind == KindPipe && r >= 3)
+                    continue;
+                if (Kind == KindFile && !FileAcls)
                     continue;
 
                 if (Mapped & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE))
@@ -442,63 +472,79 @@ static VOID ChildCreateRows(DWORD Level)
         CloseHandle(Event);
     }
 
-    /* A file in a directory without a label: no FILE_ADD_FILE below Medium */
-    StringCchPrintfW(Name, _countof(Name), L"%s\\c-%lx", BaseDir, Level);
-    File = CreateFileW(Name, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
-    ok(File == INVALID_HANDLE_VALUE && GetLastError() == ERROR_ACCESS_DENIED,
-       "level %lx: file in the unlabelled directory: %p, error %lu\n", Level, File, GetLastError());
-    if (File != INVALID_HANDLE_VALUE) { CloseHandle(File); DeleteFileW(Name); }
-
-    /* In a directory labelled Low (OICI): created, inherits the Low label, opened again for write */
-    StringCchPrintfW(Name, _countof(Name), L"%s\\lowdir\\c-%lx", BaseDir, Level);
-    File = CreateFileW(Name, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
-    if (Level >= SECURITY_MANDATORY_LOW_RID)
+    if (!FileAcls)
     {
-        ok(File != INVALID_HANDLE_VALUE, "level %lx: file in the Low directory: %lu\n", Level, GetLastError());
-        if (File != INVALID_HANDLE_VALUE)
-        {
-            Label = LabelOf(File, SE_FILE_OBJECT, NULL, NULL);
-            ok(Label == SECURITY_MANDATORY_LOW_RID, "level %lx: file in the Low directory labelled %lx\n", Level, Label);
-            CloseHandle(File);
-            File = CreateFileW(Name, GENERIC_WRITE | DELETE, 0, NULL, OPEN_EXISTING, 0, NULL);
-            ok(File != INVALID_HANDLE_VALUE, "level %lx: own file for write: %lu\n", Level, GetLastError());
-            if (File != INVALID_HANDLE_VALUE) CloseHandle(File);
-            DeleteFileW(Name);
-        }
+        skip("level %lx: the volume keeps no security descriptors: no file creation rows\n", Level);
     }
     else
     {
-        /* Untrusted is below the directory's Low label */
+        /* A file in a directory without a label: no FILE_ADD_FILE below Medium */
+        StringCchPrintfW(Name, _countof(Name), L"%s\\c-%lx", BaseDir, Level);
+        File = CreateFileW(Name, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
         ok(File == INVALID_HANDLE_VALUE && GetLastError() == ERROR_ACCESS_DENIED,
-           "level %lx: file in the Low directory: %p, error %lu\n", Level, File, GetLastError());
+           "level %lx: file in the unlabelled directory: %p, error %lu\n", Level, File, GetLastError());
         if (File != INVALID_HANDLE_VALUE) { CloseHandle(File); DeleteFileW(Name); }
+
+        /* In a directory labelled Low (OICI): created, inherits the Low label, opened again for write */
+        StringCchPrintfW(Name, _countof(Name), L"%s\\lowdir\\c-%lx", BaseDir, Level);
+        File = CreateFileW(Name, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
+        if (Level >= SECURITY_MANDATORY_LOW_RID)
+        {
+            ok(File != INVALID_HANDLE_VALUE, "level %lx: file in the Low directory: %lu\n", Level, GetLastError());
+            if (File != INVALID_HANDLE_VALUE)
+            {
+                Label = LabelOf(File, SE_FILE_OBJECT, NULL, NULL);
+                ok(Label == SECURITY_MANDATORY_LOW_RID, "level %lx: file in the Low directory labelled %lx\n", Level, Label);
+                CloseHandle(File);
+                File = CreateFileW(Name, GENERIC_WRITE | DELETE, 0, NULL, OPEN_EXISTING, 0, NULL);
+                ok(File != INVALID_HANDLE_VALUE, "level %lx: own file for write: %lu\n", Level, GetLastError());
+                if (File != INVALID_HANDLE_VALUE) CloseHandle(File);
+                DeleteFileW(Name);
+            }
+        }
+        else
+        {
+            /* Untrusted is below the directory's Low label */
+            ok(File == INVALID_HANDLE_VALUE && GetLastError() == ERROR_ACCESS_DENIED,
+               "level %lx: file in the Low directory: %p, error %lu\n", Level, File, GetLastError());
+            if (File != INVALID_HANDLE_VALUE) { CloseHandle(File); DeleteFileW(Name); }
+        }
+
     }
 
-    /* The profile's LocalLow (FOLDERID_LocalAppDataLow) is labelled Low and writable at Low */
-    Length = GetEnvironmentVariableW(L"USERPROFILE", LocalLow, _countof(LocalLow));
-    if (Length && Length < _countof(LocalLow) &&
-        SUCCEEDED(StringCchCatW(LocalLow, _countof(LocalLow), L"\\AppData\\LocalLow")))
+    if (!ProfileAcls)
     {
-        HANDLE Dir = CreateFileW(LocalLow, READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-                                 OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-        ok(Dir != INVALID_HANDLE_VALUE, "level %lx: LocalLow: %lu\n", Level, GetLastError());
-        if (Dir != INVALID_HANDLE_VALUE)
-        {
-            Flags = 0;
-            Label = LabelOf(Dir, SE_FILE_OBJECT, &Policy, &Flags);
-            ok(Label == SECURITY_MANDATORY_LOW_RID, "level %lx: LocalLow labelled %lx\n", Level, Label);
-            ok(Flags == (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE), "level %lx: LocalLow label flags %x\n", Level, Flags);
-            CloseHandle(Dir);
-        }
-        StringCchPrintfW(Name, _countof(Name), L"%s\\mlo%lu-%lx", LocalLow, ParentPid, Level);
-        File = CreateFileW(Name, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_FLAG_DELETE_ON_CLOSE, NULL);
-        ok((File != INVALID_HANDLE_VALUE) == (Level >= SECURITY_MANDATORY_LOW_RID),
-           "level %lx: file in LocalLow: %p, error %lu\n", Level, File, GetLastError());
-        if (File != INVALID_HANDLE_VALUE) CloseHandle(File);
+        skip("level %lx: the volume of the profile keeps no security descriptors: no LocalLow rows\n", Level);
     }
     else
     {
-        ok(0, "level %lx: no LocalLow folder\n", Level);
+        /* The profile's LocalLow (FOLDERID_LocalAppDataLow) is labelled Low and writable at Low */
+        Length = GetEnvironmentVariableW(L"USERPROFILE", LocalLow, _countof(LocalLow));
+        if (Length && Length < _countof(LocalLow) &&
+            SUCCEEDED(StringCchCatW(LocalLow, _countof(LocalLow), L"\\AppData\\LocalLow")))
+        {
+            HANDLE Dir = CreateFileW(LocalLow, READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                     OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+            ok(Dir != INVALID_HANDLE_VALUE, "level %lx: LocalLow: %lu\n", Level, GetLastError());
+            if (Dir != INVALID_HANDLE_VALUE)
+            {
+                Flags = 0;
+                Label = LabelOf(Dir, SE_FILE_OBJECT, &Policy, &Flags);
+                ok(Label == SECURITY_MANDATORY_LOW_RID, "level %lx: LocalLow labelled %lx\n", Level, Label);
+                ok(Flags == (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE), "level %lx: LocalLow label flags %x\n", Level, Flags);
+                CloseHandle(Dir);
+            }
+            StringCchPrintfW(Name, _countof(Name), L"%s\\mlo%lu-%lx", LocalLow, ParentPid, Level);
+            File = CreateFileW(Name, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_FLAG_DELETE_ON_CLOSE, NULL);
+            ok((File != INVALID_HANDLE_VALUE) == (Level >= SECURITY_MANDATORY_LOW_RID),
+               "level %lx: file in LocalLow: %p, error %lu\n", Level, File, GetLastError());
+            if (File != INVALID_HANDLE_VALUE) CloseHandle(File);
+        }
+        else
+        {
+            ok(0, "level %lx: no LocalLow folder\n", Level);
+        }
+
     }
 
     /* A key created below the Low key carries the creator's level */
@@ -849,10 +895,28 @@ static VOID ChildRowsV12(DWORD Level, DWORD ParentLevel)
     Dup = NULL;
     if (DuplicateTokenEx(Token, DupAccess, NULL, SecurityImpersonation, TokenPrimary, &Dup))
     {
+        /* V12-4g: what the duplicate of a High token grants to a Low or Untrusted process (Windows: 0xb for
+           QUERY|DUPLICATE|ASSIGN_PRIMARY|ADJUST_DEFAULT, 0x2000b with READ_CONTROL; all of it for a Medium token) */
+        {
+            OBJECT_BASIC_INFORMATION Basic;
+            ACCESS_MASK Limited = TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE | TOKEN_QUERY |
+                                  TOKEN_QUERY_SOURCE | READ_CONTROL;
+
+            Status = NtQueryObject(Dup, ObjectBasicInformation, &Basic, sizeof(Basic), NULL);
+            ok(NT_SUCCESS(Status), "V12-4g level %lx: NtQueryObject 0x%lx\n", Level, Status);
+            if (NT_SUCCESS(Status))
+            {
+                if (ParentLevel >= SECURITY_MANDATORY_HIGH_RID)
+                    ok(Basic.GrantedAccess == (DupAccess & Limited), "V12-4g level %lx: granted 0x%lx, expected 0x%lx\n",
+                       Level, Basic.GrantedAccess, DupAccess & Limited);
+                else
+                    ok((Basic.GrantedAccess & DupAccess) == DupAccess, "V12-4g level %lx: granted 0x%lx\n", Level, Basic.GrantedAccess);
+            }
+        }
         Ok = SetLevel(Dup, Level);
         Error = Ok ? 0 : GetLastError();
         if (ParentLevel >= SECURITY_MANDATORY_HIGH_RID)
-            todo_ros ok(!Ok && Error == ERROR_ACCESS_DENIED, "V12-4s level %lx: lowering the High duplicate: %d, %lu\n", Level, Ok, Error);
+            ok(!Ok && Error == ERROR_ACCESS_DENIED, "V12-4s level %lx: lowering the High duplicate: %d, %lu\n", Level, Ok, Error);
         else
             ok(Ok, "V12-4s level %lx: lowering the duplicate: %lu\n", Level, Error);
         if (Ok)
@@ -883,12 +947,26 @@ static VOID ChildRowsV12(DWORD Level, DWORD ParentLevel)
     if (DuplicateTokenEx(Token, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenPrimary, &Dup) &&
         CreateProcessW(NULL, Command, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &Startup, &Pi))
     {
+        /* V12-5g: a MAXIMUM_ALLOWED duplicate of the High parent's token is granted nothing (Windows 0) */
+        {
+            OBJECT_BASIC_INFORMATION Basic;
+
+            Status = NtQueryObject(Dup, ObjectBasicInformation, &Basic, sizeof(Basic), NULL);
+            ok(NT_SUCCESS(Status), "V12-5g level %lx: NtQueryObject 0x%lx\n", Level, Status);
+            if (NT_SUCCESS(Status))
+            {
+                if (ParentLevel >= SECURITY_MANDATORY_HIGH_RID)
+                    ok(Basic.GrantedAccess == 0, "V12-5g level %lx: granted 0x%lx\n", Level, Basic.GrantedAccess);
+                else
+                    ok((Basic.GrantedAccess & TOKEN_ASSIGN_PRIMARY) != 0, "V12-5g level %lx: granted 0x%lx\n", Level, Basic.GrantedAccess);
+            }
+        }
         AccessToken.Token = Dup;
         AccessToken.Thread = Pi.hThread;
         Status = NtSetInformationProcess(Pi.hProcess, ProcessAccessToken, &AccessToken, sizeof(AccessToken));
         ok(!NT_SUCCESS(Status), "V12-5 level %lx: 0x%lx\n", Level, Status);
         if (ParentLevel >= SECURITY_MANDATORY_HIGH_RID)
-            todo_ros ok(Status == STATUS_ACCESS_DENIED, "V12-5 level %lx: 0x%lx, Windows 0xc0000022\n", Level, Status);
+            ok(Status == STATUS_ACCESS_DENIED, "V12-5 level %lx: 0x%lx, Windows 0xc0000022\n", Level, Status);
         else
             ok(Status == STATUS_PRIVILEGE_NOT_HELD, "V12-5 level %lx: 0x%lx\n", Level, Status);
         TerminateProcess(Pi.hProcess, 0);
@@ -933,12 +1011,16 @@ static VOID ChildRowsV13V7(DWORD Level)
     if (Handle) CloseHandle(Handle);
 
     /* V13-file (in the Low directory): Low 1314, Untrusted 5 */
-    StringCchPrintfW(Name, _countof(Name), L"%s\\lowdir\\v13-%lx.txt", BaseDir, Level);
-    Handle = CreateFileW(Name, GENERIC_READ | GENERIC_WRITE, 0, &Sa, CREATE_NEW, 0, NULL);
-    Error = (Handle == INVALID_HANDLE_VALUE) ? GetLastError() : 0;
-    ok(Handle == INVALID_HANDLE_VALUE && Error == (Level >= SECURITY_MANDATORY_LOW_RID ? ERROR_PRIVILEGE_NOT_HELD : ERROR_ACCESS_DENIED),
-       "V13-file level %lx: %lu\n", Level, Error);
-    if (Handle != INVALID_HANDLE_VALUE) { CloseHandle(Handle); DeleteFileW(Name); }
+    if (FileAcls)
+    {
+        StringCchPrintfW(Name, _countof(Name), L"%s\\lowdir\\v13-%lx.txt", BaseDir, Level);
+        Handle = CreateFileW(Name, GENERIC_READ | GENERIC_WRITE, 0, &Sa, CREATE_NEW, 0, NULL);
+        Error = (Handle == INVALID_HANDLE_VALUE) ? GetLastError() : 0;
+        ok(Handle == INVALID_HANDLE_VALUE && Error == (Level >= SECURITY_MANDATORY_LOW_RID ? ERROR_PRIVILEGE_NOT_HELD : ERROR_ACCESS_DENIED),
+           "V13-file level %lx: %lu\n", Level, Error);
+        if (Handle != INVALID_HANDLE_VALUE) { CloseHandle(Handle); DeleteFileW(Name); }
+
+    }
 
     /* V13-pipe: Low 1314, Untrusted 5 (on Windows an Untrusted process creates no named pipe, V7-pipe) */
     StringCchPrintfW(Name, _countof(Name), L"\\\\.\\pipe\\mlo%lu-v13-%lx", ParentPid, Level);
@@ -948,7 +1030,7 @@ static VOID ChildRowsV13V7(DWORD Level)
     if (Level >= SECURITY_MANDATORY_LOW_RID)
         ok(Error == ERROR_PRIVILEGE_NOT_HELD, "V13-pipe level %lx: %lu\n", Level, Error);
     else
-        todo_ros ok(Error == ERROR_ACCESS_DENIED, "V13-pipe level %lx: %lu (Windows 5)\n", Level, Error);
+        ok(Error == ERROR_ACCESS_DENIED, "V13-pipe level %lx: %lu (Windows 5)\n", Level, Error);
     if (Handle != INVALID_HANDLE_VALUE) CloseHandle(Handle);
 
     /* V13-key (below the Low key): Low 1314, Untrusted 5 (keys: under enforcement) */
@@ -967,16 +1049,20 @@ static VOID ChildRowsV13V7(DWORD Level)
         todo_ros_if(!KeysEnforced) ok(Result == ERROR_ACCESS_DENIED, "V13-key level %lx: %ld (Windows 5)\n", Level, Result);
     LocalFree(Sa.lpSecurityDescriptor);
 
-    /* V13-dir: an inherit-only High label from Low: ERROR_INVALID_LABEL (1299); Untrusted 5 */
-    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(HighIo, SDDL_REVISION_1, &Sa.lpSecurityDescriptor, NULL))
+    if (FileAcls)
     {
-        StringCchPrintfW(Name, _countof(Name), L"%s\\lowdir\\v13dir-%lx", BaseDir, Level);
-        Ok = CreateDirectoryW(Name, &Sa);
-        Error = Ok ? 0 : GetLastError();
-        ok(!Ok && Error == (Level >= SECURITY_MANDATORY_LOW_RID ? ERROR_INVALID_LABEL : ERROR_ACCESS_DENIED),
-           "V13-dir level %lx: %d, %lu\n", Level, Ok, Error);
-        if (Ok) RemoveDirectoryW(Name);
-        LocalFree(Sa.lpSecurityDescriptor);
+        /* V13-dir: an inherit-only High label from Low: ERROR_INVALID_LABEL (1299); Untrusted 5 */
+        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(HighIo, SDDL_REVISION_1, &Sa.lpSecurityDescriptor, NULL))
+        {
+            StringCchPrintfW(Name, _countof(Name), L"%s\\lowdir\\v13dir-%lx", BaseDir, Level);
+            Ok = CreateDirectoryW(Name, &Sa);
+            Error = Ok ? 0 : GetLastError();
+            ok(!Ok && Error == (Level >= SECURITY_MANDATORY_LOW_RID ? ERROR_INVALID_LABEL : ERROR_ACCESS_DENIED),
+               "V13-dir level %lx: %d, %lu\n", Level, Ok, Error);
+            if (Ok) RemoveDirectoryW(Name);
+            LocalFree(Sa.lpSecurityDescriptor);
+        }
+
     }
 
     /* V7-pipe: a named pipe with the default descriptor: Low creates it, Untrusted does not (5) */
@@ -996,12 +1082,34 @@ static VOID ChildRowsV13V7(DWORD Level)
     }
     else
     {
-        todo_ros ok(Handle == INVALID_HANDLE_VALUE && Error == ERROR_ACCESS_DENIED, "V7-pipe level %lx: %lu (Windows 5)\n", Level, Error);
+        ok(Handle == INVALID_HANDLE_VALUE && Error == ERROR_ACCESS_DENIED, "V7-pipe level %lx: %lu (Windows 5)\n", Level, Error);
     }
+    if (Handle != INVALID_HANDLE_VALUE)
+        CloseHandle(Handle);
+
+    /* V7-pipe-anon: an anonymous pipe is made at every level (an Untrusted process creates no named pipe but CreatePipe
+       works: the pipe has no name) and carries data */
+    {
+        HANDLE Read = NULL, Write = NULL;
+        BYTE Byte = 0x5a, Back = 0;
+        DWORD Done = 0;
+
+        SetLastError(0xdeadbeef);
+        Ok = CreatePipe(&Read, &Write, NULL, 0);
+        ok(Ok, "V7-pipe-anon level %lx: CreatePipe %lu\n", Level, GetLastError());
+        if (Ok)
+        {
+            ok(WriteFile(Write, &Byte, 1, &Done, NULL) && Done == 1, "V7-pipe-anon level %lx: write %lu\n", Level, GetLastError());
+            ok(ReadFile(Read, &Back, 1, &Done, NULL) && Done == 1 && Back == Byte, "V7-pipe-anon level %lx: read %lu\n", Level, GetLastError());
+            CloseHandle(Read);
+            CloseHandle(Write);
+        }
+    }
+    Handle = INVALID_HANDLE_VALUE;
     if (Handle != INVALID_HANDLE_VALUE) CloseHandle(Handle);
 
     /* V7-file-label: a file in the Low (OICI) directory inherits (ML;ID;NW;;;LW) */
-    if (Level >= SECURITY_MANDATORY_LOW_RID)
+    if (FileAcls && Level >= SECURITY_MANDATORY_LOW_RID)
     {
         StringCchPrintfW(Name, _countof(Name), L"%s\\lowdir\\v7-%lx.txt", BaseDir, Level);
         Handle = CreateFileW(Name, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
@@ -1239,7 +1347,8 @@ static VOID ChildRowsV17V3V8V9(DWORD Level, DWORD ParentLevel)
             else
                 ok(EventError == ERROR_ACCESS_DENIED, "V17-6 level %lx: %lu\n", Level, EventError);
             /* V17-7: the Medium-labelled file for write: 1346 */
-            ok(FileError == ERROR_BAD_IMPERSONATION_LEVEL, "V17-7 level %lx: %lu\n", Level, FileError);
+            if (FileAcls)
+                ok(FileError == ERROR_BAD_IMPERSONATION_LEVEL, "V17-7 level %lx: %lu\n", Level, FileError);
         }
         if (Dup) CloseHandle(Dup);
         CloseHandle(Token);
@@ -1286,6 +1395,12 @@ static VOID ChildRowsV17V3V8V9(DWORD Level, DWORD ParentLevel)
                 ok(Attributes != MAXDWORD, "V8-priv level %lx: %S not in the token\n", Level, Privileges[i]);
         }
         CloseHandle(Token);
+    }
+
+    if (!FileAcls)
+    {
+        skip("level %lx: the volume keeps no security descriptors: no V8-backup / V9 rows\n", Level);
+        return;
     }
 
     /* V8-backup: the Medium-labelled file for write with backup semantics: 5 */
@@ -1586,7 +1701,9 @@ static VOID ParentRowsLowerPrivileges(DWORD Level)
     if (Before != MAXDWORD)
         ok(After == 0, "lower-priv-after: 0x%lx\n", After);
 
-    /* spawn-priv2: enabling it again leaves it disabled (Windows: GetLastError 0 for this call by the parent) */
+    /* spawn-priv2: enabling it again leaves it disabled; the call returns TRUE with ERROR_NOT_ALL_ASSIGNED (Windows Server 2022,
+       a duplicate lowered to Low by the High parent: 1300 for every privilege but SeChangeNotifyPrivilege, also when the
+       parent had enabled it first; an earlier probe that printed GetLastError after other calls had read 0) */
     if (Before != MAXDWORD && LookupPrivilegeValueW(NULL, L"SeImpersonatePrivilege", &Tp.Privileges[0].Luid))
     {
         Tp.PrivilegeCount = 1;
@@ -1595,7 +1712,7 @@ static VOID ParentRowsLowerPrivileges(DWORD Level)
         Ok = AdjustTokenPrivileges(Dup, FALSE, &Tp, 0, NULL, NULL);
         Error = GetLastError();
         ok(Ok, "spawn-priv2: %lu\n", Error);
-        todo_ros ok(Error == ERROR_SUCCESS, "spawn-priv2: GetLastError %lu, Windows 0\n", Error);
+        ok(Error == ERROR_NOT_ALL_ASSIGNED, "spawn-priv2: GetLastError %lu, Windows 1300\n", Error);
         After = PrivilegeAttributes(Dup, L"SeImpersonatePrivilege");
         ok(After == 0, "spawn-priv2: attributes 0x%lx\n", After);
     }
@@ -1750,6 +1867,7 @@ START_TEST(MandatoryLabelOpen)
     {
         ParentPid = strtoul(Argv[4], NULL, 10);
         MultiByteToWideChar(CP_ACP, 0, Argv[6], -1, BaseDir, _countof(BaseDir));
+        DetectVolumes();
         Child(strtoul(Argv[3], NULL, 16), strtoul(Argv[5], NULL, 10));
         return;
     }
@@ -1781,6 +1899,9 @@ START_TEST(MandatoryLabelOpen)
     /* Scratch directory on the system volume: Everyone full, no label; lowdir: Low OICI */
     GetWindowsDirectoryW(Windows, _countof(Windows));
     StringCchPrintfW(BaseDir, _countof(BaseDir), L"%.2s\\mlo%lu", Windows, ParentPid);
+    DetectVolumes();
+    if (!FileAcls || !ProfileAcls)
+        skip("the volume keeps no security descriptors (FAT): the file rows of the children are skipped\n");
     MakeSd(0, TRUE, GENERIC_ALL, SdBuffer, (PACL)DaclBuffer, (PACL)SaclBuffer);
     ok(CreateDirectoryW(BaseDir, &Sa), "CreateDirectory %S: %lu\n", BaseDir, GetLastError());
     StringCchPrintfW(Name, _countof(Name), L"%s\\lowdir", BaseDir);

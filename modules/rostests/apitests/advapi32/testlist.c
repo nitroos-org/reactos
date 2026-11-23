@@ -13,6 +13,7 @@ extern void func_AccessCheckObjectTypeList(void);
 extern void func_AddMandatoryAce(void);
 extern void func_RegSaveKeyExFormat(void);
 extern void func_RegSaveKeyBigValue(void);
+extern void func_SddlLabelAce(void);
 extern void func_SddlNullAcl(void);
 extern void func_AuditCategories(void);
 extern void func_CveEventWrite(void);
@@ -50,6 +51,7 @@ extern void func_HKEY_CLASSES_ROOT(void);
 extern void func_GetUserNameImpersonated(void);
 extern void func_IsTextUnicode(void);
 extern void func_LockServiceDatabase(void);
+extern void func_LookupPrivilegeNames(void);
 extern void func_LookupAccountSidCaller(void);
 extern void func_LogonUser(void);
 extern void func_LogonUserCleartext(void);
@@ -70,6 +72,8 @@ extern void func_LsassServerLeak(void);
 extern void func_LsaLogonUserFailure(void);
 extern void func_LsaLogonUserLocalGroups(void);
 extern void func_LsaPortClients(void);
+extern void func_LsaPrivateDataCaller(void);
+extern void func_LsaSubmitLength(void);
 extern void func_LsaLogonUserS4U(void);
 extern void func_LsaManageSidNameMapping(void);
 extern void func_LsaSecretStorage(void);
@@ -198,6 +202,7 @@ const struct test winetest_testlist[] =
     { "AddMandatoryAce", func_AddMandatoryAce },
     { "RegSaveKeyExFormat", func_RegSaveKeyExFormat },
     { "RegSaveKeyBigValue", func_RegSaveKeyBigValue },
+    { "SddlLabelAce", func_SddlLabelAce },
     { "SddlNullAcl", func_SddlNullAcl },
     { "AuditCategories", func_AuditCategories },
     { "CveEventWrite", func_CveEventWrite },
@@ -245,6 +250,7 @@ const struct test winetest_testlist[] =
     { "GetUserNameImpersonated", func_GetUserNameImpersonated },
     { "IsTextUnicode" , func_IsTextUnicode },
     { "LockServiceDatabase" , func_LockServiceDatabase },
+    { "LookupPrivilegeNames", func_LookupPrivilegeNames },
     { "LookupAccountSidCaller", func_LookupAccountSidCaller },
     { "LogonUser", func_LogonUser },
     { "LogonUserCleartext", func_LogonUserCleartext },
@@ -264,6 +270,8 @@ const struct test winetest_testlist[] =
     { "LsaLogonUserFailure", func_LsaLogonUserFailure },
     { "LsaLogonUserLocalGroups", func_LsaLogonUserLocalGroups },
     { "LsaPortClients", func_LsaPortClients },
+    { "LsaPrivateDataCaller", func_LsaPrivateDataCaller },
+    { "LsaSubmitLength", func_LsaSubmitLength },
     { "LsaLogonUserS4U", func_LsaLogonUserS4U },
     { "LsaTrustedClientToken", func_LsaTrustedClientToken },
     { "LsaManageSidNameMapping", func_LsaManageSidNameMapping },

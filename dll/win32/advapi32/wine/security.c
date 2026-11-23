@@ -3628,7 +3628,8 @@ static BOOL DumpAce(LPVOID pace, WCHAR **pwptr, ULONG *plen)
     PSID sid;
     DWORD k;
 
-    if ((type > SYSTEM_ALARM_ACE_TYPE && !isObject) || ((PACE_HEADER)pace)->AceSize < sizeof(ACCESS_ALLOWED_ACE))
+    if ((type > SYSTEM_ALARM_ACE_TYPE && !isObject && type != SYSTEM_MANDATORY_LABEL_ACE_TYPE) ||
+        ((PACE_HEADER)pace)->AceSize < sizeof(ACCESS_ALLOWED_ACE))
     {
         SetLastError(ERROR_INVALID_ACL);
         return FALSE;
@@ -3696,6 +3697,9 @@ static BOOL DumpAce(LPVOID pace, WCHAR **pwptr, ULONG *plen)
         case SYSTEM_ALARM_OBJECT_ACE_TYPE:
             DumpString(SDDL_OBJECT_ALARM, -1, pwptr, plen);
             break;
+        case SYSTEM_MANDATORY_LABEL_ACE_TYPE:
+            DumpString(SDDL_MANDATORY_LABEL, -1, pwptr, plen);
+            break;
     }
     DumpString(&semicolon, 1, pwptr, plen);
 
@@ -3714,7 +3718,29 @@ static BOOL DumpAce(LPVOID pace, WCHAR **pwptr, ULONG *plen)
     if (piace->Header.AceFlags & FAILED_ACCESS_ACE_FLAG)
         DumpString(SDDL_AUDIT_FAILURE, -1, pwptr, plen);
     DumpString(&semicolon, 1, pwptr, plen);
-    DumpRights(piace->Mask, pwptr, plen);
+    if (type == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+    {
+        /* The mask of a label is the policy (no write up, no read up, no execute up): NW, NR, NX; a bit that has no name is a number */
+        if (piace->Mask & ~(SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP))
+        {
+            static const WCHAR fmtW[] = {'0','x','%','x',0};
+            WCHAR buf[15];
+
+            sprintfW(buf, fmtW, piace->Mask);
+            DumpString(buf, -1, pwptr, plen);
+        }
+        else
+        {
+            if (piace->Mask & SYSTEM_MANDATORY_LABEL_NO_WRITE_UP)
+                DumpString(SDDL_NO_WRITE_UP, -1, pwptr, plen);
+            if (piace->Mask & SYSTEM_MANDATORY_LABEL_NO_READ_UP)
+                DumpString(SDDL_NO_READ_UP, -1, pwptr, plen);
+            if (piace->Mask & SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP)
+                DumpString(SDDL_NO_EXECUTE_UP, -1, pwptr, plen);
+        }
+    }
+    else
+        DumpRights(piace->Mask, pwptr, plen);
     DumpString(&semicolon, 1, pwptr, plen);
     for (k = 0; k < 2; k++)
     {
@@ -3889,7 +3915,7 @@ BOOL WINAPI ConvertSecurityDescriptorToStringSecurityDescriptorW(PSECURITY_DESCR
     if (RequestedInformation & DACL_SECURITY_INFORMATION)
         if (!DumpDacl(SecurityDescriptor, NULL, &len))
             return FALSE;
-    if (RequestedInformation & SACL_SECURITY_INFORMATION)
+    if (RequestedInformation & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION))
         if (!DumpSacl(SecurityDescriptor, NULL, &len))
             return FALSE;
 
@@ -3914,7 +3940,7 @@ BOOL WINAPI ConvertSecurityDescriptorToStringSecurityDescriptorW(PSECURITY_DESCR
             LocalFree (wstr);
             return FALSE;
         }
-    if (RequestedInformation & SACL_SECURITY_INFORMATION)
+    if (RequestedInformation & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION))
         if (!DumpSacl(SecurityDescriptor, &wptr, NULL)) {
             LocalFree (wstr);
             return FALSE;

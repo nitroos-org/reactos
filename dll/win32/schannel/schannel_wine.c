@@ -1370,22 +1370,30 @@ SECURITY_STATUS SEC_ENTRY schan_QueryContextAttributesW(
             if (status == SEC_E_OK)
             {
                 SecPkgContext_StreamSizes *stream_sizes = buffer;
-                SIZE_T mac_size = info.dwHashStrength;
                 unsigned int block_size = schan_imp_get_session_cipher_block_size(ctx->session);
                 unsigned int message_size = schan_imp_get_max_message_size(ctx->session);
+                DWORD header, trailer;
 
-                TRACE("Using %lu mac bytes, message size %u, block size %u\n",
-                        mac_size, message_size, block_size);
+                /* What the record layer adds around the data of a record (Windows Server 2022: GCM 13 + 16, TLS 1.1 CBC
+                 * with SHA-1 21 + 36, TLS 1.0 CBC 5 + 36), so a caller that sizes its buffers by it does what it does there */
+                schan_imp_get_stream_overhead(ctx->session, &header, &trailer);
+                TRACE("Using header %lu trailer %lu, message size %u, block size %u\n",
+                        header, trailer, message_size, block_size);
 
-                /* These are defined by the TLS RFC */
-                stream_sizes->cbHeader = 5;
-                stream_sizes->cbTrailer = mac_size + 256; /* Max 255 bytes padding + 1 for padding size */
+                stream_sizes->cbHeader = header;
+                stream_sizes->cbTrailer = trailer;
                 stream_sizes->cbMaximumMessage = message_size;
                 stream_sizes->cbBuffers = 4;
                 stream_sizes->cbBlockSize = block_size;
             }
 
             return status;
+        }
+        case SECPKG_ATTR_CIPHER_INFO:
+        {
+            if (!schan_imp_handshake_done(ctx->session))
+                return SEC_E_INVALID_HANDLE;
+            return schan_imp_get_cipher_info(ctx->session, buffer);
         }
         case SECPKG_ATTR_REMOTE_CERT_CONTEXT:
         {
@@ -1458,6 +1466,8 @@ SECURITY_STATUS SEC_ENTRY schan_QueryContextAttributesA(
         case SECPKG_ATTR_STREAM_SIZES:
             return schan_QueryContextAttributesW(context_handle, attribute, buffer);
         case SECPKG_ATTR_REMOTE_CERT_CONTEXT:
+            return schan_QueryContextAttributesW(context_handle, attribute, buffer);
+        case SECPKG_ATTR_CIPHER_INFO:
             return schan_QueryContextAttributesW(context_handle, attribute, buffer);
         case SECPKG_ATTR_CONNECTION_INFO:
             return schan_QueryContextAttributesW(context_handle, attribute, buffer);

@@ -87,6 +87,12 @@ static NTSTATUS StoreText(PCWSTR Name, PCWSTR Text)
     return Store(Name, &Data);
 }
 
+/* LsaRetrievePrivateData never gives the value of a machine secret (measured on Windows Server 2022) */
+static BOOL IsMachineSecret(PCWSTR Name)
+{
+    return (Name[0] == L'M' || Name[0] == L'm') && Name[1] == L'$';
+}
+
 /* Retrieves Name and compares it with Text (the value as a string: Length = its bytes, MaximumLength + 2) */
 static VOID ExpectRetrieve(PCSTR Row, PCWSTR Name, PCWSTR Text)
 {
@@ -101,6 +107,15 @@ static VOID ExpectRetrieve(PCSTR Row, PCWSTR Name, PCWSTR Text)
         return;
     InitString(&Key, Name);
     Status = LsaRetrievePrivateData(Policy, &Key, &Data);
+    if (IsMachineSecret(Name))
+    {
+        ok(Status == STATUS_ACCESS_DENIED, "%s %ls: LsaRetrievePrivateData 0x%08lx, expected STATUS_ACCESS_DENIED\n",
+           Row, Name, Status);
+        if (NT_SUCCESS(Status) && Data)
+            LsaFreeMemory(Data);
+        LsaClose(Policy);
+        return;
+    }
     ok(Status == STATUS_SUCCESS, "%s %ls: LsaRetrievePrivateData 0x%08lx\n", Row, Name, Status);
     if (NT_SUCCESS(Status) && Data)
     {
@@ -125,7 +140,9 @@ static VOID ExpectRetrieveStatus(PCSTR Row, PCWSTR Name, NTSTATUS Expected)
         return;
     InitString(&Key, Name);
     Status = LsaRetrievePrivateData(Policy, &Key, &Data);
-    ok(Status == Expected, "%s %ls: LsaRetrievePrivateData 0x%08lx, expected 0x%08lx\n", Row, Name, Status, Expected);
+    if (IsMachineSecret(Name))
+        Expected = STATUS_ACCESS_DENIED;
+    ok(Status == Expected,"%s %ls: LsaRetrievePrivateData 0x%08lx, expected 0x%08lx\n", Row, Name, Status, Expected);
     if (NT_SUCCESS(Status) && Data)
         LsaFreeMemory(Data);
     LsaClose(Policy);

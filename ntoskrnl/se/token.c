@@ -1607,6 +1607,29 @@ SeIsTokenSibling(
 
 /**
  * @brief
+ * Returns the integrity level of the primary token of the current process.
+ */
+ULONG
+NTAPI
+SeGetCurrentProcessIntegrityLevel(VOID)
+{
+    PTOKEN ProcessToken;
+    ULONG ProcessLevel;
+
+    ProcessToken = PsReferencePrimaryToken(PsGetCurrentProcess());
+    if (!ProcessToken)
+        return SECURITY_MANDATORY_UNTRUSTED_RID;
+
+    SepAcquireTokenLockShared(ProcessToken);
+    ProcessLevel = ProcessToken->IntegrityLevel;
+    SepReleaseTokenLock(ProcessToken);
+    ObFastDereferenceObject(&PsGetCurrentProcess()->Token, ProcessToken);
+
+    return ProcessLevel;
+}
+
+/**
+ * @brief
  * Whether a token has a higher integrity level than the primary token of
  * the current process.
  *
@@ -2360,6 +2383,9 @@ SepCreateSystemProcessToken(VOID)
         {SeImpersonatePrivilege, SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED},
         {SeCreateGlobalPrivilege, SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED},
         {SeTimeZonePrivilege, SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED},
+        /* The token of LocalSystem holds these two on Windows Server 2022 (measured), enabled */
+        {SeIncreaseWorkingSetPrivilege, SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED},
+        {SeDelegateSessionUserImpersonatePrivilege, SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED},
         /* Services and installers that run as Local System create symbolic links (Office, MSI, ...) */
         {SeCreateSymbolicLinkPrivilege, SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED},
     };

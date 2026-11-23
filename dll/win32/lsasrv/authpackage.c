@@ -698,6 +698,10 @@ LsapTerminateLogon(
 }
 
 
+/* The largest submit buffer / authentication information a caller may state (Windows Server 2022: 1048576 bytes are
+ * taken, one more is STATUS_INVALID_PARAMETER, for LsaCallAuthenticationPackage and for LsaLogonUser alike) */
+#define LSAP_MAX_SUBMIT_LENGTH 0x100000
+
 NTSTATUS
 LsapCallAuthenticationPackage(PLSA_API_MSG RequestMsg,
                               PLSAP_LOGON_CONTEXT LogonContext)
@@ -717,6 +721,12 @@ LsapCallAuthenticationPackage(PLSA_API_MSG RequestMsg,
     PackageId = RequestMsg->CallAuthenticationPackage.Request.AuthenticationPackage;
     ClientSubmitBuffer = RequestMsg->CallAuthenticationPackage.Request.ProtocolSubmitBuffer;
     SubmitBufferLength = RequestMsg->CallAuthenticationPackage.Request.SubmitBufferLength;
+
+    if (SubmitBufferLength > LSAP_MAX_SUBMIT_LENGTH)
+    {
+        TRACE("The submit buffer is too long (%lu)\n", SubmitBufferLength);
+        return STATUS_INVALID_PARAMETER;
+    }
 
     /* Get the right authentication package */
     Package = LsapGetAuthenticationPackage(PackageId);
@@ -2235,6 +2245,13 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
     ClientLocalGroups = RequestMsg->LogonUser.Request.LocalGroups;
     LocalGroupsCount = RequestMsg->LogonUser.Request.LocalGroupsCount;
     SourceContext = RequestMsg->LogonUser.Request.SourceContext;
+
+    if (AuthInfoLength > LSAP_MAX_SUBMIT_LENGTH)
+    {
+        ERR("The authentication information is too long (%lu)\n", AuthInfoLength);
+        Status = STATUS_INVALID_PARAMETER;
+        goto done;
+    }
 
     /* Get the right authentication package */
     Package = LsapGetAuthenticationPackage(PackageId);

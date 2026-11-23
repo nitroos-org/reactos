@@ -3797,6 +3797,20 @@ LsapEnsureSecretSd(
 }
 
 
+/* The name of a machine secret ("M$" and a name after it) */
+static
+BOOLEAN
+LsapIsMachineSecretName(
+    IN PRPC_UNICODE_STRING KeyName)
+{
+    return KeyName != NULL &&
+           KeyName->Buffer != NULL &&
+           KeyName->Length >= 2 * sizeof(WCHAR) &&
+           (KeyName->Buffer[0] == L'M' || KeyName->Buffer[0] == L'm') &&
+           KeyName->Buffer[1] == L'$';
+}
+
+
 /* Function 42 */
 NTSTATUS
 WINAPI
@@ -3994,16 +4008,30 @@ LsarRetrievePrivateData(
     TRACE("LsarRetrievePrivateData(%p %wZ %p)\n",
           PolicyHandle, KeyName, EncryptedData);
 
-    /* Validate the SecretHandle */
+    /* Validate the PolicyHandle: its access mask does not matter (measured: a handle opened with no
+       access retrieves private data for an elevated administrator) */
     Status = LsapValidateDbObject(PolicyHandle,
                                   LsaDbPolicyObject,
-                                  POLICY_GET_PRIVATE_INFORMATION,
+                                  0,
                                   &PolicyObject);
     if (!NT_SUCCESS(Status))
     {
         ERR("LsapValidateDbObject returned 0x%08lx\n", Status);
         return Status;
     }
+
+    /* What decides is the caller's token against the policy descriptor, not the handle (measured: an
+       administrator whose token is not elevated and a standard user are refused through every handle) */
+    Status = LsapCheckClientPolicyAccess(PolicyObject, POLICY_GET_PRIVATE_INFORMATION);
+    if (!NT_SUCCESS(Status))
+    {
+        WARN("The caller may not retrieve private data (0x%08lx)\n", Status);
+        return Status;
+    }
+
+    /* The value of a machine secret is never given to a caller of the interface (measured), whatever the caller is */
+    if (!PolicyObject->Trusted && LsapIsMachineSecretName(KeyName))
+        return STATUS_ACCESS_DENIED;
 
     /* Open the secret object */
     Status = LsapOpenDbObject(PolicyObject,

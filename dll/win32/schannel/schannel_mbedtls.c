@@ -98,6 +98,8 @@ typedef struct
     BOOL                     cert_checked;
     DWORD                    enabled_protocols;
     BOOL                     version_checked;
+    int                      kx_group;          /* the elliptic curve (mbedtls_ecp_group_id) of the key exchange, seen during the handshake */
+    unsigned int             kx_dh_bits;        /* the size of the Diffie-Hellman prime in bits, seen during the handshake */
     char                    *alpn_names;        /* the offered ALPN protocol names, NUL separated */
     const char              *alpn_protocols[17];
 } MBEDTLS_SESSION, *PMBEDTLS_SESSION;
@@ -437,6 +439,159 @@ void schan_imp_set_session_validation(schan_imp_session session, const WCHAR *ta
     }
 }
 
+/* The named curves of the key exchange (RFC 8422, IANA TLS supported groups): the number of the group and its size in bits.
+ * mbedtls.dll does not export mbedtls_ecp_curve_info_from_grp_id */
+static BOOL schannel_curve_info(int group_id, unsigned int *tls_id, unsigned int *bits)
+{
+    static const struct { int id; unsigned int tls_id, bits; } curves[] =
+    {
+        { MBEDTLS_ECP_DP_SECP192R1, 19, 192 }, { MBEDTLS_ECP_DP_SECP224R1, 21, 224 }, { MBEDTLS_ECP_DP_SECP256R1, 23, 256 },
+        { MBEDTLS_ECP_DP_SECP384R1, 24, 384 }, { MBEDTLS_ECP_DP_SECP521R1, 25, 521 }, { MBEDTLS_ECP_DP_BP256R1, 26, 256 },
+        { MBEDTLS_ECP_DP_BP384R1, 27, 384 }, { MBEDTLS_ECP_DP_BP512R1, 28, 512 }, { MBEDTLS_ECP_DP_CURVE25519, 29, 255 },
+        { MBEDTLS_ECP_DP_SECP192K1, 18, 192 }, { MBEDTLS_ECP_DP_SECP224K1, 20, 224 }, { MBEDTLS_ECP_DP_SECP256K1, 22, 256 },
+    };
+    unsigned int i;
+
+    for (i = 0; i < sizeof(curves) / sizeof(curves[0]); i++)
+    {
+        if (curves[i].id == group_id)
+        {
+            *tls_id = curves[i].tls_id;
+            *bits = curves[i].bits;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL schannel_suite_is_aead(const mbedtls_ssl_ciphersuite_t *cs);
+static unsigned int schannel_get_cipher_key_size(int ciphersuite_id);
+static unsigned int schannel_get_mac_key_size(int ciphersuite_id);
+static ALG_ID schannel_get_cipher_algid(int ciphersuite_id);
+
+/* The bytes the record layer adds around the data of one record, for SECPKG_ATTR_STREAM_SIZES (Windows Server 2022, kbatch8
+ * evidence): header = record header 5 + the explicit nonce of GCM (8) or the explicit IV of CBC from TLS 1.1 on (block size),
+ * trailer = the tag of an AEAD suite (16), or the MAC plus a block of padding for CBC (SHA-1 with AES: 36, with 3DES: 28) */
+VOID schan_imp_get_stream_overhead(schan_imp_session session, DWORD *header, DWORD *trailer)
+{
+    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
+    const mbedtls_ssl_transform *t = s->ssl.transform;
+    const mbedtls_ssl_ciphersuite_t *cs = t->ciphersuite_info;
+    const mbedtls_cipher_info_t *ci = mbedtls_cipher_info_from_type(cs->cipher);
+
+    *header = 5;
+    if (schannel_suite_is_aead(cs))
+    {
+        *header += t->ivlen - t->fixed_ivlen;
+        *trailer = (cs->flags & MBEDTLS_CIPHERSUITE_SHORT_TAG) ? 8 : 16;
+    }
+    else if (ci && ci->mode == MBEDTLS_MODE_CBC)
+    {
+        if (s->ssl.minor_ver >= MBEDTLS_SSL_MINOR_VERSION_2)
+            *header += t->ivlen;
+        *trailer = t->maclen + ci->block_size;
+#if defined(MBEDTLS_SSL_CBC_RECORD_SPLITTING)
+        /* TLS 1.0 with a CBC suite sends the first byte as a record of its own (the BEAST countermeasure of mbedTLS, which
+         * Windows does not take: it reports 5 + 36 there). Both records are written one after the other into the buffers,
+         * so the trailer must hold the first record (1 byte, MAC, padding) and the header and MAC and padding of the
+         * second: kept safe here, at the price of a larger trailer than Windows reports for TLS 1.0. */
+        if (s->ssl.minor_ver == MBEDTLS_SSL_MINOR_VERSION_1 && s->conf.cbc_record_splitting != MBEDTLS_SSL_CBC_RECORD_SPLITTING_DISABLED)
+            *trailer = 2 * (t->maclen + ci->block_size) + 5;
+#endif
+    }
+    else
+        *trailer = t->maclen;
+}
+
+static void schan_copy_name(WCHAR *dest, const char *src)
+{
+    unsigned int i;
+
+    for (i = 0; i < 63 && src[i]; i++)
+        dest[i] = (src[i] == '-') ? '_' : (WCHAR)(unsigned char)src[i];
+    dest[i] = 0;
+}
+
+/* SECPKG_ATTR_CIPHER_INFO, as on Windows Server 2022 (kbatch8 evidence): the protocol number of the wire (0x303), the
+ * IANA name of the suite, AES / 3DES, the key length in bits (3DES 168), the block size, the hash of a non-AEAD suite
+ * (SHA1 160), the key exchange (RSA 512..16384, DH 1024..1024, ECDH 0..65536), the certificate type and for ECDHE the
+ * number of the curve (the TLS group: 23, 24, 29) as the key type */
+SECURITY_STATUS schan_imp_get_cipher_info(schan_imp_session session, SCHAN_CIPHER_INFO *info)
+{
+    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
+    int ciphersuite_id = mbedtls_ssl_get_ciphersuite_id(mbedtls_ssl_get_ciphersuite(&s->ssl));
+    const mbedtls_ssl_ciphersuite_t *cs = mbedtls_ssl_ciphersuite_from_id(ciphersuite_id);
+    const mbedtls_cipher_info_t *ci = mbedtls_cipher_info_from_type(cs->cipher);
+    ALG_ID cipher = schannel_get_cipher_algid(ciphersuite_id);
+    const char *name, *hash = "", *exch = "", *cert = "RSA";
+
+    memset(info, 0, sizeof(*info));
+    info->dwVersion = 1;
+    info->dwProtocol = 0x300 + s->ssl.minor_ver;
+    info->dwCipherSuite = ciphersuite_id;
+    info->dwBaseCipherSuite = ciphersuite_id;
+    schan_copy_name(info->szCipherSuite, mbedtls_ssl_get_ciphersuite(&s->ssl));
+
+    switch (cipher)
+    {
+        case CALG_3DES:   name = "3DES"; break;
+        case CALG_DES:    name = "DES"; break;
+        case CALG_RC4:    name = "RC4"; break;
+        default:          name = "AES"; break;
+    }
+    schan_copy_name(info->szCipher, name);
+    info->dwCipherLen = schannel_get_cipher_key_size(ciphersuite_id);
+    info->dwCipherBlockLen = ci->block_size ? ci->block_size : 1;
+    if (ci->mode == MBEDTLS_MODE_GCM || ci->mode == MBEDTLS_MODE_CCM || ci->mode == MBEDTLS_MODE_CHACHAPOLY)
+        info->dwCipherBlockLen = 16;
+
+    if (!schannel_suite_is_aead(cs))
+    {
+        switch (cs->mac)
+        {
+            case MBEDTLS_MD_MD5:    hash = "MD5"; break;
+            case MBEDTLS_MD_SHA1:   hash = "SHA1"; break;
+            case MBEDTLS_MD_SHA256: hash = "SHA256"; break;
+            case MBEDTLS_MD_SHA384: hash = "SHA384"; break;
+            default: break;
+        }
+        info->dwHashLen = schannel_get_mac_key_size(ciphersuite_id);
+    }
+    schan_copy_name(info->szHash, hash);
+
+    switch (cs->key_exchange)
+    {
+        case MBEDTLS_KEY_EXCHANGE_RSA:
+        case MBEDTLS_KEY_EXCHANGE_RSA_PSK:
+            exch = "RSA"; info->dwMinExchangeLen = 512; info->dwMaxExchangeLen = 16384;
+            break;
+        case MBEDTLS_KEY_EXCHANGE_DHE_RSA:
+        case MBEDTLS_KEY_EXCHANGE_DHE_PSK:
+            exch = "DH"; info->dwMinExchangeLen = 1024; info->dwMaxExchangeLen = 1024;
+            break;
+        case MBEDTLS_KEY_EXCHANGE_ECDHE_RSA:
+        case MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA:
+        case MBEDTLS_KEY_EXCHANGE_ECDHE_PSK:
+        case MBEDTLS_KEY_EXCHANGE_ECDH_RSA:
+        case MBEDTLS_KEY_EXCHANGE_ECDH_ECDSA:
+        {
+            unsigned int tls_id, bits;
+
+            exch = "ECDH"; info->dwMinExchangeLen = 0; info->dwMaxExchangeLen = 65536;
+            info->dwKeyType = schannel_curve_info(s->kx_group, &tls_id, &bits) ? tls_id : 0;
+            break;
+        }
+        default:
+            break;
+    }
+    schan_copy_name(info->szExchange, exch);
+
+    if (cs->key_exchange == MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA || cs->key_exchange == MBEDTLS_KEY_EXCHANGE_ECDH_ECDSA)
+        cert = "ECDSA";
+    schan_copy_name(info->szCertificate, cert);
+    return SEC_E_OK;
+}
+
 static SECURITY_STATUS schan_add_peer_chain(const mbedtls_x509_crt *peer_cert, HCERTSTORE store,
                                             PCCERT_CONTEXT *ret);
 
@@ -629,6 +784,17 @@ SECURITY_STATUS schan_imp_handshake(schan_imp_session session)
         }
 
         err = mbedtls_ssl_handshake_step(&s->ssl);
+
+        /* The key exchange parameters are freed with the handshake data when it ends: keep what
+           SECPKG_ATTR_CONNECTION_INFO and SECPKG_ATTR_CIPHER_INFO report of them */
+        if (s->ssl.handshake)
+        {
+            if (s->ssl.handshake->ecdh_ctx.grp.id != MBEDTLS_ECP_DP_NONE)
+                s->kx_group = s->ssl.handshake->ecdh_ctx.grp.id;
+            if (s->ssl.handshake->dhm_ctx.len)
+                s->kx_dh_bits = (unsigned int)s->ssl.handshake->dhm_ctx.len * 8;
+        }
+
         if (err != 0)
             break;
     }
@@ -677,14 +843,30 @@ static unsigned int schannel_get_cipher_key_size(int ciphersuite_id)
 
     unsigned int key_bitlen = cipher_info->key_bitlen;
 
+    /* Windows reports the effective 168 bits of three-key triple DES, not the 192 bits of the key material */
+    if (cipher_info->type == MBEDTLS_CIPHER_DES_EDE3_ECB || cipher_info->type == MBEDTLS_CIPHER_DES_EDE3_CBC)
+        key_bitlen = 168;
+
     TRACE("MBEDTLS schannel_get_cipher_key_size: Unknown cipher %#x, returning %u\n", ciphersuite_id, key_bitlen);
 
     return key_bitlen;
 }
 
+/* AEAD suites (GCM, CCM, ChaCha20-Poly1305) have no separate MAC: the hash of the suite is only its PRF */
+static BOOL schannel_suite_is_aead(const mbedtls_ssl_ciphersuite_t *cs)
+{
+    const mbedtls_cipher_info_t *ci = mbedtls_cipher_info_from_type(cs->cipher);
+
+    return ci && (ci->mode == MBEDTLS_MODE_GCM || ci->mode == MBEDTLS_MODE_CCM || ci->mode == MBEDTLS_MODE_CHACHAPOLY);
+}
+
 static unsigned int schannel_get_mac_key_size(int ciphersuite_id)
 {
     const mbedtls_ssl_ciphersuite_t *ssl_cipher_suite = mbedtls_ssl_ciphersuite_from_id(ciphersuite_id);
+
+    /* Windows Server 2022: 0 for the GCM suites, 160 for SHA-1 (kbatch8 evidence) */
+    if (schannel_suite_is_aead(ssl_cipher_suite))
+        return 0;
     const mbedtls_md_info_t                  *md_info = mbedtls_md_info_from_type(ssl_cipher_suite->mac);
 
     int md_size = md_info->size * CHAR_BIT; /* return the size in bits, as the secur32:schannel winetest shows */
@@ -694,19 +876,51 @@ static unsigned int schannel_get_mac_key_size(int ciphersuite_id)
     return md_size;
 }
 
-static unsigned int schannel_get_kx_key_size(const mbedtls_ssl_context *ssl, const mbedtls_ssl_config *conf, int ciphersuite_id)
+/* The size in bits of the key of the server certificate (RSA: the modulus) */
+static unsigned int schannel_server_key_bits(const MBEDTLS_SESSION *s)
+{
+    const mbedtls_x509_crt *crt = NULL;
+
+    if (s->conf.endpoint == MBEDTLS_SSL_IS_SERVER)
+        crt = s->conf.key_cert ? s->conf.key_cert->cert : NULL;
+    else
+        crt = mbedtls_ssl_get_peer_cert(&s->ssl);
+
+    return crt ? (unsigned int)mbedtls_pk_get_bitlen(&crt->pk) : 0;
+}
+
+/* dwExchStrength of SECPKG_ATTR_CONNECTION_INFO, in bits as measured on Windows Server 2022 (kbatch8 evidence):
+ * ECDHE the size of the curve (384 for P-384, 255 for X25519), RSA key exchange the size of the server key (2048),
+ * DHE the size of the Diffie-Hellman group (2048) */
+static unsigned int schannel_get_kx_key_size(const MBEDTLS_SESSION *s, int ciphersuite_id)
 {
     const mbedtls_ssl_ciphersuite_t *ssl_ciphersuite = mbedtls_ssl_ciphersuite_from_id(ciphersuite_id);
 
-    /* if we are the server take ca_chain, if we are the client take the proper x509 peer certificate */
-    const mbedtls_x509_crt *server_cert = (conf->endpoint == MBEDTLS_SSL_IS_SERVER) ? conf->ca_chain : mbedtls_ssl_get_peer_cert(ssl);
+    switch (ssl_ciphersuite->key_exchange)
+    {
+        case MBEDTLS_KEY_EXCHANGE_ECDHE_RSA:
+        case MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA:
+        case MBEDTLS_KEY_EXCHANGE_ECDHE_PSK:
+        case MBEDTLS_KEY_EXCHANGE_ECDH_RSA:
+        case MBEDTLS_KEY_EXCHANGE_ECDH_ECDSA:
+        {
+            unsigned int tls_id, bits;
 
-    if (ssl_ciphersuite->key_exchange != MBEDTLS_KEY_EXCHANGE_NONE)
-        return mbedtls_pk_get_len(&(server_cert->pk));
+            return schannel_curve_info(s->kx_group, &tls_id, &bits) ? bits : 0;
+        }
 
-    TRACE("MBEDTLS schannel_get_kx_key_size: Unknown kx %#x, returning 0\n", ssl_ciphersuite->key_exchange);
+        case MBEDTLS_KEY_EXCHANGE_DHE_RSA:
+        case MBEDTLS_KEY_EXCHANGE_DHE_PSK:
+            return s->kx_dh_bits;
 
-    return 0;
+        case MBEDTLS_KEY_EXCHANGE_RSA:
+        case MBEDTLS_KEY_EXCHANGE_RSA_PSK:
+            return schannel_server_key_bits(s);
+
+        default:
+            TRACE("MBEDTLS schannel_get_kx_key_size: Unknown kx %#x, returning 0\n", ssl_ciphersuite->key_exchange);
+            return 0;
+    }
 }
 
 static DWORD schannel_get_protocol(const mbedtls_ssl_context *ssl, const mbedtls_ssl_config *conf)
@@ -956,7 +1170,7 @@ SECURITY_STATUS schan_imp_get_connection_info(schan_imp_session session,
     info->aiHash           = schannel_get_mac_algid(ciphersuite_id);
     info->dwHashStrength   = schannel_get_mac_key_size(ciphersuite_id);
     info->aiExch           = schannel_get_kx_algid(ciphersuite_id);
-    info->dwExchStrength   = schannel_get_kx_key_size(&s->ssl, &s->conf, ciphersuite_id);
+    info->dwExchStrength   = schannel_get_kx_key_size(s, ciphersuite_id);
 
     return SEC_E_OK;
 }
