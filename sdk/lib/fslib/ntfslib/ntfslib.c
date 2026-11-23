@@ -9,6 +9,7 @@
 /* INCLUDES ******************************************************************/
 
 #include "ntfslib.h"
+#include <reactos/rosrandom.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -257,6 +258,8 @@ ComputeLayout(IN ULONG ClusterSize)
     }
 
     // Volume serial number (the format time keeps two formats in a session apart)
+    // (from the system generator; the clock is only the fall-back when ksecdd is not there)
+    if (!RosSystemRandom(&LAYOUT.SerialNumber, sizeof(LAYOUT.SerialNumber)))
     {
         ULONG Seed = NtGetTickCount() ^ (ULONG)NtfsFormatData.FormatTime ^ (ULONG)(NtfsFormatData.FormatTime >> 32);
         ULONG Hi   = RtlRandom(&Seed);

@@ -135,6 +135,7 @@ FORCEINLINE VOID InsertTailList(PLIST_ENTRY ListHead, PLIST_ENTRY Entry) {
 
 #ifdef __REACTOS__
 ULONG NTAPI NtGetTickCount(VOID);
+#include <reactos/rosrandom.h>
 #endif
 
 typedef struct {
@@ -738,6 +739,12 @@ static void get_uuid(uint8_t* uuid) {
 static void get_uuid(uint8_t* uuid, ULONG* seed) {
 #endif
     uint8_t i;
+
+#ifdef __REACTOS__
+    /* the system generator; the clock-seeded RtlRandom below is only the fall-back when ksecdd is not there */
+    if (RosSystemRandom(uuid, BTRFS_UUID_SIZE))
+        return;
+#endif
 
     for (i = 0; i < BTRFS_UUID_SIZE; i += 2) {
 #ifndef __REACTOS__

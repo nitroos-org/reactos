@@ -1245,7 +1245,19 @@ ComputerPageDlgProc(HWND hwndDlg,
 
             /* Set focus to computer name */
             SetFocus(GetDlgItem(hwndDlg, IDC_COMPUTERNAME));
-            if (pSetupData->UnattendSetup)
+            if (pSetupData->UnattendSetup && pSetupData->ShowComputerPage)
+            {
+                /* The answer file keeps this page interactive: it starts with the name of the file (a random one
+                 * for "*" or none), the person types the name and the password, and every other page stays answered */
+                if (pSetupData->ComputerName[0] &&
+                    !(pSetupData->ComputerName[0] == L'*' && !pSetupData->ComputerName[1]) &&
+                    UnattendIsValidComputerName(pSetupData->ComputerName))
+                {
+                    SetDlgItemTextW(hwndDlg, IDC_COMPUTERNAME, pSetupData->ComputerName);
+                }
+                UnattendLog(L"the computer name and Administrator password page is shown (ShowComputerPage)");
+            }
+            else if (pSetupData->UnattendSetup)
             {
                 /* "*" or no ComputerName at all means use a random name
                  * (we have already generated it above), as Windows does */
@@ -1297,9 +1309,11 @@ ComputerPageDlgProc(HWND hwndDlg,
             switch (lpnm->code)
             {
                 case PSN_SETACTIVE:
-                    /* Enable the Back and Next buttons */
-                    PropSheet_SetWizButtons(GetParent(hwndDlg), PSWIZB_BACK | PSWIZB_NEXT);
-                    if (pSetupData->UnattendSetup)
+                    /* Enable the Back and Next buttons (Back leads to pages that were answered and never shown) */
+                    PropSheet_SetWizButtons(GetParent(hwndDlg),
+                                            (pSetupData->UnattendSetup && pSetupData->ShowComputerPage)
+                                                ? PSWIZB_NEXT : (PSWIZB_BACK | PSWIZB_NEXT));
+                    if (pSetupData->UnattendSetup && !pSetupData->ShowComputerPage)
                     {
                         /* already set (and logged) when the page was created: never show it */
                         WriteComputerSettings(pSetupData->ComputerName, NULL);
@@ -1349,6 +1363,18 @@ ComputerPageDlgProc(HWND hwndDlg,
 #else
                     GetDlgItemTextW(hwndDlg, IDC_ADMINPASSWORD1, Password1, 128);
                     GetDlgItemTextW(hwndDlg, IDC_ADMINPASSWORD2, Password2, 128);
+                    if (pSetupData->UnattendSetup && pSetupData->ShowComputerPage && !Password1[0])
+                    {
+                        /* a disk image that asks for the password must not end up with a blank one */
+                        WCHAR NoPassword[256];
+
+                        if (0 == LoadStringW(hDllInstance, IDS_WZD_PASSWORDEMPTY, NoPassword, ARRAYSIZE(NoPassword)))
+                            wcscpy(NoPassword, L"You must enter a password!");
+                        MessageBoxW(hwndDlg, NoPassword, Title, MB_ICONERROR | MB_OK);
+                        SetFocus(GetDlgItem(hwndDlg, IDC_ADMINPASSWORD1));
+                        SetWindowLongPtr(hwndDlg, DWLP_MSGRESULT, -1);
+                        return TRUE;
+                    }
 #endif
                     /* Check if passwords match */
                     if (wcscmp(Password1, Password2))
@@ -1383,6 +1409,13 @@ ComputerPageDlgProc(HWND hwndDlg,
 
                     /* Set admin password */
                     SetAdministratorPassword(Password1);
+                    if (pSetupData->UnattendSetup && pSetupData->ShowComputerPage)
+                    {
+                        wcscpy(pSetupData->ComputerName, ComputerName);
+                        WriteDefaultLogonData(pSetupData->ComputerName);
+                        UnattendLog(L"computer name: %s", pSetupData->ComputerName);
+                        UnattendLog(L"Administrator password: set (typed on the page)");
+                    }
                     break;
 
                 case PSN_WIZBACK:
@@ -3538,6 +3571,12 @@ ProcessUnattendSection(
         else if (!_wcsicmp(szName, L"DisableAutoDaylightTimeSet"))
         {
             pSetupData->DisableAutoDaylightTimeSet = _wtoi(szValue);
+        }
+        else if (!_wcsicmp(szName, L"ShowComputerPage"))
+        {
+            /* yes: the page that asks for the computer name and the Administrator password is shown even though
+               the rest of the setup is unattended (a password is required then) */
+            pSetupData->ShowComputerPage = !_wcsicmp(szValue, L"yes");
         }
         else if (!_wcsicmp(szName, L"RappsDownload"))
         {

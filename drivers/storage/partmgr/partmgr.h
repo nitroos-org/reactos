@@ -115,6 +115,10 @@ typedef struct _FDO_EXTENSION
     } DiskData;
     UNICODE_STRING DiskInterfaceName;
     PARTMGR_IO_STATS IoStats;
+
+    LIST_ENTRY DiskListEntry;   // PartMgrDiskList, see PartMgrResolveIdentityCollision
+    BOOLEAN OnDiskList;
+    BOOLEAN IdentityVirtual;    // the layout this FDO reports carries an identity the disk does not
 } FDO_EXTENSION, *PFDO_EXTENSION;
 
 typedef struct _PARTITION_EXTENSION
