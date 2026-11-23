@@ -12,8 +12,8 @@
 
 NEIGHBOR_CACHE_TABLE NeighborCache[NB_HASHMASK + 1];
 
-/* Group entries in the cache (GroupEntry), at most NB_MAX_GROUP_ENTRIES (Windows: 256 neighbour entries per
-   interface, netsh interface ipv4 show global) */
+/* Group entries in the cache (GroupEntry), at most NB_MAX_GROUP_ENTRIES; each one goes after NB_GROUP_IDLE_SECONDS
+   without a datagram to its group (NBTimeout) */
 static volatile LONG NBGroupEntries;
 
 VOID NBCompleteSend( PVOID Context,
@@ -168,6 +168,16 @@ VOID NBTimeout(VOID)
 
         for (PrevNCE = &NeighborCache[i].Cache;
              (NCE = *PrevNCE) != NULL;) {
+            /* A group entry that no datagram used for a while goes; one that is in use is
+               kept (NBFindOrCreateNeighbor starts the count again). Whoever still holds a
+               reference keeps the NCE itself until it lets go */
+            if (NCE->GroupEntry && ++NCE->GroupIdle >= NB_GROUP_IDLE_SECONDS)
+            {
+                *PrevNCE = NCE->Next;
+                NBUnlinkedNeighbor(NCE, NDIS_STATUS_REQUEST_ABORTED);
+                continue;
+            }
+
             if (NCE->State & NUD_INCOMPLETE)
             {
                 /* Solicit for an address */
@@ -379,6 +389,7 @@ PNEIGHBOR_CACHE_ENTRY NBAddNeighbor(
   NCE->RefCount = 2; /* The cache's and the caller's */
   NCE->Unlinked = FALSE;
   NCE->GroupEntry = FALSE;
+  NCE->GroupIdle = 0;
   NCE->Interface = Interface;
   NCE->Address = InternalAddress;
   NCE->LinkAddressLength = LinkAddressLength;
@@ -645,14 +656,22 @@ PNEIGHBOR_CACHE_ENTRY NBFindOrCreateNeighbor(
   TI_DbgPrint(DEBUG_NCACHE, ("Called. Interface (0x%X)  Address (0x%X).\n", Interface, Address));
 
   NCE = NBLocateNeighbor(Address, Interface);
-  if (NCE == NULL)
+  if (NCE != NULL)
+    {
+        /* A group in use stays: the idle count starts again */
+        if (NCE->GroupEntry)
+            NCE->GroupIdle = 0;
+    }
+  else
     {
         TI_DbgPrint(MID_TRACE,("BCAST: %s\n", A2S(&Interface->Broadcast)));
         if (Address->Type == IP_ADDRESS_V4 && IPV4_IS_MULTICAST(Address->Address.IPv4Address)) {
             /* An IPv4 group: its Ethernet address (RFC 1112 6.4: 01:00:5e and the low 23 bits of the group), a
-               permanent entry, as Windows lists one ("static") for each group it sent to; no ARP. Permanent entries
-               never time out and any user can send to 2^28 groups: past NB_MAX_GROUP_ENTRIES cached ones, a group
-               gets an entry of its own that is not in the cache and goes with its last reference */
+               permanent entry, as Windows lists one for each group it sent to; no ARP. Windows ages them (measured:
+               they are gone minutes after the last send) and does not bound them (measured: 55 000 listed); any user
+               can send to 2^28 groups, so ours go after NB_GROUP_IDLE_SECONDS without a send, and past
+               NB_MAX_GROUP_ENTRIES cached ones a group gets an entry of its own that is not in the cache and goes
+               with its last reference */
             const UCHAR *Group = (const UCHAR *)&Address->Address.IPv4Address;
             UCHAR Mac[6];
 

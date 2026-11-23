@@ -26,6 +26,9 @@
 #define SERVICE_TAG 0x63765368  /* 'hSvc' */
 #define INVALID_TAG 0xAABBCCDD
 
+/* The dwControlsAccepted bits SetServiceStatus takes (see RSetServiceStatus) */
+#define SCM_VALID_CONTROLS_ACCEPTED 0x77FF
+
 typedef struct _SCMGR_HANDLE
 {
     DWORD Tag;
@@ -1334,6 +1337,7 @@ RControlService(
     DWORD dwControlsAccepted;
     DWORD dwCurrentState;
     PSERVICE_IMAGE lpImage;
+    HANDLE hControlPipe;
     HKEY hServicesKey = NULL;
     LPCWSTR lpLogStrings[2];
     WCHAR szLogBuffer[80];
@@ -1505,11 +1509,24 @@ RControlService(
                 break;
         }
 
+        /*
+         * The control is sent with the database lock released (the service answers with RSetServiceStatus,
+         * which needs it). Take the service's image first: the control pipe and its record stay valid if the
+         * service's process ends while the control is on its way.
+         */
+        ScmLockDatabaseShared();
+        lpImage = (lpService->Status.dwCurrentState != SERVICE_STOPPED) ?
+                      ScmAcquireImageForControl(lpService, &hControlPipe) : NULL;
+        ScmUnlockDatabase();
+        if (lpImage == NULL)
+            return ERROR_SERVICE_NOT_ACTIVE;
+
         /* Send control code to the service */
-        dwError = ScmControlService(lpImage->hControlPipe,
+        dwError = ScmControlService(hControlPipe,
                                     lpService->lpServiceName,
                                     dwControl,
                                     lpService->dwStatusHandle);
+        ScmReleaseImageAfterControl(lpImage);
 
         /* Return service status information */
         RtlCopyMemory(lpServiceStatus,
@@ -2233,8 +2250,11 @@ RSetServiceStatus(
         return ERROR_INVALID_DATA;
     }
 
-    /* Check accepted controls */
-    if (lpServiceStatus->dwControlsAccepted & ~0xFF)
+    /* Check accepted controls. Measured on Windows Server 2022: SERVICE_ACCEPT_STOP to SERVICE_ACCEPT_TRIGGEREVENT
+       (0x1 to 0x400, winsvc.h) and 0x1000, 0x2000 and 0x4000 are taken, and the service is shown in the new state with
+       them; 0x800 (SERVICE_ACCEPT_USERMODEREBOOT in the current header) and every other bit make the call fail
+       with ERROR_INVALID_DATA and change nothing. */
+    if (lpServiceStatus->dwControlsAccepted & ~SCM_VALID_CONTROLS_ACCEPTED)
     {
         DPRINT("Invalid controls accepted\n");
         return ERROR_INVALID_DATA;
@@ -8093,6 +8113,7 @@ RI_ScSendPnPMessage(
     DWORD PacketSize;
     PSERVICE pService;
     PSERVICE_IMAGE pImage;
+    HANDLE hControlPipe;
     ULONG_PTR Ptr;
     DWORD dwControlsAccepted, dwCurrentState;
     DWORD dwError = ERROR_SUCCESS;
@@ -8172,12 +8193,25 @@ RI_ScSendPnPMessage(
         RtlCopyMemory((PULONG)Ptr, pEventData, dwEventSize);
     }
 
+    /* Take the image of the service for the send: its control pipe and record stay valid if the
+       service's process ends while the packet is on its way (the lock is not held during the send) */
+    ScmLockDatabaseShared();
+    pImage = (pService->Status.dwCurrentState != SERVICE_STOPPED) ?
+                 ScmAcquireImageForControl(pService, &hControlPipe) : NULL;
+    ScmUnlockDatabase();
+    if (pImage == NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, ControlPacket);
+        return ERROR_SERVICE_NOT_ACTIVE;
+    }
+
     /* Send the control packet */
-    dwError = ScmSendControlPacket(pImage->hControlPipe,
+    dwError = ScmSendControlPacket(hControlPipe,
                                    pService->lpServiceName,
                                    dwControl,
                                    PacketSize,
                                    ControlPacket);
+    ScmReleaseImageAfterControl(pImage);
 
     /* Free the control packet */
     HeapFree(GetProcessHeap(), 0, ControlPacket);

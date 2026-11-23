@@ -2225,6 +2225,8 @@ ScmCheckServiceProcessExited(PSERVICE Service)
 }
 
 
+static VOID ScmFreeServiceImage(PSERVICE_IMAGE pServiceImage);
+
 VOID
 ScmRemoveServiceImage(PSERVICE_IMAGE pServiceImage)
 {
@@ -2247,26 +2249,89 @@ ScmRemoveServiceImage(PSERVICE_IMAGE pServiceImage)
     if (pServiceImage->hProcess != INVALID_HANDLE_VALUE)
         CloseHandle(pServiceImage->hProcess);
 
-    /* Close the control pipe */
-    if (pServiceImage->hControlPipe != INVALID_HANDLE_VALUE)
-        CloseHandle(pServiceImage->hControlPipe);
-
     /* Unload the user profile */
     if (pServiceImage->hProfile != NULL)
     {
         ScmEnableBackupRestorePrivileges(pServiceImage->hToken, TRUE);
         UnloadUserProfile(pServiceImage->hToken, pServiceImage->hProfile);
         ScmEnableBackupRestorePrivileges(pServiceImage->hToken, FALSE);
+        pServiceImage->hProfile = NULL;
     }
 
     /* Close the logon token */
     if (pServiceImage->hToken != NULL)
+    {
         CloseHandle(pServiceImage->hToken);
+        pServiceImage->hToken = NULL;
+    }
     if (pServiceImage->hProcessToken != NULL)
+    {
         CloseHandle(pServiceImage->hProcessToken);
+        pServiceImage->hProcessToken = NULL;
+    }
 
-    /* Release the service image */
+    /* A thread that is sending a control through the pipe still needs the pipe and the record: the last
+       one gives them up (ScmReleaseImageAfterControl) */
+    if (pServiceImage->lControlSenders != 0)
+    {
+        pServiceImage->bRemovePending = TRUE;
+        return;
+    }
+
+    ScmFreeServiceImage(pServiceImage);
+}
+
+
+/* Closes the control pipe and releases the record of an image that is out of the list */
+static
+VOID
+ScmFreeServiceImage(PSERVICE_IMAGE pServiceImage)
+{
+    if (pServiceImage->hControlPipe != INVALID_HANDLE_VALUE)
+        CloseHandle(pServiceImage->hControlPipe);
+
     HeapFree(GetProcessHeap(), 0, pServiceImage);
+}
+
+
+/* Called with the database lock held, shared or exclusive */
+PSERVICE_IMAGE
+ScmAcquireImageForControl(
+    _In_ PSERVICE lpService,
+    _Out_ HANDLE *phControlPipe)
+{
+    PSERVICE_IMAGE pServiceImage = lpService->lpImage;
+
+    *phControlPipe = INVALID_HANDLE_VALUE;
+    if (pServiceImage == NULL || pServiceImage->hControlPipe == INVALID_HANDLE_VALUE)
+        return NULL;
+
+    InterlockedIncrement(&pServiceImage->lControlSenders);
+    *phControlPipe = pServiceImage->hControlPipe;
+    return pServiceImage;
+}
+
+
+/* Called with the database lock held exclusively */
+VOID
+ScmReleaseImageAfterControlLocked(
+    _In_ PSERVICE_IMAGE pServiceImage)
+{
+    if (InterlockedDecrement(&pServiceImage->lControlSenders) == 0 &&
+        pServiceImage->bRemovePending)
+    {
+        ScmFreeServiceImage(pServiceImage);
+    }
+}
+
+
+VOID
+ScmReleaseImageAfterControl(
+    _In_ PSERVICE_IMAGE pServiceImage)
+{
+    ScmLockDatabaseExclusive();
+    ScmReleaseImageAfterControlLocked(pServiceImage);
+    ScmUnlockDatabase();
 }
 
 
@@ -4639,16 +4704,18 @@ ScmAutoShutdownServices(VOID)
     PLIST_ENTRY ServiceEntry;
     PSERVICE CurrentService;
     PSERVICE *Services;
-    PSERVICE_IMAGE lpImage;
+    PSERVICE_IMAGE *Images;
+    HANDLE *Pipes;
     DWORD Count = 0, i;
 
     DPRINT("ScmAutoShutdownServices() called\n");
 
     /*
-     * The order of operations to send a control to a service is: lock, reference, unlock,
-     * send the control, lock, dereference, unlock (see ScmReferenceService). A service
-     * that answers the control with RSetServiceStatus needs the database lock
-     * itself, and the control is only sent with the lock released.
+     * The order of operations to send a control to a service is: lock, reference the service and take its
+     * image, unlock, send the control, lock, give the image back and dereference the service, unlock (see
+     * ScmReferenceService, ScmAcquireImageForControl). A service that answers the control with
+     * RSetServiceStatus needs the database lock itself, and the control is only sent with the lock released;
+     * the image (with the control pipe) stays valid if the service's process ends meanwhile.
      */
     ScmLockDatabaseExclusive();
 
@@ -4659,13 +4726,16 @@ ScmAutoShutdownServices(VOID)
         ServiceEntry = ServiceEntry->Flink;
     }
 
-    Services = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)Count * sizeof(PSERVICE));
+    Services = HeapAlloc(GetProcessHeap(), 0,
+                         (SIZE_T)Count * (sizeof(PSERVICE) + sizeof(PSERVICE_IMAGE) + sizeof(HANDLE)));
     if (Services == NULL)
     {
         ScmUnlockDatabase();
         DPRINT1("ScmAutoShutdownServices(): out of memory\n");
         return;
     }
+    Images = (PSERVICE_IMAGE *)&Services[Count];
+    Pipes = (HANDLE *)&Images[Count];
 
     Count = 0;
     ServiceEntry = ServiceListHead.Flink;
@@ -4678,8 +4748,12 @@ ScmAutoShutdownServices(VOID)
              CurrentService->Status.dwCurrentState == SERVICE_START_PENDING) &&
             CurrentService->lpImage != NULL)
         {
-            ScmReferenceService(CurrentService);
-            Services[Count++] = CurrentService;
+            Images[Count] = ScmAcquireImageForControl(CurrentService, &Pipes[Count]);
+            if (Images[Count] != NULL)
+            {
+                ScmReferenceService(CurrentService);
+                Services[Count++] = CurrentService;
+            }
         }
 
         ServiceEntry = ServiceEntry->Flink;
@@ -4692,14 +4766,9 @@ ScmAutoShutdownServices(VOID)
     {
         CurrentService = Services[i];
 
-        /* Read once: a stop clears it without the caller holding a lock */
-        lpImage = *(PSERVICE_IMAGE volatile *)&CurrentService->lpImage;
-        if (lpImage == NULL)
-            continue;
-
         /* Send the shutdown notification */
         DPRINT("Shutdown service: %S\n", CurrentService->lpServiceName);
-        ScmControlService(lpImage->hControlPipe,
+        ScmControlService(Pipes[i],
                           CurrentService->lpServiceName,
                           SERVICE_CONTROL_SHUTDOWN,
                           CurrentService->dwStatusHandle);
@@ -4707,7 +4776,10 @@ ScmAutoShutdownServices(VOID)
 
     ScmLockDatabaseExclusive();
     for (i = 0; i < Count; i++)
+    {
+        ScmReleaseImageAfterControlLocked(Images[i]);
         ScmDereferenceService(Services[i]);
+    }
     ScmUnlockDatabase();
 
     HeapFree(GetProcessHeap(), 0, Services);

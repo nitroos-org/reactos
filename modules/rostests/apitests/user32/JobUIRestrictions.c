@@ -491,7 +491,8 @@ RunNested(void)
         SetLastError(0xdeadbeef);
         bResult = AssignProcessToJobObject(hLimited, pi.hProcess);
         ok(bResult == FALSE, "A job with UI limits took a process of another job\n");
-        ok(GetLastError() == ERROR_ACCESS_DENIED, "AssignProcessToJobObject error %lu\n", GetLastError());
+        /* Windows Server 2022: ERROR_NOT_SUPPORTED (measured with a process in a job with HANDLES limits and a second job with GLOBALATOMS) */
+        ok(GetLastError() == ERROR_NOT_SUPPORTED, "AssignProcessToJobObject error %lu\n", GetLastError());
 
         ResumeThread(pi.hThread);
         ok(WaitPumping(hDone, 30000) == WAIT_OBJECT_0, "The child did not check its rows\n");

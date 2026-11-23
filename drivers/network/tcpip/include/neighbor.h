@@ -7,7 +7,7 @@
 
 #pragma once
 
-#define NB_HASHMASK 0xF /* Hash mask for neighbor cache */
+#define NB_HASHMASK 0x3F /* Hash mask for neighbor cache (64 chains: NB_MAX_GROUP_ENTRIES group entries stay about 16 deep) */
 
 typedef VOID (*PNEIGHBOR_PACKET_COMPLETE)
     ( PVOID Context, PNDIS_PACKET Packet, NDIS_STATUS Status );
@@ -39,6 +39,7 @@ typedef struct NEIGHBOR_CACHE_ENTRY {
     volatile LONG RefCount;             /* See above */
     BOOLEAN Unlinked;                   /* Out of the cache (bucket lock) */
     BOOLEAN GroupEntry;                 /* A cached IPv4 group entry, counted (NBFindOrCreateNeighbor) */
+    UINT GroupIdle;                     /* Group entry: seconds since it was last used (NBTimeout ages it) */
     UCHAR State;                        /* State of NCE */
     UINT EventTimer;                    /* Ticks since last event */
     UINT EventCount;                    /* Number of events */
@@ -54,8 +55,12 @@ typedef struct NEIGHBOR_CACHE_ENTRY {
 #define NUD_PERMANENT  0x02
 #define NUD_STALE      0x04
 
-/* The most IPv4 group entries kept in the cache (NBFindOrCreateNeighbor) */
-#define NB_MAX_GROUP_ENTRIES 256
+/* The most IPv4 group entries kept in the cache (NBFindOrCreateNeighbor): the 1024 that Windows reports as its
+   neighbour cache limit per interface (netsh interface ipv4 show global), which it does not enforce for groups */
+#define NB_MAX_GROUP_ENTRIES 1024
+
+/* Seconds a group entry stays in the cache without a datagram sent to its group (NBTimeout) */
+#define NB_GROUP_IDLE_SECONDS 120
 
 /* Timeout for incomplete NCE ARP requests */
 #define ARP_INCOMPLETE_TIMEOUT 3
