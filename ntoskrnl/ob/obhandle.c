@@ -3669,9 +3669,9 @@ NtDuplicateObject(IN HANDLE SourceProcessHandle,
                   IN ULONG Options)
 {
     PEPROCESS SourceProcess, TargetProcess, Target;
-    HANDLE hTarget;
+    HANDLE hTarget = NULL;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
-    NTSTATUS Status;
+    NTSTATUS Status, TargetStatus = STATUS_SUCCESS;
     OBTRACE(OB_HANDLE_DEBUG,
             "%s - Duplicating handle: %p for %p into %p.\n",
             __FUNCTION__,
@@ -3723,7 +3723,9 @@ NtDuplicateObject(IN HANDLE SourceProcessHandle,
         }
         else
         {
-            /* No target process */
+            /* No target process: the source is still closed when the caller asked for it, and the caller
+               gets the status of the target handle (measured on Windows Server 2022) */
+            TargetStatus = Status;
             Target = NULL;
         }
     }
@@ -3743,6 +3745,13 @@ NtDuplicateObject(IN HANDLE SourceProcessHandle,
                                HandleAttributes,
                                Options,
                                PreviousMode);
+
+    /* A target process that could not be used is the answer, not the result of the call without one */
+    if (!NT_SUCCESS(TargetStatus))
+    {
+        Status = TargetStatus;
+        hTarget = NULL;
+    }
 
     /* Check if the caller wanted the return handle */
     if (TargetHandle)
