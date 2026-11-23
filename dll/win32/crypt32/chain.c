@@ -112,10 +112,24 @@ static BOOL CRYPT_CheckRestrictedRoot(HCERTSTORE store)
     return ret;
 }
 
+/* An engine, the default ones above all, lives as long as the process and
+ * holds the system stores it opened.  A certificate added to or removed from
+ * one of them by anything else after that (a root added to the machine's Root
+ * store, say) must be seen by the next chain: the stores bring themselves up to
+ * date when they are enumerated and the registry key changed.  (Wine resyncs the
+ * whole default world on every use instead; reading the 230 roots again for
+ * each chain would cost every TLS handshake.) */
+static void CRYPT_WatchSystemStore(HCERTSTORE store)
+{
+    if (store)
+        CertControlStore(store, 0, CERT_STORE_CTRL_AUTO_RESYNC, NULL);
+}
+
 HCERTCHAINENGINE CRYPT_CreateChainEngine(HCERTSTORE root, DWORD system_store, const CERT_CHAIN_ENGINE_CONFIG *config)
 {
     CertificateChainEngine *engine;
     HCERTSTORE worldStores[4];
+    BOOL system_root = FALSE;
     /* The engine only reads the stores.  A LocalMachine store is opened for
      * read, and the ones that are not needed (all but Root) only when they
      * exist, so a user that may not write HKLM is not refused and nothing is
@@ -130,7 +144,10 @@ HCERTCHAINENGINE CRYPT_CreateChainEngine(HCERTSTORE root, DWORD system_store, co
         else if (config->hRestrictedRoot)
             root = CertDuplicateStore(config->hRestrictedRoot);
         else
+        {
             root = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, system_store | ro, L"Root");
+            system_root = TRUE;
+        }
         if(!root)
             return NULL;
     }
@@ -148,6 +165,11 @@ HCERTCHAINENGINE CRYPT_CreateChainEngine(HCERTSTORE root, DWORD system_store, co
     worldStores[1] = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, system_store | ro_existing, L"CA");
     worldStores[2] = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, system_store | ro_existing, L"My");
     worldStores[3] = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, system_store | ro_existing, L"Trust");
+    if (system_root)
+        CRYPT_WatchSystemStore(root);
+    CRYPT_WatchSystemStore(worldStores[1]);
+    CRYPT_WatchSystemStore(worldStores[2]);
+    CRYPT_WatchSystemStore(worldStores[3]);
 
     CRYPT_AddStoresToCollection(engine->hWorld, ARRAY_SIZE(worldStores), worldStores);
     CRYPT_AddStoresToCollection(engine->hWorld, config->cAdditionalStore, config->rghAdditionalStore);
