@@ -1,5 +1,6 @@
 LSI Logic Fusion-MPT SAS (SAS1068) miniport, PCI 1000:0054 (the VMware "LSI Logic SAS" controller; also
-emulated by QEMU: -device mptsas1068)
+emulated by QEMU: -device mptsas1068), and the parallel SCSI chip of the same family, LSI53C1030, PCI 1000:0030
+(the VirtualBox "LsiLogic" controller)
 
 The driver (mptsas.c) is new code, GPL-2.0-or-later, written against the legacy SCSI port
 interface (scsiport) like the BusLogic and PVSCSI miniports.
@@ -16,12 +17,19 @@ Origin of the device interface
             and IOC init, reply frames, port facts, port enable). No code was copied: the OpenBSD driver is
             written for its own SCSI midlayer and DMA API.
 
+The 53C1030 uses the same messages. What differs is what PORT FACTS reports (port type SCSI instead of SAS: the
+targets are SCSI ids 0..15 of one bus, the adapter has id 7) and the device ids. Facts about it were checked in
+the open source of VirtualBox's device model (src/VBox/Devices/Storage/DevLsiLogicSCSI.cpp and .h; GPL-3.0-only;
+read for the device ids (0x0030, subsystem 1000:8000), the port facts it returns, the frame size (128
+bytes) and the SCSI I/O request fields it accepts (TargetID below 16, Bus 0), and not copied) and in the
+OpenBSD mpi(4) driver, which drives the 1030 with the same code as the SAS1068.
+
 Not used: the Linux drivers mptbase/mptsas/mpt3sas (GPL-2.0-only, not compatible with this tree), and any
 LSI or VMware binary driver.
 
 What it does not do: events (no hot plug of disks), configuration pages (no RAID volume handling, no
 transfer parameters), MSI, more than one logical unit per target, CDBs longer than 16 bytes, more than
-35 scatter/gather elements per request, the parallel SCSI chip LSI 1030 (PCI 1000:0030: not emulated by
-QEMU, so not tried). The sizes that the controller reports (request frame, reply queue depth, credits,
+35 scatter/gather elements per request, transfer parameters of the parallel SCSI bus (the 1030 runs at the speed the
+virtual bus gives it). QEMU does not emulate the 1030: it is tested on VirtualBox only. The sizes that the controller reports (request frame, reply queue depth, credits,
 number of devices) are checked before they are used, every wait on the controller is bounded, and every
 address and context that the controller writes into a reply is validated.
