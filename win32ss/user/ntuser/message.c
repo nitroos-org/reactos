@@ -1981,6 +1981,7 @@ co_IntSendMessageTimeout( HWND hWnd,
     PWND DesktopWindow;
     HWND *Children;
     HWND *Child;
+    USER_HELD_POOL_ENTRY HeldChildren;
 
     if (hWnd != HWND_BROADCAST && hWnd != HWND_TOPMOST)
     {
@@ -2008,6 +2009,8 @@ co_IntSendMessageTimeout( HWND hWnd,
         return 0;
     }
 
+    /* A broadcast calls this thread's own windows too: the list goes with the thread if it ends in one */
+    UserHoldPoolCo(Children, USERTAG_WINDOWLIST, &HeldChildren);
     for (Child = Children; NULL != *Child; Child++)
     {
         PWND pwnd = UserGetWindowObject(*Child);
@@ -2020,7 +2023,7 @@ co_IntSendMessageTimeout( HWND hWnd,
         co_IntSendMessageTimeoutSingle(*Child, Msg, wParam, lParam, uFlags, uTimeout, uResult);
     }
 
-    ExFreePoolWithTag(Children, USERTAG_WINDOWLIST);
+    UserFreePoolCo(&HeldChildren);
 
     return (LRESULT) TRUE;
 }
