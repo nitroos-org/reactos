@@ -18,6 +18,7 @@
 #include "gptlayout.h"
 
 #include "registry.h"
+#include <reactos/rosrandom.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -140,6 +141,14 @@ GptCreateGuid(
     LARGE_INTEGER Time, Counter64;
     PULONG Words = (PULONG)Guid;
     ULONG i;
+
+    /* The system generator; the clock below is only the fall-back when ksecdd is not there */
+    if (RosSystemRandom(Guid, sizeof(*Guid)))
+    {
+        Guid->Data3 = (Guid->Data3 & 0x0FFF) | 0x4000;
+        Guid->Data4[0] = (Guid->Data4[0] & 0x3F) | 0x80;
+        return;
+    }
 
     NtQuerySystemTime(&Time);
     NtQueryPerformanceCounter(&Counter64, NULL);
@@ -1537,13 +1546,17 @@ SetDiskSignature(
 
     while (TRUE)
     {
-        NtQuerySystemTime(&SystemTime);
-        RtlTimeToTimeFields(&SystemTime, &TimeFields);
+        /* The system generator; the clock is only the fall-back when ksecdd is not there */
+        if (!RosSystemRandom(Buffer, sizeof(ULONG)))
+        {
+            NtQuerySystemTime(&SystemTime);
+            RtlTimeToTimeFields(&SystemTime, &TimeFields);
 
-        Buffer[0] = (UCHAR)(TimeFields.Year & 0xFF) + (UCHAR)(TimeFields.Hour & 0xFF);
-        Buffer[1] = (UCHAR)(TimeFields.Year >> 8) + (UCHAR)(TimeFields.Minute & 0xFF);
-        Buffer[2] = (UCHAR)(TimeFields.Month & 0xFF) + (UCHAR)(TimeFields.Second & 0xFF);
-        Buffer[3] = (UCHAR)(TimeFields.Day & 0xFF) + (UCHAR)(TimeFields.Milliseconds & 0xFF);
+            Buffer[0] = (UCHAR)(TimeFields.Year & 0xFF) + (UCHAR)(TimeFields.Hour & 0xFF);
+            Buffer[1] = (UCHAR)(TimeFields.Year >> 8) + (UCHAR)(TimeFields.Minute & 0xFF);
+            Buffer[2] = (UCHAR)(TimeFields.Month & 0xFF) + (UCHAR)(TimeFields.Second & 0xFF);
+            Buffer[3] = (UCHAR)(TimeFields.Day & 0xFF) + (UCHAR)(TimeFields.Milliseconds & 0xFF);
+        }
 
         if (DiskEntry->LayoutBuffer->Signature == 0)
         {
