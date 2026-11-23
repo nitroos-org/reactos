@@ -27,6 +27,9 @@ PEPROCESS ExpDebuggerProcessAttach;
 PEPROCESS ExpDebuggerProcessKill;
 ULONG_PTR ExpDebuggerPageIn;
 
+/* SysDbgGetLiveKernelDump, which the headers declare only for NTDDI_WINBLUE and later */
+#define SYSDBG_GET_LIVE_KERNEL_DUMP ((SYSDBG_COMMAND)37)
+
 /* FUNCTIONS *****************************************************************/
 
 /*
@@ -218,6 +221,25 @@ NtSystemDebugControl(
     ULONG Length = 0;
     NTSTATUS Status;
 
+    /*
+     * Measured on Windows Server 2022 (booted without a kernel debugger, an
+     * elevated administrator with SeDebugPrivilege disabled and enabled, and a
+     * standard user; every Command from 0 to 47 and larger values with NULL
+     * buffers): every command but the two live dump commands returns
+     * STATUS_DEBUGGER_INACTIVE, whatever the caller's privileges and whether
+     * the command is known or not; SysDbgGetTriageDump and SysDbgGetLiveKernelDump
+     * are decided by the privilege first (STATUS_ACCESS_DENIED), then by the
+     * buffers (STATUS_INFO_LENGTH_MISMATCH here, the output or input buffer
+     * being empty).
+     */
+    if ((KdPitchDebugger ||
+         (!KdDebuggerEnabled && Command != SysDbgEnableKernelDebugger && Command != SysDbgDisableKernelDebugger)) &&
+        Command != SysDbgGetTriageDump &&
+        Command != SYSDBG_GET_LIVE_KERNEL_DUMP)
+    {
+        return STATUS_DEBUGGER_INACTIVE;
+    }
+
     /* Debugger controlling requires the debug privilege */
     if (!SeSinglePrivilegeCheck(SeDebugPrivilege, PreviousMode))
         return STATUS_ACCESS_DENIED;
@@ -232,6 +254,15 @@ NtSystemDebugControl(
                 ProbeForWrite(OutputBuffer, OutputBufferLength, sizeof(ULONG));
             if (ReturnLength)
                 ProbeForWriteUlong(ReturnLength);
+        }
+
+        /* SysDbgGetLiveKernelDump: an empty input buffer is refused first (Windows Server 2022); the dump itself is not implemented */
+        if (Command == SYSDBG_GET_LIVE_KERNEL_DUMP)
+        {
+            Status = (InputBufferLength == 0) ? STATUS_INFO_LENGTH_MISMATCH : STATUS_NOT_IMPLEMENTED;
+            if (ReturnLength)
+                *ReturnLength = 0;
+            _SEH2_YIELD(return Status);
         }
 
         switch (Command)
@@ -377,6 +408,12 @@ NtSystemDebugControl(
                 break;
 
             case SysDbgGetTriageDump:
+                /* An empty output buffer is refused first (Windows Server 2022) */
+                if (OutputBufferLength == 0)
+                {
+                    Status = STATUS_INFO_LENGTH_MISMATCH;
+                    break;
+                }
                 UNIMPLEMENTED;
                 Status = STATUS_NOT_IMPLEMENTED;
                 break;
