@@ -1,6 +1,7 @@
 add_subdirectory(mmixer_test)
 add_subdirectory(pagercommit)
 add_subdirectory(pagersoak)
+add_subdirectory(svcimage)
 add_subdirectory(fsngrace)
 add_subdirectory(dllexport)
 add_subdirectory(sesstest)

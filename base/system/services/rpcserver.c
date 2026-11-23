@@ -1334,6 +1334,7 @@ RControlService(
     DWORD dwControlsAccepted;
     DWORD dwCurrentState;
     PSERVICE_IMAGE lpImage;
+    HANDLE hControlPipe;
     HKEY hServicesKey = NULL;
     LPCWSTR lpLogStrings[2];
     WCHAR szLogBuffer[80];
@@ -1505,11 +1506,24 @@ RControlService(
                 break;
         }
 
+        /*
+         * The control is sent with the database lock released (the service answers with RSetServiceStatus,
+         * which needs it). Take the service's image first: the control pipe and its record stay valid if the
+         * service's process ends while the control is on its way.
+         */
+        ScmLockDatabaseShared();
+        lpImage = (lpService->Status.dwCurrentState != SERVICE_STOPPED) ?
+                      ScmAcquireImageForControl(lpService, &hControlPipe) : NULL;
+        ScmUnlockDatabase();
+        if (lpImage == NULL)
+            return ERROR_SERVICE_NOT_ACTIVE;
+
         /* Send control code to the service */
-        dwError = ScmControlService(lpImage->hControlPipe,
+        dwError = ScmControlService(hControlPipe,
                                     lpService->lpServiceName,
                                     dwControl,
                                     lpService->dwStatusHandle);
+        ScmReleaseImageAfterControl(lpImage);
 
         /* Return service status information */
         RtlCopyMemory(lpServiceStatus,
@@ -8087,6 +8101,7 @@ RI_ScSendPnPMessage(
     DWORD PacketSize;
     PSERVICE pService;
     PSERVICE_IMAGE pImage;
+    HANDLE hControlPipe;
     ULONG_PTR Ptr;
     DWORD dwControlsAccepted, dwCurrentState;
     DWORD dwError = ERROR_SUCCESS;
@@ -8166,12 +8181,25 @@ RI_ScSendPnPMessage(
         RtlCopyMemory((PULONG)Ptr, pEventData, dwEventSize);
     }
 
+    /* Take the image of the service for the send: its control pipe and record stay valid if the
+       service's process ends while the packet is on its way (the lock is not held during the send) */
+    ScmLockDatabaseShared();
+    pImage = (pService->Status.dwCurrentState != SERVICE_STOPPED) ?
+                 ScmAcquireImageForControl(pService, &hControlPipe) : NULL;
+    ScmUnlockDatabase();
+    if (pImage == NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, ControlPacket);
+        return ERROR_SERVICE_NOT_ACTIVE;
+    }
+
     /* Send the control packet */
-    dwError = ScmSendControlPacket(pImage->hControlPipe,
+    dwError = ScmSendControlPacket(hControlPipe,
                                    pService->lpServiceName,
                                    dwControl,
                                    PacketSize,
                                    ControlPacket);
+    ScmReleaseImageAfterControl(pImage);
 
     /* Free the control packet */
     HeapFree(GetProcessHeap(), 0, ControlPacket);
