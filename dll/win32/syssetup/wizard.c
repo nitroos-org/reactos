@@ -1154,21 +1154,53 @@ WriteDefaultLogonData(LPWSTR Domain)
  * "DESKTOP-" followed by 7 random uppercase letters/digits, the same shape
  * Windows 10 setup generates when no computer name is given.
  */
+/* advapi32: RtlGenRandom (the system random number generator, ksecdd.sys) */
+BOOLEAN WINAPI SystemFunction036(PVOID Buffer, ULONG Length);
+
+/*
+ * The characters come from the system random number generator. A disk image installed once and copied to other
+ * machines starts its second stage at the same tick count on each of them, and a name made from
+ * GetTickCount() is then the same name (a NetBIOS name conflict).
+ */
 static void
 GenerateComputerName(LPWSTR lpBuffer)
 {
     static const WCHAR Chars[] = L"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     static const unsigned cChars = sizeof(Chars) / sizeof(WCHAR) - 1;
-    unsigned i;
+    /* bytes below this give every character the same chance (252 = 7 * 36) */
+    static const BYTE Limit = (256 / 36) * 36;
+    BYTE Random[32];
+    unsigned i = 8, j = sizeof(Random);
+    BOOL HaveRandom = TRUE;
 
     wcscpy(lpBuffer, L"DESKTOP-");
 
-    srand(GetTickCount());
-
     /* fill in 7 characters */
-    for (i = 8; i < 15; i++)
-        lpBuffer[i] = Chars[rand() % cChars];
+    while (i < 15)
+    {
+        if (j == sizeof(Random))
+        {
+            if (!SystemFunction036(Random, sizeof(Random)))
+            {
+                /* the generator refuses: the old source, never fails */
+                HaveRandom = FALSE;
+                srand(GetTickCount() ^ GetCurrentProcessId());
+                break;
+            }
+            j = 0;
+        }
+        if (Random[j] < Limit)
+            lpBuffer[i++] = Chars[Random[j] % cChars];
+        j++;
+    }
 
+    if (!HaveRandom)
+    {
+        for (; i < 15; i++)
+            lpBuffer[i] = Chars[rand() % cChars];
+    }
+
+    SecureZeroMemory(Random, sizeof(Random));
     lpBuffer[15] = UNICODE_NULL; /* NULL-terminate */
 }
 
