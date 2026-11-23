@@ -8,19 +8,22 @@
 /*
  * SeAccessCheck takes the descriptor of its kernel-mode caller as it is: one that a file
  * system read from the disk is not validated again. Its DACL walk takes, for each index,
- * the ACE RtlGetAce gives. These rows fix what it does with malformed DACLs whose every
- * index RtlGetAce resolves (ACEs of size 0, sizes that are not a multiple of 4, an ACE that
- * runs past AclSize, an AceCount larger than the ACEs that fit, with slack in the ACL): the
- * same before and after the walk became one pass. A DACL where RtlGetAce fails for an index
- * (an ACE at or beyond AclSize, a bad revision) makes the checked kernel assert, before as
- * after; the free kernel stops the walk there (before, it read the memory behind the ACL):
- * that row runs on free builds only.
+ * the ACE RtlGetAce gives, and stops at the first ACE that does not lie within the ACL
+ * (its header, a size of at least a header, and for allow and deny ACEs every field the
+ * check reads: mask, flags, object types, SID), as the label walk does: that ACE and the
+ * ones after it count for nothing. Sizes that are not a multiple of 4 and an AceCount
+ * larger than the ACEs, with slack in the ACL, are walked as RtlGetAce resolves them. A
+ * DACL where RtlGetAce fails for an index (an ACE at or beyond AclSize, a bad revision)
+ * makes the checked kernel assert; the free kernel stops the walk there: that row runs on
+ * free builds only.
  *
  * The matrix: MA_MATRIX pseudo-random malformed DACLs (fixed seed, only shapes whose every
  * index RtlGetAce resolves and whose ACEs lie within the test's buffer), each checked for
- * five desired accesses; the hash of the results is compared with the value of the kernel
- * before the change (MA_MATRIX_GOLDEN). SeAccessCheckLargeDaclPerf (hidden) prints the cost
- * of one check against DACLs of 2 to about 3 270 ACEs.
+ * five desired accesses. A DACL whose walk meets an ACE that does not lie within the ACL
+ * must give the results of the same DACL with AceCount cut before that ACE; every other
+ * DACL must give the results the kernel gave before the change (the hash of those rows,
+ * MA_MATRIX_FIT_GOLDEN, measured on the kernel without the stop). SeAccessCheckLargeDaclPerf
+ * (hidden) prints the cost of one check against DACLs of 2 to about 3 270 ACEs.
  */
 
 #include <kmt_test.h>
@@ -36,9 +39,13 @@ static GENERIC_MAPPING MaMapping =
 #define MA_BUFFER       1024
 #define MA_MATRIX       4000
 #define MA_MATRIX_SEED  0x5eed1234UL
-/* Rows and hash of the matrix on the kernel before the one-pass walk (main 7d343f320d1) */
-#define MA_MATRIX_GOLDEN_ROWS   17955UL
-#define MA_MATRIX_GOLDEN_HASH   0x5bcb9997UL
+/*
+ * Rows and hash of the DACLs whose ACEs all lie within the ACL, on the kernel without the stop (main 34cae6737bd with
+ * the one-pass walk), with World, Authenticated Users and Local Service as the SIDs of the ACEs (0: not compared).
+ * There the 13 015 other rows gave the results of the DACL cut before the ACE outside the ACL in 12 358.
+ */
+#define MA_MATRIX_FIT_GOLDEN_ROWS   4870UL
+#define MA_MATRIX_FIT_GOLDEN_HASH   0x3e03d998UL
 
 typedef struct _MA_SD
 {
@@ -160,6 +167,51 @@ MaEveryIndexResolves(
     return TRUE;
 }
 
+/*
+ * The index of the first ACE of the walk that does not lie within the ACL (the rule of the
+ * access check, written out again here), or the AceCount when every ACE does. Only for
+ * DACLs whose every index resolves (MaEveryIndexResolves).
+ */
+static
+ULONG
+MaFirstAceOutside(
+    _In_ PMA_SD MaSd)
+{
+    PACL Acl = (PACL)MaSd->Buffer;
+    PUCHAR End = (PUCHAR)Acl + Acl->AclSize;
+    PUCHAR Ace = (PUCHAR)(Acl + 1);
+    PACE_HEADER Header;
+    ULONG i, Left, SidOffset, Flags;
+
+    for (i = 0; i < Acl->AceCount; i++, Ace += Header->AceSize)
+    {
+        Header = (PACE_HEADER)Ace;
+        Left = (ULONG)(End - Ace);
+        if (Left < sizeof(ACE_HEADER) || Header->AceSize < sizeof(ACE_HEADER) || Left < Header->AceSize)
+            return i;
+        switch (Header->AceType)
+        {
+            case ACCESS_ALLOWED_ACE_TYPE:
+            case ACCESS_DENIED_ACE_TYPE:
+                SidOffset = 8;
+                break;
+            case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+            case ACCESS_DENIED_OBJECT_ACE_TYPE:
+                if (Left < 12)
+                    return i;
+                RtlCopyMemory(&Flags, Ace + 8, sizeof(Flags));
+                SidOffset = 12 + ((Flags & ACE_OBJECT_TYPE_PRESENT) ? 16 : 0) +
+                            ((Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT) ? 16 : 0);
+                break;
+            default:
+                continue;
+        }
+        if (Left < SidOffset + 8 || Left < SidOffset + 8 + 4 * (ULONG)Ace[SidOffset + 1])
+            return i;
+    }
+    return Acl->AceCount;
+}
+
 static ULONG MaSeed;
 
 static
@@ -170,28 +222,36 @@ MaRandom(VOID)
     return (MaSeed >> 8) & 0xFFFFFF;
 }
 
+typedef struct _MA_MATRIX_RESULT
+{
+    ULONG Rows, Hash, Skipped;
+    ULONG FitRows, FitHash;          /* DACLs whose ACEs all lie within the ACL */
+    ULONG CutRows, CutEqual;         /* the others, and how many gave the results of the DACL cut before the ACE */
+} MA_MATRIX_RESULT, *PMA_MATRIX_RESULT;
+
+#define MaHashStep(h, v) ((h) = ((h) ^ (ULONG)(v)) * 16777619UL)
+
 static
 VOID
 MaMatrix(
     _In_ PSECURITY_SUBJECT_CONTEXT SubjectContext,
     _In_ PSID User,
-    _Out_ PULONG Rows,
-    _Out_ PULONG Hash,
-    _Out_ PULONG Skipped)
+    _Out_ PMA_MATRIX_RESULT Out)
 {
     static const ACCESS_MASK Desired[] = { 0x1, 0x2, 0x3, READ_CONTROL, MAXIMUM_ALLOWED };
     static const UCHAR Types[] = { ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
                                    ACCESS_DENIED_OBJECT_ACE_TYPE, SYSTEM_AUDIT_ACE_TYPE, 0x7f };
     PMA_SD MaSd;
     PSID Sids[3];
-    ULONG n, i, d, Offset, Count;
-    ACCESS_MASK Granted;
-    NTSTATUS AccessStatus;
-    BOOLEAN Result;
+    ULONG n, i, d, Offset, Count, Outside;
+    USHORT AceCount;
+    ACCESS_MASK Granted, CutGranted;
+    NTSTATUS AccessStatus, CutStatus;
+    BOOLEAN Result, CutResult;
 
-    *Rows = 0;
-    *Hash = 2166136261UL;
-    *Skipped = 0;
+    RtlZeroMemory(Out, sizeof(*Out));
+    Out->Hash = 2166136261UL;
+    Out->FitHash = 2166136261UL;
     MaSd = ExAllocatePoolWithTag(NonPagedPool, sizeof(*MaSd), 'aMmK');
     if (!MaSd)
         return;
@@ -233,17 +293,34 @@ MaMatrix(
 
         if (!MaEveryIndexResolves(MaSd))
         {
-            (*Skipped)++;
+            Out->Skipped++;
             continue;
         }
 
+        AceCount = ((PACL)MaSd->Buffer)->AceCount;
+        Outside = MaFirstAceOutside(MaSd);
         for (d = 0; d < RTL_NUMBER_OF(Desired); d++)
         {
             Result = MaCheck(SubjectContext, MaSd, Desired[d], &Granted, &AccessStatus);
-            *Hash = (*Hash ^ (Result ? 1 : 0)) * 16777619UL;
-            *Hash = (*Hash ^ (Result ? Granted : 0)) * 16777619UL;
-            *Hash = (*Hash ^ (ULONG)AccessStatus) * 16777619UL;
-            (*Rows)++;
+            MaHashStep(Out->Hash, Result ? 1 : 0);
+            MaHashStep(Out->Hash, Result ? Granted : 0);
+            MaHashStep(Out->Hash, AccessStatus);
+            Out->Rows++;
+            if (Outside == AceCount)
+            {
+                MaHashStep(Out->FitHash, Result ? 1 : 0);
+                MaHashStep(Out->FitHash, Result ? Granted : 0);
+                MaHashStep(Out->FitHash, AccessStatus);
+                Out->FitRows++;
+                continue;
+            }
+            /* The same DACL with only the ACEs before the one outside */
+            ((PACL)MaSd->Buffer)->AceCount = (USHORT)Outside;
+            CutResult = MaCheck(SubjectContext, MaSd, Desired[d], &CutGranted, &CutStatus);
+            ((PACL)MaSd->Buffer)->AceCount = AceCount;
+            Out->CutRows++;
+            if (CutResult == Result && CutStatus == AccessStatus && (!Result || CutGranted == Granted))
+                Out->CutEqual++;
         }
     }
     ExFreePoolWithTag(MaSd, 'aMmK');
@@ -255,7 +332,7 @@ START_TEST(SeAccessCheckMalformedAcl)
     PTOKEN_USER UserInfo = NULL;
     PMA_SD MaSd;
     PSID World;
-    ULONG Rows, Hash, Skipped;
+    MA_MATRIX_RESULT Matrix;
     USHORT Ace;
     NTSTATUS Status;
 
@@ -277,11 +354,19 @@ START_TEST(SeAccessCheckMalformedAcl)
     MaExpect(&SubjectContext, MaSd, 0x2, FALSE, 0);
     MaExpect(&SubjectContext, MaSd, MAXIMUM_ALLOWED, TRUE, 0x1);
 
-    /* 2. An allow ACE of size 0, AceCount 2: every index gives the same ACE, which grants */
+    /* 2. An allow ACE of size 0 (smaller than its header), AceCount 2: the walk stops at it, nothing is granted */
     MaInitSd(MaSd, sizeof(ACL) + Ace, 2, ACL_REVISION);
     MaPutAce(MaSd->Buffer, sizeof(ACL), ACCESS_ALLOWED_ACE_TYPE, 0, 0x1, World);
-    MaExpect(&SubjectContext, MaSd, 0x1, TRUE, 0x1);
-    MaExpect(&SubjectContext, MaSd, MAXIMUM_ALLOWED, TRUE, 0x1);
+    MaExpect(&SubjectContext, MaSd, 0x1, FALSE, 0);
+    MaExpect(&SubjectContext, MaSd, MAXIMUM_ALLOWED, FALSE, 0);
+
+    /* 2b. The same after a well-formed allow ACE for 0x2: that one counts */
+    MaInitSd(MaSd, sizeof(ACL) + Ace + Ace, 3, ACL_REVISION);
+    MaPutAce(MaSd->Buffer, sizeof(ACL), ACCESS_ALLOWED_ACE_TYPE, Ace, 0x2, World);
+    MaPutAce(MaSd->Buffer, sizeof(ACL) + Ace, ACCESS_ALLOWED_ACE_TYPE, 0, 0x1, World);
+    MaExpect(&SubjectContext, MaSd, 0x1, FALSE, 0);
+    MaExpect(&SubjectContext, MaSd, 0x2, TRUE, 0x2);
+    MaExpect(&SubjectContext, MaSd, MAXIMUM_ALLOWED, TRUE, 0x2);
 
     /* 3. A deny ACE of size 0 */
     MaInitSd(MaSd, sizeof(ACL) + Ace, 3, ACL_REVISION);
@@ -305,12 +390,34 @@ START_TEST(SeAccessCheckMalformedAcl)
     MaExpect(&SubjectContext, MaSd, 0x2, TRUE, 0x2);
     MaExpect(&SubjectContext, MaSd, MAXIMUM_ALLOWED, TRUE, 0x2);
 
-    /* 6. Truncated: the only ACE starts inside the ACL and runs 4 bytes past AclSize (its SID's last bytes): it counts */
+    /* 6. Truncated: the only ACE starts inside the ACL and runs 4 bytes past AclSize (its SID's last bytes): it does not count */
     MaInitSd(MaSd, sizeof(ACL) + Ace - 4, 1, ACL_REVISION);
     MaPutAce(MaSd->Buffer, sizeof(ACL), ACCESS_ALLOWED_ACE_TYPE, Ace, 0x1, World);
-    MaExpect(&SubjectContext, MaSd, 0x1, TRUE, 0x1);
+    MaExpect(&SubjectContext, MaSd, 0x1, FALSE, 0);
+    MaExpect(&SubjectContext, MaSd, MAXIMUM_ALLOWED, FALSE, 0);
 
-    /* 7. AceCount 3, one ACE and 12 bytes of zeros in the ACL: the zero ACE (size 0) is evaluated twice and grants nothing */
+    /* 6b. An allow ACE that fits, then a truncated allow ACE: only the first counts */
+    MaInitSd(MaSd, sizeof(ACL) + Ace + Ace - 4, 2, ACL_REVISION);
+    MaPutAce(MaSd->Buffer, sizeof(ACL), ACCESS_ALLOWED_ACE_TYPE, Ace, 0x2, World);
+    MaPutAce(MaSd->Buffer, sizeof(ACL) + Ace, ACCESS_ALLOWED_ACE_TYPE, Ace, 0x1, World);
+    MaExpect(&SubjectContext, MaSd, 0x1, FALSE, 0);
+    MaExpect(&SubjectContext, MaSd, 0x2, TRUE, 0x2);
+    MaExpect(&SubjectContext, MaSd, MAXIMUM_ALLOWED, TRUE, 0x2);
+
+    /* 6c. An ACE of size 4 that ends at AclSize: its mask and SID would be read behind the ACL; it does not count */
+    MaInitSd(MaSd, sizeof(ACL) + 4, 1, ACL_REVISION);
+    MaPutAce(MaSd->Buffer, sizeof(ACL), ACCESS_ALLOWED_ACE_TYPE, 4, 0x1, World);
+    MaExpect(&SubjectContext, MaSd, 0x1, FALSE, 0);
+
+    /* 6d. A truncated deny ACE after an allow ACE: the allow counts (the walk never grants more by stopping) */
+    MaInitSd(MaSd, sizeof(ACL) + Ace + Ace - 4, 2, ACL_REVISION);
+    MaPutAce(MaSd->Buffer, sizeof(ACL), ACCESS_ALLOWED_ACE_TYPE, Ace, 0x1, World);
+    MaPutAce(MaSd->Buffer, sizeof(ACL) + Ace, ACCESS_DENIED_ACE_TYPE, Ace, 0x2, World);
+    MaExpect(&SubjectContext, MaSd, 0x1, TRUE, 0x1);
+    MaExpect(&SubjectContext, MaSd, 0x2, FALSE, 0);
+    MaExpect(&SubjectContext, MaSd, MAXIMUM_ALLOWED, TRUE, 0x1);
+
+    /* 7. AceCount 3, one ACE and 12 bytes of zeros in the ACL: the zero ACE (size 0) ends the walk */
     MaInitSd(MaSd, sizeof(ACL) + Ace + 12, 3, ACL_REVISION);
     MaPutAce(MaSd->Buffer, sizeof(ACL), ACCESS_ALLOWED_ACE_TYPE, Ace, 0x1, World);
     MaExpect(&SubjectContext, MaSd, 0x1, TRUE, 0x1);
@@ -333,12 +440,18 @@ START_TEST(SeAccessCheckMalformedAcl)
 #endif
 
     /* The matrix */
-    MaMatrix(&SubjectContext, UserInfo->User.Sid, &Rows, &Hash, &Skipped);
-    trace("MAMATRIX rows %lu hash 0x%08lx skipped %lu\n", Rows, Hash, Skipped);
-    if (MA_MATRIX_GOLDEN_ROWS != 0)
+    /* Authenticated Users, not the caller's user: the SIDs' bytes are read as ACE fields too, the same on every machine */
+    MaMatrix(&SubjectContext, SeExports->SeAuthenticatedUsersSid, &Matrix);
+    trace("MAMATRIX rows %lu hash 0x%08lx skipped %lu\n", Matrix.Rows, Matrix.Hash, Matrix.Skipped);
+    trace("MAMATRIX fit rows %lu hash 0x%08lx; cut rows %lu equal %lu\n",
+          Matrix.FitRows, Matrix.FitHash, Matrix.CutRows, Matrix.CutEqual);
+    ok(Matrix.CutRows != 0, "no DACL with an ACE outside the ACL\n");
+    ok(Matrix.CutEqual == Matrix.CutRows, "%lu of %lu rows differ from the DACL cut before the ACE outside the ACL\n",
+       Matrix.CutRows - Matrix.CutEqual, Matrix.CutRows);
+    if (MA_MATRIX_FIT_GOLDEN_ROWS != 0)
     {
-        ok(Rows == MA_MATRIX_GOLDEN_ROWS, "matrix rows %lu, expected %lu\n", Rows, MA_MATRIX_GOLDEN_ROWS);
-        ok(Hash == MA_MATRIX_GOLDEN_HASH, "matrix hash 0x%08lx, expected 0x%08lx\n", Hash, MA_MATRIX_GOLDEN_HASH);
+        ok(Matrix.FitRows == MA_MATRIX_FIT_GOLDEN_ROWS, "fit rows %lu, expected %lu\n", Matrix.FitRows, MA_MATRIX_FIT_GOLDEN_ROWS);
+        ok(Matrix.FitHash == MA_MATRIX_FIT_GOLDEN_HASH, "fit hash 0x%08lx, expected 0x%08lx\n", Matrix.FitHash, MA_MATRIX_FIT_GOLDEN_HASH);
     }
 
 done:
