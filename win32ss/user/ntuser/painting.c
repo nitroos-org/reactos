@@ -1904,7 +1904,7 @@ IntBeginPaint(PWND Window, PPAINTSTRUCT Ps)
             GreDeleteObject(hRgn);
          }
       }
-      while(Window->state & WNDS_UPDATEDIRTY);
+      while((Window->state & WNDS_UPDATEDIRTY) && !(Window->state & WNDS_DESTROYED));
    }
    else
    {
@@ -1912,6 +1912,13 @@ IntBeginPaint(PWND Window, PPAINTSTRUCT Ps)
    }
 
    RtlZeroMemory(Ps, sizeof(PAINTSTRUCT));
+
+   /* WM_NCPAINT (and hiding the caret) went to the window's procedure, which can destroy it (the caller
+      holds it, its storage is gone: no class, no links); there is nothing to paint then */
+   if (Window->state & WNDS_DESTROYED)
+   {
+      return NULL;
+   }
 
    if (Window->state2 & WNDS2_ENDPAINTINVALIDATE)
    {
