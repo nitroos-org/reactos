@@ -2,7 +2,9 @@
  * PROJECT:     ReactOS LSI Logic Fusion-MPT SAS SCSI miniport driver
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     SCSI port miniport for the LSI Logic SAS1068 controller (PCI 1000:0054), the SCSI
- *              controller that VMware offers for Windows guests and that QEMU emulates as mptsas1068
+ *              controller that VMware offers for Windows guests and that QEMU emulates as mptsas1068,
+ *              and for the parallel SCSI chip of the same family, LSI53C1030 (PCI 1000:0030), which
+ *              VirtualBox emulates as its "LsiLogic" controller
  * COPYRIGHT:   Copyright 2026 ReactOS Project contributors
  *
  * The register offsets, the doorbell and reply queue bits, the message function numbers and the
@@ -1207,12 +1209,11 @@ MptFindAdapter(
     return SP_RETURN_FOUND;
 }
 
-NTSTATUS NTAPI
-DriverEntry(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING RegistryPath)
+static NTSTATUS
+MptInitialization(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING RegistryPath, PUCHAR DeviceId)
 {
     HW_INITIALIZATION_DATA Init;
     UCHAR VendorId[4] = { '1', '0', '0', '0' };
-    UCHAR DeviceId[4] = { '0', '0', '5', '4' };
 
     RtlZeroMemory(&Init, sizeof(Init));
     Init.HwInitializationDataSize = sizeof(Init);
@@ -1226,7 +1227,7 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING RegistryPath)
     Init.VendorId = VendorId;
     Init.VendorIdLength = sizeof(VendorId);
     Init.DeviceId = DeviceId;
-    Init.DeviceIdLength = sizeof(DeviceId);
+    Init.DeviceIdLength = 4;
     Init.NumberOfAccessRanges = 3;
     Init.DeviceExtensionSize = sizeof(MPT_EXTENSION);
     Init.SrbExtensionSize = 0;
@@ -1236,4 +1237,19 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING RegistryPath)
     Init.AutoRequestSense = TRUE;
 
     return ScsiPortInitialize(DriverObject, RegistryPath, &Init, NULL);
+}
+
+NTSTATUS NTAPI
+DriverEntry(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING RegistryPath)
+{
+    UCHAR IdSas[4] = { '0', '0', '5', '4' };            /* SAS1068 (VMware, QEMU mptsas1068) */
+    UCHAR IdSpi[4] = { '0', '0', '3', '0' };            /* 53C1030, the parallel SCSI chip of the family (VirtualBox "LsiLogic") */
+    NTSTATUS Status1, Status2;
+
+    /* The same message interface drives both: only the port type that PORT FACTS reports differs (SAS or parallel SCSI),
+       and the targets are SCSI ids of a bus instead of the devices of SAS ports. One pass per chip. */
+    Status1 = MptInitialization(DriverObject, RegistryPath, IdSas);
+    Status2 = MptInitialization(DriverObject, RegistryPath, IdSpi);
+
+    return NT_SUCCESS(Status1) ? Status1 : Status2;
 }
