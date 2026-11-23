@@ -923,7 +923,7 @@ static BOOL RPCRT4_protseq_is_endpoint_registered(RpcServerProtseq *protseq, con
   return registered;
 }
 
-static RPC_STATUS RPCRT4_use_protseq(RpcServerProtseq* ps, const char *endpoint)
+static RPC_STATUS RPCRT4_use_protseq(RpcServerProtseq* ps, const char *endpoint, const void *descriptor)
 {
   RPC_STATUS status;
 
@@ -932,7 +932,7 @@ static RPC_STATUS RPCRT4_use_protseq(RpcServerProtseq* ps, const char *endpoint)
   if (RPCRT4_protseq_is_endpoint_registered(ps, endpoint))
     status = RPC_S_OK;
   else
-    status = ps->ops->open_endpoint(ps, endpoint);
+    status = ps->ops->open_endpoint(ps, endpoint, descriptor);
 
   LeaveCriticalSection(&ps->cs);
 
@@ -1116,7 +1116,7 @@ RPC_STATUS WINAPI RpcServerUseProtseqEpExA( RPC_CSTR Protseq, UINT MaxCalls, RPC
   if (status != RPC_S_OK)
     return status;
 
-  return RPCRT4_use_protseq(ps, (const char *)Endpoint);
+  return RPCRT4_use_protseq(ps, (const char *)Endpoint, SecurityDescriptor);
 }
 
 /***********************************************************************
@@ -1141,7 +1141,7 @@ RPC_STATUS WINAPI RpcServerUseProtseqEpExW( RPC_WSTR Protseq, UINT MaxCalls, RPC
     return status;
 
   EndpointA = RPCRT4_strdupWtoA(Endpoint);
-  status = RPCRT4_use_protseq(ps, EndpointA);
+  status = RPCRT4_use_protseq(ps, EndpointA, SecurityDescriptor);
   free(EndpointA);
   return status;
 }
@@ -1160,7 +1160,7 @@ RPC_STATUS WINAPI RpcServerUseProtseqA(RPC_CSTR Protseq, unsigned int MaxCalls, 
   if (status != RPC_S_OK)
     return status;
 
-  return RPCRT4_use_protseq(ps, NULL);
+  return RPCRT4_use_protseq(ps, NULL, SecurityDescriptor);
 }
 
 /***********************************************************************
@@ -1180,7 +1180,7 @@ RPC_STATUS WINAPI RpcServerUseProtseqW(RPC_WSTR Protseq, unsigned int MaxCalls, 
   if (status != RPC_S_OK)
     return status;
 
-  return RPCRT4_use_protseq(ps, NULL);
+  return RPCRT4_use_protseq(ps, NULL, SecurityDescriptor);
 }
 
 void RPCRT4_destroy_all_protseqs(void)
