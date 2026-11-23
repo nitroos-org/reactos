@@ -14,6 +14,7 @@ extern void func_LifetimeBroadcastDesktops(void);
 extern void func_LifetimeCallbackExitLeak(void);
 extern void func_LifetimeCaptureWinEvent(void);
 extern void func_LifetimeCbtActivateRecursion(void);
+extern void func_LifetimeEventProcExitThread(void);
 extern void func_LifetimeForegroundWinEvent(void);
 extern void func_LifetimeFreeExitClass(void);
 extern void func_LifetimeHookExitLeak(void);
@@ -215,6 +216,7 @@ const struct test winetest_testlist[] =
     { "LifetimeCallbackExitLeak", func_LifetimeCallbackExitLeak },
     { "LifetimeCaptureWinEvent", func_LifetimeCaptureWinEvent },
     { "LifetimeCbtActivateRecursion", func_LifetimeCbtActivateRecursion },
+    { "LifetimeEventProcExitThread", func_LifetimeEventProcExitThread },
     { "LifetimeForegroundWinEvent", func_LifetimeForegroundWinEvent },
     { "LifetimeFreeExitClass", func_LifetimeFreeExitClass },
     { "LifetimeHookExitLeak", func_LifetimeHookExitLeak },

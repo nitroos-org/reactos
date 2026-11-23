@@ -1496,6 +1496,75 @@ START_TEST(LifetimeFreeExitClass)
     }
 }
 
+/*
+ * EventProcExitThread: an in-context WinEvent procedure of the process for EVENT_OBJECT_DESTROY; threads end
+ * (ExitThread) with their window still there, so the window goes in the thread's cleanup. The procedure must
+ * not be called in the ending thread then: its DLLs were told that it detaches and its TLS is gone.
+ */
+#define EPX_THREADS 20
+static struct
+{
+    DWORD Tid[EPX_THREADS];
+    HWND Hwnd[EPX_THREADS];
+    volatile LONG InDying, Other;
+} gEpx;
+
+static void CALLBACK EpxProc(HWINEVENTHOOK h, DWORD Event, HWND hwnd, LONG idObject, LONG idChild, DWORD tid, DWORD ms)
+{
+    int i;
+    if (idObject != OBJID_WINDOW)
+        return;
+    for (i = 0; i < EPX_THREADS; i++)
+    {
+        if (hwnd && hwnd == gEpx.Hwnd[i])
+        {
+            if (GetCurrentThreadId() == gEpx.Tid[i])
+                InterlockedIncrement(&gEpx.InDying);
+            else
+                InterlockedIncrement(&gEpx.Other);
+        }
+    }
+}
+
+static DWORD WINAPI EpxThread(LPVOID Param)
+{
+    int i = (int)(INT_PTR)Param;
+    gEpx.Tid[i] = GetCurrentThreadId();
+    gEpx.Hwnd[i] = ClCreate(L"epx", WS_OVERLAPPEDWINDOW | WS_VISIBLE, NULL, 60);
+    ClPump();
+    ExitThread(0x77);
+}
+
+START_TEST(LifetimeEventProcExitThread)
+{
+    HWINEVENTHOOK hHook;
+    HANDLE h;
+    int i, Gone = 0;
+
+    ClRegister();
+    hHook = SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY, ghInst, EpxProc, GetCurrentProcessId(), 0,
+                            WINEVENT_INCONTEXT);
+    ok(hHook != NULL, "SetWinEventHook failed (%lu)\n", GetLastError());
+    if (!hHook)
+        return;
+    for (i = 0; i < EPX_THREADS; i++)
+    {
+        h = CreateThread(NULL, 0, EpxThread, (LPVOID)(INT_PTR)i, 0, NULL);
+        if (!h)
+            continue;
+        ok(ClWait(h, 10000), "thread %d did not end\n", i);
+        CloseHandle(h);
+        if (gEpx.Hwnd[i] && !IsWindow(gEpx.Hwnd[i]))
+            Gone++;
+    }
+    ClPump();
+    UnhookWinEvent(hHook);
+    trace("%d windows gone with their thread; destroy events in the ending thread %ld, in other threads %ld\n", Gone,
+          gEpx.InDying, gEpx.Other);
+    ok(Gone == EPX_THREADS, "only %d of %d windows went with their thread\n", Gone, EPX_THREADS);
+    ok(gEpx.InDying == 0, "the in-context procedure ran %ld times in a thread that was ending\n", gEpx.InDying);
+}
+
 START_TEST(LifetimeKeyboardLayoutWalk)
 {
     HKL hklOld, hklNew, hklRet;
