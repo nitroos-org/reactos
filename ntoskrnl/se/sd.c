@@ -1664,12 +1664,14 @@ BOOLEAN
 SepAclHasEffectiveLabel(
     _In_ PACL Acl)
 {
+    SEP_ACE_CURSOR Cursor;
     PACE_HEADER Ace;
     ULONG Index;
 
+    SepInitAceCursor(&Cursor, Acl);
     for (Index = 0; Index < Acl->AceCount; Index++)
     {
-        if (!NT_SUCCESS(RtlGetAce(Acl, Index, (PVOID *)&Ace)))
+        if (!SepNextAce(&Cursor, (PVOID *)&Ace))
             break;
         if (Ace->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE && !(Ace->AceFlags & INHERIT_ONLY_ACE))
             return TRUE;
@@ -2146,6 +2148,7 @@ SepCheckCreatorDescriptor(
     BOOLEAN Present, Defaulted, LabelOnly;
     PACL Sacl;
     PSID Owner;
+    SEP_ACE_CURSOR Cursor;
     PACE_HEADER Ace;
     ULONG i;
 
@@ -2162,9 +2165,11 @@ SepCheckCreatorDescriptor(
     if (NT_SUCCESS(RtlGetSaclSecurityDescriptor(ExplicitDescriptor, &Present, &Sacl, &Defaulted)) && Present)
     {
         LabelOnly = (Sacl != NULL && Sacl->AceCount != 0);
+        if (LabelOnly)
+            SepInitAceCursor(&Cursor, Sacl);
         for (i = 0; LabelOnly && i < Sacl->AceCount; i++)
         {
-            if (!NT_SUCCESS(RtlGetAce(Sacl, i, (PVOID *)&Ace)) ||
+            if (!SepNextAce(&Cursor, (PVOID *)&Ace) ||
                 Ace->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
             {
                 LabelOnly = FALSE;

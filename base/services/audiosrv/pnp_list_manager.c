@@ -7,6 +7,9 @@
 
 #include "audiosrv.h"
 
+#include <sddl.h>
+#include <namedobjtrust.h>
+
 #define NDEBUG
 #include <debug.h>
 
@@ -46,6 +49,8 @@ CreateDeviceDescriptor(WCHAR* path, BOOL is_enabled)
 
 static HANDLE device_list_file = NULL;
 static PnP_AudioHeader* audio_device_list = NULL;
+/* The size of the view, the service's own copy: the header in the shared memory is not trusted for it */
+static DWORD audio_device_list_max_size = 0;
 
 
 /*
@@ -64,8 +69,10 @@ AppendAudioDeviceToList(PnP_AudioDevice* device)
 
     LockAudioDeviceList();
 
-    /* We DON'T want to overshoot the end of the buffer! */
-    if (audio_device_list->size + device_info_size > audio_device_list->max_size)
+    /* We DON'T want to overshoot the end of the buffer! (bounded by the size of our view, whatever the header says) */
+    if (audio_device_list->size < sizeof(PnP_AudioHeader) ||
+        audio_device_list->size > audio_device_list_max_size ||
+        (DWORD)device_info_size > audio_device_list_max_size - audio_device_list->size)
     {
         /*DPRINT("failed, max_size would be exceeded\n");*/
 
@@ -105,13 +112,32 @@ CreateAudioDeviceList(DWORD max_size)
     LockAudioDeviceList();
 
     DPRINT("Creating file mapping\n");
-    /* Expose our device list to the world */
-    device_list_file = CreateFileMappingW(INVALID_HANDLE_VALUE,
-                                          NULL,
-                                          PAGE_READWRITE,
-                                          0,
-                                          max_size,
-                                          AUDIO_LIST_NAME);
+    /* Expose our device list to the world: everyone reads it, only SYSTEM and the Administrators write it */
+    {
+        SECURITY_ATTRIBUTES security;
+
+        security.nLength = sizeof(security);
+        security.lpSecurityDescriptor = NULL;
+        security.bInheritHandle = FALSE;
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;WD)", SDDL_REVISION_1,
+                                                             &security.lpSecurityDescriptor, NULL);
+        device_list_file = CreateFileMappingW(INVALID_HANDLE_VALUE,
+                                              security.lpSecurityDescriptor ? &security : NULL,
+                                              PAGE_READWRITE,
+                                              0,
+                                              max_size,
+                                              AUDIO_LIST_NAME);
+        /* A section of that name someone else made first (its content, its size) is not ours: keep the list private */
+        if (device_list_file && GetLastError() == ERROR_ALREADY_EXISTS &&
+            !NamedObjectIsTrusted(device_list_file, TRUE))
+        {
+            DPRINT1("audiosrv: %S was made by another process, keeping the device list private\n", AUDIO_LIST_NAME);
+            CloseHandle(device_list_file);
+            device_list_file = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, max_size, NULL);
+        }
+        if (security.lpSecurityDescriptor)
+            LocalFree(security.lpSecurityDescriptor);
+    }
     if (!device_list_file)
     {
         DPRINT("Creation of audio device list failed (err %d)\n", GetLastError());
@@ -148,6 +174,7 @@ CreateAudioDeviceList(DWORD max_size)
     /* Don't want devices to overwrite the list! */
     audio_device_list->size = sizeof(PnP_AudioHeader);
     audio_device_list->max_size = max_size;
+    audio_device_list_max_size = max_size;
     audio_device_list->device_count = 0;
 
     UnlockAudioDeviceList();

@@ -74,6 +74,11 @@ WINAPI
 SecureSystemDirectories(VOID);
 
 BOOL
+WINAPI
+CreateProgramFilesDirectory(
+    _In_ PCWSTR pszPath);
+
+BOOL
 SetLowIntegrityProfileFolder(
     _In_ PCWSTR pszProfilePath);
 

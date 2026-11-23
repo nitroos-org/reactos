@@ -82,6 +82,64 @@ typedef struct _TOKEN_AUDIT_POLICY_INFORMATION
 #define TOKEN_FILTER_METHOD    0xFUL
 
 //
+// The ACEs of an ACL in index order, in one pass. Each step returns the ACE that
+// RtlGetAce(Acl, Index) returns for the next index, and fails exactly where it
+// fails: an ACL revision out of range, or an ACE that starts at or beyond the
+// end of the ACL (AclSize), and so every index after that one. RtlGetAce walks
+// from the first ACE again for every index: a loop over all indexes through it
+// takes a number of steps quadratic in the ACE count (a 64 KB DACL holds about
+// 3 300 ACEs). Like RtlGetAce, a step reads the size of the previous ACE only;
+// what an ACE holds is for the caller to check. The caller counts the indexes
+// against AceCount.
+//
+typedef struct _SEP_ACE_CURSOR
+{
+    PUCHAR Current;
+    PUCHAR End;
+    PUCHAR First;
+    BOOLEAN Failed;
+} SEP_ACE_CURSOR, *PSEP_ACE_CURSOR;
+
+FORCEINLINE
+VOID
+SepInitAceCursor(
+    _Out_ PSEP_ACE_CURSOR Cursor,
+    _In_ PACL Acl)
+{
+    Cursor->Current = NULL;
+    Cursor->First = (PUCHAR)(Acl + 1);
+    Cursor->End = (PUCHAR)Acl + Acl->AclSize;
+    Cursor->Failed = (Acl->AclRevision < MIN_ACL_REVISION) || (Acl->AclRevision > MAX_ACL_REVISION);
+}
+
+FORCEINLINE
+BOOLEAN
+SepNextAce(
+    _Inout_ PSEP_ACE_CURSOR Cursor,
+    _Out_ PVOID *Ace)
+{
+    PUCHAR Next;
+
+    if (Cursor->Failed)
+        return FALSE;
+
+    if (Cursor->Current == NULL)
+        Next = Cursor->First;
+    else
+        Next = Cursor->Current + ((PACE_HEADER)Cursor->Current)->AceSize;
+
+    if ((ULONG_PTR)Next >= (ULONG_PTR)Cursor->End)
+    {
+        Cursor->Failed = TRUE;
+        return FALSE;
+    }
+
+    Cursor->Current = Next;
+    *Ace = Next;
+    return TRUE;
+}
+
+//
 // Security descriptor internal helpers
 //
 FORCEINLINE

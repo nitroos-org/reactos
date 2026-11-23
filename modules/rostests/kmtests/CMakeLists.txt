@@ -180,6 +180,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ps/PsQuotaSwitchRace.c
     ntos_se/SeAccessCheckAuditAlarm.c
     ntos_se/SeAccessCheckDifferential.c
+    ntos_se/SeAccessCheckMalformedAcl.c
     ntos_se/SeAutoInherit.c
     ntos_se/SeHelpers.c
     ntos_se/SeInheritance.c

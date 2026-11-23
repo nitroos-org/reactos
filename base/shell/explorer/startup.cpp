@@ -41,6 +41,7 @@
  */
 
 #include "precomp.h"
+#include <namedobjtrust.h>
 
 // For the auto startup process
 static HANDLE s_hStartupMutex = NULL;
@@ -532,6 +533,17 @@ static BOOL InitializeStartupMutex()
         s_hStartupMutex = CreateMutexW(NULL, FALSE, L"ExplorerIsShellMutex");
         if (s_hStartupMutex == NULL)
             return FALSE;
+
+        // A mutex of that name that a less trusted process made first (a Low one, another user) could be held
+        // for ever: the shell does not wait for it and goes on with a lock of its own.
+        if (GetLastError() == ERROR_ALREADY_EXISTS && !NamedObjectIsTrusted(s_hStartupMutex, TRUE))
+        {
+            ERR("ExplorerIsShellMutex was made by another process: not waited for\n");
+            CloseHandle(s_hStartupMutex);
+            s_hStartupMutex = CreateMutexW(NULL, FALSE, NULL);
+            if (s_hStartupMutex == NULL)
+                return FALSE;
+        }
     }
 
     DWORD dwWait = WaitForSingleObject(s_hStartupMutex, INFINITE);

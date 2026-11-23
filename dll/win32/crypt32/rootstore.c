@@ -29,6 +29,9 @@
 #include "winternl.h"
 #include "wine/debug.h"
 #include "crypt32_private.h"
+#ifdef __REACTOS__
+#include <namedobjtrust.h>
+#endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(crypt);
 
@@ -913,8 +916,21 @@ void CRYPT_ImportSystemRootCertsToReg(void)
 
     if(GetLastError() == ERROR_ALREADY_EXISTS)
     {
-        WaitForSingleObject(hsem, INFINITE);
-        goto done;
+#ifdef __REACTOS__
+        /* A semaphore of that name made by a less trusted process (a Low one, another user) could be held for
+         * ever: then this process imports on its own instead of waiting for it */
+        if (!NamedObjectIsTrusted(hsem, TRUE))
+        {
+            WARN("crypt32_root_semaphore was made by another process, not waiting for it\n");
+            CloseHandle(hsem);
+            hsem = NULL;
+        }
+        else
+#endif
+        {
+            WaitForSingleObject(hsem, INFINITE);
+            goto done;
+        }
     }
 
     /* Opened for read: the writes below open it for write when there is
@@ -965,6 +981,11 @@ done:
     CertCloseStore(store, 0);
     CertCloseStore(reg, 0);
     root_certs_imported = TRUE;
+#ifdef __REACTOS__
+    if (hsem)
+#endif
+    {
     ReleaseSemaphore(hsem, 1, NULL);
     CloseHandle(hsem);
+    }
 }

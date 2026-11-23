@@ -127,5 +127,6 @@
 300 stdcall -noname SecureSystemDirectories()
 301 stdcall -noname SecureRegistryKeys()
 302 stdcall -noname UpgradeNetworkCatalog()
+303 stdcall -noname CreateProgramFilesDirectory(wstr)
 200 stub -noname CreateURLFile                                        #stdcall -noname CreateURLFile(36)
 201 stub -noname DeleteURLFile                                        #stdcall -noname DeleteURLFile(16)
