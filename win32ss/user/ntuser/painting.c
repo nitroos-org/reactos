@@ -592,9 +592,24 @@ co_IntUpdateWindows(PWND Wnd, ULONG Flags, BOOL Recurse)
         !UserIsDesktopWindow(Wnd))
    {
       PWND Child;
+      HWND *List, *phWnd;
+      USER_HELD_POOL_ENTRY HeldList;
 
-      for (Child = Wnd->spwndChild; Child; Child = Child->spwndNext)
+      /* The children paint themselves (WM_PAINT): any of them, or its siblings, can be destroyed or moved
+         meanwhile. The walk goes by handle over the children as they were, each one found again, instead of
+         following spwndNext of a child after its paint (a destroyed child is unlinked, and freed once it is
+         no longer held) */
+      List = IntWinListChildren(Wnd);
+      if (!List)
+         return;
+      UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
+
+      for (phWnd = List; *phWnd; ++phWnd)
       {
+         Child = ValidateHwndNoErr(*phWnd);
+         if (!Child || Child->spwndParent != Wnd)
+            continue;
+
          /* transparent window, check for non-transparent sibling to paint first, then skip it */
          if ( Child->ExStyle & WS_EX_TRANSPARENT &&
              ( Child->hrgnUpdate != NULL || Child->state & WNDS_INTERNALPAINT ) )
@@ -618,6 +633,7 @@ co_IntUpdateWindows(PWND Wnd, ULONG Flags, BOOL Recurse)
              UserDerefObjectCo(Child);
          }
       }
+      UserFreePoolCo(&HeldList);
    }
 }
 
