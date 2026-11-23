@@ -1961,6 +1961,7 @@ co_WinPosSetWindowPosEx(
    PREGION VisBeforeJustClient = NULL;
    PREGION VisAfter = NULL;
    BOOL bRedirKeep = FALSE;
+   BOOL bHadVisBefore, bHadVisAfter;
    PREGION CopyRgn = NULL;
    ULONG WvrFlags = 0;
    RECTL OldWindowRect, OldClientRect;
@@ -2598,6 +2599,32 @@ co_WinPosSetWindowPosEx(
       }
    }
 
+   /* What follows needs only to know whether there were visible regions. The regions go before the
+      activation messages and the paints below: a thread that ends in one of those callbacks would never free
+      them (regions belong to no process). */
+   bHadVisBefore = (VisBefore != NULL || VisBeforeJustClient != NULL);
+   bHadVisAfter = (VisAfter != NULL);
+   if (VisBefore != NULL)
+   {
+      REGION_Delete(VisBefore);
+      VisBefore = NULL;
+   }
+   if (VisBeforeJustClient != NULL)
+   {
+      REGION_Delete(VisBeforeJustClient);
+      VisBeforeJustClient = NULL;
+   }
+   if (VisAfter != NULL)
+   {
+      REGION_Delete(VisAfter);
+      VisAfter = NULL;
+   }
+   if (CopyRgn != NULL)
+   {
+      REGION_Delete(CopyRgn);
+      CopyRgn = NULL;
+   }
+
    if (!(WinPos.flags & (SWP_NOACTIVATE|SWP_HIDEWINDOW)))
    {
       if ((Window->style & (WS_CHILD | WS_POPUP)) == WS_CHILD)
@@ -2626,8 +2653,8 @@ co_WinPosSetWindowPosEx(
 
    if ( !PosChanged &&
          (WinPos.flags & SWP_FRAMECHANGED) &&
-        !(WinPos.flags & SWP_DEFERERASE) &&    // Prevent sending WM_SYNCPAINT message. 
-         VisAfter )
+        !(WinPos.flags & SWP_DEFERERASE) &&    // Prevent sending WM_SYNCPAINT message.
+         bHadVisAfter )
    {
        PWND Parent = Window->spwndParent;
        if ( !(Window->style & WS_CHILD) && (Parent) && (Parent->style & WS_CLIPCHILDREN))
@@ -2638,34 +2665,12 @@ co_WinPosSetWindowPosEx(
    }
 
    // Fix wine msg test_SetFocus, prevents sending WM_WINDOWPOSCHANGED.
-   if ( VisBefore == NULL &&
-        VisBeforeJustClient == NULL &&
+   if ( !bHadVisBefore &&
        !(Window->ExStyle & WS_EX_TOPMOST) &&
         (WinPos.flags & SWP_AGG_STATUSFLAGS) == (SWP_AGG_NOPOSCHANGE & ~SWP_NOZORDER))
    {
       TRACE("No drawing, set no Z order and no redraw!\n");
       WinPos.flags |= SWP_NOZORDER|SWP_NOREDRAW;
-   }
-
-   if (VisBefore != NULL)
-   {
-      REGION_Delete(VisBefore);
-      VisBefore = NULL;
-   }
-   if (VisBeforeJustClient != NULL)
-   {
-      REGION_Delete(VisBeforeJustClient);
-      VisBeforeJustClient = NULL;
-   }
-   if (VisAfter != NULL)
-   {
-      REGION_Delete(VisAfter);
-      VisAfter = NULL;
-   }
-   if (CopyRgn != NULL)
-   {
-      REGION_Delete(CopyRgn);
-      CopyRgn = NULL;
    }
 
    if(!(flags & SWP_DEFERERASE))
