@@ -57,8 +57,12 @@ static const PRIVILEGE_DATA WellKnownPrivileges[] =
     {{SE_MANAGE_VOLUME_PRIVILEGE, 0}, SE_MANAGE_VOLUME_NAME, IDS_MANAGE_VOLUME_PRIVILEGE},
     {{SE_IMPERSONATE_PRIVILEGE, 0}, SE_IMPERSONATE_NAME, IDS_IMPERSONATE_PRIVILEGE},
     {{SE_CREATE_GLOBAL_PRIVILEGE, 0}, SE_CREATE_GLOBAL_NAME, IDS_CREATE_GLOBAL_PRIVILEGE},
+    {{SE_TRUSTED_CREDMAN_ACCESS_PRIVILEGE, 0}, SE_TRUSTED_CREDMAN_ACCESS_NAME, IDS_TRUSTED_CREDMAN_ACCESS_PRIVILEGE},
+    {{SE_RELABEL_PRIVILEGE, 0}, SE_RELABEL_NAME, IDS_RELABEL_PRIVILEGE},
+    {{SE_INC_WORKING_SET_PRIVILEGE, 0}, SE_INC_WORKING_SET_NAME, IDS_INC_WORKING_SET_PRIVILEGE},
     {{SE_TIME_ZONE_PRIVILEGE, 0}, SE_TIME_ZONE_NAME, IDS_TIME_ZONE_PRIVILEGE},
-    {{SE_CREATE_SYMBOLIC_LINK_PRIVILEGE, 0}, SE_CREATE_SYMBOLIC_LINK_NAME, IDS_CREATE_SYMBOLIC_LINK_PRIVILEGE}
+    {{SE_CREATE_SYMBOLIC_LINK_PRIVILEGE, 0}, SE_CREATE_SYMBOLIC_LINK_NAME, IDS_CREATE_SYMBOLIC_LINK_PRIVILEGE},
+    {{SE_DELEGATE_SESSION_USER_IMPERSONATE_PRIVILEGE, 0}, SE_DELEGATE_SESSION_USER_IMPERSONATE_NAME, IDS_DELEGATE_SESSION_USER_IMPERSONATE_PRIVILEGE}
 };
 
 static const RIGHT_DATA WellKnownRights[] =
@@ -149,7 +153,7 @@ LsarpLookupPrivilegeDisplayName(PRPC_UNICODE_STRING Name,
         {
             TRACE("Index: %u\n", Index);
             nLength = LsapGetResourceStringLengthEx(hInstance,
-                                                    IDS_CREATE_TOKEN_PRIVILEGE + Index,
+                                                    WellKnownPrivileges[Index].DisplayNameId,
                                                     ClientLanguage);
             if (nLength != 0)
             {
@@ -168,7 +172,7 @@ LsarpLookupPrivilegeDisplayName(PRPC_UNICODE_STRING Name,
                 }
 
                 LsapLoadStringEx(hInstance,
-                                 IDS_CREATE_TOKEN_PRIVILEGE + Index,
+                                 WellKnownPrivileges[Index].DisplayNameId,
                                  ClientLanguage,
                                  DisplayNameBuffer->Buffer,
                                  nLength);
@@ -179,7 +183,7 @@ LsarpLookupPrivilegeDisplayName(PRPC_UNICODE_STRING Name,
             else
             {
                 nLength = LsapGetResourceStringLengthEx(hInstance,
-                                                        IDS_CREATE_TOKEN_PRIVILEGE + Index,
+                                                        WellKnownPrivileges[Index].DisplayNameId,
                                                         ClientSystemDefaultLanguage);
                 if (nLength != 0)
                 {
@@ -198,7 +202,7 @@ LsarpLookupPrivilegeDisplayName(PRPC_UNICODE_STRING Name,
                     }
 
                     LsapLoadStringEx(hInstance,
-                                     IDS_CREATE_TOKEN_PRIVILEGE + Index,
+                                     WellKnownPrivileges[Index].DisplayNameId,
                                      ClientSystemDefaultLanguage,
                                      DisplayNameBuffer->Buffer,
                                      nLength);
@@ -211,7 +215,7 @@ LsarpLookupPrivilegeDisplayName(PRPC_UNICODE_STRING Name,
                     return STATUS_INVALID_PARAMETER;
 #if 0
                     nLength = LsapGetResourceStringLengthEx(hInstance,
-                                                            IDS_CREATE_TOKEN_PRIVILEGE + Index,
+                                                            WellKnownPrivileges[Index].DisplayNameId,
                                                             0x409);
 #endif
                 }

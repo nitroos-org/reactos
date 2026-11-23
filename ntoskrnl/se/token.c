@@ -2360,6 +2360,9 @@ SepCreateSystemProcessToken(VOID)
         {SeImpersonatePrivilege, SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED},
         {SeCreateGlobalPrivilege, SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED},
         {SeTimeZonePrivilege, SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED},
+        /* The token of LocalSystem holds these two on Windows Server 2022 (measured), enabled */
+        {SeIncreaseWorkingSetPrivilege, SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED},
+        {SeDelegateSessionUserImpersonatePrivilege, SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED},
         /* Services and installers that run as Local System create symbolic links (Office, MSI, ...) */
         {SeCreateSymbolicLinkPrivilege, SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED},
     };

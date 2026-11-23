@@ -1158,6 +1158,34 @@ START_TEST(ServiceSidToken)
             ok(Error == ERROR_SUCCESS, "system empty list: StartService error %lu, expected 0\n", Error);
             RawAccount = "NT AUTHORITY\\LocalService";
         }
+
+        /* 9c. The privileges of the numbers 31 to 36 (measured on Windows Server 2022): the token of LocalSystem holds
+         * SeIncreaseWorkingSetPrivilege and SeDelegateSessionUserImpersonatePrivilege, and neither
+         * SeTrustedCredManAccessPrivilege nor SeRelabelPrivilege (StartService: ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE) */
+        StringCbPrintfA(Name, sizeof(Name), "%su", Base);
+        Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_NONE, "SeIncreaseWorkingSetPrivilege", &Dump);
+        ok(Error == ERROR_SUCCESS, "system SeIncreaseWorkingSetPrivilege: StartService failed with %lu\n", Error);
+        if (Dump.Valid)
+        {
+            ok(Dump.PrivCount == 2, "system SeIncreaseWorkingSetPrivilege: %lu privileges, expected 2\n", Dump.PrivCount);
+            ok(FindPriv(&Dump, "SeIncreaseWorkingSetPrivilege") >= 0, "system: no SeIncreaseWorkingSetPrivilege\n");
+        }
+        StringCbPrintfA(Name, sizeof(Name), "%sv", Base);
+        Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_NONE, "SeDelegateSessionUserImpersonatePrivilege", &Dump);
+        ok(Error == ERROR_SUCCESS, "system SeDelegateSessionUserImpersonatePrivilege: StartService failed with %lu\n", Error);
+        if (Dump.Valid)
+        {
+            ok(Dump.PrivCount == 2, "system SeDelegateSessionUserImpersonatePrivilege: %lu privileges, expected 2\n", Dump.PrivCount);
+            ok(FindPriv(&Dump, "SeDelegateSessionUserImpersonatePrivilege") >= 0, "system: no SeDelegateSessionUserImpersonatePrivilege\n");
+        }
+        StringCbPrintfA(Name, sizeof(Name), "%sw", Base);
+        Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_NONE, "SeRelabelPrivilege", &Dump);
+        ok(Error == ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE, "system SeRelabelPrivilege: StartService error %lu, expected %d\n",
+           Error, ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE);
+        StringCbPrintfA(Name, sizeof(Name), "%sy", Base);
+        Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_NONE, "SeTrustedCredManAccessPrivilege", &Dump);
+        ok(Error == ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE, "system SeTrustedCredManAccessPrivilege: StartService error %lu, expected %d\n",
+           Error, ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE);
     }
 
     /* 10. NT SERVICE\<name> names and SIDs of an existing service */
