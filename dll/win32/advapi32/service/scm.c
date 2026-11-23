@@ -2534,15 +2534,19 @@ WaitForSCManager(VOID)
 
     TRACE("WaitForSCManager()\n");
 
-    /* Try to open the existing event */
-    hEvent = OpenEventW(SYNCHRONIZE, FALSE, SCM_START_EVENT);
+    /*
+     * Try to open the existing event. The service control manager creates it in session 0; a client in
+     * another session reaches it by its global name (an unqualified name would be a private event of the
+     * client's session that nobody sets, and every SCM call there would wait the full 3 minutes).
+     */
+    hEvent = OpenEventW(SYNCHRONIZE, FALSE, L"Global\\" SCM_START_EVENT);
     if (hEvent == NULL)
     {
         if (GetLastError() != ERROR_FILE_NOT_FOUND)
             return;
 
         /* Try to create a new event */
-        hEvent = CreateEventW(NULL, TRUE, FALSE, SCM_START_EVENT);
+        hEvent = CreateEventW(NULL, TRUE, FALSE, L"Global\\" SCM_START_EVENT);
         if (hEvent == NULL)
             return;
     }
