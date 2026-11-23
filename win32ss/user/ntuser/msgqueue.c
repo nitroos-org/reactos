@@ -2986,7 +2986,13 @@ MsqDestroyMessageQueue(_In_ PTHREADINFO pti)
    PUSER_MESSAGE_QUEUE MessageQueue = pti->MessageQueue;
 
    NT_ASSERT(MessageQueue != NULL);
-   MessageQueue->QF_flags |= QF_INDESTROY;
+   /* Other threads attached through AttachThreadInput stay on the queue when this one leaves it (it attaches
+      to another thread, or it ends while still attached): the queue lives on for them, and is not in
+      destroy. Marked so, it took no more posted messages, mouse input or wakes for them (MsqPostMessage,
+      MsqWakeQueue): a thread waiting on it for the answer of a message it sent, or for input, waited for
+      good. */
+   if (MessageQueue->cThreads <= 1)
+      MessageQueue->QF_flags |= QF_INDESTROY;
 
    /* remove the message queue from any desktops */
    if ((desk = InterlockedExchangePointer((PVOID*)&MessageQueue->Desktop, 0)))
