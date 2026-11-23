@@ -14,6 +14,7 @@
 #include <shellapi.h>
 #include <strsafe.h>
 #include <stdarg.h>
+#include <namedobjtrust.h>
 
 static const WCHAR KEY_FB[] = L"SOFTWARE\\ReactOS\\Nitro\\Featmgr";
 #define MAX_ATTEMPTS 3
@@ -219,7 +220,9 @@ int FmFirstBootMain(HINSTANCE hInst, LPCWSTR cmd)
     if (FmGetLogDir(log, ARRAYSIZE(log))) StringCchCatW(log, ARRAYSIZE(log), L"\\firstboot.log");
 
     mutex = CreateMutexW(NULL, FALSE, L"Global\\NitroFeatmgrFirstBoot");
-    if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) return 0;       /* another logon already runs it */
+    /* another logon already runs it; a mutex of that name that a less trusted process made (a Low one, another
+       user) does not stop the first boot */
+    if (mutex && GetLastError() == ERROR_ALREADY_EXISTS && NamedObjectIsTrusted(mutex, TRUE)) return 0;
 
     if (GetDw(L"AutoInstall", &v) && v == 0 && !force)
     {

@@ -11,6 +11,7 @@
 #include <strsafe.h>
 #include <tlhelp32.h>
 #include <sddl.h>
+#include <namedobjtrust.h>
 
 /* msiexec exit 1618 (another install running): bounded retry */
 #define MSI_BUSY_RETRIES   6
@@ -2948,6 +2949,13 @@ static HANDLE OpenInstallMutex(void)
         sa.lpSecurityDescriptor = NULL;
     h = CreateMutexW(sa.lpSecurityDescriptor ? &sa : NULL, FALSE, FM_INSTALL_MUTEX);
     if (sa.lpSecurityDescriptor) LocalFree(sa.lpSecurityDescriptor);
+    /* a lock of that name that a process other than SYSTEM or the Administrators made first: not waited for */
+    if (h && GetLastError() == ERROR_ALREADY_EXISTS && !NamedObjectIsTrusted(h, FALSE))
+    {
+        CloseHandle(h);
+        SetLastError(ERROR_INVALID_OWNER);
+        return NULL;
+    }
     return h;
 }
 
