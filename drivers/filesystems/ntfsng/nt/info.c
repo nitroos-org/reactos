@@ -1800,11 +1800,12 @@ NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             ULONG Fixed = FIELD_OFFSET(FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName), Copy;
             if (Length < Fixed)
                 return STATUS_BUFFER_TOO_SMALL;
-            /* What the driver implements of what Windows NTFS reports: no case-sensitive lookup,
-             * compression, sparse files, quotas, object IDs, EAs, encryption or USN journal.
-             * FILE_PERSISTENT_ACLS waits for per-user recycle bin ACLs in shell32.  Reparse
-             * points need an NTFS 3.x volume ($Extend\$Reparse). */
+            /* What the driver implements of what Windows NTFS reports (0x03e706ff): no case-sensitive
+             * lookup, compression, sparse files, quotas, object IDs, EAs, encryption, transactions or
+             * USN journal.  Security descriptors are stored and enforced (NgQuerySecurity /
+             * NgSetSecurity).  Reparse points need an NTFS 3.x volume ($Extend\$Reparse). */
             A->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK |
+                                      FILE_PERSISTENT_ACLS |
                                       FILE_NAMED_STREAMS | FILE_SUPPORTS_HARD_LINKS |
                                       FILE_SUPPORTS_OPEN_BY_FILE_ID |
                                       (Vcb->MajorVersion >= 3 ? FILE_SUPPORTS_REPARSE_POINTS : 0) |

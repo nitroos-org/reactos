@@ -54,6 +54,56 @@ TrimTrailingPathSeparators_UStr(
 }
 
 
+#ifdef NITRO_KDKIT
+/*
+ * ReactOS_KdKit: the kernel debugging kit (the kernel with the Windows KD
+ * protocol, the real kdcom.dll), for WinDbg on the other end of COM1.
+ * Added next to the others: the menu is not shown unless the timeout is
+ * set, and a default boot does not change.
+ */
+static VOID
+AddKdKitBootEntry(
+    IN PVOID BootStoreHandle,
+    IN PCWSTR ArcPath)
+{
+    UCHAR xxBootEntry[FIELD_OFFSET(BOOT_STORE_ENTRY, OsOptions) + sizeof(NTOS_OPTIONS)];
+    PBOOT_STORE_ENTRY BootEntry = (PBOOT_STORE_ENTRY)&xxBootEntry;
+    PNTOS_OPTIONS Options = (PNTOS_OPTIONS)&BootEntry->OsOptions;
+
+    BootEntry->Version = FreeLdr;
+    BootEntry->BootFilePath = NULL;
+
+    BootEntry->OsOptionsLength = sizeof(NTOS_OPTIONS);
+    RtlCopyMemory(Options->Signature,
+                  NTOS_OPTIONS_SIGNATURE,
+                  RTL_FIELD_SIZE(NTOS_OPTIONS, Signature));
+
+    Options->OsLoadPath = ArcPath;
+
+    // BootEntry->BootEntryKey = MAKESTRKEY(L"ReactOS_KdKit");
+    BootEntry->FriendlyName = L"\"" BRAND_PRODUCT_NAME_W L" (kernel debugging, COM1 115200)\"";
+    Options->OsLoadOptions  = L"/KERNEL=ntkrnlkd.exe /DEBUG /DEBUGPORT=COM1 /BAUDRATE=115200";
+    AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(L"ReactOS_KdKit"));
+}
+
+// PENUM_BOOT_ENTRIES_ROUTINE
+static NTSTATUS
+NTAPI
+EnumerateKdKitEntry(
+    IN BOOT_STORE_TYPE Type,
+    IN PBOOT_STORE_ENTRY BootEntry,
+    IN PVOID Parameter OPTIONAL)
+{
+    if (Type == FreeLdr && BootEntry->BootEntryKey &&
+        _wcsicmp((PCWSTR)BootEntry->BootEntryKey, L"ReactOS_KdKit") == 0)
+    {
+        *(PBOOLEAN)Parameter = TRUE;
+        return STATUS_NO_MORE_ENTRIES;
+    }
+    return STATUS_SUCCESS;
+}
+#endif
+
 static VOID
 CreateFreeLoaderReactOSEntries(
     IN PVOID BootStoreHandle,
@@ -87,16 +137,7 @@ CreateFreeLoaderReactOSEntries(
     AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(L"ReactOS_Debug"));
 
 #ifdef NITRO_KDKIT
-    /*
-     * ReactOS_KdKit: the kernel debugging kit (the kernel with the Windows KD
-     * protocol, the real kdcom.dll), for WinDbg on the other end of COM1.
-     * Added next to the others: the menu is not shown unless the timeout is
-     * set, and a default boot does not change.
-     */
-    // BootEntry->BootEntryKey = MAKESTRKEY(L"ReactOS_KdKit");
-    BootEntry->FriendlyName = L"\"" BRAND_PRODUCT_NAME_W L" (kernel debugging, COM1 115200)\"";
-    Options->OsLoadOptions  = L"/KERNEL=ntkrnlkd.exe /DEBUG /DEBUGPORT=COM1 /BAUDRATE=115200";
-    AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(L"ReactOS_KdKit"));
+    AddKdKitBootEntry(BootStoreHandle, ArcPath);
 #endif
 
 #ifdef _WINKD_
@@ -406,7 +447,7 @@ SkipThisEntry:
     return STATUS_SUCCESS;
 }
 
-static
+/* Not static: the setuplib unit test calls it on a freeldr.ini of its own */
 NTSTATUS
 UpdateFreeLoaderIni(
     IN PCWSTR IniPath,
@@ -459,6 +500,21 @@ UpdateFreeLoaderIni(
         Options->OsLoadOptions  = NULL; // L"";
         AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(Data.SectionName));
     }
+
+#ifdef NITRO_KDKIT
+    /*
+     * The kernel debugging entry, as in a new 'freeldr.ini': appended after the others, never the default
+     * entry, the timeout is not touched.  An entry that is there already (ours, or one the user edited or
+     * pointed elsewhere) is left alone: a section is never overwritten or duplicated.
+     */
+    {
+        BOOLEAN KdKitPresent = FALSE;
+
+        EnumerateBootStoreEntries(BootStoreHandle, EnumerateKdKitEntry, &KdKitPresent);
+        if (!KdKitPresent)
+            AddKdKitBootEntry(BootStoreHandle, ArcPath);
+    }
+#endif
 
     /* Close the INI file */
     CloseBootStore(BootStoreHandle);

@@ -314,7 +314,7 @@ LsapKeyFileChecksum(PLSAP_KEY_FILE File, PUCHAR Check)
     SymCryptSha256((PCBYTE)File, FIELD_OFFSET(LSAP_KEY_FILE, Check), Check);
 }
 
-/* The volume of the file keeps file descriptors: NTFS (ntfsng enforces them without reporting FILE_PERSISTENT_ACLS) */
+/* The volume of the file keeps file descriptors: FILE_PERSISTENT_ACLS, or NTFS by name (a build that did not report the flag) */
 static BOOLEAN
 LsapVolumeKeepsSecurity(HANDLE FileHandle)
 {

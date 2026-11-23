@@ -2209,6 +2209,30 @@ typedef struct _STACKFRAME64
     KDHELP64    KdHelp;
 } STACKFRAME64, *LPSTACKFRAME64;
 
+#define INLINE_FRAME_CONTEXT_INIT   0
+#define INLINE_FRAME_CONTEXT_IGNORE 0xFFFFFFFF
+
+typedef struct _tagSTACKFRAME_EX
+{
+    ADDRESS64   AddrPC;
+    ADDRESS64   AddrReturn;
+    ADDRESS64   AddrFrame;
+    ADDRESS64   AddrStack;
+    ADDRESS64   AddrBStore;
+    PVOID       FuncTableEntry;
+    DWORD64     Params[4];
+    BOOL        Far;
+    BOOL        Virtual;
+    DWORD64     Reserved[3];
+    KDHELP64    KdHelp;
+    DWORD       StackFrameSize;
+    DWORD       InlineFrameContext;
+} STACKFRAME_EX, *LPSTACKFRAME_EX;
+
+#define SYM_STKWALK_DEFAULT         0x00000000
+#define SYM_STKWALK_FORCE_FRAMEPTR  0x00000001
+#define SYM_STKWALK_ZEROEXTEND_PTRS 0x00000002
+
 typedef BOOL
 (CALLBACK *PREAD_PROCESS_MEMORY_ROUTINE64)(
   _In_ HANDLE,
@@ -2246,7 +2270,38 @@ StackWalk64(
   _In_opt_ PGET_MODULE_BASE_ROUTINE64,
   _In_opt_ PTRANSLATE_ADDRESS_ROUTINE64);
 
+BOOL
+WINAPI
+StackWalkEx(
+  _In_ DWORD,
+  _In_ HANDLE,
+  _In_ HANDLE,
+  _Inout_ LPSTACKFRAME_EX,
+  _Inout_ PVOID,
+  _In_opt_ PREAD_PROCESS_MEMORY_ROUTINE64,
+  _In_opt_ PFUNCTION_TABLE_ACCESS_ROUTINE64,
+  _In_opt_ PGET_MODULE_BASE_ROUTINE64,
+  _In_opt_ PTRANSLATE_ADDRESS_ROUTINE64,
+  _In_ DWORD);
+
 PVOID WINAPI SymFunctionTableAccess64(_In_ HANDLE, _In_ DWORD64);
+
+/* Inline frame contexts */
+#define SYM_INLINE_COMP_ERROR     0
+#define SYM_INLINE_COMP_IDENTICAL 1
+#define SYM_INLINE_COMP_STEPIN    2
+#define SYM_INLINE_COMP_STEPOUT   3
+#define SYM_INLINE_COMP_STEPOVER  4
+#define SYM_INLINE_COMP_DIFFERENT 5
+
+DWORD WINAPI SymAddrIncludeInlineTrace(_In_ HANDLE, _In_ DWORD64);
+DWORD WINAPI SymCompareInlineTrace(_In_ HANDLE, _In_ DWORD64, _In_ DWORD, _In_ DWORD64, _In_ DWORD64, _In_ DWORD64);
+BOOL  WINAPI SymQueryInlineTrace(_In_ HANDLE, _In_ DWORD64, _In_ DWORD, _In_ DWORD64, _In_ DWORD64, _Out_ LPDWORD, _Out_ LPDWORD);
+BOOL  WINAPI SymFromInlineContext(_In_ HANDLE, _In_ DWORD64, _In_ ULONG, _Out_opt_ PDWORD64, _Inout_ PSYMBOL_INFO);
+BOOL  WINAPI SymFromInlineContextW(_In_ HANDLE, _In_ DWORD64, _In_ ULONG, _Out_opt_ PDWORD64, _Inout_ PSYMBOL_INFOW);
+BOOL  WINAPI SymGetLineFromInlineContext(_In_ HANDLE, _In_ DWORD64, _In_ ULONG, _In_opt_ DWORD64, _Out_ PDWORD, _Out_ PIMAGEHLP_LINE64);
+BOOL  WINAPI SymGetLineFromInlineContextW(_In_ HANDLE, _In_ DWORD64, _In_ ULONG, _In_opt_ DWORD64, _Out_ PDWORD, _Out_ PIMAGEHLP_LINEW64);
+BOOL  WINAPI SymSetScopeFromInlineContext(_In_ HANDLE, _In_ ULONG64, _In_ ULONG);
 
 typedef PVOID
 (CALLBACK *PSYMBOL_FUNCENTRY_CALLBACK64)(

@@ -8,6 +8,7 @@ extern void func_VirtualAlloc2(void);
 extern void func_VirtualAllocLarge(void);
 extern void func_Wow64Process(void);
 extern void func_Wow64Threads(void);
+extern void func_Wow64Debugger(void);
 extern void func_ThreadGroupAffinity(void);
 extern void func_Wow64CreateThreadAccess(void);
 extern void func_Wow64ReviewThreads(void);
@@ -166,6 +167,7 @@ extern void func_JobObject(void);
 extern void func_LCMapString(void);
 extern void func_LCMapStringHash(void);
 extern void func_LoadString(void);
+extern void func_LoadLibraryAppDirName(void);
 extern void func_LoadLibraryErrorMode(void);
 extern void func_LoadLibraryExW(void);
 extern void func_LoadLibraryMalformed(void);
@@ -303,6 +305,7 @@ const struct test winetest_testlist[] =
     { "Wow64ThreadLifetime", func_Wow64ThreadLifetime },
     { "Wow64ThreadExitProcess", func_Wow64ThreadExitProcess },
     { "Wow64Threads", func_Wow64Threads },
+    { "Wow64Debugger", func_Wow64Debugger },
     { "ThreadGroupAffinity", func_ThreadGroupAffinity },
     { "Wow64CreateThreadAccess", func_Wow64CreateThreadAccess },
     { "Wow64ReviewThreads", func_Wow64ReviewThreads },
@@ -457,6 +460,7 @@ const struct test winetest_testlist[] =
     { "LCMapString",                 func_LCMapString },
     { "LCMapStringHash",             func_LCMapStringHash },
     { "LoadString", func_LoadString },
+    { "LoadLibraryAppDirName",       func_LoadLibraryAppDirName },
     { "LoadLibraryErrorMode",        func_LoadLibraryErrorMode },
     { "LoadLibraryExW",              func_LoadLibraryExW },
     { "LoadLibraryMalformed",         func_LoadLibraryMalformed },

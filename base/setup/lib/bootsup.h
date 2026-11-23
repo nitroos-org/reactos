@@ -21,6 +21,13 @@ typedef struct _BOOT_TARGET_IDENTITY
     ULONGLONG LastSector;
 } BOOT_TARGET_IDENTITY, *PBOOT_TARGET_IDENTITY;
 
+/* Adds the boot entry of the installation at ArcPath to the freeldr.ini in the directory IniPath (an NT path),
+ * unless one of that path is there, and the kernel debugging entry unless a ReactOS_KdKit section is listed */
+NTSTATUS
+UpdateFreeLoaderIni(
+    IN PCWSTR IniPath,
+    IN PCWSTR ArcPath);
+
 /* UEFI: TRUE if the last install found another system's loader at \EFI\BOOT and left it there */
 BOOLEAN
 WasEfiFallbackLoaderKept(VOID);

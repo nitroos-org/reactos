@@ -18,6 +18,7 @@ list(APPEND SOURCE
     Wow64ThreadApc.c
     Wow64ThreadSegments.c
     Wow64Threads.c
+    Wow64Debugger.c
     Wow64CreateThreadAccess.c
     Wow64Environment.c
     BindIoCompletionCallback.c
@@ -164,6 +165,7 @@ list(APPEND SOURCE
     LCMapString.c
     LCMapStringHash.c
     LoadString.c
+    LoadLibraryAppDirName.c
     LoadLibraryErrorMode.c
     LoadLibraryExW.c
     LoadLibraryMalformed.c

@@ -842,6 +842,26 @@ static HRESULT readerinput_growraw(xmlreaderinput *readerinput)
     read = 0;
     hr = ISequentialStream_Read(readerinput->stream, buffer->data + buffer->written, len, &read);
     TRACE("written=%d, alloc=%d, requested=%ld, read=%ld, ret=%#lx\n", buffer->written, buffer->allocated, len, read, hr);
+#ifdef __REACTOS__
+    /* A stream may return fewer bytes than asked for before its end (a pipe, a stream that hands out its
+       data in pieces): read on until the chunk is full, the stream ends or fails. The parser expects a
+       chunk to hold complete markup where the stream has it, as Windows does with such streams. */
+    while (hr == S_OK && read && read < len)
+    {
+        ULONG more = 0;
+        HRESULT hr2;
+
+        hr2 = ISequentialStream_Read(readerinput->stream, buffer->data + buffer->written + read, len - read, &more);
+        TRACE("more: requested=%ld, read=%ld, ret=%#lx\n", len - read, more, hr2);
+        /* a failure, a pending read or the end of the stream is seen by the next call; this one returns
+           what it has */
+        if (FAILED(hr2) || !more)
+            break;
+        read += more;
+        if (hr2 != S_OK)
+            break;
+    }
+#endif
     readerinput->pending = hr == E_PENDING;
     if (FAILED(hr)) return hr;
     buffer->written += read;
