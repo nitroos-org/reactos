@@ -150,6 +150,7 @@ list(APPEND SOURCE
     SetSecurityInfoKeyInherit.c
     RegistryRestrictedOpen.c
     SetNamedSecurityInfoInherit.c
+    SetNamedSecurityInfoPropagate.c
     SddlRights.c
     SddlSids.c
     ServiceProcess.c
