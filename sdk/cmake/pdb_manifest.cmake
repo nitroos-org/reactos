@@ -2,7 +2,9 @@
 # Run with -DLIST=<file of "image|pdb" lines> -DPDB_ROOT=<the pdb directory> -DOUT=<manifest file>.
 # One line per image, tab separated: image name, image size, TimeDateStamp (hex), PDB name from the CodeView record, PDB GUID,
 # age, symbol store key (<PDB name>/<GUID without dashes><age in hex>), sha256 of the image, size of the PDB, sha256 of the PDB,
-# path of the PDB file relative to the pdb directory (several modules can have the same file name: the directory tells them apart).
+# path of the PDB file relative to the pdb directory (several modules can have the same file name: the directory tells them apart),
+# the name the image has when it is installed (ntkrnlmp.exe is installed as ntoskrnl.exe, halmp.dll as hal.dll ...), and the key of
+# the image in a symbol store: <TimeDateStamp as 8 upper case hex digits><SizeOfImage in lower case hex>.
 # The CodeView (RSDS) record is read from the debug directory of the linked image. An image without one, or whose record does not
 # name the PDB that was written, fails the build: a PDB that cannot be matched to its image is worth nothing.
 
@@ -37,7 +39,7 @@ function(_rev HEX FROM COUNT OUTVAR)
 endfunction()
 
 file(STRINGS "${LIST}" _lines)
-set(_out "# image\tsize\ttimestamp\tpdb\tguid\tage\tsymstore-key\timage-sha256\tpdb-size\tpdb-sha256\tpdb-path\n")
+set(_out "# image\tsize\ttimestamp\tpdb\tguid\tage\tsymstore-key\timage-sha256\tpdb-size\tpdb-sha256\tpdb-path\tinstall-name\timage-key\n")
 foreach(_line ${_lines})
     if(NOT _line MATCHES "^([^|]+)\\|(.+)$")
         continue()
@@ -166,12 +168,32 @@ foreach(_line ${_lines})
     endif()
 
     math(EXPR _stamp_hex "${_stamp}" OUTPUT_FORMAT HEXADECIMAL)
+    string(REGEX REPLACE "^0x" "" _stamp_key "${_stamp_hex}")
+    string(TOUPPER "${_stamp_key}" _stamp_key)
+    string(LENGTH "${_stamp_key}" _sk_len)
+    while(_sk_len LESS 8)
+        set(_stamp_key "0${_stamp_key}")
+        math(EXPR _sk_len "${_sk_len} + 1")
+    endwhile()
+    math(EXPR _o "${_opt} + 56")
+    _u32("${_hdr}" ${_o} _soi)
+    math(EXPR _soi_hex "${_soi}" OUTPUT_FORMAT HEXADECIMAL)
+    string(REGEX REPLACE "^0x" "" _soi_hex "${_soi_hex}")
+    # images that the installer renames
+    set(_install "${_name}")
+    if(_name STREQUAL "ntkrnlmp.exe")
+        set(_install "ntoskrnl.exe")
+    elseif(_name STREQUAL "halmp.dll")
+        set(_install "hal.dll")
+    elseif(_name STREQUAL "kdcomkit.dll")
+        set(_install "kdcom.dll")
+    endif()
     file(SIZE "${_img}" _isize)
     file(SIZE "${_pdb}" _psize)
     file(SHA256 "${_img}" _ihash)
     file(SHA256 "${_pdb}" _phash)
     file(RELATIVE_PATH _pdbrel "${PDB_ROOT}" "${_pdb}")
-    string(APPEND _out "${_name}\t${_isize}\t${_stamp_hex}\t${_cvname}\t${_guid}\t${_age}\t${_pdbname}/${_guidkey}${_age_hex}\t${_ihash}\t${_psize}\t${_phash}\t${_pdbrel}\n")
+    string(APPEND _out "${_name}\t${_isize}\t${_stamp_hex}\t${_cvname}\t${_guid}\t${_age}\t${_pdbname}/${_guidkey}${_age_hex}\t${_ihash}\t${_psize}\t${_phash}\t${_pdbrel}\t${_install}\t${_stamp_key}${_soi_hex}\n")
 endforeach()
 file(WRITE "${OUT}" "${_out}")
 message(STATUS "pdb_manifest: ${OUT}")
