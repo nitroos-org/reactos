@@ -834,6 +834,68 @@ IsRemoveAttachThread(PTHREADINFO pti)
     return Ret;
 }
 
+/*
+ * The window a queue keeps as a plain pointer, if it is a window of pti; NULL otherwise. A queue shared by
+ * attached threads may only keep windows of the threads still on it: when a window is destroyed, only the
+ * queue of its own thread is cleaned (co_UserDestroyWindow, co_UserFreeWindow).
+ */
+static PWND FASTCALL
+IntQueueWindowOfThread(_In_opt_ PWND pWnd, _In_ PTHREADINFO pti)
+{
+    return (pWnd && pWnd->head.pti == pti) ? pWnd : NULL;
+}
+
+/* A thread other than ptiLeaving that uses Queue: threads share a queue only through attachments */
+static PTHREADINFO FASTCALL
+IntQueueOtherThread(_In_ PUSER_MESSAGE_QUEUE Queue, _In_ PTHREADINFO ptiLeaving)
+{
+    PATTACHINFO pai;
+
+    for (pai = gpai; pai; pai = pai->paiNext)
+    {
+        if (pai->pti1 != ptiLeaving && pai->pti1->MessageQueue == Queue)
+            return pai->pti1;
+        if (pai->pti2 != ptiLeaving && pai->pti2->MessageQueue == Queue)
+            return pai->pti2;
+    }
+    return NULL;
+}
+
+/* pti leaves Queue, which other threads keep: Queue forgets the windows of pti, and pti as the thread
+   that gets its keyboard and mouse input (ptiKeyboard / ptiMouse, the thread that created the queue):
+   nothing else changes them, and pti's THREADINFO is freed when pti ends while Queue lives on */
+static VOID FASTCALL
+IntQueueForgetThreadWindows(_In_ PUSER_MESSAGE_QUEUE Queue, _In_ PTHREADINFO pti)
+{
+    if (Queue->ptiKeyboard == pti || Queue->ptiMouse == pti)
+    {
+        PTHREADINFO ptiOther = IntQueueOtherThread(Queue, pti);
+
+        if (Queue->ptiKeyboard == pti)
+            Queue->ptiKeyboard = ptiOther;
+        if (Queue->ptiMouse == pti)
+            Queue->ptiMouse = ptiOther;
+    }
+
+    if (IntQueueWindowOfThread(Queue->spwndActive, pti))
+        Queue->spwndActive = NULL;
+    if (IntQueueWindowOfThread(Queue->spwndFocus, pti))
+        Queue->spwndFocus = NULL;
+    if (IntQueueWindowOfThread(Queue->spwndActivePrev, pti))
+        Queue->spwndActivePrev = NULL;
+    if (IntQueueWindowOfThread(Queue->spwndCapture, pti))
+    {
+        Queue->spwndCapture = NULL;
+        Queue->QF_flags &= ~QF_CAPTURELOCKED;
+    }
+    if (Queue->CaretInfo.hWnd)
+    {
+        PWND pwndCaret = ValidateHwndNoErr(Queue->CaretInfo.hWnd);
+        if (!pwndCaret || pwndCaret->head.pti == pti)
+            RtlZeroMemory(&Queue->CaretInfo, sizeof(Queue->CaretInfo));
+    }
+}
+
 NTSTATUS FASTCALL
 UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
 {
@@ -884,6 +946,12 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
 
         if (ptiTo->MessageQueue != ptiFrom->MessageQueue)
         {
+           /* Other threads attached to ptiFrom stay on its queue: it keeps their windows, and only the
+              windows of ptiFrom go with ptiFrom (the other threads' windows must not be named by the
+              queue of ptiTo, and the queue left must not name ptiFrom's windows: neither queue would be
+              cleaned when such a window is destroyed) */
+           BOOL bShared = (ptiFrom->MessageQueue->cThreads > 1);
+           PUSER_MESSAGE_QUEUE pumqFrom = ptiFrom->MessageQueue;
 
            ptiTo->MessageQueue->iCursorLevel -= ptiFrom->iCursorLevel;
 
@@ -893,13 +961,30 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
            {
               PDESKTOP pdeskFg = ptiFrom->MessageQueue->Desktop;
               ERR("ptiFrom is Foreground\n");
-              ptiTo->MessageQueue->spwndActive  = ptiFrom->MessageQueue->spwndActive;
-              ptiTo->MessageQueue->spwndFocus   = ptiFrom->MessageQueue->spwndFocus;
-              ptiTo->MessageQueue->spwndCapture = ptiFrom->MessageQueue->spwndCapture;
+              if (!bShared)
+              {
+                 ptiTo->MessageQueue->spwndActive  = pumqFrom->spwndActive;
+                 ptiTo->MessageQueue->spwndFocus   = pumqFrom->spwndFocus;
+                 ptiTo->MessageQueue->spwndCapture = pumqFrom->spwndCapture;
+              }
+              else
+              {
+                 ptiTo->MessageQueue->spwndActive  = IntQueueWindowOfThread(pumqFrom->spwndActive, ptiFrom);
+                 ptiTo->MessageQueue->spwndFocus   = IntQueueWindowOfThread(pumqFrom->spwndFocus, ptiFrom);
+                 ptiTo->MessageQueue->spwndCapture = IntQueueWindowOfThread(pumqFrom->spwndCapture, ptiFrom);
+              }
               ptiTo->MessageQueue->QF_flags    ^= ((ptiTo->MessageQueue->QF_flags ^ ptiFrom->MessageQueue->QF_flags) & QF_CAPTURELOCKED);
+              if (bShared && !ptiTo->MessageQueue->spwndCapture)
+                 ptiTo->MessageQueue->QF_flags &= ~QF_CAPTURELOCKED;
               RtlCopyMemory(&ptiTo->MessageQueue->CaretInfo,
                             &ptiFrom->MessageQueue->CaretInfo,
                             sizeof(ptiTo->MessageQueue->CaretInfo));
+              if (bShared && ptiTo->MessageQueue->CaretInfo.hWnd)
+              {
+                 PWND pwndCaret = ValidateHwndNoErr(ptiTo->MessageQueue->CaretInfo.hWnd);
+                 if (!pwndCaret || pwndCaret->head.pti != ptiFrom)
+                    RtlZeroMemory(&ptiTo->MessageQueue->CaretInfo, sizeof(ptiTo->MessageQueue->CaretInfo));
+              }
               if (ptiFrom->MessageQueue == gpqForeground)
               {
                  /* The foreground queue is the one of the input desktop, both threads are on it */
@@ -918,10 +1003,15 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
            {
               ERR("ptiFrom NOT Foreground\n");
               if ( ptiTo->MessageQueue->spwndActive == 0 )
-                  ptiTo->MessageQueue->spwndActive = ptiFrom->MessageQueue->spwndActive;
+                  ptiTo->MessageQueue->spwndActive = bShared ? IntQueueWindowOfThread(pumqFrom->spwndActive, ptiFrom)
+                                                             : pumqFrom->spwndActive;
               if ( ptiTo->MessageQueue->spwndFocus == 0 )
-                  ptiTo->MessageQueue->spwndFocus  = ptiFrom->MessageQueue->spwndFocus;
+                  ptiTo->MessageQueue->spwndFocus  = bShared ? IntQueueWindowOfThread(pumqFrom->spwndFocus, ptiFrom)
+                                                             : pumqFrom->spwndFocus;
            }
+
+           if (bShared)
+              IntQueueForgetThreadWindows(pumqFrom, ptiFrom);
 
            CurIcon = ptiFrom->MessageQueue->CursorObject;
 
