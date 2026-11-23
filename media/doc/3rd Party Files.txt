@@ -204,11 +204,23 @@ Used Version: OpenBSD sys/dev/pci/vmwpvs.c revision 1.31 (definitions only, the 
 License: ISC (https://spdx.org/licenses/ISC.html)
 URL: https://github.com/openbsd/src/blob/master/sys/dev/pci/vmwpvs.c
 
+Title: LSI Logic Fusion-MPT device interface (register, message and scatter/gather layouts)
+Path: drivers/storage/port/mptsas
+Used Version: OpenBSD sys/dev/ic/mpireg.h revision 1.45 and sys/dev/ic/mpi.c revision 1.226 (definitions and the start-up order only, the driver code is new)
+License: ISC (https://spdx.org/licenses/ISC.html)
+URL: https://github.com/openbsd/src/blob/master/sys/dev/ic/mpireg.h
+
 Title: VirtIO NetKVM Windows guest driver
 Path: drivers/network/dd/netkvm
 Used Version: git commit 5e01b36
 License: BSD-3-Clause (https://spdx.org/licenses/BSD-3-Clause.html)
 URL: https://github.com/virtio-win/kvm-guest-drivers-windows/tree/03ca1696b9474d62b90fda5be06d91c8c34f6413/NetKVM/NDIS5
+
+Title: VMware vmxnet3 device interface (register, command and ring layouts)
+Path: drivers/network/dd/vmxnet3
+Used Version: OpenBSD sys/dev/pci/if_vmxreg.h revision 1.10 and sys/dev/pci/if_vmx.c revision 1.96 (definitions and the start-up order only, the driver code is new)
+License: ISC (https://spdx.org/licenses/ISC.html)
+URL: https://github.com/openbsd/src/blob/master/sys/dev/pci/if_vmxreg.h
 
 Title: Microsoft CDROM Storage Class Driver
 Path: drivers/storage/class/cdrom

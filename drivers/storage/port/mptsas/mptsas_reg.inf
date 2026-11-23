@@ -1,0 +1,7 @@
+; LSI Logic Fusion-MPT SAS miniport driver (boot start: Setup and the first boot find SAS1068 disks)
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\mptsas","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\mptsas","Group",0x00000000,"SCSI Miniport"
+HKLM,"SYSTEM\CurrentControlSet\Services\mptsas","ImagePath",0x00020000,"system32\drivers\mptsas.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\mptsas","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\mptsas","Type",0x00010001,0x00000001
