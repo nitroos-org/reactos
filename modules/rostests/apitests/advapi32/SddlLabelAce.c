@@ -99,7 +99,8 @@ START_TEST(SddlLabelAce)
         ok(InitializeSecurityDescriptor(&Descriptor, SECURITY_DESCRIPTOR_REVISION), "InitializeSecurityDescriptor failed\n");
         ok(SetSecurityDescriptorSacl(&Descriptor, TRUE, Acl, FALSE), "SetSecurityDescriptorSacl failed\n");
         Text = NULL;
-        Ret = ConvertSecurityDescriptorToStringSecurityDescriptorW(&Descriptor, SDDL_REVISION_1, SACL_SECURITY_INFORMATION, &Text, NULL);
+        /* the label belongs to LABEL_SECURITY_INFORMATION: SACL_SECURITY_INFORMATION alone prints "S:" (measured, SddlMandatoryLabel) */
+        Ret = ConvertSecurityDescriptorToStringSecurityDescriptorW(&Descriptor, SDDL_REVISION_1, LABEL_SECURITY_INFORMATION, &Text, NULL);
         ok(Ret, "API label: conversion failed with %lu\n", GetLastError());
         if (Ret)
         {

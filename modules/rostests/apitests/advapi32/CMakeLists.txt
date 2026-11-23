@@ -15,6 +15,7 @@ list(APPEND SOURCE
     RegSaveKeyExFormat.c
     RegSaveKeyBigValue.c
     SddlLabelAce.c
+    SddlMandatoryLabel.c
     SddlNullAcl.c
     AuditCategories.c
     CveEventWrite.c

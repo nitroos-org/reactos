@@ -17,6 +17,7 @@ extern void func_AddMandatoryAce(void);
 extern void func_RegSaveKeyExFormat(void);
 extern void func_RegSaveKeyBigValue(void);
 extern void func_SddlLabelAce(void);
+extern void func_SddlMandatoryLabel(void);
 extern void func_SddlNullAcl(void);
 extern void func_AuditCategories(void);
 extern void func_CveEventWrite(void);
@@ -219,6 +220,7 @@ const struct test winetest_testlist[] =
     { "RegSaveKeyExFormat", func_RegSaveKeyExFormat },
     { "RegSaveKeyBigValue", func_RegSaveKeyBigValue },
     { "SddlLabelAce", func_SddlLabelAce },
+    { "SddlMandatoryLabel", func_SddlMandatoryLabel },
     { "SddlNullAcl", func_SddlNullAcl },
     { "AuditCategories", func_AuditCategories },
     { "CveEventWrite", func_CveEventWrite },
