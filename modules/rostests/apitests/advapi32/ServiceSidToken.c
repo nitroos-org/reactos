@@ -472,6 +472,10 @@ StartWithRawPrivileges(SC_HANDLE hScm, PCSTR Name, DWORD Type, const VOID *Data,
 /* Create, configure and start a scratch service; its token facts into Dump. Returns the StartService error */
 static CHAR WriteTargets[4 * MAX_PATH];     /* quoted paths the service opens for writing, appended to its command line */
 
+/* RunService: a REG_MULTI_SZ RequiredPrivileges value written to the registry as it is (a list longer than the API takes) */
+static const VOID *RunRawBlob;
+static DWORD RunRawSize;
+
 static DWORD
 RunService(SC_HANDLE hScm, PCSTR Name, PCSTR Account, DWORD SidType, PCSTR Privileges, PTOKEN_DUMP Dump)
 {
@@ -509,6 +513,21 @@ RunService(SC_HANDLE hScm, PCSTR Name, PCSTR Account, DWORD SidType, PCSTR Privi
         PrivInfo.pmszRequiredPrivileges = Multi;
         ok(ChangeServiceConfig2A(hService, SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO, &PrivInfo),
            "%s: REQUIRED_PRIVILEGES_INFO failed with %lu\n", Name, GetLastError());
+    }
+
+    if (RunRawBlob)
+    {
+        CHAR Key[256];
+        HKEY hKey;
+
+        StringCbPrintfA(Key, sizeof(Key), "SYSTEM\\CurrentControlSet\\Services\\%s", Name);
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, Key, 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
+        {
+            LONG SetResult = RegSetValueExW(hKey, L"RequiredPrivileges", 0, REG_MULTI_SZ, RunRawBlob, RunRawSize);
+
+            ok(SetResult == ERROR_SUCCESS, "%s: RegSetValueEx of %lu bytes failed with %ld\n", Name, RunRawSize, SetResult);
+            RegCloseKey(hKey);
+        }
     }
 
     if (!StartServiceA(hService, 0, NULL))
@@ -1186,6 +1205,42 @@ START_TEST(ServiceSidToken)
         Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_NONE, "SeTrustedCredManAccessPrivilege", &Dump);
         ok(Error == ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE, "system SeTrustedCredManAccessPrivilege: StartService error %lu, expected %d\n",
            Error, ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE);
+        /* 9c. A list of 1600 names (76 KB; Windows Server 2022 applies it as it applies a short one) */
+        {
+            static const WCHAR Notify[] = L"SeChangeNotifyPrivilege";
+            static const WCHAR Imp[] = L"SeImpersonatePrivilege";
+            DWORD Count = 1600, Size = Count * sizeof(Notify) + sizeof(Imp) + sizeof(WCHAR), k;
+            PWSTR Big = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Size);
+
+            ok(Big != NULL, "no memory\n");
+            if (Big)
+            {
+                for (k = 0; k < Count; k++)
+                    memcpy((PBYTE)Big + k * sizeof(Notify), Notify, sizeof(Notify));
+                /* only the names of SeChangeNotifyPrivilege: the token keeps it alone (76 KB as Unicode) */
+                RunRawBlob = Big;
+                RunRawSize = Count * sizeof(Notify) + sizeof(WCHAR);
+                StringCbPrintfA(Name, sizeof(Name), "%sz", Base);
+                Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_NONE, NULL, &Dump);
+                ok(Error == ERROR_SUCCESS, "big list: StartService failed with %lu\n", Error);
+                if (Dump.Valid)
+                    ok(Dump.PrivCount == 1, "big list: %lu privileges, expected 1\n", Dump.PrivCount);
+                /* the name that matters comes after the 64 KB mark */
+                memcpy((PBYTE)Big + Count * sizeof(Notify), Imp, sizeof(Imp));
+                RunRawSize = Count * sizeof(Notify) + sizeof(Imp) + sizeof(WCHAR);
+                StringCbPrintfA(Name, sizeof(Name), "%sZ", Base);
+                Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_NONE, NULL, &Dump);
+                ok(Error == ERROR_SUCCESS, "big list, last name: StartService failed with %lu\n", Error);
+                if (Dump.Valid)
+                {
+                    ok(Dump.PrivCount == 2, "big list, last name: %lu privileges, expected 2\n", Dump.PrivCount);
+                    ok(FindPriv(&Dump, "SeImpersonatePrivilege") >= 0, "big list, last name: no SeImpersonatePrivilege\n");
+                    ok(FindPriv(&Dump, "SeDebugPrivilege") < 0, "big list, last name: SeDebugPrivilege kept\n");
+                }
+                RunRawBlob = NULL;
+                HeapFree(GetProcessHeap(), 0, Big);
+            }
+        }
     }
 
     /* 10. NT SERVICE\<name> names and SIDs of an existing service */

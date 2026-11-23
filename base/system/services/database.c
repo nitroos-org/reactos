@@ -489,6 +489,9 @@ ScmFreeTokenConfig(
     RtlZeroMemory(pConfig, sizeof(*pConfig));
 }
 
+/* A larger RequiredPrivileges value is refused (not measured on Windows above 76 KB) */
+#define SCM_MAX_REQUIRED_PRIVILEGES_SIZE (4 * 1024 * 1024)
+
 static
 DWORD
 ScmReadTokenConfig(
@@ -531,18 +534,52 @@ ScmReadTokenConfig(
         RegCloseKey(hServiceKey);
         return ERROR_INVALID_PARAMETER;
     }
-    if (dwType == REG_MULTI_SZ && dwSize >= 2 * sizeof(WCHAR) && dwSize <= 64 * 1024)
+    if (dwType == REG_MULTI_SZ && dwSize >= 2 * sizeof(WCHAR))
     {
-        /* two extra NULs: the list is terminated even when the value is not */
-        pConfig->pszPrivileges = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize + 2 * sizeof(WCHAR));
-        if (pConfig->pszPrivileges == NULL)
+        /* A list of any length is applied (Windows Server 2022: 1600 names, 76 KB, filter the token as a short one does).
+         * The value may grow between the size query and the read: read again with the size the first read returned. */
+        for (i = 0; ; i++)
         {
-            RegCloseKey(hServiceKey);
-            return ERROR_NOT_ENOUGH_MEMORY;
+            DWORD dwRead;
+
+            if (dwSize > SCM_MAX_REQUIRED_PRIVILEGES_SIZE || i == 4)
+            {
+                DPRINT1("Service %S: RequiredPrivileges is too large or keeps changing\n", pService->lpServiceName);
+                RegCloseKey(hServiceKey);
+                return ERROR_INVALID_PARAMETER;
+            }
+
+            /* two extra NULs: the list is terminated even when the value is not */
+            pConfig->pszPrivileges = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize + 2 * sizeof(WCHAR));
+            if (pConfig->pszPrivileges == NULL)
+            {
+                RegCloseKey(hServiceKey);
+                return ERROR_NOT_ENOUGH_MEMORY;
+            }
+
+            dwRead = dwSize;
+            dwError = RegQueryValueExW(hServiceKey, L"RequiredPrivileges", NULL, &dwType,
+                                       (LPBYTE)pConfig->pszPrivileges, &dwRead);
+            if (dwError == ERROR_MORE_DATA)
+            {
+                HeapFree(GetProcessHeap(), 0, pConfig->pszPrivileges);
+                pConfig->pszPrivileges = NULL;
+                dwSize = dwRead;
+                continue;
+            }
+            break;
         }
-        if (RegQueryValueExW(hServiceKey, L"RequiredPrivileges", NULL, &dwType,
-                             (LPBYTE)pConfig->pszPrivileges, &dwSize) != ERROR_SUCCESS ||
-            dwType != REG_MULTI_SZ || pConfig->pszPrivileges[0] == UNICODE_NULL)
+
+        if (dwError != ERROR_SUCCESS || dwType != REG_MULTI_SZ)
+        {
+            /* The value vanished or changed its type while it was read: not a list that can be applied */
+            HeapFree(GetProcessHeap(), 0, pConfig->pszPrivileges);
+            pConfig->pszPrivileges = NULL;
+            RegCloseKey(hServiceKey);
+            return (dwError != ERROR_SUCCESS) ? dwError : ERROR_INVALID_PARAMETER;
+        }
+
+        if (pConfig->pszPrivileges[0] == UNICODE_NULL)
         {
             HeapFree(GetProcessHeap(), 0, pConfig->pszPrivileges);
             pConfig->pszPrivileges = NULL;
@@ -992,10 +1029,11 @@ ScmApplyRequiredPrivileges(
     _In_ PCWSTR pszPrivileges)
 {
     PTOKEN_PRIVILEGES pPrivileges = NULL, pRemove = NULL;
+    PLUID pLuids = NULL;
     PCWSTR pszName;
     LUID Luid;
     DWORD dwSize = 0, dwError = ERROR_SUCCESS;
-    ULONG i;
+    ULONG i, n, nLuids = 0;
     BOOL bListed;
 
     GetTokenInformation(hToken, TokenPrivileges, NULL, 0, &dwSize);
@@ -1008,41 +1046,75 @@ ScmApplyRequiredPrivileges(
         goto done;
     }
 
-    /* A name that is no privilege stops the start: ERROR_INVALID_PARAMETER when none of the names is one,
+    /* Look each name up once (the lookups go to the LSA, and a list can name the same privilege thousands of times).
+     * A name that is no privilege stops the start: ERROR_INVALID_PARAMETER when none of the names is one,
      * ERROR_INVALID_DATA when the list holds known and unknown names (Windows Server 2022) */
     {
-        ULONG nKnown = 0, nUnknown = 0;
+        ULONG nNames = 0, nUnknown = 0, nSeen = 0, k;
+        struct { PCWSTR pszName; LUID Luid; } Seen[16];
+
+        for (pszName = pszPrivileges; *pszName != UNICODE_NULL; pszName += wcslen(pszName) + 1)
+            nNames++;
+
+        pLuids = HeapAlloc(GetProcessHeap(), 0, (nNames ? nNames : 1) * sizeof(LUID));
+        if (pLuids == NULL)
+        {
+            dwError = ERROR_NOT_ENOUGH_MEMORY;
+            goto done;
+        }
 
         for (pszName = pszPrivileges; *pszName != UNICODE_NULL; pszName += wcslen(pszName) + 1)
         {
+            for (k = 0; k < nSeen; k++)
+            {
+                if (!_wcsicmp(Seen[k].pszName, pszName))
+                    break;
+            }
+            if (k < nSeen)
+            {
+                pLuids[nLuids++] = Seen[k].Luid;
+                continue;
+            }
+
             if (LookupPrivilegeValueW(NULL, pszName, &Luid))
-                nKnown++;
+            {
+                pLuids[nLuids++] = Luid;
+                if (nSeen < RTL_NUMBER_OF(Seen))
+                {
+                    Seen[nSeen].pszName = pszName;
+                    Seen[nSeen].Luid = Luid;
+                    nSeen++;
+                }
+            }
             else
             {
                 DPRINT1("Service %S: unknown required privilege %S\n", pService->lpServiceName, pszName);
                 nUnknown++;
             }
+
+            /* Known and unknown names are both there: the answer does not change */
+            if (nUnknown != 0 && nLuids != 0)
+                break;
         }
         if (nUnknown != 0)
         {
-            dwError = (nKnown != 0) ? ERROR_INVALID_DATA : ERROR_INVALID_PARAMETER;
+            dwError = (nLuids != 0) ? ERROR_INVALID_DATA : ERROR_INVALID_PARAMETER;
             goto done;
         }
     }
 
     /* Every listed privilege must be one the account holds */
-    for (pszName = pszPrivileges; *pszName != UNICODE_NULL; pszName += wcslen(pszName) + 1)
+    for (n = 0; n < nLuids; n++)
     {
-        LookupPrivilegeValueW(NULL, pszName, &Luid);
         for (i = 0; i < pPrivileges->PrivilegeCount; i++)
         {
-            if (RtlEqualLuid(&pPrivileges->Privileges[i].Luid, &Luid))
+            if (RtlEqualLuid(&pPrivileges->Privileges[i].Luid, &pLuids[n]))
                 break;
         }
         if (i == pPrivileges->PrivilegeCount)
         {
-            DPRINT1("Service %S: the account does not hold the required privilege %S\n",
-                    pService->lpServiceName, pszName);
+            DPRINT1("Service %S: the account does not hold a required privilege (%lu)\n",
+                    pService->lpServiceName, pLuids[n].LowPart);
             dwError = ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE;
             goto done;
         }
@@ -1064,10 +1136,9 @@ ScmApplyRequiredPrivileges(
             continue;
 
         bListed = FALSE;
-        for (pszName = pszPrivileges; *pszName != UNICODE_NULL; pszName += wcslen(pszName) + 1)
+        for (n = 0; n < nLuids; n++)
         {
-            if (LookupPrivilegeValueW(NULL, pszName, &Luid) &&
-                RtlEqualLuid(&pPrivileges->Privileges[i].Luid, &Luid))
+            if (RtlEqualLuid(&pPrivileges->Privileges[i].Luid, &pLuids[n]))
             {
                 bListed = TRUE;
                 break;
@@ -1096,6 +1167,8 @@ ScmApplyRequiredPrivileges(
 done:
     if (pRemove != NULL)
         HeapFree(GetProcessHeap(), 0, pRemove);
+    if (pLuids != NULL)
+        HeapFree(GetProcessHeap(), 0, pLuids);
     HeapFree(GetProcessHeap(), 0, pPrivileges);
     return dwError;
 }
