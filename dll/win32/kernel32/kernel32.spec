@@ -1437,6 +1437,7 @@
 @ stdcall -version=0x600+ -arch=x86_64 Wow64GetThreadContext(ptr ptr)
 @ stub -version=0x600+ -arch=i386,arm Wow64GetThreadContext
 @ stdcall Wow64RevertWow64FsRedirection(ptr)
+@ stdcall -version=0x600+ -arch=x86_64 Wow64GetThreadSelectorEntry(ptr long ptr)
 @ stdcall -version=0x600+ -arch=x86_64 Wow64SetThreadContext(ptr ptr)
 @ stub -version=0x600+ -arch=i386,arm Wow64SetThreadContext
 @ stub -version=0x600+ Wow64SuspendThread

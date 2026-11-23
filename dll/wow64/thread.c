@@ -160,6 +160,22 @@ NTSTATUS Wow64QueryThread(HANDLE Thread, ULONG Class, PVOID Buffer, ULONG Length
         }
         return Status;
     }
+    if (Class == ThreadDescriptorTableEntry)
+    {
+        /* GetThreadSelectorEntry: debuggers take the segment bases of a 32-bit thread from it */
+        struct { ULONG Selector; UCHAR Descriptor[8]; } *Entry = Buffer;
+        THREAD_BASIC_INFORMATION Native;
+        ULONG Selector;
+        if (Length != sizeof(*Entry)) return STATUS_INFO_LENGTH_MISMATCH;
+        Selector = Entry->Selector;
+        Status = NtQueryInformationThread(Thread, ThreadBasicInformation, &Native, sizeof(Native), NULL);
+        if (!NT_SUCCESS(Status)) return Status;
+        if (!Wow64SelectorDescriptor(Selector, Native.TebBaseAddress ? PtrToUlong(WOW64_TEB32(Native.TebBaseAddress)) : 0,
+                                     Entry->Descriptor))
+            return STATUS_UNSUCCESSFUL;
+        if (ReturnLength) *ReturnLength = sizeof(Entry->Descriptor);
+        return STATUS_SUCCESS;
+    }
     if (Class == ThreadQuerySetWin32StartAddress || Class == ThreadAffinityMask)
     {
         ULONG_PTR Value;
