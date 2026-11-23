@@ -3119,11 +3119,8 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     FullPath.MaximumLength = sizeof(StringBuffer);
     RtlInitUnicodeString(&NtSystemRoot, SharedUserData->NtSystemRoot);
     RtlAppendUnicodeStringToString(&FullPath, &NtSystemRoot);
-#ifdef _M_IX86
-    if (NtCurrentTeb()->WOW32Reserved)
-        RtlAppendUnicodeToString(&FullPath, L"\\SysWOW64\\");
-    else
-#endif
+    /* The logical System32 directory also for a 32-bit process on a 64-bit system, as Windows names its ntdll
+     * (file system redirection maps it to SysWOW64 where a file is opened by it) */
     RtlAppendUnicodeToString(&FullPath, L"\\System32\\");
 
     /* Open the Known DLLs directory */
