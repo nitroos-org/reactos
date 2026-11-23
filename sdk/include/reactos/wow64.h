@@ -38,6 +38,34 @@ C_ASSERT(FIELD_OFFSET(WOW64_CONTEXT, ExtendedRegisters) == 204);
 #define WOW64_PEB32(Peb) ((PEB32 *)((ULONG_PTR)(Peb) + ROUND_TO_PAGES(sizeof(PEB))))
 #define WOW64_TEB32(Teb) ((TEB32 *)((ULONG_PTR)(Teb) + ROUND_TO_PAGES(sizeof(TEB))))
 
+/* The descriptor of a selector of a 32-bit thread (GetThreadSelectorEntry, Wow64GetThreadSelectorEntry): the flat
+ * code and data segments and the segment of the thread's 32-bit TEB (fs), for any requested privilege level, and an
+ * empty descriptor for the null selector, as Windows Server 2022 reports them. Other selectors have none. The eight
+ * bytes are an LDT_ENTRY. */
+static __inline BOOLEAN Wow64SelectorDescriptor(ULONG Selector, ULONG TebBase, UCHAR Descriptor[8])
+{
+    ULONG Base = 0, Limit = 0;
+    UCHAR Type = 0, High = 0;
+
+    switch (Selector & ~3UL)
+    {
+    case 0x00: break;
+    case 0x20: Limit = 0xFFFFF; Type = 0xFB; High = 0xC0; break;
+    case 0x28: Limit = 0xFFFFF; Type = 0xF3; High = 0xC0; break;
+    case 0x50: Base = TebBase; Limit = 0xFFF; Type = 0xF3; High = 0x40; break;
+    default: return FALSE;
+    }
+    Descriptor[0] = (UCHAR)Limit;
+    Descriptor[1] = (UCHAR)(Limit >> 8);
+    Descriptor[2] = (UCHAR)Base;
+    Descriptor[3] = (UCHAR)(Base >> 8);
+    Descriptor[4] = (UCHAR)(Base >> 16);
+    Descriptor[5] = Type;
+    Descriptor[6] = High | (UCHAR)((Limit >> 16) & 0xF);
+    Descriptor[7] = (UCHAR)(Base >> 24);
+    return TRUE;
+}
+
 /* The WoW64 layer's own 64-bit code: native ntdll, wow64.dll, wow64win.dll,
  * wow64cpu.dll and the low-address gate page. A thread in 64-bit mode while
  * InTransition is set is in the middle of a transition only when it runs

@@ -10,6 +10,9 @@
 /* INCLUDES *******************************************************************/
 
 #include <k32.h>
+#ifdef _WIN64
+#include <reactos/wow64.h>
+#endif
 
 #define NDEBUG
 #include <debug.h>
@@ -1964,6 +1967,29 @@ BOOL WINAPI Wow64GetThreadContext(HANDLE Thread, PWOW64_CONTEXT Context)
     return GetThreadContext(Thread, (PCONTEXT)Context);
 #endif
 }
+
+#ifdef _WIN64
+/* The descriptor of a selector of a 32-bit thread, as GetThreadSelectorEntry gives it to a 32-bit program */
+BOOL WINAPI Wow64GetThreadSelectorEntry(HANDLE Thread, DWORD Selector, PVOID Entry /* PWOW64_LDT_ENTRY */)
+{
+    THREAD_BASIC_INFORMATION Info;
+    NTSTATUS Status;
+    UCHAR Descriptor[8];
+
+    Status = NtQueryInformationThread(Thread, ThreadBasicInformation, &Info, sizeof(Info), NULL);
+    if (NT_SUCCESS(Status) &&
+        !Wow64SelectorDescriptor(Selector, Info.TebBaseAddress ? PtrToUlong(WOW64_TEB32(Info.TebBaseAddress)) : 0,
+                                 Descriptor))
+        Status = STATUS_UNSUCCESSFUL;
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+    RtlCopyMemory(Entry, Descriptor, sizeof(Descriptor));
+    return TRUE;
+}
+#endif
 
 BOOL WINAPI Wow64SetThreadContext(HANDLE Thread, const WOW64_CONTEXT *Context)
 {

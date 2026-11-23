@@ -3616,6 +3616,17 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             }
             return Status;
         }
+        if (a[1] == ProcessDebugObjectHandle)
+        {
+            /* A handle, a ULONG for the guest (STATUS_PORT_NOT_SET when the process is not debugged) */
+            HANDLE Object = NULL;
+            if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+            if (a[4]) PROBE(4);
+            Status = NtQueryInformationProcess(H(0), a[1], &Object, sizeof(Object), NULL);
+            if (NT_SUCCESS(Status)) U(2) = HandleToUlong(Object);
+            if (a[4]) U(4) = sizeof(ULONG);
+            return Status;
+        }
         if (a[1] == ProcessDebugPort)
         {
             /* The debug port is a pointer-sized value that only ever reports
@@ -3633,6 +3644,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         case ProcessDefaultHardErrorMode: case ProcessExecuteFlags: case ProcessPriorityClass:
         case ProcessSessionInformation: case ProcessBreakOnTermination: case ProcessCookie:
         case ProcessHandleCount: case 58 /* ProcessHandleTable, Windows 8.1 */:
+        case ProcessDebugFlags:
             /* A ULONG, and the handle values as a ULONG array */
             return NtQueryInformationProcess(H(0), a[1], P(2), a[3], P(4));
         case 52 /* ProcessMitigationPolicy: { ULONG Policy; ULONG Flags }, the same in both widths. The sandbox of a
