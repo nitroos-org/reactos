@@ -105,6 +105,7 @@ NICEnableTxRx (
     // TX and RX must be enabled before setting these
     //
     NdisRawWritePortUlong(Adapter->IoBase + R_RC, RC_VAL);
+    Adapter->RxConfig = RC_VAL;
     NdisRawWritePortUlong(Adapter->IoBase + R_TC, TC_VAL);
     return NDIS_STATUS_SUCCESS;
 }
@@ -269,7 +270,15 @@ NICApplyPacketFilter (
         filterMask |= B_RC_AAP;
     }
 
-    NdisRawWritePortUlong(Adapter->IoBase + R_RC, filterMask);
+    /* A write of the receive configuration register starts the receive ring over in some chips (the model of
+       QEMU does: write and read pointers back to the start), and the driver goes on reading where it was: no
+       frame was found after that. The filter and the multicast list are asked for more than once with the
+       same result, so the register is written only when its value changes */
+    if (filterMask != Adapter->RxConfig)
+    {
+        NdisRawWritePortUlong(Adapter->IoBase + R_RC, filterMask);
+        Adapter->RxConfig = filterMask;
+    }
 
     return NDIS_STATUS_SUCCESS;
 }

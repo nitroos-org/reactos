@@ -97,6 +97,7 @@ RxResetReceiver (
     NdisRawWritePortUlong(Adapter->IoBase + R_RXSA, Adapter->ReceiveBufferPa.LowPart);
     NdisRawWritePortUchar(Adapter->IoBase + R_CMD, B_CMD_TXE | B_CMD_RXE);
     NdisRawWritePortUlong(Adapter->IoBase + R_RC, RC_VAL);
+    Adapter->RxConfig = RC_VAL;
     NICApplyPacketFilter(Adapter);
     RtlZeroMemory(Adapter->ReceiveBuffer, RECEIVE_BUFFER_SIZE);
     Adapter->ReceiveOffset = 0;

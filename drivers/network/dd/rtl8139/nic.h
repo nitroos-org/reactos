@@ -45,6 +45,7 @@ typedef struct _NIC_EVENTS {
 typedef struct _RTL_ADAPTER {
     NDIS_HANDLE MiniportAdapterHandle;
     NDIS_SPIN_LOCK Lock;
+    ULONG RxConfig; /* the value last written to the receive configuration register */
 
     ULONG IoRangeStart;
     ULONG IoRangeLength;
