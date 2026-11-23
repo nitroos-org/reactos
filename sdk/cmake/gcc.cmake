@@ -364,6 +364,23 @@ if(NITRO_REPRODUCIBLE_BUILD)
     # the build directory comes second because it lies inside the source tree in the usual layout
     add_compile_options("-ffile-prefix-map=${REACTOS_SOURCE_DIR}=/ros-src" "-ffile-prefix-map=${REACTOS_BINARY_DIR}=/ros-bin")
 endif()
+if(NITRO_PDB_PUBLICS)
+    # ld --pdb exists since binutils 2.40: refuse to configure with a linker that would silently ignore or reject it
+    execute_process(COMMAND ${CMAKE_C_COMPILER} -print-prog-name=ld
+                    OUTPUT_VARIABLE _nitro_ld OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _nitro_ld_rc)
+    set(_nitro_ld_help "")
+    if(_nitro_ld_rc EQUAL 0 AND _nitro_ld)
+        execute_process(COMMAND ${_nitro_ld} --help OUTPUT_VARIABLE _nitro_ld_help ERROR_QUIET)
+        execute_process(COMMAND ${_nitro_ld} --version OUTPUT_VARIABLE _nitro_ld_version ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+        string(REGEX REPLACE "\n.*" "" _nitro_ld_version "${_nitro_ld_version}")
+    endif()
+    if(NOT _nitro_ld_help MATCHES "--pdb=")
+        message(FATAL_ERROR "NITRO_PDB_PUBLICS=ON needs GNU ld 2.40 or later (option --pdb); the linker of this toolchain is '${_nitro_ld}' (${_nitro_ld_version}) and does not have it. Use a toolchain with binutils 2.40 or later or configure with -DNITRO_PDB_PUBLICS=OFF.")
+    endif()
+    message(STATUS "NITRO_PDB_PUBLICS: PDB publics for kernel-mode images, linker ${_nitro_ld_version}")
+    file(MAKE_DIRECTORY ${REACTOS_BINARY_DIR}/pdb)
+endif()
+
 if(NITRO_REPRODUCIBLE_BUILD)
     # ld would write the link time into every PE header (and its debug directory): 0 instead
     foreach(_nitro_lf CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS CMAKE_MODULE_LINKER_FLAGS)
@@ -422,6 +439,16 @@ function(set_module_type_toolchain MODULE TYPE)
         endif()
 
         target_link_options(${MODULE} PRIVATE -Wl,--exclude-all-symbols,-file-alignment=0x1000,-section-alignment=0x1000)
+
+        if(NITRO_PDB_PUBLICS)
+            # A PDB with the public symbols. The CodeView record in the image carries the bare file name (GUID and age match the PDB);
+            # the file itself lies in the directory of the module below pdb/, because two modules can share a file name
+            # (win32ss/drivers/miniport/vbe and pc98vid both build vgapnp.sys).
+            file(RELATIVE_PATH _nitro_pdb_rel "${REACTOS_BINARY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+            file(MAKE_DIRECTORY "${REACTOS_BINARY_DIR}/pdb/${_nitro_pdb_rel}")
+            target_link_options(${MODULE} PRIVATE "-Wl,--pdb=${REACTOS_BINARY_DIR}/pdb/${_nitro_pdb_rel}/$<TARGET_FILE_BASE_NAME:${MODULE}>.pdb")
+            set_property(GLOBAL APPEND PROPERTY NITRO_PDB_MODULE_LIST "${MODULE}|${_nitro_pdb_rel}")
+        endif()
 
         if(${TYPE} STREQUAL "wdmdriver")
             target_link_options(${MODULE} PRIVATE "-Wl,--wdmdriver")

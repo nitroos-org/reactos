@@ -100,6 +100,12 @@ cmake_dependent_option(BUILD_WOW64_ENABLED
     "Build the experimental amd64 WoW64 runtime."
     OFF "ARCH STREQUAL amd64" OFF)
 
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    option(NITRO_PDB_PUBLICS "Write a PDB with the public symbols and a CodeView (RSDS) record for every kernel-mode image (kernel, HALs, kdcom, drivers), into <build>/pdb with a MANIFEST.txt. Needs GNU ld 2.40 or later." OFF)
+else()
+    set(NITRO_PDB_PUBLICS OFF)
+endif()
+
 set(GENERATE_DEPENDENCY_GRAPH FALSE CACHE BOOL
 "Whether to create a GraphML dependency graph of DLLs.")
 
