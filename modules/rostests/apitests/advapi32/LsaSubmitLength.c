@@ -17,6 +17,21 @@
 
 #define LIMIT 0x100000UL
 
+/* secur32 exports, loaded at run time (advapi32_apitest does not import secur32) */
+static NTSTATUS (NTAPI *pLsaConnectUntrusted)(PHANDLE);
+static NTSTATUS (NTAPI *pLsaDeregisterLogonProcess)(HANDLE);
+static NTSTATUS (NTAPI *pLsaLookupAuthenticationPackage)(HANDLE, PLSA_STRING, PULONG);
+static NTSTATUS (NTAPI *pLsaCallAuthenticationPackage)(HANDLE, ULONG, PVOID, ULONG, PVOID *, PULONG, PNTSTATUS);
+static NTSTATUS (NTAPI *pLsaLogonUser)(HANDLE, PLSA_STRING, SECURITY_LOGON_TYPE, ULONG, PVOID, ULONG, PTOKEN_GROUPS,
+                                       PTOKEN_SOURCE, PVOID *, PULONG, PLUID, PHANDLE, PQUOTA_LIMITS, PNTSTATUS);
+static NTSTATUS (NTAPI *pLsaFreeReturnBuffer)(PVOID);
+#define LsaConnectUntrusted pLsaConnectUntrusted
+#define LsaDeregisterLogonProcess pLsaDeregisterLogonProcess
+#define LsaLookupAuthenticationPackage pLsaLookupAuthenticationPackage
+#define LsaCallAuthenticationPackage pLsaCallAuthenticationPackage
+#define LsaLogonUser pLsaLogonUser
+#define LsaFreeReturnBuffer pLsaFreeReturnBuffer
+
 static HANDLE Lsa;
 static ULONG Package;
 
@@ -84,6 +99,27 @@ START_TEST(LsaSubmitLength)
     PVOID Big, Small;
     ULONG i;
 
+    {
+        HMODULE hSecur32 = LoadLibraryW(L"secur32.dll");
+
+        if (!hSecur32)
+        {
+            skip("secur32.dll is not available\n");
+            return;
+        }
+        pLsaConnectUntrusted = (PVOID)GetProcAddress(hSecur32, "LsaConnectUntrusted");
+        pLsaDeregisterLogonProcess = (PVOID)GetProcAddress(hSecur32, "LsaDeregisterLogonProcess");
+        pLsaLookupAuthenticationPackage = (PVOID)GetProcAddress(hSecur32, "LsaLookupAuthenticationPackage");
+        pLsaCallAuthenticationPackage = (PVOID)GetProcAddress(hSecur32, "LsaCallAuthenticationPackage");
+        pLsaLogonUser = (PVOID)GetProcAddress(hSecur32, "LsaLogonUser");
+        pLsaFreeReturnBuffer = (PVOID)GetProcAddress(hSecur32, "LsaFreeReturnBuffer");
+        if (!pLsaConnectUntrusted || !pLsaDeregisterLogonProcess || !pLsaLookupAuthenticationPackage ||
+            !pLsaCallAuthenticationPackage || !pLsaLogonUser || !pLsaFreeReturnBuffer)
+        {
+            skip("secur32.dll lacks an entry point\n");
+            return;
+        }
+    }
     Status = LsaConnectUntrusted(&Lsa);
     ok(Status == STATUS_SUCCESS, "LsaConnectUntrusted 0x%08lx\n", Status);
     if (Status != STATUS_SUCCESS)
