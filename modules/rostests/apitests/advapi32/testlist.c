@@ -72,6 +72,7 @@ extern void func_LsaLogonUserFailure(void);
 extern void func_LsaLogonUserLocalGroups(void);
 extern void func_LsaPortClients(void);
 extern void func_LsaPrivateDataCaller(void);
+extern void func_LsaSubmitLength(void);
 extern void func_LsaLogonUserS4U(void);
 extern void func_LsaManageSidNameMapping(void);
 extern void func_LsaSecretStorage(void);
@@ -268,6 +269,7 @@ const struct test winetest_testlist[] =
     { "LsaLogonUserLocalGroups", func_LsaLogonUserLocalGroups },
     { "LsaPortClients", func_LsaPortClients },
     { "LsaPrivateDataCaller", func_LsaPrivateDataCaller },
+    { "LsaSubmitLength", func_LsaSubmitLength },
     { "LsaLogonUserS4U", func_LsaLogonUserS4U },
     { "LsaTrustedClientToken", func_LsaTrustedClientToken },
     { "LsaManageSidNameMapping", func_LsaManageSidNameMapping },
