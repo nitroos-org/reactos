@@ -183,6 +183,8 @@ typedef struct _SYM_EXTENSION
     BOOLEAN BounceReported;
     BOOLEAN ShortReported;
     BOOLEAN OwnReset;                           /* the driver pulsed the bus reset line: the interrupt for it is expected */
+    UCHAR UaTargets;                            /* targets whose next command may report the unit attention that a bus reset leaves */
+    BOOLEAN UaReported;
 } SYM_EXTENSION, *PSYM_EXTENSION;
 
 static UCHAR
@@ -255,6 +257,7 @@ SymResetChip(PSYM_EXTENSION Ext, BOOLEAN ResetBus)
     if (ResetBus)
     {
         Ext->OwnReset = TRUE;
+        Ext->UaTargets = (UCHAR)~(1 << SYM_HOST_ID);   /* every target reports a unit attention to its next command */
         SymWrite8(Ext, SYM_SCNTL1, SCNTL1_RST);
         ScsiPortStallExecution(100);            /* at least 25 microseconds */
         SymWrite8(Ext, SYM_SCNTL1, 0);
@@ -409,10 +412,32 @@ SymDone(PSYM_EXTENSION Ext)
 {
     PSCSI_REQUEST_BLOCK Srb = Ext->Srb;
     UCHAR Status;
+    UCHAR TargetBit;
+    BOOLEAN Ua;
 
     if (Srb == NULL || Ext->State != SymActive)
     {
         SymFatal(Ext, "command complete without a command", Ext->State);
+        return;
+    }
+
+    /* After a bus reset the first command to every target is answered with CHECK CONDITION (unit attention: "power on, reset
+       or bus device reset occurred"). The reset is ours, so the command is simply issued again, once: the port would give the
+       failure to the class driver, which counts it against the few retries a request has. */
+    TargetBit = (UCHAR)(1 << (Srb->TargetId & 7));
+    Ua = (Ext->UaTargets & TargetBit) != 0;
+    Ext->UaTargets &= (UCHAR)~TargetBit;
+    if (Ua && SymXfer(Ext)->StatusBuf[0] == SCSISTAT_CHECK_CONDITION)
+    {
+        if (!Ext->UaReported)
+        {
+            Ext->UaReported = TRUE;
+            DbgPrint("sym53c8xx: first command after a bus reset answered with CHECK CONDITION, issued again\n");
+        }
+        SymXfer(Ext)->StatusBuf[0] = 0xFF;
+        Ext->Residual = 0;
+        SymWrite32(Ext, SYM_DSA, SymXferPa(Ext));
+        SymRunScript(Ext, SYM_ENT_START);
         return;
     }
 
@@ -660,7 +685,25 @@ SymExecuteScsi(PSYM_EXTENSION Ext, PSCSI_REQUEST_BLOCK Srb)
 static BOOLEAN
 SymReset(PSYM_EXTENSION Ext, ULONG PathId)
 {
-    ScsiPortCompleteRequest(Ext, (UCHAR)PathId, SP_UNTAGGED, SP_UNTAGGED, SRB_STATUS_BUS_RESET);
+    PSCSI_REQUEST_BLOCK Srb = Ext->Srb;
+
+    /* The command that was on the bus is lost with the reset (the data of a write is simply sent again). Failing it with
+       BUS_RESET hands it back to the class driver, which gives a request up after 4 retries; a disk that stalls for 90 s
+       costs the same request 6 resets, so the file system saw a failed write (the journal commit of a lone request) and
+       stopped writing. BUSY makes the port start the same request again after the bus settle time, up to 20 times
+       (a request that never gets an answer fails then); commands that bypass the queue keep BUS_RESET.
+       The request is completed through the notification, not through ScsiPortCompleteRequest: that one sets the transfer
+       length to 0, and the port starts the request again as it stands (a read with a length of 0 and a data phase). */
+    if (Srb != NULL && Srb->Function == SRB_FUNCTION_EXECUTE_SCSI && !(Srb->SrbFlags & SRB_FLAGS_BYPASS_FROZEN_QUEUE))
+    {
+        Srb->SrbStatus = SRB_STATUS_BUSY;
+        Srb->ScsiStatus = 0;
+        ScsiPortNotification(RequestComplete, Ext, Srb);
+    }
+    else
+    {
+        ScsiPortCompleteRequest(Ext, (UCHAR)PathId, SP_UNTAGGED, SP_UNTAGGED, SRB_STATUS_BUS_RESET);
+    }
     Ext->Srb = NULL;
     Ext->State = SymIdle;
     DbgPrint("sym53c8xx: reset of the bus, the chip was started again\n");
