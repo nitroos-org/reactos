@@ -70,6 +70,7 @@ list(APPEND SOURCE
     LsaLogonUserFailure.c
     LsaLogonUserLocalGroups.c
     LsaPortClients.c
+    LsaSubmitLength.c
     LsaLogonUserS4U.c
     LsaTrustedClientToken.c
     LsaManageSidNameMapping.c
