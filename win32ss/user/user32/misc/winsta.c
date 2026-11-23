@@ -388,39 +388,55 @@ OpenWindowStationW(
     IN BOOL fInherit,
     IN ACCESS_MASK dwDesiredAccess)
 {
-    NTSTATUS Status;
     HWINSTA hWinSta;
-    UNICODE_STRING WindowStationName;
+    UNICODE_STRING WindowStationName, FullName;
     WCHAR WindowStationsDirBuffer[64];
     UNICODE_STRING WindowStationsDir;
     OBJECT_ATTRIBUTES ObjectAttributes;
-    HANDLE hWindowStationsDir;
+    SIZE_T Length;
+    PWCHAR Buffer;
 
     UserGetWindowStationsDir(&WindowStationsDir, WindowStationsDirBuffer, sizeof(WindowStationsDirBuffer));
 
-    /* Open WindowStations directory */
-    InitializeObjectAttributes(&ObjectAttributes,
-                               &WindowStationsDir,
-                               OBJ_CASE_INSENSITIVE,
-                               NULL,
-                               NULL);
-
-    Status = NtOpenDirectoryObject(&hWindowStationsDir,
-                                   DIRECTORY_TRAVERSE,
-                                   &ObjectAttributes);
-    if(!NT_SUCCESS(Status))
+    /*
+     * The window station is named by its full path: opening the WindowStations directory for DIRECTORY_TRAVERSE
+     * first would check that right against the directory's descriptor, which (as on Windows) has no entry for a
+     * process in an AppContainer, while walking through the directory to a station is not checked for a token
+     * that has the privilege to bypass traverse checking.
+     */
+    RtlInitUnicodeString(&WindowStationName, lpszWinSta);
+    if (WindowStationName.Length == 0)
     {
-        ERR("Failed to open WindowStations directory\n");
+        /* No name: the window station of the calling process' logon session, which win32k names itself */
+        InitializeObjectAttributes(&ObjectAttributes, &WindowStationName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        if (fInherit)
+            ObjectAttributes.Attributes |= OBJ_INHERIT;
+        return NtUserOpenWindowStation(&ObjectAttributes, dwDesiredAccess);
+    }
+    Length = WindowStationsDir.Length + sizeof(WCHAR) + WindowStationName.Length;
+    if (Length + sizeof(UNICODE_NULL) > MAXUSHORT)
+    {
+        SetLastError(ERROR_FILENAME_EXCED_RANGE);
         return NULL;
     }
-
-    /* Open the window station object */
-    RtlInitUnicodeString(&WindowStationName, lpszWinSta);
+    Buffer = RtlAllocateHeap(GetProcessHeap(), 0, Length + sizeof(UNICODE_NULL));
+    if (!Buffer)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
+    RtlCopyMemory(Buffer, WindowStationsDir.Buffer, WindowStationsDir.Length);
+    Buffer[WindowStationsDir.Length / sizeof(WCHAR)] = OBJ_NAME_PATH_SEPARATOR;
+    RtlCopyMemory(Buffer + WindowStationsDir.Length / sizeof(WCHAR) + 1, WindowStationName.Buffer, WindowStationName.Length);
+    Buffer[Length / sizeof(WCHAR)] = UNICODE_NULL;
+    FullName.Buffer = Buffer;
+    FullName.Length = (USHORT)Length;
+    FullName.MaximumLength = (USHORT)(Length + sizeof(UNICODE_NULL));
 
     InitializeObjectAttributes(&ObjectAttributes,
-                               &WindowStationName,
+                               &FullName,
                                OBJ_CASE_INSENSITIVE,
-                               hWindowStationsDir,
+                               NULL,
                                NULL);
 
     /* Check if the handle should be inheritable */
@@ -431,7 +447,7 @@ OpenWindowStationW(
 
     hWinSta = NtUserOpenWindowStation(&ObjectAttributes, dwDesiredAccess);
 
-    NtClose(hWindowStationsDir);
+    RtlFreeHeap(GetProcessHeap(), 0, Buffer);
 
     return hWinSta;
 }
