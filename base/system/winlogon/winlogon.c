@@ -13,6 +13,7 @@
 #include "winlogon.h"
 
 #include <ndk/cmfuncs.h>
+#include <ndk/psfuncs.h>
 
 /* GLOBALS ******************************************************************/
 
@@ -27,6 +28,10 @@ BOOL WINAPI SecureRegistryKeys(VOID);
 /* userenv private export (ordinal 302): the IPv6 transport and Winsock catalog entries of an install that predates them */
 BOOL WINAPI UpgradeNetworkCatalog(VOID);
 PWLSESSION WLSession = NULL;
+
+/* NitroSessions 3: what this Winlogon does (see WlGetSessionRole) */
+WL_SESSION_ROLE WlSessionRole = WlRoleSingle;
+ULONG WlSessionId = 0;
 
 /* FUNCTIONS *****************************************************************/
 
@@ -120,17 +125,70 @@ StartLsass(VOID)
 }
 
 
+/*
+ * NitroSessions 3 (HKLM\SYSTEM\CurrentControlSet\Control\Session Manager, DWORD): session 1 holds the
+ * console. Session 0's Winlogon then only starts the services and the LSA (the part Windows gives
+ * wininit); session 1's Winlogon, started by the Session Manager, logs the interactive user on and serves
+ * the shutdown requests. Any other value: one Winlogon in session 0 does everything, as before.
+ */
+static
+VOID
+WlGetSessionRole(VOID)
+{
+    HKEY hKey;
+    DWORD dwType, dwValue = 0, cbData = sizeof(dwValue);
+    PROCESS_SESSION_INFORMATION SessionInfo;
+    NTSTATUS Status;
+
+    WlSessionRole = WlRoleSingle;
+    WlSessionId = 0;
+
+    /* The kernel's value, never the PEB's */
+    Status = NtQueryInformationProcess(NtCurrentProcess(),
+                                       ProcessSessionInformation,
+                                       &SessionInfo,
+                                       sizeof(SessionInfo),
+                                       NULL);
+    if (NT_SUCCESS(Status))
+        WlSessionId = SessionInfo.SessionId;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SYSTEM\\CurrentControlSet\\Control\\Session Manager",
+                      0,
+                      KEY_QUERY_VALUE,
+                      &hKey) != ERROR_SUCCESS)
+    {
+        return;
+    }
+    if ((RegQueryValueExW(hKey, L"NitroSessions", NULL, &dwType, (PBYTE)&dwValue, &cbData) != ERROR_SUCCESS) ||
+        (dwType != REG_DWORD) || (cbData != sizeof(dwValue)))
+    {
+        dwValue = 0;
+    }
+    RegCloseKey(hKey);
+
+    if (dwValue == 3)
+        WlSessionRole = (WlSessionId == 0) ? WlRoleServices : WlRoleInteractive;
+
+    if (WlSessionRole != WlRoleSingle)
+        ERR("WL: session %lu, %s\n", WlSessionId,
+            (WlSessionRole == WlRoleServices) ? "services and LSA only" : "interactive logon");
+}
+
+
 static
 VOID
 WaitForLsass(VOID)
 {
     HANDLE hEvent;
     DWORD dwError;
+    /* The LSA creates the event in session 0; from another session it is reached by its global name */
+    PCWSTR EventName = (WlSessionId == 0) ? L"LSA_RPC_SERVER_ACTIVE" : L"Global\\LSA_RPC_SERVER_ACTIVE";
 
     hEvent = CreateEventW(NULL,
                           TRUE,
                           FALSE,
-                          L"LSA_RPC_SERVER_ACTIVE");
+                          EventName);
     if (hEvent == NULL)
     {
         dwError = GetLastError();
@@ -140,7 +198,7 @@ WaitForLsass(VOID)
         {
             hEvent = OpenEventW(SYNCHRONIZE,
                                 FALSE,
-                                L"LSA_RPC_SERVER_ACTIVE");
+                                EventName);
             if (hEvent == NULL)
             {
                ERR("WL: Could not open the notification event (Error %lu)\n", GetLastError());
@@ -466,15 +524,22 @@ WinMain(
     RtlSetProcessIsCritical(TRUE, NULL, FALSE);
     RtlSetThreadIsCritical(TRUE, NULL, FALSE);
 
-    /* Installs from before the well-known folders had the DACLs of Windows get them now (nothing happens once they have) */
-    SecureSystemDirectories();
-    SecureRegistryKeys();
+    /* Which part of the work is ours (NitroSessions) */
+    WlGetSessionRole();
 
-    /* An install from before the IPv6 transport and catalog entries gets them now when the stack's IPv6 switch is on (once) */
-    UpgradeNetworkCatalog();
+    /* The machine-wide work is session 0's */
+    if (WlSessionRole != WlRoleInteractive)
+    {
+        /* Installs from before the well-known folders had the DACLs of Windows get them now (nothing happens once they have) */
+        SecureSystemDirectories();
+        SecureRegistryKeys();
 
-    /* Update the cached TCP/IP Information in the registry */
-    UpdateTcpIpInformation();
+        /* An install from before the IPv6 transport and catalog entries gets them now when the stack's IPv6 switch is on (once) */
+        UpgradeNetworkCatalog();
+
+        /* Update the cached TCP/IP Information in the registry */
+        UpdateTcpIpInformation();
+    }
 
     if (!RegisterLogonProcess(GetCurrentProcessId(), TRUE))
     {
@@ -514,29 +579,46 @@ WinMain(
         ExitProcess(1);
     }
 
-    if (!StartRpcServer())
+    /*
+     * The shutdown requests (InitiateSystemShutdown) go to the Winlogon of the console session: it shows
+     * the warning where the user is and logs the user off before the system goes down
+     */
+    if ((WlSessionRole != WlRoleServices) && !StartRpcServer())
     {
         ERR("WL: Could not start the RPC server\n");
         NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
         ExitProcess(1);
     }
 
-    if (!StartServicesManager())
+    /* The services and the LSA run in session 0 */
+    if (WlSessionRole != WlRoleInteractive)
     {
-        ERR("WL: Could not start services.exe\n");
-        NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
-        ExitProcess(1);
-    }
+        if (!StartServicesManager())
+        {
+            ERR("WL: Could not start services.exe\n");
+            NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
+            ExitProcess(1);
+        }
 
-    if (!StartLsass())
-    {
-        ERR("WL: Failed to start lsass.exe service (error %lu)\n", GetLastError());
-        NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
-        ExitProcess(1);
+        if (!StartLsass())
+        {
+            ERR("WL: Failed to start lsass.exe service (error %lu)\n", GetLastError());
+            NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
+            ExitProcess(1);
+        }
     }
 
     /* Wait for the LSA server */
     WaitForLsass();
+
+    if (WlSessionRole == WlRoleServices)
+    {
+        /* No logon in this session: the console session's Winlogon does it */
+        NtInitializeRegistry(CM_BOOT_FLAG_ACCEPTED | 1);
+        ERR("WL: services and LSA started, the interactive logon is in another session\n");
+        SleepEx(INFINITE, FALSE);
+        return 0;
+    }
 
     /* Init Notifications */
     InitNotifications();
@@ -617,8 +699,9 @@ WinMain(
     }
 
     /* Tell kernel that CurrentControlSet is good (needed
-     * to support Last good known configuration boot) */
-    NtInitializeRegistry(CM_BOOT_FLAG_ACCEPTED | 1);
+     * to support Last good known configuration boot); session 0's Winlogon does it */
+    if (WlSessionRole == WlRoleSingle)
+        NtInitializeRegistry(CM_BOOT_FLAG_ACCEPTED | 1);
 
     /* Message loop for the SAS window */
     while (GetMessageW(&Msg, WLSession->SASWindow, 0, 0))

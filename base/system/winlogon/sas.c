@@ -511,6 +511,35 @@ HandleLogon(
 {
     BOOL ret = FALSE;
 
+    /*
+     * The LSA hands out the logon token for session 0. In another session (NitroSessions) the token gets
+     * this session's id before anything runs with it, so that the shell, the screen saver and every
+     * process of the user start here and not in session 0 (setting it needs SeTcbPrivilege, which
+     * Winlogon holds). Session 0 is left as it was.
+     */
+    if (WlSessionId != 0 && Session->UserToken)
+    {
+        BOOLEAN Old;
+        NTSTATUS Status;
+        ULONG NewSessionId = WlSessionId;
+
+        Status = RtlAdjustPrivilege(SE_TCB_PRIVILEGE, TRUE, FALSE, &Old);
+        if (NT_SUCCESS(Status))
+        {
+            Status = NtSetInformationToken(Session->UserToken,
+                                           TokenSessionId,
+                                           &NewSessionId,
+                                           sizeof(NewSessionId));
+            RtlAdjustPrivilege(SE_TCB_PRIVILEGE, Old, FALSE, &Old);
+        }
+        if (!NT_SUCCESS(Status))
+        {
+            /* Never start the user's processes in another session */
+            ERR("WL: cannot give the logon token session %lu, Status 0x%08lx\n", WlSessionId, Status);
+            goto cleanup;
+        }
+    }
+
     /* Loading personal settings */
     DisplayStatusMessage(Session, Session->WinlogonDesktop, IDS_LOADINGYOURPERSONALSETTINGS);
 

@@ -285,6 +285,16 @@ typedef enum _NOTIFICATION_TYPE
 extern HINSTANCE hAppInstance;
 extern PWLSESSION WLSession;
 
+/* NitroSessions 3: session 0's Winlogon starts the services and the LSA, session 1's logs the user on */
+typedef enum _WL_SESSION_ROLE
+{
+    WlRoleSingle,       /* one Winlogon does everything (session 0 holds the console) */
+    WlRoleServices,     /* session 0 without the console: services and LSA only */
+    WlRoleInteractive   /* the console session: the interactive logon and the shutdown requests */
+} WL_SESSION_ROLE;
+extern WL_SESSION_ROLE WlSessionRole;
+extern ULONG WlSessionId;
+
 #define WLX_LOGGINGOFF(wlxAction) \
   (((wlxAction) == WLX_SAS_ACTION_LOGOFF) || \
    ((wlxAction) == WLX_SAS_ACTION_FORCE_LOGOFF))
