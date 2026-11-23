@@ -1,0 +1,34 @@
+LSI MegaRAID SAS (MFI) miniport, PCI 1000:0060 (SAS 1078) and 1000:0079 (SAS 2108), the controllers that
+QEMU emulates as megasas and megasas-gen2 and that Proxmox VE offers as the "MegaRAID SAS 8708EM2"
+
+The driver (megasas.c) is new code, GPL-2.0-or-later, written against the legacy SCSI port
+interface (scsiport) like the BusLogic, PVSCSI and MPT miniports.
+
+Origin of the device interface
+  Project:  OpenBSD
+  Files:    sys/dev/ic/mfireg.h revision 1.52 (2022/09/16), sys/dev/ic/mfi.c and sys/dev/pci/mfi_pci.c
+            (the 2024 tree): the start-up sequence and the command layout only
+  URL:      https://github.com/openbsd/src/blob/master/sys/dev/ic/mfireg.h
+  License:  ISC, notice kept in the header of megasas.c
+  Used:     the register offsets, the firmware states and the doorbell values, the layouts of the frame
+            header, the init frame and its queue description, the I/O, pass-through and direct command
+            frames, the 64-bit scatter/gather element, the command and status numbers, and the order of the
+            start-up steps (firmware to ready, init frame with the reply queue, polled). No code was copied:
+            the OpenBSD driver is written for its own SCSI midlayer and DMA API.
+
+Not used: the Linux driver megaraid_sas (GPL-2.0-only, not compatible with this tree), and any LSI or
+Broadcom binary driver.
+
+How it talks to the controller (behaviour found with QEMU's model): every command, reads and writes included, is a
+pass-through frame for the logical drive with the CDB in it (QEMU's model reads the CDB of read/write frames from
+the pass-through position, so the block address form cannot be used); the reply queue has as many entries as the
+firmware has commands (a longer one is refused); the register BAR of a controller that sits above 4 GB is taken from
+the BAR in configuration space, because the port reports a 64-bit BAR above 4 GB with its upper half cut off.
+
+What it does not do: the 1078 "xscale" register layout (PCI 1000:0411 and others: not emulated, not
+registered), the 2008 "skinny" layout, the controller information and configuration commands (the logical
+drives are found by probing the targets), events (no hot plug), RAID management, MSI, more than one
+logical unit per target, CDBs longer than 16 bytes, more than 33 scatter/gather elements per request.
+The command limits the firmware reports are checked before they are used, every wait on the controller
+is bounded, and the reply queue indices, the contexts and the sense length that the controller writes are
+validated.

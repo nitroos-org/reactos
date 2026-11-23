@@ -1,0 +1,37 @@
+LSI Logic 53C895A and 53C810 SCSI miniport, PCI 1000:0012 and 1000:0001 (QEMU: lsi53c895a and lsi53c810; the
+Proxmox VE "LSI 53C895A" controller, the default of its older templates)
+
+The driver (sym53c8xx.c) is new code, GPL-2.0-or-later, written against the legacy SCSI port interface
+(scsiport) like the BusLogic and other miniports. The chip runs a SCRIPTS program that the driver loads
+into the uncached extension and starts at the physical address of its first instruction.
+
+Origin
+  Project:  OpenBSD
+  Files:    sys/dev/ic/siopreg.h, sys/dev/ic/siop_common.c, sys/dev/ic/siop.c (revision 1.90): the register
+            names and bits, the chip set-up, the residual count after a phase mismatch and the structure of
+            the interrupt handling.
+            sys/dev/microcode/siop/siop.ss (revision 1.10) and its assembler ncr53cxxx.c: sym53c8xx.ss is a
+            smaller SCRIPTS program derived from siop.ss (the phase dispatch, the message in handling and
+            the data loop; no scheduler slots, no per-target or tag switch: one command at a time, the
+            program needs no relocation). sym53c8xx_script.h is its assembled form (the assembler of the
+            OpenBSD directory, invocation in the header of the .ss file; to change the program, change the
+            .ss file and assemble it again).
+  URL:      https://github.com/openbsd/src/tree/master/sys/dev/ic and /sys/dev/microcode/siop
+  License:  BSD 2-clause, Copyright (c) 2000 Manuel Bouyer; the notice is kept in sym53c8xx.c and in
+            sym53c8xx.ss
+  No code of the OpenBSD driver was copied.
+
+Not used: the Linux drivers sym53c8xx and ncr53c8xx (GPL-2.0-only, not compatible with this tree), and any
+Symbios/LSI binary driver.
+
+What it does not do: tagged queueing and more than one command at a time (the port is told about the next
+request when the current one has completed), synchronous and wide transfers (asynchronous, narrow), a disconnect in
+the middle of a data transfer (the command fails and the bus is reset: no data pointer is restored), data
+out phase mismatches (the command fails), more than 33 scatter/gather elements per request, CDBs longer than
+16 bytes, more than one logical unit per target, the 40-bit and 64-bit addressing of the 895A (the chip is used with 32-bit
+addresses: a request whose buffer has a page above 4 GB goes through one buffer of 128 KB below 4 GB that the driver
+allocates, and the data is copied; the adapter says it handles 64-bit addresses, so that the HAL does not double-buffer
+for it), the 53C700 family and the wide and ultra chips (53C875, 53C1010: not
+emulated, not registered). The interrupt status, the script interrupt code, the data pointer, the residual
+count, the reselecting target and the identify and status bytes that the chip and the bus deliver are checked
+before they are used.
