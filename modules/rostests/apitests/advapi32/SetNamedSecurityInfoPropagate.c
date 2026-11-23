@@ -202,9 +202,9 @@ static DWORD SetRoot(PCWSTR Root, BOOL WithUsers, BOOL ByHandle)
 static void TestFiles(VOID)
 {
     WCHAR Temp[MAX_PATH], Root[MAX_PATH], Path[MAX_PATH], Target[MAX_PATH], Deep[PROP_DEPTH * 2 + MAX_PATH];
-    PWSTR Before[4], After;
+    PWSTR Before[4], After, HardLinkBefore = NULL;
     PSECURITY_DESCRIPTOR Sd;
-    BOOL Present, Defaulted, Auto;
+    BOOL Present, Defaulted, Auto, HardLink;
     PACL Dacl = NULL;
     UCHAR Flags;
     ACCESS_MASK Mask;
@@ -261,6 +261,21 @@ static void TestFiles(VOID)
     MakeFile(Path);
     StringCbPrintfW(Path, sizeof(Path), L"%s\\J", Root);
     ok(MakeJunction(Path, Target), "junction: %lu\n", GetLastError());
+
+    /*
+     * a\hl: a hard link to the file hf outside the tree, whose DACL has entries flagged inherited (so the walk would
+     * take it for a child that inherits): it is another object's descriptor, left alone
+     */
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\hf", Target);
+    MakeFile(Path);
+    Sd = SdFromSddl(L"D:(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;%s)");
+    ok(SetFileSecurityW(Path, DACL_SECURITY_INFORMATION, Sd), "hf: %lu\n", GetLastError());
+    LocalFree(Sd);
+    StringCbPrintfW(Deep, sizeof(Deep), L"%s\\a\\hl", Root);
+    HardLink = CreateHardLinkW(Deep, Path, NULL);
+    ok(HardLink, "CreateHardLinkW: %lu\n", GetLastError());
+    HardLinkBefore = FileDaclString(Path);
+    ok(HardLinkBefore != NULL, "hf: no DACL\n");
 
     /* a chain of PROP_DEPTH directories below a */
     StringCbPrintfW(Deep, sizeof(Deep), L"\\\\?\\%s\\a", Root);
@@ -327,6 +342,14 @@ static void TestFiles(VOID)
         ok(TargetFileBefore && After && !wcscmp(TargetFileBefore, After), "file behind the junction: %S -> %S\n",
            TargetFileBefore, After);
         LocalFree(After);
+        if (HardLink)
+        {
+            StringCbPrintfW(Path, sizeof(Path), L"%s\\hf", Target);
+            After = FileDaclString(Path);
+            ok(HardLinkBefore && After && !wcscmp(HardLinkBefore, After), "file with a hard link in the tree: %S -> %S\n",
+               HardLinkBefore, After);
+            LocalFree(After);
+        }
         LocalFree(TargetBefore);
         LocalFree(TargetFileBefore);
     }
@@ -349,10 +372,14 @@ static void TestFiles(VOID)
 
     for (i = 0; i < _countof(Fixed); i++)
         LocalFree(Before[i]);
+    if (HardLinkBefore)
+        LocalFree(HardLinkBefore);
 
     /* cleanup: the junction first (RemoveTree does not follow it), the deep chain through the extended path */
     StringCbPrintfW(Path, sizeof(Path), L"%s\\J", Root);
     RemoveDirectoryW(Path);
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a\\hl", Root);
+    DeleteFileW(Path);
     for (i = PROP_DEPTH; i > 0; i--)
     {
         RemoveDirectoryW(Deep);

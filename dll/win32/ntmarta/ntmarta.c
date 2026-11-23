@@ -1707,7 +1707,10 @@ Cleanup:
  *  - a child that changed and is a directory is walked the same way, with its old and new descriptor;
  *  - a reparse point (a junction, a symbolic link) gets its own DACL updated, through a handle to the link
  *    itself, and is never followed; a child that cannot be opened (access denied, a sharing violation) or set is
- *    skipped with what is below it; the call still succeeds.
+ *    skipped with what is below it; the call still succeeds;
+ *  - whether a child is a directory is taken from the object opened, not from the listing; a file with more than
+ *    one name (hard links) is left alone: its other names can lie outside the tree (not measured on Windows; the
+ *    safe choice for a caller such as SYSTEM walking a tree that users can write to).
  * The walk opens every child relative to its directory's handle (no path length limit), keeps its state in a heap
  * array of frames (one per level, the depth capped at ACCP_MAX_FILE_DEPTH, deeper levels are not walked) and
  * stops below a child that already has what it would get.
@@ -1836,6 +1839,7 @@ AccpPropagateToFiles(IN HANDLE Directory,
         BOOL Present, Defaulted;
         BOOLEAN IsDirectory, IsReparse, Inherits, Changed = FALSE;
         HANDLE Child = NULL, ChildDirectory = NULL;
+        FILE_STANDARD_INFORMATION Standard;
         IO_STATUS_BLOCK Iosb;
         DWORD Revision;
         NTSTATUS Status;
@@ -1876,6 +1880,19 @@ AccpPropagateToFiles(IN HANDLE Directory,
             Walk->Skipped++;
             continue;
         }
+
+        /*
+         * What was opened, not what the listing said (the name may name another object by now): a directory or not,
+         * and a file with more than one name is left alone. Its other names can lie outside the tree (a hard link
+         * the owner of a directory in the tree made to a file elsewhere): its descriptor is not the tree's to change.
+         */
+        if (!NT_SUCCESS(NtQueryInformationFile(Child, &Iosb, &Standard, sizeof(Standard), FileStandardInformation)) ||
+            (!Standard.Directory && Standard.NumberOfLinks > 1))
+        {
+            Walk->Skipped++;
+            goto Next;
+        }
+        IsDirectory = Standard.Directory;
 
         OldSd = AccpQueryFileSd(Child);
         if (OldSd == NULL ||
