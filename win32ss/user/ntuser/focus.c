@@ -1330,6 +1330,15 @@ co_IntSetActiveWindow(
 
    IntNotifyWinEvent(EVENT_SYSTEM_FOREGROUND, Wnd, OBJID_WINDOW, CHILDID_SELF, WEF_SETBYWNDPTI);
 
+   /* An in-context WinEvent procedure ran in this thread: it can have attached the input of the thread
+      (the queue is freed) or destroyed Wnd, as the hook above */
+   if (ThreadQueue != pti->MessageQueue || !VerifyWnd(Wnd))
+   {
+      ERR("SetActiveWindow: the queue or the window changed in the foreground event\n");
+      Wnd->state &= ~WNDS_BEINGACTIVATED;
+      return FALSE;
+   }
+
    // Clear out activate EVENT messages.
    FindRemoveEventMsg(pti, POSTEVENT_SAW, POSTEVENT_DAW);
 
