@@ -13,34 +13,38 @@
 
 /* FUNCTIONS ******************************************************************/
 
+/* bFloor: the number is cut off, not rounded: the offsets of LIST PARTITION on the Windows DiskPart (Windows Server 2022: 64000 KB is
+   "62 MB", not "63 MB") */
 static
 VOID
-PrintSize(
+PrintSizeEx(
     _In_ ULONGLONG ullSize,
+    _In_ BOOLEAN bFloor,
     _Out_ PWSTR pszOutBuffer,
     _In_ ULONG ulOutBufferSize)
 {
     WCHAR szUnitBuffer[8];
     INT nUnitId;
+#define SIZE_DIVIDE(ullValue, ullUnit) (bFloor ? ((ullValue) / (ullUnit)) : RoundingDivide((ullValue), (ullUnit)))
 
     if (ullSize >= SIZE_10TB) /* 10 TB */
     {
-        ullSize = RoundingDivide(ullSize, SIZE_1TB);
+        ullSize = SIZE_DIVIDE(ullSize, SIZE_1TB);
         nUnitId = IDS_UNIT_TB;
     }
     else if (ullSize >= SIZE_10GB) /* 10 GB */
     {
-        ullSize = RoundingDivide(ullSize, SIZE_1GB);
+        ullSize = SIZE_DIVIDE(ullSize, SIZE_1GB);
         nUnitId = IDS_UNIT_GB;
     }
     else if (ullSize >= SIZE_10MB) /* 10 MB */
     {
-        ullSize = RoundingDivide(ullSize, SIZE_1MB);
+        ullSize = SIZE_DIVIDE(ullSize, SIZE_1MB);
         nUnitId = IDS_UNIT_MB;
     }
     else if (ullSize >= SIZE_10KB) /* 10 KB */
     {
-        ullSize = RoundingDivide(ullSize, SIZE_1KB);
+        ullSize = SIZE_DIVIDE(ullSize, SIZE_1KB);
         nUnitId = IDS_UNIT_KB;
     }
     else
@@ -56,6 +60,17 @@ PrintSize(
     StringCchPrintfW(pszOutBuffer,
                      ulOutBufferSize,
                      L"%4I64u %-2s", ullSize, szUnitBuffer);
+#undef SIZE_DIVIDE
+}
+
+static
+VOID
+PrintSize(
+    _In_ ULONGLONG ullSize,
+    _Out_ PWSTR pszOutBuffer,
+    _In_ ULONG ulOutBufferSize)
+{
+    PrintSizeEx(ullSize, FALSE, pszOutBuffer, ulOutBufferSize);
 }
 
 
@@ -261,7 +276,7 @@ ListPartition(
                 PrintSize(PartSize, szSizeBuffer, ARRAYSIZE(szSizeBuffer));
 
                 PartOffset = PartEntry->StartSector.QuadPart * CurrentDisk->BytesPerSector;
-                PrintSize(PartOffset, szOffsetBuffer, ARRAYSIZE(szOffsetBuffer));
+                PrintSizeEx(PartOffset, TRUE, szOffsetBuffer, ARRAYSIZE(szOffsetBuffer));
 
                 LoadStringW(GetModuleHandle(NULL),
                             IsContainerPartition(PartEntry->Mbr.PartitionType) ? IDS_PARTITION_TYPE_EXTENDED : IDS_PARTITION_TYPE_PRIMARY,
@@ -291,7 +306,7 @@ ListPartition(
                         PrintSize(PartSize, szSizeBuffer, ARRAYSIZE(szSizeBuffer));
 
                         PartOffset = Logical->StartSector.QuadPart * CurrentDisk->BytesPerSector;
-                        PrintSize(PartOffset, szOffsetBuffer, ARRAYSIZE(szOffsetBuffer));
+                        PrintSizeEx(PartOffset, TRUE, szOffsetBuffer, ARRAYSIZE(szOffsetBuffer));
 
                         LoadStringW(GetModuleHandle(NULL),
                                     IDS_PARTITION_TYPE_LOGICAL,
@@ -322,7 +337,7 @@ ListPartition(
                 PrintSize(PartSize, szSizeBuffer, ARRAYSIZE(szSizeBuffer));
 
                 PartOffset = PartEntry->StartSector.QuadPart * CurrentDisk->BytesPerSector;
-                PrintSize(PartOffset, szOffsetBuffer, ARRAYSIZE(szOffsetBuffer));
+                PrintSizeEx(PartOffset, TRUE, szOffsetBuffer, ARRAYSIZE(szOffsetBuffer));
 
                 if (IsEqualGUID(&PartEntry->Gpt.PartitionType, &PARTITION_ENTRY_UNUSED_GUID))
                 {
