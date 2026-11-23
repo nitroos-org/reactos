@@ -2143,6 +2143,7 @@ NtDuplicateToken(
     PTOKEN NewToken;
     PSECURITY_QUALITY_OF_SERVICE CapturedSecurityQualityOfService;
     BOOLEAN QoSPresent;
+    BOOLEAN LimitedDuplicate;
     OBJECT_HANDLE_INFORMATION HandleInformation;
     NTSTATUS Status;
 
@@ -2198,6 +2199,17 @@ NtDuplicateToken(
     }
 
     /*
+     * A process of Low or Untrusted integrity gets a duplicate of a token of High integrity or above that it can
+     * only read, duplicate and impersonate with (Windows Server 2022, measured: a Low or Untrusted child
+     * of the High parent asking QUERY|DUPLICATE|ASSIGN_PRIMARY|ADJUST_DEFAULT is granted 0xb, asking for
+     * MAXIMUM_ALLOWED is granted nothing, so TokenIntegrityLevel cannot be set on the duplicate and the
+     * process cannot be given the token; the same child of a Medium parent gets all the access it asks).
+     */
+    LimitedDuplicate = (PreviousMode != KernelMode &&
+                        Token->IntegrityLevel >= SECURITY_MANDATORY_HIGH_RID &&
+                        SeGetCurrentProcessIntegrityLevel() < SECURITY_MANDATORY_MEDIUM_RID);
+
+    /*
      * Fail, if the original token is an impersonation token and the caller
      * tries to raise the impersonation level of the new token above the
      * impersonation level of the original token.
@@ -2242,9 +2254,25 @@ NtDuplicateToken(
 
     if (NT_SUCCESS(Status))
     {
+        ACCESS_MASK GrantedAccess = DesiredAccess ? DesiredAccess : HandleInformation.GrantedAccess;
+
+        if (LimitedDuplicate)
+        {
+            if (GrantedAccess & MAXIMUM_ALLOWED)
+            {
+                GrantedAccess = 0;
+            }
+            else
+            {
+                RtlMapGenericMask(&GrantedAccess, &SeTokenObjectType->TypeInfo.GenericMapping);
+                GrantedAccess &= TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE | TOKEN_QUERY |
+                                 TOKEN_QUERY_SOURCE | READ_CONTROL;
+            }
+        }
+
         Status = ObInsertObject(NewToken,
                                 NULL,
-                                (DesiredAccess ? DesiredAccess : HandleInformation.GrantedAccess),
+                                GrantedAccess,
                                 0,
                                 NULL,
                                 &hToken);

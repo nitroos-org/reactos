@@ -849,10 +849,28 @@ static VOID ChildRowsV12(DWORD Level, DWORD ParentLevel)
     Dup = NULL;
     if (DuplicateTokenEx(Token, DupAccess, NULL, SecurityImpersonation, TokenPrimary, &Dup))
     {
+        /* V12-4g: what the duplicate of a High token grants to a Low or Untrusted process (Windows: 0xb for
+           QUERY|DUPLICATE|ASSIGN_PRIMARY|ADJUST_DEFAULT, 0x2000b with READ_CONTROL; all of it for a Medium token) */
+        {
+            OBJECT_BASIC_INFORMATION Basic;
+            ACCESS_MASK Limited = TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE | TOKEN_QUERY |
+                                  TOKEN_QUERY_SOURCE | READ_CONTROL;
+
+            Status = NtQueryObject(Dup, ObjectBasicInformation, &Basic, sizeof(Basic), NULL);
+            ok(NT_SUCCESS(Status), "V12-4g level %lx: NtQueryObject 0x%lx\n", Level, Status);
+            if (NT_SUCCESS(Status))
+            {
+                if (ParentLevel >= SECURITY_MANDATORY_HIGH_RID)
+                    ok(Basic.GrantedAccess == (DupAccess & Limited), "V12-4g level %lx: granted 0x%lx, expected 0x%lx\n",
+                       Level, Basic.GrantedAccess, DupAccess & Limited);
+                else
+                    ok((Basic.GrantedAccess & DupAccess) == DupAccess, "V12-4g level %lx: granted 0x%lx\n", Level, Basic.GrantedAccess);
+            }
+        }
         Ok = SetLevel(Dup, Level);
         Error = Ok ? 0 : GetLastError();
         if (ParentLevel >= SECURITY_MANDATORY_HIGH_RID)
-            todo_ros ok(!Ok && Error == ERROR_ACCESS_DENIED, "V12-4s level %lx: lowering the High duplicate: %d, %lu\n", Level, Ok, Error);
+            ok(!Ok && Error == ERROR_ACCESS_DENIED, "V12-4s level %lx: lowering the High duplicate: %d, %lu\n", Level, Ok, Error);
         else
             ok(Ok, "V12-4s level %lx: lowering the duplicate: %lu\n", Level, Error);
         if (Ok)
@@ -883,12 +901,26 @@ static VOID ChildRowsV12(DWORD Level, DWORD ParentLevel)
     if (DuplicateTokenEx(Token, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenPrimary, &Dup) &&
         CreateProcessW(NULL, Command, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &Startup, &Pi))
     {
+        /* V12-5g: a MAXIMUM_ALLOWED duplicate of the High parent's token is granted nothing (Windows 0) */
+        {
+            OBJECT_BASIC_INFORMATION Basic;
+
+            Status = NtQueryObject(Dup, ObjectBasicInformation, &Basic, sizeof(Basic), NULL);
+            ok(NT_SUCCESS(Status), "V12-5g level %lx: NtQueryObject 0x%lx\n", Level, Status);
+            if (NT_SUCCESS(Status))
+            {
+                if (ParentLevel >= SECURITY_MANDATORY_HIGH_RID)
+                    ok(Basic.GrantedAccess == 0, "V12-5g level %lx: granted 0x%lx\n", Level, Basic.GrantedAccess);
+                else
+                    ok((Basic.GrantedAccess & TOKEN_ASSIGN_PRIMARY) != 0, "V12-5g level %lx: granted 0x%lx\n", Level, Basic.GrantedAccess);
+            }
+        }
         AccessToken.Token = Dup;
         AccessToken.Thread = Pi.hThread;
         Status = NtSetInformationProcess(Pi.hProcess, ProcessAccessToken, &AccessToken, sizeof(AccessToken));
         ok(!NT_SUCCESS(Status), "V12-5 level %lx: 0x%lx\n", Level, Status);
         if (ParentLevel >= SECURITY_MANDATORY_HIGH_RID)
-            todo_ros ok(Status == STATUS_ACCESS_DENIED, "V12-5 level %lx: 0x%lx, Windows 0xc0000022\n", Level, Status);
+            ok(Status == STATUS_ACCESS_DENIED, "V12-5 level %lx: 0x%lx, Windows 0xc0000022\n", Level, Status);
         else
             ok(Status == STATUS_PRIVILEGE_NOT_HELD, "V12-5 level %lx: 0x%lx\n", Level, Status);
         TerminateProcess(Pi.hProcess, 0);
@@ -1608,7 +1640,9 @@ static VOID ParentRowsLowerPrivileges(DWORD Level)
     if (Before != MAXDWORD)
         ok(After == 0, "lower-priv-after: 0x%lx\n", After);
 
-    /* spawn-priv2: enabling it again leaves it disabled (Windows: GetLastError 0 for this call by the parent) */
+    /* spawn-priv2: enabling it again leaves it disabled; the call returns TRUE with ERROR_NOT_ALL_ASSIGNED (Windows Server 2022,
+       a duplicate lowered to Low by the High parent: 1300 for every privilege but SeChangeNotifyPrivilege, also when the
+       parent had enabled it first; an earlier probe that printed GetLastError after other calls had read 0) */
     if (Before != MAXDWORD && LookupPrivilegeValueW(NULL, L"SeImpersonatePrivilege", &Tp.Privileges[0].Luid))
     {
         Tp.PrivilegeCount = 1;
@@ -1617,7 +1651,7 @@ static VOID ParentRowsLowerPrivileges(DWORD Level)
         Ok = AdjustTokenPrivileges(Dup, FALSE, &Tp, 0, NULL, NULL);
         Error = GetLastError();
         ok(Ok, "spawn-priv2: %lu\n", Error);
-        todo_ros ok(Error == ERROR_SUCCESS, "spawn-priv2: GetLastError %lu, Windows 0\n", Error);
+        ok(Error == ERROR_NOT_ALL_ASSIGNED, "spawn-priv2: GetLastError %lu, Windows 1300\n", Error);
         After = PrivilegeAttributes(Dup, L"SeImpersonatePrivilege");
         ok(After == 0, "spawn-priv2: attributes 0x%lx\n", After);
     }
