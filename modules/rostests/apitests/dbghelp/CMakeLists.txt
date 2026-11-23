@@ -4,6 +4,7 @@ add_definitions(-DWINETEST_USE_DBGSTR_LONGLONG)
 include_directories(${REACTOS_SOURCE_DIR}/sdk/tools/rsym)
 
 list(APPEND SOURCE
+    inline.c
     pdb.c
     rsym.c
     data.c
