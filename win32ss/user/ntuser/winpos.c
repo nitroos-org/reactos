@@ -1417,6 +1417,7 @@ HWND FASTCALL
 WinPosDoOwnedPopups(PWND Window, HWND hWndInsertAfter)
 {
    HWND *List = NULL;
+   USER_HELD_POOL_ENTRY HeldList;
    HWND Owner;
    LONG Style;
    PWND DesktopWindow, ChildObject;
@@ -1543,6 +1544,8 @@ WinPosDoOwnedPopups(PWND Window, HWND hWndInsertAfter)
         }
       }
 
+      /* The owned popups' SetWindowPos calls their window procedures: held, the list goes if the thread ends there */
+      UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
       for (; List[i]; i++)
       {
          PWND Wnd;
@@ -1566,7 +1569,7 @@ WinPosDoOwnedPopups(PWND Window, HWND hWndInsertAfter)
          UserDerefObjectCo(Wnd);
          hWndInsertAfter = List[i];
       }
-      ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+      UserFreePoolCo(&HeldList);
    }
 done:
    return hWndInsertAfter;
