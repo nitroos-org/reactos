@@ -22,6 +22,9 @@ typedef struct _COUNTY_TABLE
 } COUNTRY_TABLE, *PCOUNTRY_TABLE;
 
 
+/* advapi32: RtlGenRandom (the system random number generator, ksecdd.sys) */
+BOOLEAN WINAPI SystemFunction036(PVOID Buffer, ULONG Length);
+
 static WCHAR szPasswordChars[] = L"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ@#$%_-+:";
 static COUNTRY_TABLE CountryTable[] =
 { {  0, 5080},   // System Default
@@ -585,8 +588,10 @@ GenerateRandomPassword(
 {
     LPWSTR pPassword = NULL;
     size_t nCharsLen, i, nLength = 8;
-
-    srand(GetTickCount());
+    BYTE Random[32];
+    size_t j = sizeof(Random);
+    BOOL bHaveRandom = TRUE;
+    BYTE Limit;
 
     pPassword = HeapAlloc(GetProcessHeap(),
                           HEAP_ZERO_MEMORY,
@@ -596,10 +601,37 @@ GenerateRandomPassword(
 
     nCharsLen = wcslen(szPasswordChars);
 
-    for (i = 0; i < nLength; i++)
+    /* Bytes at or above this give some characters a higher chance than others */
+    Limit = (BYTE)((256 / nCharsLen) * nCharsLen);
+
+    /* The password comes from the system random number generator (a clock-seeded rand() gave
+     * the same password to two runs within one clock tick, and a guessable one to anybody who
+     * knows roughly when the command ran). Only when the generator refuses is the old
+     * source used, so that the command still works. */
+    for (i = 0; i < nLength; )
     {
-        pPassword[i] = szPasswordChars[rand() % nCharsLen];
+        if (j == sizeof(Random))
+        {
+            if (!SystemFunction036(Random, sizeof(Random)))
+            {
+                bHaveRandom = FALSE;
+                srand(GetTickCount());
+                break;
+            }
+            j = 0;
+        }
+        if (Random[j] < Limit)
+            pPassword[i++] = szPasswordChars[Random[j] % nCharsLen];
+        j++;
     }
+
+    if (!bHaveRandom)
+    {
+        for (; i < nLength; i++)
+            pPassword[i] = szPasswordChars[rand() % nCharsLen];
+    }
+
+    SecureZeroMemory(Random, sizeof(Random));
 
     *lpPassword = pPassword;
     *lpAllocated = TRUE;

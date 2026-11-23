@@ -819,6 +819,8 @@ static NTSTATUS FwCreateSD(VOID)
     return Status;
 }
 
+static VOID Fw6SeedFlowKey(VOID);
+
 /* Called from DriverEntry after the dispatch table is set. A failure here never fails the driver:
    networking keeps working, unfiltered. */
 NTSTATUS NitroFwInitialize(PDRIVER_OBJECT DriverObject)
@@ -840,6 +842,7 @@ NTSTATUS NitroFwInitialize(PDRIVER_OBJECT DriverObject)
         return STATUS_SUCCESS;
     }
     FwReadSwitchEx(L"NitroFwEnforce", TRUE, &FwOptIn);   /* unreadable: stays at the default (on) */
+    Fw6SeedFlowKey();
 
     Status = FwCreateSD();
     if (!NT_SUCCESS(Status))
@@ -1217,6 +1220,33 @@ static BOOLEAN FwFlowLookup(USHORT LocalPort, ULONG RemoteAddr, USHORT RemotePor
  */
 static ULONG FwFlow6Key[5];
 static LONG FwFlow6KeyState;    /* 0 none, 1 being set, 2 set */
+
+/* ksecdd.sys, kernel-mode BCryptGenRandom (bcrypt.h is a user-mode header); callable at PASSIVE_LEVEL only */
+#define FW_BCRYPT_USE_SYSTEM_PREFERRED_RNG 0x00000002
+NTSTATUS NTAPI BCryptGenRandom(PVOID Algorithm, PUCHAR Buffer, ULONG Count, ULONG Flags);
+
+/*
+ * The key from the system random number generator, at driver start (PASSIVE_LEVEL, where the generator can be
+ * called; the packet path cannot). When the generator refuses (it has no seed yet this early in the boot, or it
+ * failed its self-test) the key stays unset and Fw6FlowKey makes one at its first use, as it always did.
+ */
+static VOID Fw6SeedFlowKey(VOID)
+{
+    ULONG Key[RTL_NUMBER_OF(FwFlow6Key)];
+    NTSTATUS Status;
+    ULONG i;
+
+    Status = BCryptGenRandom(NULL, (PUCHAR)Key, sizeof(Key), FW_BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    if (!NT_SUCCESS(Status))
+    {
+        DbgPrint("NitroFw: system random number generator refused (0x%lx), the IPv6 flow key is made at first use\n", Status);
+        return;
+    }
+    for (i = 0; i < RTL_NUMBER_OF(Key); i++)
+        FwFlow6Key[i] = Key[i] | ((i == 4) ? 1 : 0);
+    RtlSecureZeroMemory(Key, sizeof(Key));
+    InterlockedExchange(&FwFlow6KeyState, 2);
+}
 
 static ULONG Fw6FlowKey(const UCHAR *Address)
 {
