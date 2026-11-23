@@ -65,6 +65,9 @@ typedef struct _SERVICE_IMAGE
     BOOL bServiceSid;       /* hToken has the service SID: the process gets the descriptor of ScmCreateServiceProcessSd */
     PSERVICE_PROCESS_WATCH pWatch;
     BOOL bProcessEnded; /* Its process is gone: a new start makes a new image */
+    LONG lControlSenders;   /* Threads that took hControlPipe to send a control with the database lock released
+                               (ScmAcquireImageForControl); changed under the database lock */
+    BOOL bRemovePending;    /* ScmRemoveServiceImage ran while senders were in flight: the last one frees the record and the pipe */
 } SERVICE_IMAGE, *PSERVICE_IMAGE;
 
 
@@ -221,6 +224,13 @@ VOID ScmServiceStoppedWithError(PSERVICE Service, PSERVICE_IMAGE Image, PLIST_EN
 VOID ScmFlushFailureLog(PLIST_ENTRY pQueue);
 
 VOID ScmRemoveServiceImage(PSERVICE_IMAGE pServiceImage);
+
+/* A control is sent through the control pipe of the service's image with the database lock released. The
+   image is taken first (lock held, shared or exclusive) and given back after the send; a removal in between
+   (the service process ended) is held back until the last sender is done. */
+PSERVICE_IMAGE ScmAcquireImageForControl(_In_ PSERVICE lpService, _Out_ HANDLE *phControlPipe);
+VOID ScmReleaseImageAfterControl(_In_ PSERVICE_IMAGE pServiceImage); /* takes the lock itself */
+VOID ScmReleaseImageAfterControlLocked(_In_ PSERVICE_IMAGE pServiceImage); /* lock held exclusively */
 PSERVICE ScmGetServiceEntryByName(LPCWSTR lpServiceName);
 PSERVICE ScmGetServiceEntryByDisplayName(LPCWSTR lpDisplayName);
 PSERVICE ScmGetServiceEntryByResumeCount(DWORD dwResumeCount);
