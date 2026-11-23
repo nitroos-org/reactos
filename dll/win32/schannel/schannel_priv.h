@@ -111,6 +111,24 @@ extern BOOL schan_imp_set_session_alpn(schan_imp_session session, const unsigned
 extern const char *schan_imp_get_session_alpn(schan_imp_session session) DECLSPEC_HIDDEN;
 extern SECURITY_STATUS schan_imp_get_connection_info(schan_imp_session session,
                                                      SecPkgContext_ConnectionInfo *info) DECLSPEC_HIDDEN;
+#ifndef SECPKG_ATTR_CIPHER_INFO
+#define SECPKG_ATTR_CIPHER_INFO 0x64
+#endif
+/* SecPkgContext_CipherInfo (SECPKG_ATTR_CIPHER_INFO, not in the headers of the tree) */
+typedef struct _SCHAN_CIPHER_INFO
+{
+    DWORD dwVersion, dwProtocol, dwCipherSuite, dwBaseCipherSuite;
+    WCHAR szCipherSuite[64], szCipher[64];
+    DWORD dwCipherLen, dwCipherBlockLen;
+    WCHAR szHash[64];
+    DWORD dwHashLen;
+    WCHAR szExchange[64];
+    DWORD dwMinExchangeLen, dwMaxExchangeLen;
+    WCHAR szCertificate[64];
+    DWORD dwKeyType;
+} SCHAN_CIPHER_INFO;
+extern SECURITY_STATUS schan_imp_get_cipher_info(schan_imp_session session, SCHAN_CIPHER_INFO *info) DECLSPEC_HIDDEN;
+extern VOID schan_imp_get_stream_overhead(schan_imp_session session, DWORD *header, DWORD *trailer) DECLSPEC_HIDDEN;
 extern SECURITY_STATUS schan_imp_get_session_peer_certificate(schan_imp_session session, HCERTSTORE,
                                                               PCCERT_CONTEXT *cert) DECLSPEC_HIDDEN;
 extern SECURITY_STATUS schan_imp_get_unique_binding(schan_imp_session session, BYTE *data,
