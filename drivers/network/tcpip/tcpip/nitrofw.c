@@ -6,19 +6,10 @@
  *
  * Contract with the rule service (mpssvc): sdk/include/reactos/nitrofw.h.
  *
- * Switches (HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters, REG_DWORD):
- *   NitroFwDisable = 1   kill switch, read once at driver load: no device, no filtering at all.
- *                        The boot option /NOFIREWALL does the same (SystemStartOptions).
- *   NitroFwEnforce       default 1 (enforcement on). NitroFwEnforce = 0 turns it off: a policy is accepted
- *                        and reported by IOCTL_NITROFW_GET_STATUS but nothing is dropped. An absent value
- *                        means 1. Read at load and on every IOCTL_NITROFW_SET_POLICY, so a change takes
- *                        effect at the service's next push.
+ * The boot option /NOFIREWALL (SystemStartOptions; administrators only, a recovery tool like safe mode)
+ * removes the device and the filter entirely at driver load: no device, no filtering at all.
  * The policy's own NITROFW_POLICY_ENFORCE flag (mpssvc: HKLM\SOFTWARE\ReactOS\Nitro\Firewall Enforce)
- * must be set as well.
- *
- * Reading NitroFwEnforce at SET time: a value that is absent counts as 1 (on). Any other failure to read it
- * (no memory, wrong type, registry error) keeps the opt-in the previous push established (at load: on), so a
- * transient registry fault or a malformed value cannot silently turn enforcement off (or on); it is logged.
+ * must be set for a policy to be enforced.
  *
  * Scope: inbound. IPv4 here (NitroFwInboundAllowed); IPv6 (only with Tcpip\Parameters\Ipv6Enable, lwIP's
  * stack) in NitroFwInboundAllowed6 further down, which applies the same rules and defaults.
@@ -51,7 +42,6 @@ NTSYSAPI NTSTATUS NTAPI ZwQueryInformationProcess(HANDLE ProcessHandle, PROCESSI
 #define NITROFW_TAG       'wFiN'
 #define NITROFW_IMG_TAG   'iFiN'
 
-#define FW_PARAMS_KEY     L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip\\Parameters"
 #define FW_CONTROL_KEY    L"\\Registry\\Machine\\System\\CurrentControlSet\\Control"
 
 /* UDP flow table: 4-way set associative, replies pass for FW_UDP_TIMEOUT seconds after the last packet.
@@ -124,7 +114,6 @@ volatile LONG NitroFwTracking = 0;      /* filter loaded: outbound UDP sends fee
 volatile LONG NitroFwWantImages = 0;     /* enforced policy with program rules: address files need their image */
 
 static BOOLEAN FwKilled = TRUE;         /* until NitroFwInitialize decides otherwise */
-static BOOLEAN FwOptIn = TRUE;   /* NitroFwEnforce default: on (an absent value, or a value that cannot be read at load) */
 static PDEVICE_OBJECT FwDevice = NULL;
 static BOOLEAN FwSymlink = FALSE;
 static PSECURITY_DESCRIPTOR FwSD = NULL;
@@ -210,35 +199,6 @@ static NTSTATUS FwQueryValue(PCWSTR KeyPath, PCWSTR Name, ULONG Type, PVOID Data
     return Status;
 }
 
-/* Read a REG_DWORD switch. An absent key or value is a definite answer, the switch default (returns TRUE,
-   *Value = Default); any other failure returns FALSE and leaves *Value alone: the caller decides what an
-   unreadable switch means. */
-static BOOLEAN FwReadSwitchEx(PCWSTR Name, BOOLEAN Default, PBOOLEAN Value)
-{
-    ULONG Data = 0, Len = sizeof(Data);
-    NTSTATUS Status = FwQueryValue(FW_PARAMS_KEY, Name, REG_DWORD, &Data, &Len);
-
-    if (NT_SUCCESS(Status))
-    {
-        if (Len != sizeof(Data))
-            return FALSE;
-        *Value = Data != 0;
-        return TRUE;
-    }
-    if (Status == STATUS_OBJECT_NAME_NOT_FOUND || Status == STATUS_OBJECT_PATH_NOT_FOUND)
-    {
-        *Value = Default;
-        return TRUE;
-    }
-    return FALSE;
-}
-
-static BOOLEAN FwReadSwitch(PCWSTR Name)
-{
-    BOOLEAN Value = FALSE;
-    return FwReadSwitchEx(Name, FALSE, &Value) && Value;
-}
-
 /* /NOFIREWALL on the boot entry; the kernel stores the options without slashes */
 static BOOLEAN FwBootOptionOff(VOID)
 {
@@ -322,7 +282,7 @@ static VOID FwDerefPolicy(PFW_POLICY Policy)
 
 static BOOLEAN FwPolicyEnforced(PFW_POLICY Policy)
 {
-    return Policy && FwOptIn && (Policy->Flags & NITROFW_POLICY_ENFORCE) && Policy->EnabledProfiles != 0;
+    return Policy && (Policy->Flags & NITROFW_POLICY_ENFORCE) && Policy->EnabledProfiles != 0;
 }
 
 /* Install NewPolicy (may be NULL) and drop the reference on the old one. Caller holds FwSetMutex. */
@@ -579,7 +539,6 @@ static NTSTATUS FwSetPolicy(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     ULONG InLen = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
     PFW_POLICY Policy;
     NTSTATUS Status;
-    BOOLEAN OptIn = FALSE, OptInRead;
     ULONGLONG Generation;
     ULONG RuleCount, InRuleCount, ActiveProfiles, EnabledProfiles, Flags;
     LONG Enforcing;
@@ -603,9 +562,6 @@ static NTSTATUS FwSetPolicy(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         return Status;
     }
 
-    /* registry access (Zw calls) before the APC_LEVEL mutex is taken */
-    OptInRead = FwReadSwitchEx(L"NitroFwEnforce", TRUE, &OptIn);
-
     ExAcquireFastMutex(&FwSetMutex);
     if (Policy->Generation <= FwLastGeneration)
     {
@@ -614,10 +570,6 @@ static NTSTATUS FwSetPolicy(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         return STATUS_REVISION_MISMATCH;
     }
     FwLastGeneration = Policy->Generation;
-    if (OptInRead)
-        FwOptIn = OptIn;
-    else
-        OptIn = FwOptIn;    /* unreadable: keep what the last push established (never silently flip) */
     /* the policy is owned by FwPolicy from here on (and may be replaced or freed by the next SET/CLEAR
        as soon as the mutex is gone): everything logged below is copied while still under the mutex */
     Generation = Policy->Generation;
@@ -634,10 +586,8 @@ static NTSTATUS FwSetPolicy(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     if (NitroFwWantImages)
         FwBackfillImages();
 
-    if (!OptInRead)
-        DbgPrint("NitroFw: NitroFwEnforce could not be read, opt-in kept at %u\n", OptIn);
-    DbgPrint("NitroFw: policy %I64u installed, %lu rules (%lu inbound), profiles 0x%lx enabled 0x%lx, flags 0x%lx, opt-in %u, enforcing %ld\n",
-            Generation, RuleCount, InRuleCount, ActiveProfiles, EnabledProfiles, Flags, OptIn, Enforcing);
+    DbgPrint("NitroFw: policy %I64u installed, %lu rules (%lu inbound), profiles 0x%lx enabled 0x%lx, flags 0x%lx, enforcing %ld\n",
+            Generation, RuleCount, InRuleCount, ActiveProfiles, EnabledProfiles, Flags, Enforcing);
     return STATUS_SUCCESS;
 }
 
@@ -681,7 +631,7 @@ static NTSTATUS FwDeviceControl(PIRP Irp, PIO_STACK_LOCATION IrpSp)
                 St->ActiveProfiles = Policy->ActiveProfiles;
                 FwDerefPolicy(Policy);
             }
-            St->KernelState = (FwOptIn ? NITROFW_KSTATE_OPTIN : 0) | (NitroFwEnforcing ? NITROFW_KSTATE_ENFORCING : 0);
+            St->KernelState = NITROFW_KSTATE_OPTIN |(NitroFwEnforcing ? NITROFW_KSTATE_ENFORCING : 0);
             St->DroppedInbound = (ULONGLONG)InterlockedCompareExchange64(&FwDroppedInbound, 0, 0);
             St->PassedInbound = (ULONGLONG)InterlockedCompareExchange64(&FwPassedInbound, 0, 0);
             if (StSize >= sizeof(*St))
@@ -836,12 +786,11 @@ NTSTATUS NitroFwInitialize(PDRIVER_OBJECT DriverObject)
     KeInitializeSpinLock(&FwLogLock);
     ExInitializeFastMutex(&FwSetMutex);
 
-    if (FwReadSwitch(L"NitroFwDisable") || FwBootOptionOff())
+    if (FwBootOptionOff())
     {
-        DbgPrint("NitroFw: disabled by the kill switch (NitroFwDisable or /NOFIREWALL)\n");
+        DbgPrint("NitroFw: disabled by the boot option /NOFIREWALL\n");
         return STATUS_SUCCESS;
     }
-    FwReadSwitchEx(L"NitroFwEnforce", TRUE, &FwOptIn);   /* unreadable: stays at the default (on) */
     Fw6SeedFlowKey();
 
     Status = FwCreateSD();
@@ -885,7 +834,7 @@ NTSTATUS NitroFwInitialize(PDRIVER_OBJECT DriverObject)
     FwDevice->Flags &= ~DO_DEVICE_INITIALIZING;
     FwKilled = FALSE;
     InterlockedExchange((PLONG)&NitroFwTracking, 1);
-    DbgPrint("NitroFw: filter ready, enforcement opt-in %u\n", FwOptIn);
+    DbgPrint("NitroFw: filter ready\n");
     return STATUS_SUCCESS;
 }
 
