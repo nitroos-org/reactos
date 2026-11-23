@@ -68,6 +68,11 @@ static EFI_GUID BlockIoGuid = BLOCK_IO_PROTOCOL;
    and the most that one direct read asks the firmware for */
 #define UEFI_DISK_READ_BUFFER_SIZE  0x40000
 #define UEFI_DISK_DIRECT_READ_SIZE  0x100000
+
+/* What the devices have taken so far: the most bytes one command asks for (halved when a read fails, down to
+   one page), and whether reads into the caller's memory work at all (see UefiDiskRead) */
+static ULONG UefiMaxRequest = UEFI_DISK_DIRECT_READ_SIZE;
+static BOOLEAN UefiNoDirectRead = FALSE;
 static EFI_HANDLE* handles = NULL;
 static ULONG HandleCount = 0;
 
@@ -613,11 +618,16 @@ UefiDiskRead(ULONG FileId, VOID *Buffer, ULONG N, ULONG *Count)
 
     while (TotalSectors)
     {
-        if (N >= Context->SectorSize &&
-            UefiIsAlignedPointer(Ptr, (BlockIo->Media->IoAlign == 0) ? 1 : BlockIo->Media->IoAlign))
+        /* The most blocks one command may ask for now (see UefiMaxRequest) */
+        ULONG MaxRun = max(1, UefiMaxRequest / Context->SectorSize);
+        BOOLEAN Direct = (!UefiNoDirectRead &&
+                          N >= Context->SectorSize &&
+                          UefiIsAlignedPointer(Ptr, (BlockIo->Media->IoAlign == 0) ? 1 : BlockIo->Media->IoAlign));
+
+        if (Direct)
         {
             /* Whole blocks into memory the firmware may write to: no copy, one command for the run */
-            ReadSectors = min(N / Context->SectorSize, UEFI_DISK_DIRECT_READ_SIZE / Context->SectorSize);
+            ReadSectors = min(N / Context->SectorSize, MaxRun);
             Length = ReadSectors * Context->SectorSize;
 
             Status = BlockIo->ReadBlocks(
@@ -629,7 +639,7 @@ UefiDiskRead(ULONG FileId, VOID *Buffer, ULONG N, ULONG *Count)
         }
         else
         {
-            ReadSectors = min(TotalSectors, MaxSectors);
+            ReadSectors = min(TotalSectors, min(MaxSectors, MaxRun));
 
             Status = BlockIo->ReadBlocks(
                 BlockIo,
@@ -649,6 +659,25 @@ UefiDiskRead(ULONG FileId, VOID *Buffer, ULONG N, ULONG *Count)
 
         if (EFI_ERROR(Status))
         {
+            /*
+             * Not every device driver takes the large requests: the virtio-scsi driver of OVMF answers a request
+             * of 1 MB (or one into memory it cannot map for the device) with EFI_DEVICE_ERROR, and the system
+             * could not load its kernel. Ask for less, down to one page, and read through the bounce buffer
+             * when even that is refused into the caller's memory; remember what worked for the next read.
+             * Only a failure of the smallest request through the bounce buffer is a failure of the read.
+             */
+            if (UefiMaxRequest > EFI_PAGE_SIZE)
+            {
+                UefiMaxRequest = max(UefiMaxRequest / 2, EFI_PAGE_SIZE);
+                WARN("ReadBlocks failed (0x%lx), requests are limited to 0x%lx bytes now\n", (ULONG)Status, UefiMaxRequest);
+                continue;
+            }
+            if (Direct)
+            {
+                UefiNoDirectRead = TRUE;
+                WARN("ReadBlocks failed (0x%lx) into the caller's memory, reading through the buffer now\n", (ULONG)Status);
+                continue;
+            }
             ERR("ReadBlocks failed: Status = 0x%lx\n", (ULONG)Status);
             ret = FALSE;
             break;
