@@ -3088,7 +3088,16 @@ PipDeviceActionWorker(
         ASSERT(Request->DeviceObject);
 
         deviceNode = IopGetDeviceNode(Request->DeviceObject);
-        ASSERT(deviceNode);
+        if (deviceNode == NULL)
+        {
+            /* The device has gone between the request and now: its node is deleted when the device is removed (a hub
+               removing the PDO of a device that has just been unplugged or reset, a driver that asks for the state
+               of a device it is taking away). Nothing is left to act on. */
+            DPRINT1("PnP request %p: device object %p has no device node any more, action %u dropped\n",
+                    Request, Request->DeviceObject, Request->Action);
+            status = STATUS_NO_SUCH_DEVICE;
+            goto RequestDone;
+        }
 
         status = STATUS_SUCCESS;
 
@@ -3226,6 +3235,7 @@ PipDeviceActionWorker(
                 break;
         }
 
+RequestDone:
         if (Request->CompletionStatus)
         {
             *Request->CompletionStatus = status;
