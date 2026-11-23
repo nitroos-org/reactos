@@ -671,7 +671,8 @@ PvFindAdapter(
     if (!PvStartAdapter(Ext))
         return SP_RETURN_ERROR;
 
-    /* *Again stays FALSE: the port crashes in its second pass for a miniport that asks for another adapter (known), so only the first controller of a machine is driven */
+    /* Ask to be called again: the port looks for the next controller of this kind on the bus */
+    *Again = TRUE;
     return SP_RETURN_FOUND;
 }
 
