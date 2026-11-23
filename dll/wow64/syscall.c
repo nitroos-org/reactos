@@ -2371,6 +2371,16 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtCreateDirectoryObject:
         PROBE(0);
         ATTR(2); Status = NtCreateDirectoryObject(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
+    case W64_NtCreatePrivateNamespace:
+    case W64_NtOpenPrivateNamespace:
+        /* The boundary descriptor is one block without pointers (reactos/boundarydesc.h): the same in both layouts */
+        PROBE(0);
+        ATTR(2);
+        if (Number == W64_NtCreatePrivateNamespace)
+            Status = NtCreatePrivateNamespace(&Cleanup->Handle, a[1], OA(2), P(3));
+        else
+            Status = NtOpenPrivateNamespace(&Cleanup->Handle, a[1], OA(2), P(3));
+        RETURN_HANDLE();
     case W64_NtCreateSymbolicLinkObject:
     {
         UNICODE_STRING Target;

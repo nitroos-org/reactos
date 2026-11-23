@@ -353,6 +353,13 @@ WINAPI
 BasepCheckNamedObjectDirectory(
     _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes);
 
+/* privnamespace.c */
+extern RTL_CRITICAL_SECTION BasepNamespaceLock;
+
+VOID
+BasepAdjustObjectAttributesForPrivateNamespace(
+    _Inout_ POBJECT_ATTRIBUTES ObjectAttributes);
+
 NTSTATUS
 WINAPI
 BasepMapFile(IN LPCWSTR lpApplicationName,

@@ -221,6 +221,27 @@ NtCreateDirectoryObject(
     _In_ POBJECT_ATTRIBUTES ObjectAttributes
 );
 
+/* The boundary descriptor: the layout of <reactos/boundarydesc.h> */
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCreatePrivateNamespace(
+    _Out_ PHANDLE NamespaceHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ PVOID BoundaryDescriptor
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtOpenPrivateNamespace(
+    _Out_ PHANDLE NamespaceHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ PVOID BoundaryDescriptor
+);
+
 NTSYSCALLAPI
 NTSTATUS
 NTAPI

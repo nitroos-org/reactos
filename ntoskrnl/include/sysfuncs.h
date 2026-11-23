@@ -330,4 +330,6 @@
     SVC_(OpenKeyTransacted, 4)
     SVC_(OpenKeyTransactedEx, 5)
     SVC_(NotifyChangeDirectoryFileEx, 10)
+    SVC_(CreatePrivateNamespace, 4)
+    SVC_(OpenPrivateNamespace, 4)
 #endif
