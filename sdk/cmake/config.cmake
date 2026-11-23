@@ -93,6 +93,12 @@ else()
     set(_WINKD_ FALSE CACHE BOOL "Whether to compile with the KD protocol.")
 endif()
 
+# The kernel debugging kit: a second kernel (ntkrnlkd.exe) with the Windows KD protocol, the matching kdcom.dll
+# and a boot entry that uses them, next to the default kernel, which is not changed. The kit kernel has no KDBG, and
+# drivers built with KDBG extensions need one that has: no kit in those builds.
+cmake_dependent_option(KDKIT "Whether to build the kernel debugging kit (a kernel with the Windows KD protocol, for WinDbg, shipped next to the default kernel)." ON
+                       "NOT KDBG;NOT _WINKD_;NOT GDB;NOT MSVC;ARCH STREQUAL i386 OR ARCH STREQUAL amd64" OFF)
+
 cmake_dependent_option(ISAPNP_ENABLE "Whether to enable the ISA PnP support." ON
                        "ARCH STREQUAL i386 AND NOT SARCH STREQUAL xbox" OFF)
 

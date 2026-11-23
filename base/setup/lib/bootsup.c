@@ -86,6 +86,19 @@ CreateFreeLoaderReactOSEntries(
     Options->OsLoadOptions  = L"/DEBUG /DEBUGPORT=COM1 /BAUDRATE=115200 /SOS";
     AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(L"ReactOS_Debug"));
 
+#ifdef NITRO_KDKIT
+    /*
+     * ReactOS_KdKit: the kernel debugging kit (the kernel with the Windows KD
+     * protocol, the real kdcom.dll), for WinDbg on the other end of COM1.
+     * Added next to the others: the menu is not shown unless the timeout is
+     * set, and a default boot does not change.
+     */
+    // BootEntry->BootEntryKey = MAKESTRKEY(L"ReactOS_KdKit");
+    BootEntry->FriendlyName = L"\"" BRAND_PRODUCT_NAME_W L" (kernel debugging, COM1 115200)\"";
+    Options->OsLoadOptions  = L"/KERNEL=ntkrnlkd.exe /DEBUG /DEBUGPORT=COM1 /BAUDRATE=115200";
+    AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(L"ReactOS_KdKit"));
+#endif
+
 #ifdef _WINKD_
     /* ReactOS_VBoxDebug */
     // BootEntry->BootEntryKey = MAKESTRKEY(L"ReactOS_VBoxDebug");
