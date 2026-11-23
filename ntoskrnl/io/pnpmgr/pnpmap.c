@@ -35,6 +35,10 @@ typedef struct _PNP_DETECT_IDENTIFIER_MAP
 /* Map the device also when the firmware mapper is disabled (DisableFirmwareMapper,
  * set by the ACPI HAL): ACPI does not describe it, the boot loader does */
 #define PNPMAP_NOT_IN_ACPI      0x2
+/* The device exists only on the boots that describe it (the boot loader hands it
+ * over, or does not): mark it reported for this boot only, so that the root
+ * enumerator does not create it from the registry on the other boots */
+#define PNPMAP_THIS_BOOT_ONLY   0x4
 
 /* The firmware mapper is disabled: map only the PNPMAP_NOT_IN_ACPI devices */
 static BOOLEAN IopFirmwareMapperAcpiOnly = FALSE;
@@ -46,6 +50,8 @@ static UNICODE_STRING HardwareIDU = RTL_CONSTANT_STRING(L"HardwareID");
 static UNICODE_STRING ConfigurationDataU = RTL_CONSTANT_STRING(L"Configuration Data");
 static UNICODE_STRING BootConfigU = RTL_CONSTANT_STRING(L"BootConfig");
 static UNICODE_STRING LogConfU = RTL_CONSTANT_STRING(L"LogConf");
+static UNICODE_STRING ControlU = RTL_CONSTANT_STRING(L"Control");
+static UNICODE_STRING DeviceReportedU = RTL_CONSTANT_STRING(L"DeviceReported");
 
 /* FIXME: Trailing \0 in structures below are hacks, should be removed.
  * Hardware identifiers also can be mapped using "LegacyXlate" sections
@@ -123,11 +129,52 @@ PNP_DETECT_IDENTIFIER_MAP PnPMap[] =
     { L"PointerPeripheral", NULL, PointerMap, 0, 0 },
     { L"ParallelController", L"*PNP0400\0", NULL, 0, 0 },
     { L"FloppyDiskPeripheral", L"*PNP0700\0", NULL, 0, 0 },
-    { L"DisplayController", NULL, DisplayMap, 0, PNPMAP_NO_BOOT_CONFIG | PNPMAP_NOT_IN_ACPI },
+    { L"DisplayController", NULL, DisplayMap, 0, PNPMAP_NO_BOOT_CONFIG | PNPMAP_NOT_IN_ACPI | PNPMAP_THIS_BOOT_ONLY },
     { NULL, NULL, NULL, 0, 0 }
 };
 
 /* FUNCTIONS *****************************************************************/
+
+/*
+ * The device instance is present on this boot only. The root enumerator
+ * (IopShouldProcessDevice) creates an instance that has a DeviceReported value
+ * only when its volatile Control key has one too, as for the devices reported
+ * with IoReportDetectedDevice: on a later boot without the device (the loader
+ * handed over no framebuffer) the instance stays in the registry, but no
+ * device is created and its driver is not loaded.
+ */
+static
+CODE_SEG("INIT")
+VOID
+IopMarkReportedThisBoot(
+    _In_ HANDLE InstanceKey)
+{
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE ControlKey;
+    ULONG Reported = 1;
+    NTSTATUS Status;
+
+    InitializeObjectAttributes(&ObjectAttributes, &ControlU, OBJ_KERNEL_HANDLE, InstanceKey, NULL);
+    Status = ZwCreateKey(&ControlKey,
+                         KEY_SET_VALUE,
+                         &ObjectAttributes,
+                         0,
+                         NULL,
+                         REG_OPTION_VOLATILE,
+                         NULL);
+    if (NT_SUCCESS(Status))
+    {
+        Status = ZwSetValueKey(ControlKey, &DeviceReportedU, 0, REG_DWORD, &Reported, sizeof(Reported));
+        ZwClose(ControlKey);
+    }
+
+    /* Without the mark of this boot the device would not be created: then not at all */
+    if (NT_SUCCESS(Status))
+        Status = ZwSetValueKey(InstanceKey, &DeviceReportedU, 0, REG_DWORD, &Reported, sizeof(Reported));
+
+    if (!NT_SUCCESS(Status))
+        DPRINT1("Cannot mark the device as present on this boot only: status 0x%08lx\n", Status);
+}
 
 static
 CODE_SEG("INIT")
@@ -157,12 +204,12 @@ IopMapDetectedDeviceId(
     _In_ PUNICODE_STRING DetectId,
     _In_ PUNICODE_STRING Value,
     _Out_ PULONG DeviceIndex,
-    _Out_ PBOOLEAN NoBootConfig)
+    _Out_ PULONG MapFlags)
 {
     ULONG i;
     UNICODE_STRING CmpId;
 
-    *NoBootConfig = FALSE;
+    *MapFlags = 0;
 
     if (!DetectId)
         return NULL;
@@ -178,7 +225,7 @@ IopMapDetectedDeviceId(
                 return NULL;
 
             *DeviceIndex = PnPMap[i].Counter++;
-            *NoBootConfig = !!(PnPMap[i].Flags & PNPMAP_NO_BOOT_CONFIG);
+            *MapFlags = PnPMap[i].Flags;
 
             if (PnPMap[i].PeripheralMap)
                 return IopMapPeripheralId(Value, PnPMap[i].PeripheralMap);
@@ -244,7 +291,7 @@ IopEnumerateDetectedDevices(
         UNICODE_STRING HardwareIdKey;
         PWSTR pHardwareId;
         ULONG DeviceIndex = 0;
-        BOOLEAN NoBootConfig;
+        ULONG MapFlags;
 
         Status = ZwEnumerateKey(hDevicesKey,
                                 KeyIndex,
@@ -482,7 +529,7 @@ IopEnumerateDetectedDevices(
                 ValueName.Length -= sizeof(WCHAR);
         }
 
-        pHardwareId = IopMapDetectedDeviceId(RelativePath, &ValueName, &DeviceIndex, &NoBootConfig);
+        pHardwareId = IopMapDetectedDeviceId(RelativePath, &ValueName, &DeviceIndex, &MapFlags);
         if (!pHardwareId)
         {
             /* Unknown key path */
@@ -543,6 +590,9 @@ IopEnumerateDetectedDevices(
             goto nextdevice;
         }
 
+        if (MapFlags & PNPMAP_THIS_BOOT_ONLY)
+            IopMarkReportedThisBoot(hLevel2Key);
+
         /* Create 'LogConf' subkey */
         InitializeObjectAttributes(&ObjectAttributes, &LogConfU, OBJ_KERNEL_HANDLE, hLevel2Key, NULL);
 
@@ -562,7 +612,7 @@ IopEnumerateDetectedDevices(
             goto nextdevice;
         }
 
-        if (!NoBootConfig && (BootResourcesLength >= sizeof(CM_FULL_RESOURCE_DESCRIPTOR)))
+        if (!(MapFlags & PNPMAP_NO_BOOT_CONFIG) && (BootResourcesLength >= sizeof(CM_FULL_RESOURCE_DESCRIPTOR)))
         {
             PUCHAR CmResourceList;
             ULONG ListCount;
