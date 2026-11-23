@@ -80,6 +80,7 @@ extern void func_selecttimeval(void);
 extern void func_selectclose(void);
 extern void func_eventhandle(void);
 extern void func_selectsets(void);
+extern void func_selectlimits(void);
 extern void func_selectmany(void);
 extern void func_shutdownrecv(void);
 extern void func_sotimeout(void);
@@ -196,6 +197,7 @@ const struct test winetest_testlist[] =
     { "selectclose", func_selectclose },
     { "eventhandle", func_eventhandle },
     { "selectsets", func_selectsets },
+    { "selectlimits", func_selectlimits },
     { "selectmany", func_selectmany },
     { "shutdownrecv", func_shutdownrecv },
     { "sotimeout", func_sotimeout },

@@ -96,6 +96,8 @@ START_TEST(LdrLoadDllPendingInit)
     TestScenario("ll", FALSE, TRUE, "A+ A:LL(B) C+ B+(C=1) A:LL(B)=ok A:ret P+");
     TestScenario("gpa", FALSE, TRUE, "A+ A:GPA(B) C+ B+(C=1) A:GPA(B)=ok A:ret P+");
     TestScenario("lln", FALSE, TRUE, "A+ A:LL(N) C+ B+(C=1) N+(B=1) A:LL(N)=ok A:ret P+");
+    /* Windows Server 2022 (20348): C's DllMain loads B, which imports C: B keeps its place, after C returns */
+    TestScenario("cll", FALSE, TRUE, "A+ A:ret C+ C:LL(B) C:LL(B)=ok B+(C=1) P+");
     TestScenario("none", TRUE, FALSE, "A+ A:ret C+ B+(C=1) B:FALSE");
     TestScenario("ll", TRUE, FALSE, "A+ A:LL(B) C+ B+(C=1) B:FALSE A:LL(B)=NULL,1114 A:ret");
 }

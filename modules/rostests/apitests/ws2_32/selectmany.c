@@ -221,26 +221,30 @@ TestBogusCount(SOCKET Socket)
 
     for (i = 0; i < (int)(sizeof(Counts) / sizeof(Counts[0])); i++)
     {
+        /* Windows Server 2022: more than 65535 in a set is WSAENOBUFS (checked before the memory is read), a
+         * count below that which reaches beyond the memory is WSAEFAULT */
+        int Expected = Counts[i] > 0xFFFF ? WSAENOBUFS : WSAEFAULT;
+
         Set->fd_array[0] = Set->fd_array[1] = Socket;
         Set->fd_count = Counts[i];
         SetLastError(0xdeadbeef);
         Result = select(0, Set, NULL, NULL, &Zero);
         Error = WSAGetLastError();
-        ok(Result == SOCKET_ERROR && Error == WSAEFAULT, "read set with count %u and room for 2: select returned %d, error %d\n",
+        ok(Result == SOCKET_ERROR && Error == Expected, "read set with count %u and room for 2: select returned %d, error %d\n",
            Counts[i], Result, Error);
 
         Set->fd_array[0] = Set->fd_array[1] = Socket;
         Set->fd_count = Counts[i];
         Result = select(0, NULL, Set, NULL, &Zero);
         Error = WSAGetLastError();
-        ok(Result == SOCKET_ERROR && Error == WSAEFAULT, "write set with count %u and room for 2: select returned %d, error %d\n",
+        ok(Result == SOCKET_ERROR && Error == Expected, "write set with count %u and room for 2: select returned %d, error %d\n",
            Counts[i], Result, Error);
 
         Set->fd_array[0] = Set->fd_array[1] = Socket;
         Set->fd_count = Counts[i];
         Result = select(0, NULL, NULL, Set, &Zero);
         Error = WSAGetLastError();
-        ok(Result == SOCKET_ERROR && Error == WSAEFAULT, "except set with count %u and room for 2: select returned %d, error %d\n",
+        ok(Result == SOCKET_ERROR && Error == Expected, "except set with count %u and room for 2: select returned %d, error %d\n",
            Counts[i], Result, Error);
     }
 

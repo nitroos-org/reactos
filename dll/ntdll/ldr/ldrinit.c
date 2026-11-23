@@ -682,6 +682,16 @@ typedef struct _LDRP_INIT_QUEUE
 
 static LDRP_INIT_QUEUE *LdrpInitQueue;
 
+/* The entries whose init routine is running now, the innermost first (a routine can load a module that runs
+   another). Guarded by the loader lock */
+typedef struct _LDRP_RUNNING_INIT
+{
+    PLDR_DATA_TABLE_ENTRY Entry;
+    struct _LDRP_RUNNING_INIT *Prev;
+} LDRP_RUNNING_INIT;
+
+static LDRP_RUNNING_INIT *LdrpRunningInit;
+
 /*
  * Runs the init routine of one entry: its TLS callbacks and DLL_PROCESS_ATTACH, under its activation context.
  * STATUS_DLL_INIT_FAILED when the routine returned FALSE (or raised).
@@ -694,6 +704,7 @@ LdrpInitializeEntry(IN PLDR_DATA_TABLE_ENTRY LdrEntry,
     PVOID EntryPoint;
     PLDR_DATA_TABLE_ENTRY OldInitializer;
     RTL_CALLER_ALLOCATED_ACTIVATION_CONTEXT_STACK_FRAME_EXTENDED ActCtx;
+    LDRP_RUNNING_INIT Running;
     ULONG BreakOnDllLoad;
     BOOLEAN DllStatus;
     NTSTATUS Status;
@@ -739,6 +750,9 @@ LdrpInitializeEntry(IN PLDR_DATA_TABLE_ENTRY LdrEntry,
         /* Save the old Dll Initializer and write the current one */
         OldInitializer = LdrpCurrentDllInitializer;
         LdrpCurrentDllInitializer = LdrEntry;
+        Running.Entry = LdrEntry;
+        Running.Prev = LdrpRunningInit;
+        LdrpRunningInit = &Running;
 
         /* Set up the Act Ctx */
         ActCtx.Size = sizeof(ActCtx);
@@ -782,6 +796,7 @@ LdrpInitializeEntry(IN PLDR_DATA_TABLE_ENTRY LdrEntry,
 
         /* Save the Current DLL Initializer */
         LdrpCurrentDllInitializer = OldInitializer;
+        LdrpRunningInit = Running.Prev;
 
         /* Mark the entry as processed. NT6+ does not send DLL_PROCESS_DETACH
            to a module whose DLL_PROCESS_ATTACH failed (VERBUMP B5) */
@@ -856,6 +871,81 @@ NTSTATUS
 LdrpInitializePendingImports(IN PLDR_DATA_TABLE_ENTRY Importer,
                              IN LDRP_INIT_QUEUE *SkipQueue OPTIONAL);
 
+/* Whether the entry waits in a queue to be initialized */
+static
+BOOLEAN
+LdrpIsPendingEntry(IN PLDR_DATA_TABLE_ENTRY Target)
+{
+    LDRP_INIT_QUEUE *Queue;
+    ULONG i;
+
+    for (Queue = LdrpInitQueue; Queue; Queue = Queue->Prev)
+    {
+        for (i = 0; i < Queue->Count; i++)
+        {
+            if (Queue->Entries[i] == Target) return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/*
+ * Whether Importer imports a module whose init routine is running, directly or through a module that waits to be
+ * initialized: it cannot be initialized before that routine has returned (Windows Server 2022 leaves such a module
+ * to its place in the run: a routine that loads a module that imports it gets the handle, nothing more)
+ */
+#define LDRP_VISITED_MAX 256
+
+typedef struct _LDRP_VISITED
+{
+    ULONG Count;
+    PLDR_DATA_TABLE_ENTRY Entries[LDRP_VISITED_MAX];
+} LDRP_VISITED;
+
+static
+BOOLEAN
+LdrpImportsRunningModule(IN PLDR_DATA_TABLE_ENTRY Importer,
+                         IN OUT LDRP_VISITED *Visited)
+{
+    PIMAGE_IMPORT_DESCRIPTOR Import;
+    PLDR_DATA_TABLE_ENTRY Dependency;
+    LDRP_RUNNING_INIT *Running;
+    BOOLEAN Found = FALSE;
+    ULONG Size, i;
+
+    /* Each module is looked at once (the imports of a ring of modules lead back to where they came from, and a
+       module can be reached through many paths); a graph larger than the list is treated as not found */
+    for (i = 0; i < Visited->Count; i++)
+    {
+        if (Visited->Entries[i] == Importer) return FALSE;
+    }
+    if (Visited->Count == LDRP_VISITED_MAX) return FALSE;
+    Visited->Entries[Visited->Count++] = Importer;
+
+    _SEH2_TRY
+    {
+        Import = RtlImageDirectoryEntryToData(Importer->DllBase, TRUE, IMAGE_DIRECTORY_ENTRY_IMPORT, &Size);
+        for (; Import && !Found && Import->Name && Import->FirstThunk; Import++)
+        {
+            Dependency = LdrpFindLoadedImport(Importer, (LPSTR)((ULONG_PTR)Importer->DllBase + Import->Name));
+            if (!Dependency) continue;
+            for (Running = LdrpRunningInit; Running; Running = Running->Prev)
+            {
+                if (Running->Entry == Dependency) Found = TRUE;
+            }
+            if (!Found && LdrpIsPendingEntry(Dependency))
+                Found = LdrpImportsRunningModule(Dependency, Visited);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Found = FALSE;
+    }
+    _SEH2_END;
+
+    return Found;
+}
+
 /*
  * A module that is mapped but not yet initialized, because the run of init routines that has it queued has not
  * reached it, and that a routine of that run reaches (LoadLibrary or GetProcAddress of it, or the load of a new
@@ -886,6 +976,14 @@ LdrpInitializePendingEntryEx(IN PLDR_DATA_TABLE_ENTRY Target,
     return STATUS_SUCCESS;
 
 Found:
+    /* It imports a module whose init routine is running: it keeps its place in the run */
+    {
+        LDRP_VISITED Visited;
+
+        Visited.Count = 0;
+        if (LdrpImportsRunningModule(Target, &Visited)) return STATUS_SUCCESS;
+    }
+
     /* Claim it, as the run does, and run what it imports first */
     Queue->Entries[i] = NULL;
 

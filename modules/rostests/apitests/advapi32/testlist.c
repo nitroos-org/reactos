@@ -189,6 +189,7 @@ extern void func_RegWow64Aliases(void);
 extern void func_RegWow64RelativeView(void);
 extern void func_ServiceProcess(void);
 extern void func_ServiceInheritOnlyGeneric(void);
+extern void func_ServiceSharedToken(void);
 extern void func_ServiceSidToken(void);
 extern void func_ServiceStructLayout(void);
 extern void func_ServiceTriggerPrivileges(void);
@@ -386,6 +387,7 @@ const struct test winetest_testlist[] =
     { "SddlSids", func_SddlSids },
     { "ServiceProcess", func_ServiceProcess },
     { "ServiceInheritOnlyGeneric", func_ServiceInheritOnlyGeneric },
+    { "ServiceSharedToken", func_ServiceSharedToken },
     { "ServiceSidToken", func_ServiceSidToken },
     { "ServiceStructLayout", func_ServiceStructLayout },
     { "ServiceTriggerPrivileges", func_ServiceTriggerPrivileges },

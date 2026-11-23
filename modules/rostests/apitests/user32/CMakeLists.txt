@@ -178,6 +178,7 @@ list(APPEND SOURCE
     GetIconInfoEx.c
     CreateDesktopEx.c
     DesktopHeapLeak.c
+    DesktopLabels.c
     DesktopViewNoAddressSpace.c
     DesktopCloseUserObjects.c
     DesktopWindowSiblings.c

@@ -178,6 +178,7 @@ extern void func_DialogDpiBehavior(void);
 extern void func_GetIconInfoEx(void);
 extern void func_CreateDesktopEx(void);
 extern void func_DesktopHeapLeak(void);
+extern void func_DesktopLabels(void);
 extern void func_DesktopViewNoAddressSpace(void);
 extern void func_DesktopCloseUserObjects(void);
 extern void func_DesktopWindowSiblings(void);
@@ -356,6 +357,7 @@ const struct test winetest_testlist[] =
     { "GetIconInfoEx", func_GetIconInfoEx },
     { "CreateDesktopEx", func_CreateDesktopEx },
     { "DesktopHeapLeak", func_DesktopHeapLeak },
+    { "DesktopLabels", func_DesktopLabels },
     { "DesktopViewNoAddressSpace", func_DesktopViewNoAddressSpace },
     { "DesktopCloseUserObjects", func_DesktopCloseUserObjects },
     { "DesktopWindowSiblings", func_DesktopWindowSiblings },

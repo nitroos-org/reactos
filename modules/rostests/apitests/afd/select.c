@@ -152,6 +152,42 @@ TestParameters(
     ok(Final == STATUS_SUCCESS, "valid request: final %lx\n", Final);
 }
 
+/* The most a poll takes is 65535 sockets (as select() on Windows): one more is refused before any handle is
+ * looked at, with the buffers as large as the request needs them */
+static
+void
+TestMaximumCount(
+    _In_ SOCKET Client)
+{
+    ULONG Count, i;
+    TEST_POLL_INFO *Poll;
+    NTSTATUS Status, Final;
+
+    for (Count = 0xFFFF; Count <= 0x10000; Count++)
+    {
+        Poll = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, POLL_SIZE(Count));
+        if (!Poll)
+        {
+            skip("out of memory\n");
+            return;
+        }
+        Poll->Timeout.QuadPart = -200 * 10000;
+        Poll->HandleCount = Count;
+        for (i = 0; i < Count; i++)
+        {
+            Poll->Handles[i].Handle = (HANDLE)Client;
+            Poll->Handles[i].Events = POLL_EVENTS;
+        }
+        Status = DoPoll((HANDLE)Client, Poll, POLL_SIZE(Count), Poll, POLL_SIZE(Count), 2000, &Final);
+        if (Count == 0xFFFF)
+            ok(Status == STATUS_SUCCESS || (Status == STATUS_PENDING && Final == STATUS_SUCCESS),
+               "65535 handles: got %lx, final %lx\n", Status, Final);
+        else
+            ok(Status == STATUS_INVALID_PARAMETER, "65536 handles: got %lx\n", Status);
+        HeapFree(GetProcessHeap(), 0, Poll);
+    }
+}
+
 /* Requests that overran kernel memory before the checks; last, so a failure ends nothing else */
 static
 void
@@ -336,6 +372,7 @@ START_TEST(select)
     else
     {
         TestParameters(Client);
+        TestMaximumCount(Client);
         TestHandles(Client);
         closesocket(Client);
         closesocket(Server);
