@@ -2795,6 +2795,11 @@ co_WinPosSendSizeMoveEx(PWND Wnd, BOOL bCreate)
 
     co_IntSendMessageNoWait(UserHMGetHandle(Wnd), WM_SIZE, wParam, lParam);
 
+    /* The window procedure can destroy the window in WM_SIZE (the caller holds it): its storage is
+       gone, spwndParent with it */
+    if ((Wnd->state & WNDS_DESTROYED) || !Wnd->spwndParent)
+        return;
+
     if (UserIsDesktopWindow(Wnd->spwndParent))
        lParam = MAKELONG(Wnd->rcClient.left, Wnd->rcClient.top);
     else

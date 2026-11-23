@@ -2444,6 +2444,7 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
    DWORD dwShowMode = SW_SHOW;
    CREATESTRUCTW *pCsw = NULL;
    USER_HELD_POOL_ENTRY HeldCsw, HeldCbtCreate;
+   BOOL bGuiConsoleClass = FALSE;
    PVOID pszClass = NULL, pszName = NULL;
    PWND ret = NULL;
 
@@ -2468,6 +2469,9 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
        ERR("Failed to find class %wZ\n", ClassName);
        goto cleanup;
    }
+   /* Read now: the window's reference on the class goes when the window is destroyed during its
+      creation messages, and the class can go with it */
+   bGuiConsoleClass = (Class->atomClassName == gaGuiConsoleWndClass);
 
    /* The desktop and message windows of the desktop are gone once CSRSS has exited
       (IntDesktopThreadProcessExit): nothing to create a window under */
@@ -2797,6 +2801,13 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
         co_WinPosSendSizeMoveEx(Window, TRUE);
    }
 
+   /* From here on the creation has succeeded, but the window procedure can destroy the window in any of
+      the messages below (WM_SIZE, WM_MOVE, the show messages ...): its storage is gone then (the class,
+      the links), the window itself is held. The steps that read it are skipped once it is destroyed; the
+      result is the same as before (the handle). */
+   if (Window->state & WNDS_DESTROYED)
+      goto created;
+
    /* Show or maybe minimize or maximize the window. */
 
    style = IntSetStyle( Window, 0, WS_MAXIMIZE | WS_MINIMIZE );
@@ -2825,10 +2836,14 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
       {
          co_WinPosSendNcCalcSizeStateChanged(Window);
       }
+      if (Window->state & WNDS_DESTROYED)
+         goto created;
    }
 
    /* Send the WM_PARENTNOTIFY message */
    IntSendParentNotify(Window, WM_CREATE);
+   if (Window->state & WNDS_DESTROYED)
+      goto created;
 
    /* Notify the shell that a new window was created */
    if (Window->spwndOwner == NULL ||
@@ -2849,10 +2864,12 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
    {
       co_UserShowScrollBar(Window, SB_VERT, FALSE, TRUE);
    }
-   if (Window->style & WS_HSCROLL)
+   if (!(Window->state & WNDS_DESTROYED) && (Window->style & WS_HSCROLL))
    {
       co_UserShowScrollBar(Window, SB_HORZ, TRUE, FALSE);
    }
+   if (Window->state & WNDS_DESTROYED)
+      goto created;
 
    /* Show the new window */
    if (Cs->style & WS_VISIBLE)
@@ -2864,7 +2881,7 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
 
       co_WinPosShowWindow(Window, dwShowMode);
 
-      if (Window->ExStyle & WS_EX_MDICHILD)
+      if (!(Window->state & WNDS_DESTROYED) && (Window->ExStyle & WS_EX_MDICHILD))
       {
           ASSERT(ParentWindow);
           if(!ParentWindow)
@@ -2889,14 +2906,16 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
       }
    }
 
-   if (Class->atomClassName == gaGuiConsoleWndClass)
+created:
+   if (bGuiConsoleClass)
    {
        /* Count only console windows manually */
        co_IntUserManualGuiCheck(TRUE);
    }
 
    /* Set the hotkey */
-   if (!(Window->style & (WS_POPUP | WS_CHILD)) || (Window->ExStyle & WS_EX_APPWINDOW))
+   if (!(Window->state & WNDS_DESTROYED) &&
+       (!(Window->style & (WS_POPUP | WS_CHILD)) || (Window->ExStyle & WS_EX_APPWINDOW)))
    {
        if (pti->ppi->dwHotkey)
        {
@@ -2906,6 +2925,15 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
    }
 
    TRACE("co_UserCreateWindowEx(%wZ): Created window %p\n", ClassName, hWnd);
+   /* A window its procedure (or an in-context WinEvent procedure for EVENT_OBJECT_CREATE) destroyed during
+      the creation messages lives only on the reference of this function, which goes below: the caller
+      would get freed memory (the IME window of the thread is assignment-locked with it, NtUserCreateWindowEx
+      reads its handle from it). The creation fails then. */
+   if (Window->state & WNDS_DESTROYED)
+   {
+      ERR("co_UserCreateWindowEx(%wZ): window %p was destroyed during its creation\n", ClassName, hWnd);
+      goto cleanup;
+   }
    ret = Window;
 
 cleanup:
