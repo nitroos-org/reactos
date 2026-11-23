@@ -53,6 +53,7 @@ else()
         msc.c
         path.c
         pe_module.c
+        rosinline.c
         rosstubs.c
         rsym.c
         source.c
