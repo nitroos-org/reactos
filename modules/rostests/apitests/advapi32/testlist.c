@@ -52,6 +52,7 @@ extern void func_HKEY_CLASSES_ROOT(void);
 extern void func_GetUserNameImpersonated(void);
 extern void func_IsTextUnicode(void);
 extern void func_LockServiceDatabase(void);
+extern void func_LabelAutoInherit(void);
 extern void func_LookupPrivilegeNames(void);
 extern void func_LookupAccountSidCaller(void);
 extern void func_LogonUser(void);
@@ -252,6 +253,7 @@ const struct test winetest_testlist[] =
     { "GetUserNameImpersonated", func_GetUserNameImpersonated },
     { "IsTextUnicode" , func_IsTextUnicode },
     { "LockServiceDatabase" , func_LockServiceDatabase },
+    { "LabelAutoInherit", func_LabelAutoInherit },
     { "LookupPrivilegeNames", func_LookupPrivilegeNames },
     { "LookupAccountSidCaller", func_LookupAccountSidCaller },
     { "LogonUser", func_LogonUser },

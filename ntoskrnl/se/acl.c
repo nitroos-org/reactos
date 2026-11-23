@@ -623,11 +623,33 @@ SepPropagateAcl(
     USHORT AceCount = 0;
     PSID Sid;
     BOOLEAN WriteTwoAces;
+    BOOLEAN ExplicitHasLabel = FALSE;
 
     /* RtlValidAcl lets a caller's ACL size and reserved fields through, as Windows does */
     ASSERT(AclSource != NULL);
     ASSERT(!ExplicitAcl || RtlValidAcl(ExplicitAcl));
     ASSERT(!ParentAcl || RtlValidAcl(ParentAcl));
+
+    /*
+     * An explicit mandatory label replaces the label of the parent instead of
+     * being added to it (Windows Server 2022, measured on files, directories,
+     * keys and events: one label ACE, the explicit one, with the parent's label
+     * inheritable or not).
+     */
+    if (ExplicitAcl && ParentAcl)
+    {
+        PACE_HEADER ExplicitAce = (PACE_HEADER)(ExplicitAcl + 1);
+
+        for (i = 0; i < ExplicitAcl->AceCount; i++)
+        {
+            if (ExplicitAce->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+            {
+                ExplicitHasLabel = TRUE;
+                break;
+            }
+            ExplicitAce = (PACE_HEADER)((PUCHAR)ExplicitAce + ExplicitAce->AceSize);
+        }
+    }
 
     Written = 0;
     if (*AclLength >= Written + sizeof(ACL))
@@ -659,6 +681,7 @@ SepPropagateAcl(
         AceSource = (PACCESS_ALLOWED_ACE)CurrentSource;
 
         if ((AutoInherit && !IsInherited && (AceSource->Header.AceFlags & INHERITED_ACE)) ||
+            (IsInherited && ExplicitHasLabel && AceSource->Header.AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE) ||
             !SepShouldPropagateAce(AceSource->Header.AceFlags,
                                    &AceFlags,
                                    IsInherited,
@@ -668,6 +691,18 @@ SepPropagateAcl(
             continue;
         }
         InheritedFlag = (AutoInherit && IsInherited) ? INHERITED_ACE : 0;
+
+        /*
+         * The inheritance flags of an explicit label ACE on an object that is not
+         * a container mean nothing and are not stored (Windows Server 2022, a
+         * file or an event created with (ML;OICI;NW;;;LW) reads back (ML;;NW;;;LW))
+         */
+        if (!IsInherited && !IsDirectoryObject &&
+            AceSource->Header.AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE &&
+            !(AceFlags & INHERIT_ONLY_ACE))
+        {
+            AceFlags &= ~(OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | NO_PROPAGATE_INHERIT_ACE);
+        }
 
         if (AceSource->Header.AceType > ACCESS_MAX_MS_V2_ACE_TYPE)
         {

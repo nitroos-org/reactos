@@ -1122,8 +1122,8 @@ static VOID ChildRowsV13V7(DWORD Level)
             Label = LabelOf(Handle, SE_FILE_OBJECT, &Policy, &Flags);
             ok(Label == SECURITY_MANDATORY_LOW_RID && Policy == SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
                "V7-file-label level %lx: %lx policy %lx\n", Level, Label, Policy);
-            /* Windows marks an inherited label ACE inherited (ID) also where the DACL's are not (ticket) */
-            todo_ros ok(Flags == INHERITED_ACE, "V7-file-label level %lx: flags %x\n", Level, Flags);
+            /* Windows marks an inherited label ACE inherited (ID) also where the DACL's are not */
+            ok(Flags == INHERITED_ACE, "V7-file-label level %lx: flags %x\n", Level, Flags);
             CloseHandle(Handle);
             DeleteFileW(Name);
         }
