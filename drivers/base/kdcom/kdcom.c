@@ -8,6 +8,7 @@
 
 #include "kddll.h"
 
+#include <intrin.h>
 #include <arc/arc.h>
 #include <stdlib.h>
 #include <ndk/halfuncs.h>
@@ -18,6 +19,28 @@
 /* GLOBALS ********************************************************************/
 
 CPPORT KdComPort;
+
+/*
+ * The wait for an acknowledge is short, and bounded by time and not by the
+ * number of polls of the port (a poll costs 1 us on hardware and 7 us in a
+ * hypervisor): a host that is attached answers within milliseconds, and one
+ * that is not must not hold the machine for minutes (each packet used to
+ * wait 20 times 200,000 polls, 2.7 s each under a hypervisor). The time is
+ * counted in processor cycles, the only clock that runs this early with
+ * interrupts off: about 100 ms (a processor of 3 GHz) before any host was
+ * heard, one wait ends the attempt; about 200 ms afterwards, and the packet
+ * is resent a few times (KDP_HOST_RETRIES in kddll.c). A boot with
+ * /BREAK is patient: the user said a debugger is coming, so its first stop
+ * waits until the host is there.
+ */
+#define KDP_ACK_CYCLES_NOHOST   300000000ULL
+#define KDP_ACK_CYCLES_HOST     600000000ULL
+
+ULONG64 KdpByteWait;        /* cycles; 0: wait as long as the port library does */
+BOOLEAN KdpHostSeen;
+BOOLEAN KdpPatient;
+BOOLEAN KdpBreakInSeen;
+BOOLEAN KdpRememberBreakIn;
 #ifdef KDDEBUG
 CPPORT KdDebugComPort;
 #endif
@@ -61,6 +84,23 @@ ULONG KdpDbgPrint(const char *Format, ...)
 #endif
 
 /* FUNCTIONS ******************************************************************/
+
+ULONG64
+NTAPI
+KdpAckWait(VOID)
+{
+    return KdpHostSeen ? KDP_ACK_CYCLES_HOST : KDP_ACK_CYCLES_NOHOST;
+}
+
+/* A packet leader or a break-in byte arrived: there is a debugger on the other end */
+VOID
+NTAPI
+KdpHostIsPresent(VOID)
+{
+    KdpHostSeen = TRUE;
+    KD_DEBUGGER_NOT_PRESENT = FALSE;
+    SharedUserData->KdDebuggerEnabled |= 0x00000002;
+}
 
 NTSTATUS
 NTAPI
@@ -143,6 +183,9 @@ KdDebuggerInitialize0(IN PLOADER_PARAMETER_BLOCK LoaderBlock OPTIONAL)
 
         /* Upcase it */
         _strupr(CommandLine);
+
+        /* /BREAK: the first stop of the boot waits for the debugger to come */
+        KdpPatient = (strstr(CommandLine, "BREAK") != NULL);
 
         /* Get the port and baud rate */
         PortString = strstr(CommandLine, "DEBUGPORT");
@@ -282,9 +325,23 @@ NTAPI
 KdpReceiveByte(OUT PUCHAR OutByte)
 {
     USHORT Status;
+    ULONG64 Wait = KdpByteWait, End;
 
-    /* Get the byte */
-    Status = CpGetByte(&KdComPort, OutByte, TRUE, FALSE);
+    if (!Wait)
+    {
+        /* Wait as long as the port library does */
+        Status = CpGetByte(&KdComPort, OutByte, TRUE, FALSE);
+    }
+    else
+    {
+        /* A bounded wait: poll the port until the time is up */
+        End = __rdtsc() + Wait;
+        do
+        {
+            Status = CpGetByte(&KdComPort, OutByte, FALSE, FALSE);
+        } while ((Status == CP_GET_NODATA) && (__rdtsc() < End));
+    }
+
     switch (Status)
     {
         case CP_GET_SUCCESS:
@@ -299,19 +356,37 @@ KdpReceiveByte(OUT PUCHAR OutByte)
     }
 }
 
+/*
+ * Look for a break-in request: a byte seen earlier while a packet was
+ * exchanged (KdpBreakInSeen), or one that is waiting in the port now. Every
+ * byte that is waiting is taken, a host that sent a packet first must not
+ * make the break-in wait for one poll per clock tick.
+ */
 KDP_STATUS
 NTAPI
 KdpPollBreakIn(VOID)
 {
     KDP_STATUS KdStatus;
     UCHAR Byte;
+    ULONG Count;
+    BOOLEAN BreakIn = KdpBreakInSeen;
 
-    KdStatus = KdpPollByte(&Byte);
-    if ((KdStatus == KDP_PACKET_RECEIVED) && (Byte == BREAKIN_PACKET_BYTE))
+    for (Count = 0; Count < 32; Count++)
     {
-        return KDP_PACKET_RECEIVED;
+        KdStatus = KdpPollByte(&Byte);
+        if (KdStatus == KDP_PACKET_TIMEOUT)
+            break;
+        if ((KdStatus == KDP_PACKET_RECEIVED) && (Byte == BREAKIN_PACKET_BYTE))
+            BreakIn = TRUE;
     }
-    return KDP_PACKET_TIMEOUT;
+
+    if (!BreakIn)
+        return KDP_PACKET_TIMEOUT;
+
+    /* The host is there, also if it was not heard before (it attached late) */
+    KdpBreakInSeen = FALSE;
+    KdpHostIsPresent();
+    return KDP_PACKET_RECEIVED;
 }
 
 /* EOF */

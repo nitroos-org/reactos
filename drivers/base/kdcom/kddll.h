@@ -62,4 +62,23 @@ KDP_STATUS
 NTAPI
 KdpPollBreakIn(VOID);
 
+/*
+ * State of the link, see kdcom.c: how long the wait for an acknowledge may
+ * last, whether a host was ever heard, and a break-in byte that was seen
+ * while a packet was being exchanged.
+ */
+extern ULONG64 KdpByteWait;
+extern BOOLEAN KdpHostSeen;
+extern BOOLEAN KdpPatient;
+extern BOOLEAN KdpBreakInSeen;
+extern BOOLEAN KdpRememberBreakIn;
+
+VOID
+NTAPI
+KdpHostIsPresent(VOID);
+
+ULONG64
+NTAPI
+KdpAckWait(VOID);
+
 #endif /* _KDDLL_H_ */
