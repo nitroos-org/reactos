@@ -12,12 +12,12 @@
  * a link, on the parent), with Windows' REG_OPTION_BACKUP_RESTORE rules. What
  * happens with the decision depends on the mode:
  *
- * - Audit (1, the default): the decision is only recorded. Opens are decided
+ * - Audit (1): the decision is only recorded. Opens are decided
  *   by CmpCheckKeyOpenAccess against the legacy Everyone:GENERIC_ALL
  *   descriptor, creates check nothing on the parent, and every open or create
  *   that the key's descriptor denies is logged after the real decision (the
  *   shadow check); none of its outcomes reaches the caller.
- * - Enforce (2): the decision stands (CmpAclCheckKeyOpen before the handle,
+ * - Enforce (2, the default): the decision stands (CmpAclCheckKeyOpen before the handle,
  *   CmpAclCheckKeyCreate before anything is created) and every denial is
  *   logged the same way, so an audit log of a workload lists what enforcement
  *   denies. Kernel-mode callers (previous mode KernelMode without
@@ -389,10 +389,10 @@ ULONG CmpRegistryAclModeValueLength = sizeof(ULONG);
 ULONG CmpRegistryAclModeValueType = REG_NONE;
 
 /*
- * The mode without a boot option or an honoured RegistryAclMode value. Audit:
- * key access is not enforced unless asked for (mode 2).
+ * The mode without a boot option or an honoured RegistryAclMode value. Enforce:
+ * key access is decided by the keys' own descriptors, as on Windows.
  */
-#define CMP_REGACL_DEFAULT_MODE     CM_REGACL_MODE_AUDIT
+#define CMP_REGACL_DEFAULT_MODE     CM_REGACL_MODE_ENFORCE
 
 /* Configured mode, the mode that runs, and where it came from */
 ULONG CmpRegistryAclMode = CMP_REGACL_DEFAULT_MODE;
