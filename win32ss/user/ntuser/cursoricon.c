@@ -2280,7 +2280,7 @@ NtUserSetSystemCursor(
     HCURSOR hcur,
     DWORD id)
 {
-    PCURICON_OBJECT pcur, pcurOrig = NULL;
+    PCURICON_OBJECT pcur = NULL, pcurOrig = NULL;
     int i;
     PPROCESSINFO ppi;
     BOOL Ret = FALSE;
@@ -2327,6 +2327,9 @@ NtUserSetSystemCursor(
         }
     }
 Exit:
+    /* The reference that UserGetCurIconObject took is the system cursor table's only when the cursor was kept */
+    if (pcur && !Ret)
+        UserDereferenceObject(pcur);
     UserLeave();
     return Ret;
 }
