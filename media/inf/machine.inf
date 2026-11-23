@@ -80,6 +80,7 @@ HKR, , Icon,           0, "-27"
 [MicrosoftMfg]
 %ACPI\VMBUS.DeviceDesc% = NO_DRV,ACPI\VMBUS
 %ACPI\HYPER_V_GEN_COUNTER_V1.DeviceDesc% = NO_DRV,ACPI\HYPER_V_GEN_COUNTER_V1
+%ACPI\MSFT0101.DeviceDesc% = NO_DRV,ACPI\MSFT0101
 
 [NecMfg]
 %NecCb.DeviceDesc% = PCI_ISA_Inst,PCI\VEN_1033&DEV_0001
@@ -256,6 +257,7 @@ PCI\VEN_80EE&DEV_CAFE.DeviceDesc = "VirtualBox Guest Device"
 
 ACPI\VMBUS.DeviceDesc = "Hyper-V Virtual Machine Bus"
 ACPI\HYPER_V_GEN_COUNTER_V1.DeviceDesc = "Hyper-V Generation Counter"
+ACPI\MSFT0101.DeviceDesc = "Trusted Platform Module 2.0 (no TPM driver)"
 
 [Strings.0404]
 GenericMfg = "(標準系統裝置)"
