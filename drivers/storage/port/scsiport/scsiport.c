@@ -851,7 +851,6 @@ ScsiPortInitialize(
     ULONG PortConfigSize;
     BOOLEAN Again;
     BOOLEAN DeviceFound = FALSE;
-    BOOLEAN FirstConfigCall = TRUE;
     ULONG Result;
     NTSTATUS Status;
     PCI_SLOT_NUMBER SlotNumber;
@@ -1052,7 +1051,7 @@ CreatePortConfig:
                                      HwInitializationData,
                                      &ConfigInfo,
                                      DeviceExtension->PortConfig,
-                                     FirstConfigCall);
+                                     TRUE /* every pass allocates a new port configuration: it starts zeroed */);
 
         if (!NT_SUCCESS(Status))
         {
@@ -1353,8 +1352,6 @@ CreatePortConfig:
         }
 
         FdoScanAdapter(DeviceExtension);
-
-        FirstConfigCall = FALSE;
 
         /* Increase adapter number and bus number respectively */
         ConfigInfo.AdapterNumber++;
