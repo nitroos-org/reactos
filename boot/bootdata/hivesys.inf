@@ -2065,6 +2065,8 @@ HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Application\Application Error",
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Application\Application Error","TypesSupported",0x00010001,0x00000007
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Application\MsiInstaller","EventMessageFile",0x00020000,"%SystemRoot%\system32\msimsg.dll"
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Application\MsiInstaller","TypesSupported",0x00010001,0x00000007
+HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Application\RegAclReview","EventMessageFile",0x00020000,"%SystemRoot%\system32\regaclreview.exe"
+HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Application\RegAclReview","TypesSupported",0x00010001,0x00000007
 
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Security",,0x00000010
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Security","File",0x00020000,"%SystemRoot%\system32\config\SecEvent.Evt"

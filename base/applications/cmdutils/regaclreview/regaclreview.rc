@@ -7,3 +7,6 @@ LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
 #define REACTOS_STR_ORIGINAL_FILENAME   "regaclreview.exe"
 
 #include <reactos/version.rc>
+
+/* Message Table resource of the event source RegAclReview */
+#include <regaclreviewmsg.rc>

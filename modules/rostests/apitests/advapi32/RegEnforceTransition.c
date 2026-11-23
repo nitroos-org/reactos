@@ -7,9 +7,8 @@
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * The behaviour across boots (descriptors a standard user stored while an earlier boot did not enforce are
- * replaced at the first boot that does; the registry value cannot take the mode below enforcement where it
- * is the default; the marker goes away at a boot that does not enforce) needs several boots and is tested
- * outside this program. Here: the state one boot leaves.
+ * replaced at the first boot that enforces; the value RegistryAclMode of an earlier kernel is deleted and has
+ * no effect) needs several boots and is tested outside this program. Here: the state one boot leaves.
  */
 
 #include "precomp.h"
@@ -78,12 +77,11 @@ static VOID TestMarker(PCWSTR Path)
 START_TEST(RegEnforceTransition)
 {
     WCHAR Path[MAX_PATH];
-    DWORD Mode, Transition, Failed, Fallback, Configured, Source, Ignored, Attributes;
+    DWORD Transition, Failed, Unrepaired, Attributes, Removed, Was;
     HKEY Key;
-    DWORD Value, Size = sizeof(Value), Type;
-    BOOL LowerValue = FALSE;
+    LONG Error;
 
-    if (!GetStat(L"Mode", &Mode) || !GetStat(L"Transition", &Transition))
+    if (!GetStat(L"Transition", &Transition))
     {
         skip("no registry access control statistics (AuditStats\\Transition)\n");
         return;
@@ -93,40 +91,37 @@ START_TEST(RegEnforceTransition)
     StringCchCatW(Path, MAX_PATH, MARKER);
     Attributes = GetFileAttributesW(Path);
 
-    if (Mode == 2)
-    {
-        /* The check ran at this boot or an earlier one, and the marker says so */
-        ok(Transition == 1 || Transition == 2, "Transition %lu, expected 1 (checked now) or 2 (marker found)\n", Transition);
-        ok(GetStat(L"RestampFailed", &Failed) && Failed == 0, "RestampFailed %lu\n", Failed);
-        ok(GetStat(L"EnforceFallback", &Fallback) && Fallback == 0, "EnforceFallback %lu\n", Fallback);
-        ok(Attributes != INVALID_FILE_ATTRIBUTES, "no marker %ls in enforcement mode: %lu\n", Path, GetLastError());
-        if (Attributes != INVALID_FILE_ATTRIBUTES)
-            TestMarker(Path);
-    }
-    else
-    {
-        /* A boot that does not enforce removes the marker: users may change keys from now on */
-        ok(Transition == 0, "Transition %lu outside enforcement mode\n", Transition);
-        ok(Attributes == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND,
-           "the marker %ls is there in mode %lu (attributes 0x%lx, error %lu)\n", Path, Mode, Attributes, GetLastError());
-    }
+    /* The check ran at this boot or an earlier one, and the marker says so */
+    ok(Transition == 1 || Transition == 2, "Transition %lu, expected 1 (checked now) or 2 (marker found)\n", Transition);
+    ok(GetStat(L"RestampFailed", &Failed) && Failed == 0, "RestampFailed %lu\n", Failed);
+    ok(GetStat(L"BootKeysUnrepaired", &Unrepaired) && Unrepaired == 0, "BootKeysUnrepaired %lu\n", Unrepaired);
+    ok(Attributes != INVALID_FILE_ATTRIBUTES, "no marker %ls: %lu\n", Path, GetLastError());
+    if (Attributes != INVALID_FILE_ATTRIBUTES)
+        TestMarker(Path);
 
-    /* RegistryAclMode below 2 where 2 is the compiled default: ignored, said so (SwitchesIgnored 0x4) */
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Configuration Manager",
-                      0, KEY_QUERY_VALUE, &Key) == ERROR_SUCCESS)
+    /* There is no mode and no mode statistics: the old names are not published */
+    ok(!GetStat(L"Mode", &Failed), "AuditStats\\Mode is published\n");
+    ok(!GetStat(L"ConfiguredMode", &Failed), "AuditStats\\ConfiguredMode is published\n");
+    ok(!GetStat(L"EnforceFallback", &Failed), "AuditStats\\EnforceFallback is published\n");
+
+    /*
+     * The value RegistryAclMode of earlier kernels: deleted at the boot that found it, so it is not there now
+     * (unless something wrote it after the boot, which this test does not do), and when this boot deleted it the
+     * statistics say so
+     */
+    Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Configuration Manager",
+                          0, KEY_QUERY_VALUE, &Key);
+    /* The key itself may not exist (a fresh install has no value in it): then the value is not there either */
+    ok(Error == ERROR_SUCCESS || Error == ERROR_FILE_NOT_FOUND, "Configuration Manager key: %ld\n", Error);
+    if (Error == ERROR_SUCCESS)
     {
-        LowerValue = RegQueryValueExW(Key, L"RegistryAclMode", NULL, &Type, (BYTE *)&Value, &Size) == ERROR_SUCCESS &&
-                     Type == REG_DWORD && Value < 2;
+        Error = RegQueryValueExW(Key, L"RegistryAclMode", NULL, NULL, NULL, NULL);
+        ok(Error == ERROR_FILE_NOT_FOUND, "RegistryAclMode is still there after the boot: %ld\n", Error);
         RegCloseKey(Key);
     }
-    if (LowerValue && GetStat(L"ConfiguredMode", &Configured) && GetStat(L"ModeSource", &Source) &&
-        GetStat(L"SwitchesIgnored", &Ignored) && Source == 0 && Configured == 2)
+    if (GetStat(L"ModeValueRemoved", &Removed) && Removed)
     {
-        ok(Ignored & 0x4, "RegistryAclMode %lu under the enforcing default: SwitchesIgnored 0x%lx\n", Value, Ignored);
-        ok(Mode == 2, "RegistryAclMode %lu took the mode to %lu\n", Value, Mode);
-    }
-    else
-    {
-        trace("RegistryAclMode row not applicable (value %s)\n", LowerValue ? "below 2, mode set otherwise" : "absent or 2");
+        ok(GetStat(L"ModeValueWas", &Was), "ModeValueRemoved without ModeValueWas\n");
+        trace("this boot deleted RegistryAclMode (data 0x%lx)\n", Was);
     }
 }

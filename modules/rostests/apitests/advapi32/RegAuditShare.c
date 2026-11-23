@@ -6,7 +6,7 @@
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * Run by an administrator. A new standard user makes 300 distinct denied opens of HKLM\SECURITY (one access
- * mask each; denied in audit mode as a logged shadow decision and in enforcement for real); at most 128 of
+ * mask each; all refused and logged); at most 128 of
  * them may become log entries, the rest are counted as dropped (AuditStats ShareDropped). The counters are
  * published once a minute.
  */
@@ -68,7 +68,7 @@ START_TEST(RegAuditShare)
     WCHAR User[32], Exe[MAX_PATH], Command[MAX_PATH + 64];
     USER_INFO_1 Info;
     NET_API_STATUS Status;
-    DWORD Err, Mode, Dropped0, Dropped1, Entries0, Entries1, Exit = MAXDWORD, i;
+    DWORD Err, Dropped0, Dropped1, Entries0, Entries1, Exit = MAXDWORD, i;
     STARTUPINFOW Si = { sizeof(Si) };
     PROCESS_INFORMATION Pi;
     int argc;
@@ -78,9 +78,9 @@ START_TEST(RegAuditShare)
     if (argc >= 3 && !strcmp(argv[2], "child"))
         ExitProcess(Child());
 
-    if (!GetStat(L"Mode", &Mode) || Mode == 0 || !GetStat(L"ShareDropped", &Dropped0))
+    if (!GetStat(L"ShareDropped", &Dropped0))
     {
-        skip("registry access control audit not running (or no ShareDropped)\n");
+        skip("registry access control statistics not published (no ShareDropped)\n");
         return;
     }
 
@@ -113,9 +113,7 @@ START_TEST(RegAuditShare)
         GetExitCodeProcess(Pi.hProcess, &Exit);
         CloseHandle(Pi.hProcess);
         CloseHandle(Pi.hThread);
-        /* Audit mode grants them (and logs the shadow denial); enforcement refuses them */
-        if (Mode == 2)
-            ok(Exit == 0, "the standard user was granted %lu of the opens of HKLM\\SECURITY\n", Exit);
+        ok(Exit == 0, "the standard user was granted %lu of the opens of HKLM\\SECURITY\n", Exit);
 
         Dropped1 = Dropped0;
         for (i = 0; i < 15 && Dropped1 == Dropped0; i++)

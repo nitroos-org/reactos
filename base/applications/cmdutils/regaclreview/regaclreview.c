@@ -11,9 +11,12 @@
  * descriptors, but a value carries no author: a planted Run entry still runs at its account's next logon. This tool
  * lists, for every profile hive and for the .DEFAULT, LocalService and NetworkService hives, the values of the places
  * that start or load programs, with the key's last write time, the value, whether the file it names exists and who
- * owns that file; and the profile folders (ProfileList ProfileImagePath). It judges nothing: an entry is marked
- * REVIEW when what it names belongs to another account that is not an administrator, when the key may be written by
- * others, or when the key carries a label below Medium. Nothing is changed.
+ * owns that file; and the profile folders (ProfileList ProfileImagePath). An entry is marked REVIEW when what it
+ * names belongs to another account that is not an administrator, when the key may be written by others, or when the
+ * key carries a label below Medium. The machine's values that decide what runs as the system (each service's
+ * ImagePath and ServiceDll, the KnownDLLs entries, the LSA package values) get a verdict each against what a fresh
+ * install of this build holds: expected, or DIFFERS (shown, marked REVIEW). No setting is changed: the one
+ * registry write is the registration of the event source's message file when it is missing.
  *
  * Output: a text file (default %SystemRoot%\System32\LogFiles\RegAcl\review-<time>.txt, or /out <file>), one event
  * log entry (source RegAclReview), and the exit code: 0 nothing marked, 1 entries marked REVIEW, 2 a hive or a part
@@ -91,6 +94,8 @@ typedef struct _HIVE
 static PWCHAR g_Text;
 static SIZE_T g_TextChars, g_TextMax;
 static ULONG g_Entries, g_Marked, g_Unread;
+/* AuditStats: the value RegistryAclMode of earlier kernels was found and deleted at this boot (its data) */
+static DWORD g_ModeValueRemoved, g_ModeValueWas = MAXDWORD;
 static BOOL g_OutOfMemory;
 
 /* Administrators' members (SIDs), read once */
@@ -1782,6 +1787,446 @@ ReportTransitionLog(VOID)
 }
 
 /*
+ * VERDICTS. A value in the machine's settings that decides what runs as the system (a service's program, a
+ * KnownDLLs entry, the packages the security authority loads) could have been planted by any account while key
+ * permissions were not enforced, and nothing in the value says who wrote it. Each such value gets a verdict against
+ * what a fresh install of this build holds (boot\bootdata\hivesys.inf and the *_reg.inf files of the services):
+ * "expected" or "DIFFERS" with the value shown and why. A value that differs is marked REVIEW: it may be right (an
+ * administrator's own change, a program that is installed), the report cannot tell. Nothing is changed.
+ */
+#define MAX_VERDICT_EXPECTED_LINES  4000
+
+static ULONG g_ExpectedLines;
+
+static
+VOID
+Verdict(
+    _In_ BOOL Expected,
+    _In_ BOOL Counted,
+    _In_ PCWSTR Where,
+    _In_ PCWSTR Name,
+    _In_ PCWSTR Text,
+    _In_opt_ PCWSTR Why)
+{
+    WCHAR ShownWhere[MAX_SHOWN_CHARS * 6 + 8], ShownName[MAX_SHOWN_CHARS * 6 + 8], ShownText[MAX_SHOWN_CHARS * 6 + 8];
+
+    if (Expected && ++g_ExpectedLines > MAX_VERDICT_EXPECTED_LINES)
+    {
+        if (Counted)
+            g_Entries++;
+        return;
+    }
+    EscapeText(Where, wcslen(Where), ShownWhere, ARRAYSIZE(ShownWhere));
+    EscapeText(Name, wcslen(Name), ShownName, ARRAYSIZE(ShownName));
+    EscapeText(Text, wcslen(Text), ShownText, ARRAYSIZE(ShownText));
+    Out(L"  %s  %s \"%s\" = %s%s%s\r\n", Expected ? L"expected" : L"DIFFERS ", ShownWhere, ShownName, ShownText,
+        Why && Why[0] ? L"  -- " : L"", Why && Why[0] ? Why : L"");
+    if (Counted)
+    {
+        g_Entries++;
+        if (!Expected)
+        {
+            g_Marked++;
+            Out(L"    REVIEW\r\n");
+        }
+    }
+}
+
+/* A value's data as text for a verdict (a number for a DWORD, strings joined by ';'); FALSE if there is no such value */
+static
+BOOL
+ReadValueText(
+    _In_ HKEY Key,
+    _In_ PCWSTR Name,
+    _Out_writes_(Chars) PWCHAR Text,
+    _In_ SIZE_T Chars)
+{
+    static BYTE Data[MAX_VALUE_BYTES];
+    DWORD Type, Bytes = sizeof(Data);
+    LONG Error;
+
+    Text[0] = UNICODE_NULL;
+    Error = RegQueryValueExW(Key, Name, NULL, &Type, Data, &Bytes);
+    if (Error == ERROR_FILE_NOT_FOUND)
+        return FALSE;
+    if (Error == ERROR_MORE_DATA)
+        StringCchPrintfW(Text, Chars, L"(longer than the tool reads, type %lu)", Type);
+    else if (Error != ERROR_SUCCESS)
+        StringCchPrintfW(Text, Chars, L"(cannot be read, error %ld)", Error);
+    else if (Type == REG_DWORD && Bytes == sizeof(DWORD))
+        StringCchPrintfW(Text, Chars, L"%lu", *(PDWORD)Data);
+    else if (!ValueString(Type, Data, Bytes, Text, Chars))
+        StringCchPrintfW(Text, Chars, L"(type %lu, %lu bytes)", Type, Bytes);
+    return TRUE;
+}
+
+/* Service programs ------------------------------------------------------- */
+
+/* Programs of the system folder that a service never is (a command interpreter, a script host, a tool that acts) */
+static const PCWSTR g_NotAService[] =
+{
+    L"cmd.exe", L"command.com", L"powershell.exe", L"pwsh.exe", L"wscript.exe", L"cscript.exe", L"mshta.exe",
+    L"rundll32.exe", L"regsvr32.exe", L"reg.exe", L"regedit.exe", L"sc.exe", L"net.exe", L"net1.exe",
+    L"schtasks.exe", L"at.exe", L"bitsadmin.exe", L"certutil.exe"
+};
+
+/* The arguments a service of this build's own is registered with (hivesys.inf, the *_reg.inf files) */
+static const struct
+{
+    PCWSTR Program;
+    PCWSTR Arguments;
+    BOOL Group;         /* svchost: "-k <one word>" */
+} g_ServiceArguments[] =
+{
+    { L"svchost.exe", L"-k ", TRUE },
+    { L"msiexec.exe", L"/V", FALSE },
+    { L"nfsd.exe", L"--noldap", FALSE },
+    { L"nitro-certseed.exe", L"/service", FALSE },
+    { L"nitro-expand.exe", L"/service", FALSE },
+};
+
+enum { SERVICE_EXPECTED = 0, SERVICE_DIFFERS, SERVICE_OUTSIDE };
+
+/*
+ * Is the program a service (Driver: kernel driver) starts the one a fresh install has: a file of the system folder
+ * (System32, SysWOW64) of the right kind (.exe for a service, .sys for a driver, .dll for a ServiceDll), that is not
+ * an interpreter, started without arguments but those the build's own services have.
+ */
+static
+ULONG
+JudgeServiceProgram(
+    _In_ PCWSTR Raw,
+    _In_ BOOL Driver,
+    _In_ BOOL IsDll,
+    _Out_writes_(WhyChars) PWCHAR Why,
+    _In_ SIZE_T WhyChars)
+{
+    WCHAR Expanded[MAX_PATH_CHARS], Program[MAX_PATH_CHARS], Full[MAX_PATH_CHARS];
+    PCWSTR Rest, Name, p;
+    SIZE_T Root = wcslen(g_SystemRoot), i;
+
+    Why[0] = UNICODE_NULL;
+    if (!ExpandFor(Raw, L"", Expanded, ARRAYSIZE(Expanded)))
+    {
+        StringCchCopyW(Why, WhyChars, L"names a variable the tool does not resolve");
+        return SERVICE_DIFFERS;
+    }
+    p = Expanded;
+    if (!_wcsnicmp(p, L"\\??\\", 4))
+        p += 4;
+    ProgramOf(p, Program, ARRAYSIZE(Program), &Rest);
+
+    if (!_wcsnicmp(Program, L"\\SystemRoot\\", 12))
+        StringCchPrintfW(Full, ARRAYSIZE(Full), L"%s%s", g_SystemRoot, Program + 11);
+    else if (Program[0] && Program[1] == L':' && Program[2] == L'\\')
+        StringCchCopyW(Full, ARRAYSIZE(Full), Program);
+    else if (Driver && !_wcsnicmp(Program, L"system32\\", 9))
+        StringCchPrintfW(Full, ARRAYSIZE(Full), L"%s\\%s", g_SystemRoot, Program);
+    else
+    {
+        StringCchCopyW(Why, WhyChars, L"not a full path (found through a search when it starts)");
+        return SERVICE_DIFFERS;
+    }
+    if (wcsstr(Full, L"\\..") || wcschr(Full, L'/'))
+    {
+        StringCchCopyW(Why, WhyChars, L"the path goes through .. or /");
+        return SERVICE_DIFFERS;
+    }
+    if (_wcsnicmp(Full, g_SystemRoot, Root) || Full[Root] != L'\\' ||
+        (_wcsnicmp(Full + Root, L"\\system32\\", 10) && _wcsnicmp(Full + Root, L"\\syswow64\\", 10)))
+    {
+        StringCchCopyW(Why, WhyChars, L"outside the system folder (owner and writers of the file below)");
+        return SERVICE_OUTSIDE;
+    }
+
+    Name = wcsrchr(Full, L'\\') + 1;
+    if (!EndsWith(Name, wcslen(Name), IsDll ? L".dll" : Driver ? L".sys" : L".exe"))
+    {
+        StringCchPrintfW(Why, WhyChars, L"not a %s file", IsDll ? L".dll" : Driver ? L".sys" : L".exe");
+        return SERVICE_DIFFERS;
+    }
+    for (i = 0; i < ARRAYSIZE(g_NotAService); i++)
+    {
+        if (!_wcsicmp(Name, g_NotAService[i]))
+        {
+            StringCchCopyW(Why, WhyChars, L"a command interpreter or tool, not a service program");
+            return SERVICE_DIFFERS;
+        }
+    }
+    while (*Rest == L' ' || *Rest == L'\t')
+        Rest++;
+    if (!*Rest)
+        return SERVICE_EXPECTED;
+    for (i = 0; i < ARRAYSIZE(g_ServiceArguments); i++)
+    {
+        SIZE_T Chars = wcslen(g_ServiceArguments[i].Arguments);
+
+        if (_wcsicmp(Name, g_ServiceArguments[i].Program))
+            continue;
+        if (g_ServiceArguments[i].Group)
+        {
+            /* One word: no blank, quote or shell character */
+            if (!_wcsnicmp(Rest, g_ServiceArguments[i].Arguments, Chars) && Rest[Chars] &&
+                !wcspbrk(Rest + Chars, L" \t\"&|<>^%"))
+            {
+                return SERVICE_EXPECTED;
+            }
+        }
+        else if (!_wcsicmp(Rest, g_ServiceArguments[i].Arguments))
+        {
+            return SERVICE_EXPECTED;
+        }
+    }
+    StringCchCopyW(Why, WhyChars, L"arguments that the build's own services do not have");
+    return SERVICE_DIFFERS;
+}
+
+/*
+ * ImagePath and ServiceDll of every service and driver, one verdict per value. A program outside the system folder
+ * is reported as before (owner of the file and of the folders on its way, who may change them).
+ */
+static
+VOID
+JudgeServices(
+    _In_ PHIVE Machine)
+{
+    static const PCWSTR Base = L"SYSTEM\\CurrentControlSet\\Services";
+    WCHAR Name[256], Path[MAX_PATH_CHARS], Raw[MAX_PATH_CHARS], Where[MAX_PATH_CHARS], Why[160];
+    DWORD Index, NameChars, Type, Bytes, ServiceType, Expected = 0, Differs = 0, Outside = 0, j;
+    HKEY Key, Sub;
+    ULONG Verdict_;
+    BOOL Driver;
+
+    Out(L"\r\n== Services and drivers: the program of every ImagePath and ServiceDll\r\n"
+        L"   expected = a file of the system folder of the right kind, no arguments but the build's own services have\r\n");
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Base, 0, KEY_ENUMERATE_SUB_KEYS, &Key) != ERROR_SUCCESS)
+    {
+        Out(L"  cannot be read\r\n");
+        g_Unread++;
+        return;
+    }
+    for (Index = 0; Index < MAX_SUBKEYS; Index++)
+    {
+        NameChars = ARRAYSIZE(Name);
+        if (RegEnumKeyExW(Key, Index, Name, &NameChars, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        if (FAILED(StringCchPrintfW(Path, ARRAYSIZE(Path), L"%s\\%s", Base, Name)))
+            continue;
+        Driver = FALSE;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_QUERY_VALUE, &Sub) == ERROR_SUCCESS)
+        {
+            Bytes = sizeof(ServiceType);
+            if (RegQueryValueExW(Sub, L"Type", NULL, &Type, (LPBYTE)&ServiceType, &Bytes) == ERROR_SUCCESS &&
+                Type == REG_DWORD)
+            {
+                Driver = (ServiceType & (SERVICE_KERNEL_DRIVER | SERVICE_FILE_SYSTEM_DRIVER | SERVICE_RECOGNIZER_DRIVER)) != 0;
+            }
+            RegCloseKey(Sub);
+        }
+        for (j = 0; j < 2; j++)
+        {
+            WCHAR Where2[MAX_PATH_CHARS];
+
+            if (FAILED(StringCchPrintfW(Where2, ARRAYSIZE(Where2), j ? L"%s\\%s\\Parameters" : L"%s\\%s", Base, Name)) ||
+                RegOpenKeyExW(HKEY_LOCAL_MACHINE, Where2, 0, KEY_QUERY_VALUE, &Sub) != ERROR_SUCCESS)
+            {
+                continue;
+            }
+            ZeroMemory(Raw, sizeof(Raw));
+            Bytes = sizeof(Raw) - sizeof(WCHAR);
+            if (RegQueryValueExW(Sub, j ? L"ServiceDll" : L"ImagePath", NULL, &Type, (LPBYTE)Raw, &Bytes) == ERROR_SUCCESS &&
+                (Type == REG_SZ || Type == REG_EXPAND_SZ) && Raw[0])
+            {
+                StringCchPrintfW(Where, ARRAYSIZE(Where), L"HKLM\\%s", Where2);
+                Verdict_ = JudgeServiceProgram(Raw, Driver && !j, j != 0, Why, ARRAYSIZE(Why));
+                if (Verdict_ == SERVICE_EXPECTED)
+                {
+                    Expected++;
+                    Verdict(TRUE, TRUE, Where, j ? L"ServiceDll" : L"ImagePath", Raw, NULL);
+                }
+                else if (Verdict_ == SERVICE_OUTSIDE)
+                {
+                    Outside++;
+                    /* Counted and marked by the detail below (ReportKey): the file's owner and writers decide */
+                    Verdict(FALSE, FALSE, Where, j ? L"ServiceDll" : L"ImagePath", Raw, Why);
+                    ReportKey(Machine, HKEY_LOCAL_MACHINE, L"HKLM", Where2, j ? L"ServiceDll" : L"ImagePath",
+                              j ? KIND_FILE : KIND_CMD);
+                }
+                else
+                {
+                    Differs++;
+                    Verdict(FALSE, TRUE, Where, j ? L"ServiceDll" : L"ImagePath", Raw, Why);
+                }
+            }
+            RegCloseKey(Sub);
+        }
+    }
+    RegCloseKey(Key);
+    Out(L"  %lu program paths: %lu expected, %lu differ, %lu outside the system folder (listed with their file owners)\r\n",
+        Expected + Differs + Outside, Expected, Differs, Outside);
+    if (Expected > MAX_VERDICT_EXPECTED_LINES)
+        Out(L"  (only the first %lu expected values are listed; every value that differs is)\r\n", MAX_VERDICT_EXPECTED_LINES);
+}
+
+/* KnownDLLs: the entries of a fresh install (hivesys.inf) ------------------ */
+
+static const struct
+{
+    PCWSTR Name;
+    PCWSTR Data;
+} g_KnownDlls[] =
+{
+    { L"DllDirectory", L"%SystemRoot%\\system32" },
+    { L"advapi32", L"advapi32.dll" }, { L"comdlg32", L"comdlg32.dll" }, { L"gdi32", L"gdi32.dll" },
+    { L"imagehlp", L"imagehlp.dll" }, { L"kernel32", L"kernel32.dll" }, { L"lz32", L"lz32.dll" },
+    { L"msvcrt", L"msvcrt.dll" }, { L"ole32", L"ole32.dll" }, { L"oleaut32", L"oleaut32.dll" },
+    { L"olecli32", L"olecli32.dll" }, { L"olesvr32", L"olesvr32.dll" }, { L"olethk32", L"olethk32.dll" },
+    { L"rpcrt4", L"rpcrt4.dll" }, { L"setupapi", L"setupapi.dll" }, { L"shell32", L"shell32.dll" },
+    { L"url", L"url.dll" }, { L"urlmon", L"urlmon.dll" }, { L"user32", L"user32.dll" },
+    { L"version", L"version.dll" }, { L"wininet", L"wininet.dll" }, { L"wldap32", L"wldap32.dll" },
+};
+
+static
+VOID
+JudgeKnownDlls(VOID)
+{
+    static const PCWSTR Path = L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\KnownDlls";
+    static WCHAR Name[16384], Text[MAX_VALUE_BYTES / sizeof(WCHAR) + 1];
+    WCHAR Why[MAX_PATH_CHARS], Where[MAX_PATH_CHARS];
+    BOOL Seen[64];      /* the shipped list is shorter (22 entries) */
+    DWORD Index, NameChars, Values = 0, Expected = 0, Differs = 0;
+    ULONG i;
+    HKEY Key;
+
+    ZeroMemory(Seen, sizeof(Seen));
+
+    Out(L"\r\n== KnownDLLs: the DLLs every program gets from the system folder, whatever sits next to it\r\n"
+        L"   expected = the entry a fresh install has, with the same data\r\n");
+    StringCchPrintfW(Where, ARRAYSIZE(Where), L"HKLM\\%s", Path);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
+    {
+        Out(L"  %s cannot be opened: every shipped entry is missing or the key cannot be read\r\n", Where);
+        g_Unread++;
+        return;
+    }
+    if (RegQueryInfoKeyW(Key, NULL, NULL, NULL, NULL, NULL, NULL, &Values, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+        Values = 0;
+    for (Index = 0; Index < min(Values, 4096); Index++)
+    {
+        BOOL Found = FALSE, Same = FALSE;
+
+        NameChars = ARRAYSIZE(Name);
+        if (RegEnumValueW(Key, Index, Name, &NameChars, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+        {
+            g_Unread++;
+            break;
+        }
+        ReadValueText(Key, Name, Text, ARRAYSIZE(Text));
+        for (i = 0; i < ARRAYSIZE(g_KnownDlls); i++)
+        {
+            if (_wcsicmp(Name, g_KnownDlls[i].Name))
+                continue;
+            Found = TRUE;
+            Seen[i] = TRUE;
+            Same = !_wcsicmp(Text, g_KnownDlls[i].Data);
+            if (!Same)
+                StringCchPrintfW(Why, ARRAYSIZE(Why), L"a fresh install has \"%s\"", g_KnownDlls[i].Data);
+            break;
+        }
+        if (!Found)
+            StringCchCopyW(Why, ARRAYSIZE(Why), L"not an entry of a fresh install (a program or an administrator added it, or it was planted)");
+        if (Same)
+        {
+            Expected++;
+            Verdict(TRUE, TRUE, Where, Name[0] ? Name : L"(default)", Text, NULL);
+        }
+        else
+        {
+            Differs++;
+            Verdict(FALSE, TRUE, Where, Name[0] ? Name : L"(default)", Text, Why);
+        }
+    }
+    RegCloseKey(Key);
+    for (i = 0; i < ARRAYSIZE(g_KnownDlls); i++)
+    {
+        if (!Seen[i])
+        {
+            Differs++;
+            StringCchPrintfW(Why, ARRAYSIZE(Why), L"a fresh install has \"%s\"; without the entry the program's own folder is searched first", g_KnownDlls[i].Data);
+            Verdict(FALSE, TRUE, Where, g_KnownDlls[i].Name, L"(absent)", Why);
+        }
+    }
+    Out(L"  %lu entries: %lu expected, %lu differ\r\n", Expected + Differs, Expected, Differs);
+}
+
+/* LSA: the packages the security authority loads, and the values that weaken logon ----------------------- */
+
+static
+VOID
+JudgeLsa(VOID)
+{
+    static const PCWSTR Path = L"SYSTEM\\CurrentControlSet\\Control\\Lsa";
+    /* What a fresh install has (hivesys.inf) */
+    static const struct
+    {
+        PCWSTR Name;
+        PCWSTR Data;
+    } Shipped[] =
+    {
+        { L"Authentication Packages", L"msv1_0" },
+        { L"EveryoneIncludesAnonymous", L"0" },
+        { L"LimitBlankPasswordUse", L"1" },
+        { L"AllowAdministratorLockout", L"0" },
+    };
+    /* Values that name code the authority loads, and that a fresh install does not have */
+    static const PCWSTR Absent[] = { L"Notification Packages", L"Security Packages" };
+    static WCHAR Text[MAX_VALUE_BYTES / sizeof(WCHAR) + 1];
+    WCHAR Why[MAX_PATH_CHARS], Where[MAX_PATH_CHARS];
+    DWORD Expected = 0, Differs = 0;
+    ULONG i;
+    HKEY Key;
+
+    Out(L"\r\n== LSA: the packages the security authority loads into its process, and the logon values\r\n"
+        L"   expected = the value a fresh install has (the packages: none beyond the shipped ones)\r\n");
+    StringCchPrintfW(Where, ARRAYSIZE(Where), L"HKLM\\%s", Path);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
+    {
+        Out(L"  %s cannot be opened\r\n", Where);
+        g_Unread++;
+        return;
+    }
+    for (i = 0; i < ARRAYSIZE(Shipped); i++)
+    {
+        if (!ReadValueText(Key, Shipped[i].Name, Text, ARRAYSIZE(Text)))
+        {
+            Differs++;
+            StringCchPrintfW(Why, ARRAYSIZE(Why), L"a fresh install has \"%s\"", Shipped[i].Data);
+            Verdict(FALSE, TRUE, Where, Shipped[i].Name, L"(absent)", Why);
+        }
+        else if (!_wcsicmp(Text, Shipped[i].Data))
+        {
+            Expected++;
+            Verdict(TRUE, TRUE, Where, Shipped[i].Name, Text, NULL);
+        }
+        else
+        {
+            Differs++;
+            StringCchPrintfW(Why, ARRAYSIZE(Why), L"a fresh install has \"%s\"", Shipped[i].Data);
+            Verdict(FALSE, TRUE, Where, Shipped[i].Name, Text, Why);
+        }
+    }
+    for (i = 0; i < ARRAYSIZE(Absent); i++)
+    {
+        if (!ReadValueText(Key, Absent[i], Text, ARRAYSIZE(Text)))
+            continue;
+        Differs++;
+        Verdict(FALSE, TRUE, Where, Absent[i], Text, L"a fresh install has no such value; the libraries it names are loaded into the security authority");
+    }
+    RegCloseKey(Key);
+    Out(L"  %lu values: %lu expected, %lu differ\r\n", Expected + Differs, Expected, Differs);
+}
+
+/*
  * The machine's own places that start programs as anyone who logs on, or as the system, and the program files of the
  * services that are not in the system folder. Listed as for the accounts (no account owns them: a file that belongs
  * to anyone but SYSTEM and the administrators is marked).
@@ -1817,10 +2262,9 @@ ReviewMachine(VOID)
         L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options",
         L"SOFTWARE\\Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options",
     };
-    WCHAR Name[256], Path[MAX_PATH_CHARS], Raw[MAX_PATH_CHARS], Expanded[MAX_PATH_CHARS], Program[MAX_PATH_CHARS];
-    DWORD Index, NameChars, Bytes, Type, Services = 0, Outside = 0;
-    PCWSTR Rest;
-    HKEY Key, Sub;
+    WCHAR Name[256], Path[MAX_PATH_CHARS];
+    DWORD Index, NameChars;
+    HKEY Key;
     HIVE Machine;
     ULONG i, j;
 
@@ -1850,53 +2294,10 @@ ReviewMachine(VOID)
         RegCloseKey(Key);
     }
 
-    /* Services and drivers whose program file is not in the system folder (the others are counted) */
-    Out(L"  services and drivers whose program is outside %s:\r\n", g_SystemRoot);
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services", 0, KEY_ENUMERATE_SUB_KEYS, &Key) ==
-        ERROR_SUCCESS)
-    {
-        for (Index = 0; Index < MAX_SUBKEYS; Index++)
-        {
-            NameChars = ARRAYSIZE(Name);
-            if (RegEnumKeyExW(Key, Index, Name, &NameChars, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
-                break;
-            for (j = 0; j < 2; j++)
-            {
-                if (FAILED(StringCchPrintfW(Path, ARRAYSIZE(Path), j ? L"%s\\Parameters" : L"%s", Name)) ||
-                    RegOpenKeyExW(Key, Path, 0, KEY_QUERY_VALUE, &Sub) != ERROR_SUCCESS)
-                {
-                    continue;
-                }
-                ZeroMemory(Raw, sizeof(Raw));
-                Bytes = sizeof(Raw) - sizeof(WCHAR);
-                if (RegQueryValueExW(Sub, j ? L"ServiceDll" : L"ImagePath", NULL, &Type, (LPBYTE)Raw, &Bytes) ==
-                        ERROR_SUCCESS && (Type == REG_SZ || Type == REG_EXPAND_SZ) && Raw[0])
-                {
-                    Services++;
-                    /* Driver paths are relative to the system root (System32\drivers\x.sys, \SystemRoot\...) */
-                    ExpandFor(Raw, L"", Expanded, ARRAYSIZE(Expanded));
-                    ProgramOf(!_wcsnicmp(Expanded, L"\\??\\", 4) ? Expanded + 4 : Expanded, Program,
-                              ARRAYSIZE(Program), &Rest);
-                    if (!_wcsnicmp(Program, L"\\SystemRoot\\", 12) || !_wcsnicmp(Program, L"System32\\", 9) ||
-                        (!_wcsnicmp(Program, g_SystemRoot, wcslen(g_SystemRoot)) && Program[wcslen(g_SystemRoot)] == L'\\'))
-                    {
-                        RegCloseKey(Sub);
-                        continue;
-                    }
-                    Outside++;
-                    StringCchPrintfW(Path, ARRAYSIZE(Path), j ? L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters" :
-                                                                L"SYSTEM\\CurrentControlSet\\Services\\%s", Name);
-                    ReportKey(&Machine, HKEY_LOCAL_MACHINE, L"HKLM", Path, j ? L"ServiceDll" : L"ImagePath",
-                              j ? KIND_FILE : KIND_CMD);
-                }
-                RegCloseKey(Sub);
-            }
-        }
-        RegCloseKey(Key);
-    }
-    Out(L"  %lu service program paths, %lu outside the system folder (listed above)\r\n", Services, Outside);
-    Out(L"  (service settings that name a program in the system folder, e.g. an ImagePath changed to cmd.exe, are not\r\n"
-        L"  listed: compare `sc qc <name>` with a fresh install if untrusted accounts used this computer)\r\n");
+    /* The values that decide what runs as the system: a verdict for each (against a fresh install) */
+    JudgeServices(&Machine);
+    JudgeKnownDlls();
+    JudgeLsa();
 
     ReportTransitionLog();
 }
@@ -1925,21 +2326,24 @@ ReadMode(
     _Out_writes_(Chars) PWCHAR Buffer,
     _In_ SIZE_T Chars)
 {
-    DWORD Mode = MAXDWORD, Transition = MAXDWORD, Bytes;
+    DWORD Transition = MAXDWORD, Removed = 0, Was = MAXDWORD, Bytes;
     HKEY Key;
 
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl\\AuditStats", 0,
                       KEY_QUERY_VALUE, &Key) == ERROR_SUCCESS)
     {
-        Bytes = sizeof(Mode);
-        RegQueryValueExW(Key, L"Mode", NULL, NULL, (LPBYTE)&Mode, &Bytes);
         Bytes = sizeof(Transition);
         RegQueryValueExW(Key, L"Transition", NULL, NULL, (LPBYTE)&Transition, &Bytes);
+        Bytes = sizeof(Removed);
+        RegQueryValueExW(Key, L"ModeValueRemoved", NULL, NULL, (LPBYTE)&Removed, &Bytes);
+        Bytes = sizeof(Was);
+        RegQueryValueExW(Key, L"ModeValueWas", NULL, NULL, (LPBYTE)&Was, &Bytes);
         RegCloseKey(Key);
     }
-    StringCchPrintfW(Buffer, Chars, L"registry key security %s (Mode %ld, Transition %ld)",
-                     Mode == 2 ? L"enforced" : Mode == 1 ? L"audited, not enforced" : Mode == 0 ? L"off" : L"unknown",
-                     (LONG)Mode, (LONG)Transition);
+    StringCchPrintfW(Buffer, Chars, L"registry key security is enforced (always; transition state %ld)",
+                     (LONG)Transition);
+    g_ModeValueRemoved = Removed;
+    g_ModeValueWas = Was;
 }
 
 static
@@ -1975,6 +2379,33 @@ WriteReport(
     return Ok;
 }
 
+/*
+ * The event source's registration: the file with the message texts of the events (this program), so that the event
+ * viewer shows the text. A fresh install has it from the hive; an install made before this release does not, and the
+ * one value is written here (never replacing a registration that is there). This is the only registry write of the
+ * tool.
+ */
+static
+VOID
+EnsureEventSource(VOID)
+{
+    static const WCHAR Path[] = L"SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\" EVENT_SOURCE;
+    static const WCHAR File[] = L"%SystemRoot%\\system32\\regaclreview.exe";
+    DWORD Types = EVENTLOG_ERROR_TYPE | EVENTLOG_WARNING_TYPE | EVENTLOG_INFORMATION_TYPE, Bytes;
+    HKEY Key;
+
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, Path, 0, NULL, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &Key, NULL) !=
+        ERROR_SUCCESS)
+    {
+        return;
+    }
+    if (RegQueryValueExW(Key, L"EventMessageFile", NULL, NULL, NULL, &Bytes) == ERROR_FILE_NOT_FOUND)
+        RegSetValueExW(Key, L"EventMessageFile", 0, REG_EXPAND_SZ, (const BYTE *)File, sizeof(File));
+    if (RegQueryValueExW(Key, L"TypesSupported", NULL, NULL, NULL, &Bytes) == ERROR_FILE_NOT_FOUND)
+        RegSetValueExW(Key, L"TypesSupported", 0, REG_DWORD, (const BYTE *)&Types, sizeof(Types));
+    RegCloseKey(Key);
+}
+
 static
 VOID
 LogEvent(
@@ -1985,6 +2416,7 @@ LogEvent(
     PCWSTR Strings[1] = { Text };
     HANDLE Source;
 
+    EnsureEventSource();
     StringCchPrintfW(Text, ARRAYSIZE(Text),
                      L"Registry review: %lu entries listed, %lu marked REVIEW, %lu hives or parts not read. Report: %s",
                      g_Entries, g_Marked, g_Unread, Report);
@@ -2002,7 +2434,8 @@ Usage(VOID)
 {
     wprintf(L"regaclreview [/out <file>] [/transition] [/print]\n"
             L"  Lists, for every account's registry hive and the service accounts' hives, the settings that start\n"
-            L"  or load programs, and the profile folders. Changes nothing. Run as an administrator.\n"
+            L"  or load programs, and the profile folders, and judges the machine's service programs, KnownDLLs and\n"
+            L"  LSA package values against a fresh install. Changes no setting. Run as an administrator.\n"
             L"  /out <file>    write the report there (default %%SystemRoot%%\\System32\\LogFiles\\RegAcl\\review-<time>.txt)\n"
             L"  /transition    the report of the first boot that enforces (LogFiles\\RegAcl\\transition-review.txt)\n"
             L"  /print         also print the report\n"
@@ -2102,13 +2535,22 @@ wmain(
 
     Out(L"Registry review (regaclreview %u) of %s, %s%s\r\n%s\r\n", REVIEW_VERSION, Computer, Time,
         Transition ? L", first boot that enforces" : L"", Mode);
-    Out(L"\r\nThis report lists; it changes nothing and judges nothing. While registry key security was not enforced,\r\n"
-        L"any account could write these settings, also in other accounts' hives. Check each entry you did not make,\r\n"
-        L"first the ones marked REVIEW: what they name belongs to another account that is not an administrator, the\r\n"
-        L"key may be written by others, or the key is labelled below Medium. The legitimate settings of programs\r\n"
-        L"(per-user installs, file types) are listed too. The last sections list the machine's own places (HKLM Run\r\n"
-        L"keys, Winlogon, AppInit_DLLs, Image File Execution Options debuggers, services outside the system folder)\r\n"
-        L"and the keys the first enforcing boot replaced or kept.\r\n");
+    Out(L"\r\nThis report lists and changes nothing. While registry key security was not enforced, any account could\r\n"
+        L"write these settings, also in other accounts' hives. Check each entry you did not make, first the ones marked\r\n"
+        L"REVIEW: what they name belongs to another account that is not an administrator, the key may be written by\r\n"
+        L"others, or the key is labelled below Medium. The legitimate settings of programs (per-user installs, file\r\n"
+        L"types) are listed too. The last sections list the machine's own places (HKLM Run keys, Winlogon,\r\n"
+        L"AppInit_DLLs, Image File Execution Options debuggers), then judge each service program path, KnownDLLs entry\r\n"
+        L"and LSA package value against what a fresh install of this build holds (\"expected\", or \"DIFFERS\" with the\r\n"
+        L"value shown: it may be an administrator's own change, the report cannot tell), and list the keys the first\r\n"
+        L"enforcing boot replaced or kept. Nothing in this report is repaired or reset: a value that differs stays.\r\n");
+    if (g_ModeValueRemoved)
+    {
+        Out(L"\r\n== The value RegistryAclMode\r\n"
+            L"  Found in Control\\Session Manager\\Configuration Manager at this start (data %s0x%lx) and deleted. It has\r\n"
+            L"  no effect: registry key security is always enforced, no setting turns it down or off.\r\n",
+            g_ModeValueWas == MAXDWORD ? L"not a number, " : L"", g_ModeValueWas);
+    }
 
     MakeScratch();
     ReviewProfiles();
