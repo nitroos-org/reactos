@@ -35,6 +35,11 @@ MegabytesToSectors(
 static BOOLEAN g_bNoErr = FALSE;
 /* noerr given twice: invalid arguments */
 static BOOLEAN g_bNoErrTwice = FALSE;
+/* align=<N> (KB) of the command in bytes, 0 when not given or 0 (the default of the disk); the offset= of the command in bytes as given;
+ * the length in sectors of the range an offset= asks for (ResolveOffsetRange) */
+static ULONGLONG g_ullAlignBytes = 0;
+static ULONGLONG g_ullOffsetBytes = 0;
+static ULONGLONG g_ullRangeSectors = 0;
 #define CREATE_FAILED() (g_bNoErr ? EXIT_SUCCESS : EXIT_CMD_FAILED)
 /* invalid arguments are not hidden by noerr: the script stops with 0x80070057 (Windows Server 2022, measured: size=abc noerr, an unknown word, noerr noerr) */
 #define CREATE_BADARGS() (EXIT_CMD_FAILED)
@@ -51,6 +56,9 @@ ScanNoErr(
 
     g_bNoErr = FALSE;
     g_bNoErrTwice = FALSE;
+    g_ullAlignBytes = 0;
+    g_ullOffsetBytes = 0;
+    g_ullRangeSectors = 0;
     for (i = 3; i < argc; i++)
     {
         if (_wcsicmp(argv[i], L"noerr") == 0)
@@ -119,12 +127,163 @@ ParseOffsetKilobytes(
     /* less than one granule rounds down to nothing: not a valid offset (not measured below 64 KB) */
     if (ullKilobytes * 1024 < ullGranularity)
         return FALSE;
+    g_ullOffsetBytes = ullKilobytes * 1024;
     ullKilobytes = (ullKilobytes * 1024 / ullGranularity) * ullGranularity / 1024;
     if (((ullKilobytes * 1024) % ulBytesPerSector) != 0)
         return FALSE;
 
     *pullSectors = (ullKilobytes * 1024) / ulBytesPerSector;
     return TRUE;
+}
+
+/*
+ * align=<N> is in KB, decimal digits only; 0 is the default of the disk (the Windows DiskPart takes align=0 as no align=). Anything else
+ * (abc, -5) is "The arguments specified for this command are not valid" (measured on Windows Server 2022).
+ */
+static
+BOOLEAN
+ParseAlignKilobytes(
+    _In_ PWSTR pszAlign,
+    _Out_ PULONGLONG pullBytes)
+{
+    PWSTR pszEnd;
+    ULONGLONG ullKilobytes;
+
+    if (!iswdigit(*pszAlign))
+        return FALSE;
+
+    errno = 0;
+    ullKilobytes = _wcstoui64(pszAlign, &pszEnd, 10);
+    if (*pszEnd != UNICODE_NULL || errno == ERANGE || ullKilobytes > _UI64_MAX / 1024)
+        return FALSE;
+
+    *pullBytes = ullKilobytes * 1024;
+    return TRUE;
+}
+
+/* The granularity of the ranges in bytes: the alignment (64 KB when none is given), a whole number of sectors */
+static
+ULONGLONG
+GranuleBytes(
+    _In_ ULONG ulBytesPerSector,
+    _In_ ULONGLONG ullAlignBytes)
+{
+    ULONGLONG ullGranule = ullAlignBytes ? ullAlignBytes : 64 * 1024ULL;
+
+    if (ullGranule < ulBytesPerSector)
+        ullGranule = ulBytesPerSector;
+    return ((ullGranule + ulBytesPerSector - 1) / ulBytesPerSector) * ulBytesPerSector;
+}
+
+/*
+ * What an offset= asks for, as the Windows DiskPart gives it (Windows Server 2022, a VHD): the start is the offset rounded DOWN to the
+ * alignment, the end is offset + size rounded UP to it (offset=1001 size=8: 960 KB, 8256 KB; offset=40000 size=8 align=4096: 36864 KB,
+ * 12288 KB); without size= the partition runs to the end of the free space (*pullSectors is 0). An offset that rounds down to nothing
+ * is not a valid argument.
+ */
+static
+BOOLEAN
+ResolveOffsetRange(
+    _In_ ULONGLONG ullOffsetBytes,
+    _In_ ULONGLONG ullSizeMegabytes,
+    _In_ ULONG ulBytesPerSector,
+    _In_ ULONGLONG ullAlignBytes,
+    _Out_ PULONGLONG pullStartSector,
+    _Out_ PULONGLONG pullSectors)
+{
+    ULONGLONG ullGranule = GranuleBytes(ulBytesPerSector, ullAlignBytes), ullStart, ullSize, ullEnd;
+
+    ullStart = (ullOffsetBytes / ullGranule) * ullGranule;
+    if (ullStart == 0)
+        return FALSE;
+
+    *pullStartSector = ullStart / ulBytesPerSector;
+    if (ullSizeMegabytes == 0)
+    {
+        *pullSectors = 0;
+        return TRUE;
+    }
+
+    if (ullSizeMegabytes > _UI64_MAX / (1024 * 1024) || ullOffsetBytes > _UI64_MAX - ullSizeMegabytes * 1024 * 1024 - ullGranule)
+    {
+        /* no space has it: the command fails with nothing written */
+        *pullSectors = _UI64_MAX;
+        return TRUE;
+    }
+
+    ullSize = ullSizeMegabytes * 1024 * 1024;
+    ullEnd = ((ullOffsetBytes + ullSize + ullGranule - 1) / ullGranule) * ullGranule;
+    *pullSectors = (ullEnd - ullStart) / ulBytesPerSector;
+    return TRUE;
+}
+
+/* The size a command asks for in sectors: the range of an offset=, else size= (0 is all of the space) */
+static
+ULONGLONG
+RequestSectors(
+    _In_ ULONGLONG ullSizeMegabytes,
+    _In_ BOOLEAN bOffset,
+    _In_ ULONG ulBytesPerSector)
+{
+    if (bOffset)
+        return g_ullRangeSectors;
+    return (ullSizeMegabytes != 0) ? MegabytesToSectors(ullSizeMegabytes, ulBytesPerSector) : 0;
+}
+
+/*
+ * No offset= but an align=: the unpartitioned entry with the most room after its start is rounded UP and its end DOWN to the alignment
+ * (the lowest offset among equals); the size is rounded DOWN to a multiple of the alignment (size=8 align=3000: 6000 KB), all of the
+ * room without size=. ullReserve sectors at the start of an entry are the EBR of a logical drive. NULL when no entry has room.
+ */
+static
+PPARTENTRY
+FindAlignedFreeEntry(
+    _In_ PLIST_ENTRY ListHead,
+    _In_ ULONGLONG ullSectors,
+    _In_ ULONGLONG ullAlignSectors,
+    _In_ BOOLEAN bLogical,
+    _Out_ PULONGLONG pullStart,
+    _Out_ PULONGLONG pullLength)
+{
+    PLIST_ENTRY ListEntry;
+    PPARTENTRY PartEntry, Best = NULL;
+    ULONGLONG ullStart, ullEnd, ullAvailable, ullNeed, ullBest = 0;
+
+    for (ListEntry = ListHead->Flink; ListEntry != ListHead; ListEntry = ListEntry->Flink)
+    {
+        PartEntry = CONTAINING_RECORD(ListEntry, PARTENTRY, ListEntry);
+        if (PartEntry->IsPartitioned)
+            continue;
+
+        ullStart = PartEntry->StartSector.QuadPart;
+        ullEnd = ullStart + PartEntry->SectorCount.QuadPart;
+        if (bLogical && ListEntry->Blink != ListHead)
+            ullStart += PartEntry->DiskEntry->SectorAlignment;
+        ullStart = ((ullStart + ullAlignSectors - 1) / ullAlignSectors) * ullAlignSectors;
+        ullEnd = (ullEnd / ullAlignSectors) * ullAlignSectors;
+        if (ullEnd <= ullStart)
+            continue;
+
+        ullAvailable = ullEnd - ullStart;
+        if (ullSectors != 0)
+        {
+            ullNeed = (ullSectors / ullAlignSectors) * ullAlignSectors;
+            if (ullNeed == 0 || ullNeed > ullAvailable)
+                continue;
+        }
+        else
+            ullNeed = ullAvailable;
+
+        if (Best == NULL || ullAvailable > ullBest)
+        {
+            Best = PartEntry;
+            ullBest = ullAvailable;
+            *pullStart = ullStart;
+            *pullLength = ullNeed;
+        }
+    }
+
+    return Best;
 }
 
 /*
@@ -282,6 +441,20 @@ FindLargestFreeEntry(
     return Best;
 }
 
+/* An align= that finds no room: "not enough usable space" (0x8004240F) when the size would fit without it (Windows Server 2022: size=8
+   align=100000), else the failure of a size that does not fit at all (size=300: 0x80070057, which noerr hides) */
+static
+EXIT_CODE
+AlignedFailure(
+    _In_ PLIST_ENTRY ListHead,
+    _In_ ULONGLONG ullSectors,
+    _In_ BOOLEAN bLogical)
+{
+    return (FindLargestFreeEntry(ListHead, ullSectors, bLogical) != NULL) ? CREATE_NOSPACE() : CREATE_FAILED();
+}
+
+#define ALIGN_SECTORS() (GranuleBytes(CurrentDisk->BytesPerSector, g_ullAlignBytes) / CurrentDisk->BytesPerSector)
+
 /*
  * A disk the system found no partition table on (RAW) is initialised as MBR by the first CREATE PARTITION PRIMARY / EXTENDED, as the
  * Windows DiskPart does (measured: the disk gets an MBR, the partition is made at once).
@@ -335,6 +508,28 @@ InsertGptPartition(
             return NULL;
 
         NewPartEntry = SplitFreeEntry(PartEntry, *pullOffset, ullLength);
+        if (NewPartEntry == NULL)
+            return NULL;
+
+        CopyMemory(&NewPartEntry->Gpt.PartitionType, pPartitionType, sizeof(GUID));
+        NewPartEntry->Gpt.PartitionId = PartitionId;
+        NewPartEntry->Gpt.Attributes = 0ULL;
+        NewPartEntry->PartitionNumber = 0;
+        return NewPartEntry;
+    }
+
+    if (g_ullAlignBytes != 0)
+    {
+        /* align=: start and end rounded to the alignment, the size down to a multiple of it */
+        ULONGLONG ullStart, ullAlignedLength;
+
+        PartEntry = FindAlignedFreeEntry(&pDisk->PrimaryPartListHead, ullSectorSize,
+                                         GranuleBytes(pDisk->BytesPerSector, g_ullAlignBytes) / pDisk->BytesPerSector,
+                                         FALSE, &ullStart, &ullAlignedLength);
+        if (PartEntry == NULL)
+            return NULL;
+
+        NewPartEntry = SplitFreeEntry(PartEntry, ullStart, ullAlignedLength);
         if (NewPartEntry == NULL)
             return NULL;
 
@@ -569,9 +764,13 @@ CreateExtendedPartition(
         }
         else if (HasPrefix(argv[i], L"align=", &pszSuffix))
         {
-            /* align=<N> */
+            /* align=<N> (KB) */
             DPRINT("Align : %s\n", pszSuffix);
-            return RefuseUnsupportedOption(L"ALIGN");
+            if (!ParseAlignKilobytes(pszSuffix, &g_ullAlignBytes))
+            {
+                ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+                return CREATE_BADARGS();
+            }
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
@@ -587,6 +786,12 @@ CreateExtendedPartition(
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
             return CREATE_BADARGS();
         }
+    }
+
+    if (bOffset && !ResolveOffsetRange(g_ullOffsetBytes, ullSize, CurrentDisk->BytesPerSector, g_ullAlignBytes, &ullOffset, &g_ullRangeSectors))
+    {
+        ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+        return CREATE_BADARGS();
     }
 
     DPRINT1("Size: %I64u\n", ullSize);
@@ -615,10 +820,7 @@ CreateExtendedPartition(
         return CREATE_FAILED();
     }
 
-    if (ullSize != 0)
-        ullSectorCount = MegabytesToSectors(ullSize, CurrentDisk->BytesPerSector);
-    else
-        ullSectorCount = 0;
+    ullSectorCount = RequestSectors(ullSize, bOffset, CurrentDisk->BytesPerSector);
 
     DPRINT1("SectorCount: %I64u\n", ullSectorCount);
 
@@ -633,6 +835,23 @@ CreateExtendedPartition(
         {
             ConResPuts(StdOut, IDS_CREATE_PARTITION_FAIL);
             return CREATE_NOSPACE();
+        }
+
+        NewPartEntry->Mbr.PartitionType = PARTITION_EXTENDED;
+        CurrentPartition = NewPartEntry;
+        CurrentDisk->Dirty = TRUE;
+    }
+    else if (g_ullAlignBytes != 0)
+    {
+        /* align=: start and end rounded to the alignment, the size down to a multiple of it */
+        ULONGLONG ullStart, ullLength;
+
+        PartEntry = FindAlignedFreeEntry(&CurrentDisk->PrimaryPartListHead, ullSectorCount, ALIGN_SECTORS(), FALSE, &ullStart, &ullLength);
+        NewPartEntry = (PartEntry != NULL) ? SplitFreeEntry(PartEntry, ullStart, ullLength) : NULL;
+        if (NewPartEntry == NULL)
+        {
+            ConResPuts(StdOut, IDS_CREATE_PARTITION_FAIL);
+            return AlignedFailure(&CurrentDisk->PrimaryPartListHead, ullSectorCount, FALSE);
         }
 
         NewPartEntry->Mbr.PartitionType = PARTITION_EXTENDED;
@@ -787,9 +1006,13 @@ CreateLogicalPartition(
         }
         else if (HasPrefix(argv[i], L"align=", &pszSuffix))
         {
-            /* align=<N> */
+            /* align=<N> (KB) */
             DPRINT("Align : %s\n", pszSuffix);
-            return RefuseUnsupportedOption(L"ALIGN");
+            if (!ParseAlignKilobytes(pszSuffix, &g_ullAlignBytes))
+            {
+                ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+                return CREATE_BADARGS();
+            }
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
@@ -807,16 +1030,19 @@ CreateLogicalPartition(
         }
     }
 
+    if (bOffset && !ResolveOffsetRange(g_ullOffsetBytes, ullSize, CurrentDisk->BytesPerSector, g_ullAlignBytes, &ullOffset, &g_ullRangeSectors))
+    {
+        ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+        return CREATE_BADARGS();
+    }
+
     DPRINT1("Size: %I64u\n", ullSize);
 #if 0
     DPRINT1("Offset: %I64u\n", ullOffset);
 #endif
     DPRINT1("Partition Type: %hx\n", PartitionType);
 
-    if (ullSize != 0)
-        ullSectorCount = MegabytesToSectors(ullSize, CurrentDisk->BytesPerSector);
-    else
-        ullSectorCount = 0;
+    ullSectorCount = RequestSectors(ullSize, bOffset, CurrentDisk->BytesPerSector);
 
     DPRINT1("SectorCount: %I64u\n", ullSectorCount);
 
@@ -845,7 +1071,22 @@ CreateLogicalPartition(
      * the new drive starts one alignment later (else its EBR lands in the end of that drive: it was written over its
      * data). The largest free space that holds the drive is used (the lowest offset among equals).
      */
-    if (!bOffset)
+    if (!bOffset && g_ullAlignBytes != 0)
+    {
+        /* align=: start and end rounded to the alignment (the EBR in front of it), the size down to a multiple of it */
+        ULONGLONG ullStart, ullLength;
+
+        PartEntry = FindAlignedFreeEntry(&CurrentDisk->LogicalPartListHead, ullSectorCount, ALIGN_SECTORS(), TRUE, &ullStart, &ullLength);
+        NewPartEntry = (PartEntry != NULL) ? SplitFreeEntry(PartEntry, ullStart, ullLength) : NULL;
+        if (NewPartEntry != NULL)
+        {
+            NewPartEntry->Mbr.PartitionType = PartitionType;
+            CurrentPartition = NewPartEntry;
+            CurrentDisk->Dirty = TRUE;
+        }
+    }
+
+    if (!bOffset && g_ullAlignBytes == 0)
     {
         PartEntry = FindLargestFreeEntry(&CurrentDisk->LogicalPartListHead, ullSectorCount, TRUE);
         if (PartEntry != NULL)
@@ -873,7 +1114,7 @@ CreateLogicalPartition(
     {
         /* No free space was large enough */
         ConResPuts(StdOut, IDS_CREATE_PARTITION_FAIL);
-        return (bOffset ? CREATE_NOSPACE() : CREATE_FAILED());
+        return (bOffset ? CREATE_NOSPACE() : (g_ullAlignBytes ? AlignedFailure(&CurrentDisk->LogicalPartListHead, ullSectorCount, TRUE) : CREATE_FAILED()));
     }
 
     UpdateMbrDiskLayout(CurrentDisk);
@@ -1080,10 +1321,7 @@ CreatePrimaryMbrPartition(
         return CREATE_FAILED();
     }
 
-    if (ullSize != 0)
-        ullSectorCount = MegabytesToSectors(ullSize, CurrentDisk->BytesPerSector);
-    else
-        ullSectorCount = 0;
+    ullSectorCount = RequestSectors(ullSize, bOffset, CurrentDisk->BytesPerSector);
 
     DPRINT1("SectorCount: %I64u\n", ullSectorCount);
 
@@ -1102,7 +1340,22 @@ CreatePrimaryMbrPartition(
         }
     }
 
-    if (!bOffset)
+    if (!bOffset && g_ullAlignBytes != 0)
+    {
+        /* align=: start and end rounded to the alignment, the size down to a multiple of it (size=8 align=3000: 6000 KB) */
+        ULONGLONG ullStart, ullLength;
+
+        PartEntry = FindAlignedFreeEntry(&CurrentDisk->PrimaryPartListHead, ullSectorCount, ALIGN_SECTORS(), FALSE, &ullStart, &ullLength);
+        NewPartEntry = (PartEntry != NULL) ? SplitFreeEntry(PartEntry, ullStart, ullLength) : NULL;
+        if (NewPartEntry != NULL)
+        {
+            NewPartEntry->Mbr.PartitionType = PartitionType;
+            CurrentPartition = NewPartEntry;
+            CurrentDisk->Dirty = TRUE;
+        }
+    }
+
+    if (!bOffset && g_ullAlignBytes == 0)
     {
         /* The largest free space that holds it (the lowest offset among equals) */
         PartEntry = FindLargestFreeEntry(&CurrentDisk->PrimaryPartListHead, ullSectorCount, FALSE);
@@ -1137,7 +1390,7 @@ CreatePrimaryMbrPartition(
     {
         /* No free space was large enough */
         ConResPuts(StdOut, IDS_CREATE_PARTITION_FAIL);
-        return (bOffset ? CREATE_NOSPACE() : CREATE_FAILED());
+        return (bOffset ? CREATE_NOSPACE() : (g_ullAlignBytes ? AlignedFailure(&CurrentDisk->PrimaryPartListHead, ullSectorCount, FALSE) : CREATE_FAILED()));
     }
 
     UpdateMbrDiskLayout(CurrentDisk);
@@ -1197,10 +1450,7 @@ CreatePrimaryGptPartition(
     }
 
     /* Size */
-    if (ullSize != 0)
-        ullSectorCount = MegabytesToSectors(ullSize, CurrentDisk->BytesPerSector);
-    else
-        ullSectorCount = 0;
+    ullSectorCount = RequestSectors(ullSize, bOffset, CurrentDisk->BytesPerSector);
 
     DPRINT1("SectorCount: %I64u\n", ullSectorCount);
 
@@ -1219,7 +1469,7 @@ CreatePrimaryGptPartition(
     {
         ConResPuts(StdOut, IDS_CREATE_PARTITION_FAIL);
         CurrentPartition = NULL;
-        return (bOffset ? CREATE_NOSPACE() : CREATE_FAILED());
+        return (bOffset ? CREATE_NOSPACE() : (g_ullAlignBytes ? AlignedFailure(&CurrentDisk->PrimaryPartListHead, ullSectorCount, FALSE) : CREATE_FAILED()));
     }
 
     CurrentPartition = PartEntry;
@@ -1305,19 +1555,34 @@ CreatePrimaryPartition(
         }
         else if (HasPrefix(argv[i], L"align=", &pszSuffix))
         {
-            /* align=<N> */
+            /* align=<N> (KB) */
             DPRINT("Align : %s\n", pszSuffix);
-            return RefuseUnsupportedOption(L"ALIGN");
+            if (!ParseAlignKilobytes(pszSuffix, &g_ullAlignBytes))
+            {
+                ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+                return CREATE_BADARGS();
+            }
         }
         else if (_wcsicmp(argv[i], L"noerr") == 0)
         {
-            /* noerr - Alread handled above */
+            /* noerr - Already handled above; twice is an invalid argument */
+            if (g_bNoErrTwice)
+            {
+                ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+                return CREATE_BADARGS();
+            }
         }
         else
         {
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
             return CREATE_BADARGS();
         }
+    }
+
+    if (bOffset && !ResolveOffsetRange(g_ullOffsetBytes, ullSize, CurrentDisk->BytesPerSector, g_ullAlignBytes, &ullOffset, &g_ullRangeSectors))
+    {
+        ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+        return CREATE_BADARGS();
     }
 
     DPRINT("Size: %I64u\n", ullSize);
