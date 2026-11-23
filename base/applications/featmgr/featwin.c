@@ -456,6 +456,24 @@ static int BuildJobs(FM_JOB **pjobs)
     return n;
 }
 
+/* The notice of an add-on that has one is shown before it is turned on, as the command line and the Software list do:
+ * the text, OK to go on and Cancel to leave everything as it is (nothing of the other changes is applied either). */
+static BOOL NoticesAccepted(const FM_JOB *jobs, int n)
+{
+    int i;
+    for (i = 0; i < n; i++)
+    {
+        FM_FEATURE f;
+        WCHAR msg[1024];
+        if (jobs[i].action != FM_JOB_INSTALL) continue;
+        if (!FmFindFeature(jobs[i].id, &f) || !f.Notice[0] || f.State == FM_STATE_ENABLED) continue;
+        StringCchPrintfW(msg, ARRAYSIZE(msg), L"%s\n\nTurn on '%s'?", f.Notice, f.Name);
+        if (MessageBoxW(g_hwnd, msg, f.Name, MB_OKCANCEL | MB_ICONINFORMATION) != IDOK)
+            return FALSE;
+    }
+    return TRUE;
+}
+
 static void DoApply(void)
 {
     FM_JOB *jobs;
@@ -472,6 +490,11 @@ static void DoApply(void)
     {
         if (jobs) HeapFree(GetProcessHeap(), 0, jobs);
         DestroyWindow(g_hwnd);
+        return;
+    }
+    if (!NoticesAccepted(jobs, n))
+    {
+        HeapFree(GetProcessHeap(), 0, jobs);
         return;
     }
     log[0] = L'\0';
