@@ -135,6 +135,8 @@ IntRemoveEvent(PVOID Object)
       TRACE("IntRemoveEvent pEH %p\n", pEH);
       KeEnterCriticalRegion();
       RemoveEntryList(&pEH->Chain);
+      /* Off the list: its links name itself, not the neighbours it had */
+      InitializeListHead(&pEH->Chain);
       GlobalEvents->Counts--;
       if (!GlobalEvents->Counts) gpsi->dwInstalledEventHooks = 0;
       if (pEH->ModuleName.Buffer)
@@ -549,9 +551,15 @@ NtUserUnhookWinEvent(
    UserEnterExclusive();
 
    pEH = (PEVENTHOOK)UserGetObject(gHandleTable, hWinEventHook, TYPE_WINEVENTHOOK);
-   if (pEH)
+   /* A hook unhooked already (by this call before, or destroyed with its thread) that something still
+      holds (a notification walking the hooks) keeps its handle entry, in destroy: it is not unhooked twice */
+   if (pEH && !UserObjectInDestroy(hWinEventHook))
    {
       Ret = IntRemoveEvent(pEH);
+   }
+   else if (pEH)
+   {
+      EngSetLastError(ERROR_INVALID_HANDLE);
    }
 
    UserLeave();
