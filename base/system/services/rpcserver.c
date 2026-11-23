@@ -1777,7 +1777,12 @@ RQueryServiceObjectSecurity(
 }
 
 
-/* Map the generic rights of every entry of an ACL (in place) to service rights */
+/*
+ * Map the generic rights of every entry of an ACL (in place) to service rights,
+ * but not those of inherit-only entries: Windows Server 2022 keeps the generic
+ * rights of (A;OICIIO;GA;;;CO) and (AU;OICIIOSA;GW;;;WD) as they are set
+ * (SetServiceObjectSecurity, SetSecurityInfo, read back).
+ */
 static
 VOID
 ScmMapGenericAcl(
@@ -1795,7 +1800,8 @@ ScmMapGenericAcl(
             break;
 
         /* Every ACE type keeps its access mask right after the header */
-        if (pAce->AceSize >= sizeof(ACE_HEADER) + sizeof(ACCESS_MASK))
+        if (!(pAce->AceFlags & INHERIT_ONLY_ACE) &&
+            pAce->AceSize >= sizeof(ACE_HEADER) + sizeof(ACCESS_MASK))
             RtlMapGenericMask((PACCESS_MASK)(pAce + 1), &ScmServiceMapping);
     }
 }
