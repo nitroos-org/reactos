@@ -546,6 +546,19 @@ KdpDprintf(
     String.Buffer = Buffer;
     String.Length = String.MaximumLength = Length;
 
+#ifdef _WINKD_
+    /* A debugger that did not answer is not asked again for every message */
+    if (KdDebuggerNotPresent) return;
+
+    /*
+     * Sending the string also looks for a break-in request, and consumes it.
+     * Nobody here acts on it: keep it for the next poll (the clock tick, or
+     * the next DbgPrint), or the request to stop is lost.
+     */
+    if (KdpPrintString(&String))
+        KdpContext.KdpControlCPending = TRUE;
+#else
     /* Send it to the debugger directly */
     KdpPrintString(&String);
+#endif
 }

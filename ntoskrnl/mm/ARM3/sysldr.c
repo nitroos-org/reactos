@@ -27,8 +27,8 @@ KMUTANT MmSystemLoadLock;
 
 PFN_NUMBER MmTotalSystemDriverPages;
 
-PVOID MmUnloadedDrivers;
-PVOID MmLastUnloadedDrivers;
+PUNLOADED_DRIVERS MmUnloadedDrivers;
+ULONG MmLastUnloadedDriver;
 
 BOOLEAN MmMakeLowMemory;
 BOOLEAN MmEnforceWriteProtection = TRUE;
@@ -1095,6 +1095,44 @@ MiSnapThunk(IN PVOID DllBase,
 }
 
 /*
+ * The last MI_UNLOADED_DRIVERS unloaded images, in a ring that MmLastUnloadedDriver indexes (the next slot
+ * to write): a debugger lists them next to the loaded modules, which is what a driver that is called after
+ * its unload needs. Called with MmSystemLoadLock held.
+ */
+static
+VOID
+MiRememberUnloadedDriver(
+    _In_ PLDR_DATA_TABLE_ENTRY LdrEntry)
+{
+    PUNLOADED_DRIVERS Entry;
+    PWCHAR Buffer;
+    USHORT Length;
+
+    if (!MmUnloadedDrivers || !LdrEntry->BaseDllName.Buffer) return;
+
+    /* A bounded copy of a file name: whole characters only, at most MI_UNLOADED_NAME_MAX of them */
+    Length = LdrEntry->BaseDllName.Length & ~(USHORT)(sizeof(WCHAR) - 1);
+    if (Length > MI_UNLOADED_NAME_MAX * sizeof(WCHAR)) Length = MI_UNLOADED_NAME_MAX * sizeof(WCHAR);
+    if (!Length) return;
+
+    Buffer = ExAllocatePoolWithTag(NonPagedPool, Length, TAG_LDR_WSTR);
+    if (!Buffer) return;
+    RtlCopyMemory(Buffer, LdrEntry->BaseDllName.Buffer, Length);
+
+    /* The slot that is overwritten (the oldest once the ring has wrapped) gives its name back */
+    Entry = &MmUnloadedDrivers[MmLastUnloadedDriver];
+    if (Entry->Name.Buffer) ExFreePoolWithTag(Entry->Name.Buffer, TAG_LDR_WSTR);
+
+    Entry->Name.Buffer = Buffer;
+    Entry->Name.Length = Entry->Name.MaximumLength = Length;
+    Entry->StartAddress = LdrEntry->DllBase;
+    Entry->EndAddress = (PUCHAR)LdrEntry->DllBase + LdrEntry->SizeOfImage;
+    KeQuerySystemTime(&Entry->CurrentTime);
+
+    MmLastUnloadedDriver = (MmLastUnloadedDriver + 1) % MI_UNLOADED_DRIVERS;
+}
+
+/*
  * EntryReference: for a session image, the reference to drop is one on the entry (an importer's), not a
  * load in the current session
  */
@@ -1152,6 +1190,9 @@ MiUnloadSystemImageEx(
             RtlFreeAnsiString(&TempName);
         }
     }
+
+    /* Remember it for the debugger */
+    MiRememberUnloadedDriver(LdrEntry);
 
     /*
      * Delete the image mapping and return its system PTEs. Only images that
@@ -2933,6 +2974,12 @@ MiInitializeLoadedModuleList(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     PLDR_DATA_TABLE_ENTRY LdrEntry, NewEntry;
     PLIST_ENTRY ListHead, NextEntry;
     ULONG EntrySize;
+
+    /* The record of unloaded images: a debugger reads it from the start */
+    MmUnloadedDrivers = ExAllocatePoolWithTag(NonPagedPool,
+                                              MI_UNLOADED_DRIVERS * sizeof(UNLOADED_DRIVERS),
+                                              TAG_LDR_WSTR);
+    if (MmUnloadedDrivers) RtlZeroMemory(MmUnloadedDrivers, MI_UNLOADED_DRIVERS * sizeof(UNLOADED_DRIVERS));
 
     /* Setup the loaded module list and locks */
     ExInitializeResourceLite(&PsLoadedModuleResource);

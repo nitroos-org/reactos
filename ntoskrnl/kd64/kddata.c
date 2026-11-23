@@ -601,7 +601,7 @@ KDDEBUGGER_DATA64 KdDebuggerDataBlock =
     PtrToUL64(0),
     PtrToUL64(KiProcessorBlock),
     PtrToUL64(&MmUnloadedDrivers),
-    PtrToUL64(&MmLastUnloadedDrivers),
+    PtrToUL64(&MmLastUnloadedDriver),
     PtrToUL64(&MmTriageActionTaken),
     PtrToUL64(&MmSpecialPoolTag),
     PtrToUL64(&KernelVerifier),

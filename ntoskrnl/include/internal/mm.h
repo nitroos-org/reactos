@@ -28,8 +28,19 @@ extern KMUTANT MmSystemLoadLock;
 
 extern ULONG MmNumberOfPagingFiles;
 
-extern PVOID MmUnloadedDrivers;
-extern PVOID MmLastUnloadedDrivers;
+/* The record of the drivers that were unloaded, as a debugger reads it */
+#define MI_UNLOADED_DRIVERS 50
+#define MI_UNLOADED_NAME_MAX 64
+typedef struct _UNLOADED_DRIVERS
+{
+    UNICODE_STRING Name;
+    PVOID StartAddress;
+    PVOID EndAddress;
+    LARGE_INTEGER CurrentTime;
+} UNLOADED_DRIVERS, *PUNLOADED_DRIVERS;
+
+extern PUNLOADED_DRIVERS MmUnloadedDrivers;
+extern ULONG MmLastUnloadedDriver;
 extern PVOID MmTriageActionTaken;
 extern PVOID KernelVerifier;
 extern MM_DRIVER_VERIFIER_DATA MmVerifierData;
