@@ -4638,12 +4638,36 @@ ScmAutoShutdownServices(VOID)
 {
     PLIST_ENTRY ServiceEntry;
     PSERVICE CurrentService;
+    PSERVICE *Services;
+    PSERVICE_IMAGE lpImage;
+    DWORD Count = 0, i;
 
     DPRINT("ScmAutoShutdownServices() called\n");
 
-    /* Lock the service database exclusively */
+    /*
+     * The order of operations to send a control to a service is: lock, reference, unlock,
+     * send the control, lock, dereference, unlock (see ScmReferenceService). A service
+     * that answers the control with RSetServiceStatus needs the database lock
+     * itself, and the control is only sent with the lock released.
+     */
     ScmLockDatabaseExclusive();
 
+    ServiceEntry = ServiceListHead.Flink;
+    while (ServiceEntry != &ServiceListHead)
+    {
+        Count++;
+        ServiceEntry = ServiceEntry->Flink;
+    }
+
+    Services = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)Count * sizeof(PSERVICE));
+    if (Services == NULL)
+    {
+        ScmUnlockDatabase();
+        DPRINT1("ScmAutoShutdownServices(): out of memory\n");
+        return;
+    }
+
+    Count = 0;
     ServiceEntry = ServiceListHead.Flink;
     while (ServiceEntry != &ServiceListHead)
     {
@@ -4651,14 +4675,11 @@ ScmAutoShutdownServices(VOID)
 
         if ((CurrentService->Status.dwControlsAccepted & SERVICE_ACCEPT_SHUTDOWN) &&
             (CurrentService->Status.dwCurrentState == SERVICE_RUNNING ||
-             CurrentService->Status.dwCurrentState == SERVICE_START_PENDING))
+             CurrentService->Status.dwCurrentState == SERVICE_START_PENDING) &&
+            CurrentService->lpImage != NULL)
         {
-            /* Send the shutdown notification */
-            DPRINT("Shutdown service: %S\n", CurrentService->lpServiceName);
-            ScmControlService(CurrentService->lpImage->hControlPipe,
-                              CurrentService->lpServiceName,
-                              SERVICE_CONTROL_SHUTDOWN,
-                              CurrentService->dwStatusHandle);
+            ScmReferenceService(CurrentService);
+            Services[Count++] = CurrentService;
         }
 
         ServiceEntry = ServiceEntry->Flink;
@@ -4666,6 +4687,30 @@ ScmAutoShutdownServices(VOID)
 
     /* Unlock the service database */
     ScmUnlockDatabase();
+
+    for (i = 0; i < Count; i++)
+    {
+        CurrentService = Services[i];
+
+        /* Read once: a stop clears it without the caller holding a lock */
+        lpImage = *(PSERVICE_IMAGE volatile *)&CurrentService->lpImage;
+        if (lpImage == NULL)
+            continue;
+
+        /* Send the shutdown notification */
+        DPRINT("Shutdown service: %S\n", CurrentService->lpServiceName);
+        ScmControlService(lpImage->hControlPipe,
+                          CurrentService->lpServiceName,
+                          SERVICE_CONTROL_SHUTDOWN,
+                          CurrentService->dwStatusHandle);
+    }
+
+    ScmLockDatabaseExclusive();
+    for (i = 0; i < Count; i++)
+        ScmDereferenceService(Services[i]);
+    ScmUnlockDatabase();
+
+    HeapFree(GetProcessHeap(), 0, Services);
 
     DPRINT("ScmAutoShutdownServices() done\n");
 }

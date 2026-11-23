@@ -178,6 +178,25 @@ ConsoleClientShutdown(IN PCSR_PROCESS CsrProcess,
         /* On first pass, let the gui server terminate all the processes that it owns */
         if (FirstPhase) return CsrShutdownNonCsrProcess;
 
+        /*
+         * A system or other-context process without a console is a service process (the
+         * service control manager, a service host): it has no console, but registers
+         * control handlers with SetConsoleCtrlHandler for the shutdown, and is told by
+         * CTRL_SHUTDOWN_EVENT (with the service flag) before it is ended, as on Windows. The
+         * SCM passes SERVICE_CONTROL_SHUTDOWN to its services from there.
+         * Processes of the user get the end-session messages of the GUI server instead.
+         */
+        if (ProcessData->CtrlRoutine != NULL &&
+            (Flags & EWX_SHUTDOWN_MASK) &&
+            (CsrProcess->ShutdownFlags & (CsrShutdownSystem | CsrShutdownOther)))
+        {
+            DPRINT("Notify service process [0x%x] of the shutdown\n",
+                   CsrProcess->ClientId.UniqueProcess);
+            ConSrvConsoleCtrlEventTimeout(CTRL_SHUTDOWN_EVENT | 0x80000000UL /* CTRL_EVENT_SERVICE_FLAG */,
+                                          ProcessData,
+                                          ShutdownSettings.WaitToKillServiceTimeout);
+        }
+
         /* Use the generic handler since this isn't a gui process */
         return NonConsoleProcessShutdown(CsrProcess, Flags);
     }

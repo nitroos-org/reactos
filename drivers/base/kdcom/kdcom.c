@@ -27,14 +27,14 @@ CPPORT KdComPort;
  * that is not must not hold the machine for minutes (each packet used to
  * wait 20 times 200,000 polls, 2.7 s each under a hypervisor). The time is
  * counted in processor cycles, the only clock that runs this early with
- * interrupts off: about 100 ms (a processor of 3 GHz) before any host was
- * heard, one wait ends the attempt; about 200 ms afterwards, and the packet
+ * interrupts off: about 1 s (a processor of 3 GHz) before any host was
+ * heard, one wait ends the attempt; about 2 s afterwards, and the packet
  * is resent a few times (KDP_HOST_RETRIES in kddll.c). A boot with
  * /BREAK is patient: the user said a debugger is coming, so its first stop
  * waits until the host is there.
  */
-#define KDP_ACK_CYCLES_NOHOST   300000000ULL
-#define KDP_ACK_CYCLES_HOST     600000000ULL
+#define KDP_ACK_CYCLES_NOHOST   3000000000ULL
+#define KDP_ACK_CYCLES_HOST     6000000000ULL
 
 ULONG64 KdpByteWait;        /* cycles; 0: wait as long as the port library does */
 BOOLEAN KdpHostSeen;

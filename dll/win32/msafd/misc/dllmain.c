@@ -15,6 +15,8 @@
 
 #include <winuser.h>
 #include <wchar.h>
+#include <stdlib.h>
+#include <pseh/pseh2.h>
 
 HANDLE GlobalHeap;
 WSPUPCALLTABLE Upcalls;
@@ -1301,6 +1303,46 @@ WSPListen(SOCKET Handle,
 #define SELECT_IN_WRITE     0x02
 #define SELECT_IN_EXCEPT    0x04
 
+/*
+ * The most sockets (entries of the three sets together) one select() takes. The count is whatever the
+ * caller's fd_set carries (an application may define a larger FD_SETSIZE than this DLL was built
+ * with), so it is bounded here instead: with every size below computed in 64 bits, this keeps the
+ * request and the buffers far under the 32-bit sizes of the I/O request.
+ */
+#define SELECT_MAX_ENTRIES  0x100000UL
+
+typedef struct _SELECT_ENTRY
+{
+    SOCKET Socket;
+    ULONG Index;
+} SELECT_ENTRY, *PSELECT_ENTRY;
+
+/* Orders the entries by socket, equal sockets by their position in the caller's sets */
+static
+int
+__cdecl
+SelectCompareEntries(const void *a, const void *b)
+{
+    const SELECT_ENTRY *EntryA = a, *EntryB = b;
+
+    if (EntryA->Socket != EntryB->Socket)
+        return EntryA->Socket < EntryB->Socket ? -1 : 1;
+    if (EntryA->Index != EntryB->Index)
+        return EntryA->Index < EntryB->Index ? -1 : 1;
+    return 0;
+}
+
+/* Adds a socket to a result set the caller's set has room for (never more than it held) */
+static
+VOID
+SelectAddResult(IN OUT fd_set *Set, IN SOCKET Handle)
+{
+    /* The events of one socket are added one after the other: it can only be the last one there */
+    if (Set->fd_count != 0 && Set->fd_array[Set->fd_count - 1] == Handle)
+        return;
+    Set->fd_array[Set->fd_count++] = Handle;
+}
+
 int
 WSPAPI
 WSPSelect(IN int nfds,
@@ -1322,42 +1364,112 @@ WSPSelect(IN int nfds,
     PSOCKET_INFORMATION Socket;
     SOCKET              Handle;
     ULONG               Events;
-    fd_set              selectfds;
     PUCHAR              InSets;
     BOOLEAN             Cancelled;
+    ULONG               ReadCount = 0, WriteCount = 0, ExceptCount = 0, Total;
+    ULONGLONG           Needed;
+    PSELECT_ENTRY       Entries;
+    PULONG              Slots;
+    BOOLEAN             Fault = FALSE;
 
-    /* Find out how many sockets we have, and how large the buffer needs
-     * to be */
-    FD_ZERO(&selectfds);
-    if (readfds != NULL)
+    /* The sets are the caller's memory, and each count is read once: everything below works from
+     * these copies, so a set that changes (or is shorter than its count says) cannot make us
+     * read or write outside the room we sized */
+    _SEH2_TRY
     {
-        for (i = 0; i < readfds->fd_count; i++)
-        {
-            FD_SET(readfds->fd_array[i], &selectfds);
-        }
+        if (readfds != NULL)
+            ReadCount = readfds->fd_count;
+        if (writefds != NULL)
+            WriteCount = writefds->fd_count;
+        if (exceptfds != NULL)
+            ExceptCount = exceptfds->fd_count;
     }
-    if (writefds != NULL)
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
-        for (i = 0; i < writefds->fd_count; i++)
-        {
-            FD_SET(writefds->fd_array[i], &selectfds);
-        }
+        Fault = TRUE;
     }
-    if (exceptfds != NULL)
+    _SEH2_END;
+
+    if (Fault)
     {
-        for (i = 0; i < exceptfds->fd_count; i++)
-        {
-            FD_SET(exceptfds->fd_array[i], &selectfds);
-        }
+        if (lpErrno) *lpErrno = WSAEFAULT;
+        return SOCKET_ERROR;
     }
 
-    HandleCount = selectfds.fd_count;
+    /* The counts are 32-bit: the sum cannot wrap in 64 bits */
+    Needed = (ULONGLONG)ReadCount + WriteCount + ExceptCount;
 
-    if ( HandleCount == 0 )
+    if (Needed == 0)
     {
-        WARN("No handles! Returning SOCKET_ERROR\n", HandleCount);
+        WARN("No handles! Returning SOCKET_ERROR\n");
         if (lpErrno) *lpErrno = WSAEINVAL;
         return SOCKET_ERROR;
+    }
+
+    if (Needed > SELECT_MAX_ENTRIES)
+    {
+        WARN("Too many handles: %I64u\n", Needed);
+        if (lpErrno) *lpErrno = WSAEFAULT;
+        return SOCKET_ERROR;
+    }
+
+    Total = (ULONG)Needed;
+
+    /* The sockets of the three sets and the slot of each in the request (one slot per socket) */
+    Entries = HeapAlloc(GlobalHeap, 0, (SIZE_T)Total * (sizeof(SELECT_ENTRY) + sizeof(ULONG)));
+    if (!Entries)
+    {
+        if (lpErrno) *lpErrno = WSAEFAULT;
+        return SOCKET_ERROR;
+    }
+    Slots = (PULONG)(Entries + Total);
+
+    _SEH2_TRY
+    {
+        for (i = 0; i < ReadCount; i++)
+            Entries[i].Socket = readfds->fd_array[i];
+        for (i = 0; i < WriteCount; i++)
+            Entries[ReadCount + i].Socket = writefds->fd_array[i];
+        for (i = 0; i < ExceptCount; i++)
+            Entries[ReadCount + WriteCount + i].Socket = exceptfds->fd_array[i];
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Fault = TRUE;
+    }
+    _SEH2_END;
+
+    if (Fault)
+    {
+        HeapFree(GlobalHeap, 0, Entries);
+        if (lpErrno) *lpErrno = WSAEFAULT;
+        return SOCKET_ERROR;
+    }
+
+    /* A socket in several sets (or twice in one) has one slot: sort by socket to find the
+     * repeats, then number the slots in the order the sockets first appear in the sets */
+    for (i = 0; i < Total; i++)
+        Entries[i].Index = i;
+    qsort(Entries, Total, sizeof(SELECT_ENTRY), SelectCompareEntries);
+
+    /* Slots[] is first the index of the first appearance of the socket */
+    for (i = 0; i < Total; i++)
+    {
+        if (i != 0 && Entries[i].Socket == Entries[i - 1].Socket)
+            Slots[Entries[i].Index] = Slots[Entries[i - 1].Index];
+        else
+            Slots[Entries[i].Index] = Entries[i].Index;
+    }
+
+    /* Number the slots: an entry that is the first appearance of its socket takes the next one
+     * (the first appearance of a socket is never after its repeats, so its slot is set by then) */
+    HandleCount = 0;
+    for (i = 0; i < Total; i++)
+    {
+        if (Slots[i] == i)
+            Slots[i] = HandleCount++;
+        else
+            Slots[i] = Slots[Slots[i]];
     }
 
     PollBufferSize = sizeof(*PollInfo) + ((HandleCount - 1) * sizeof(AFD_HANDLE));
@@ -1402,6 +1514,7 @@ WSPSelect(IN int nfds,
             *lpErrno = WSAEFAULT;
 
         ERR("NtCreateEvent failed, 0x%08x\n", Status);
+        HeapFree(GlobalHeap, 0, Entries);
         return SOCKET_ERROR;
     }
 
@@ -1413,6 +1526,7 @@ WSPSelect(IN int nfds,
         if (lpErrno)
             *lpErrno = WSAEFAULT;
         NtClose(SockEvent);
+        HeapFree(GlobalHeap, 0, Entries);
         return SOCKET_ERROR;
     }
 
@@ -1426,31 +1540,24 @@ WSPSelect(IN int nfds,
     PollInfo->Exclusive = FALSE;
     PollInfo->Timeout = Timeout;
 
-    for (i = 0; i < selectfds.fd_count; i++)
+    /* The socket of each slot */
+    for (i = 0; i < Total; i++)
     {
-        PollInfo->Handles[i].Handle = selectfds.fd_array[i];
+        PollInfo->Handles[Slots[Entries[i].Index]].Handle = Entries[i].Socket;
     }
-    if (readfds != NULL) {
-        for (i = 0; i < readfds->fd_count; i++)
+
+    /* j is the slot of the entry i of a set (the sets follow one another in the captured order) */
+    if (ReadCount != 0) {
+        for (i = 0; i < ReadCount; i++)
         {
-            for (j = 0; j < HandleCount; j++)
-            {
-                if (PollInfo->Handles[j].Handle == readfds->fd_array[i])
-                    break;
-            }
-            if (j >= HandleCount)
-            {
-                ERR("Error while counting readfds %ld > %ld\n", j, HandleCount);
-                if (lpErrno) *lpErrno = WSAEFAULT;
-                HeapFree(GlobalHeap, 0, PollBuffer);
-                NtClose(SockEvent);
-                return SOCKET_ERROR;
-            }
-            Socket = GetSocketStructure(readfds->fd_array[i]);
+            j = Slots[i];
+            Handle = PollInfo->Handles[j].Handle;
+            Socket = GetSocketStructure(Handle);
             if (!Socket)
             {
-                ERR("Invalid socket handle provided in readfds %d\n", readfds->fd_array[i]);
+                ERR("Invalid socket handle provided in readfds %d\n", Handle);
                 if (lpErrno) *lpErrno = WSAENOTSOCK;
+                HeapFree(GlobalHeap, 0, Entries);
                 HeapFree(GlobalHeap, 0, PollBuffer);
                 NtClose(SockEvent);
                 return SOCKET_ERROR;
@@ -1465,74 +1572,49 @@ WSPSelect(IN int nfds,
             //    PollInfo->Handles[j].Events |= AFD_EVENT_OOB_RECEIVE;
         }
     }
-    if (writefds != NULL)
+    for (i = 0; i < WriteCount; i++)
     {
-        for (i = 0; i < writefds->fd_count; i++)
+        j = Slots[ReadCount + i];
+        Handle = PollInfo->Handles[j].Handle;
+        Socket = GetSocketStructure(Handle);
+        if (!Socket)
         {
-            for (j = 0; j < HandleCount; j++)
-            {
-                if (PollInfo->Handles[j].Handle == writefds->fd_array[i])
-                    break;
-            }
-            if (j >= HandleCount)
-            {
-                ERR("Error while counting writefds %ld > %ld\n", j, HandleCount);
-                if (lpErrno) *lpErrno = WSAEFAULT;
-                HeapFree(GlobalHeap, 0, PollBuffer);
-                NtClose(SockEvent);
-                return SOCKET_ERROR;
-            }
-            Socket = GetSocketStructure(writefds->fd_array[i]);
-            if (!Socket)
-            {
-                ERR("Invalid socket handle provided in writefds %d\n", writefds->fd_array[i]);
-                if (lpErrno) *lpErrno = WSAENOTSOCK;
-                HeapFree(GlobalHeap, 0, PollBuffer);
-                NtClose(SockEvent);
-                return SOCKET_ERROR;
-            }
-            InSets[j] |= SELECT_IN_WRITE;
-            PollInfo->Handles[j].Handle = writefds->fd_array[i];
-            PollInfo->Handles[j].Events |= AFD_EVENT_SEND;
-            if (Socket->SharedData->NonBlocking != 0)
-                PollInfo->Handles[j].Events |= AFD_EVENT_CONNECT;
+            ERR("Invalid socket handle provided in writefds %d\n", Handle);
+            if (lpErrno) *lpErrno = WSAENOTSOCK;
+            HeapFree(GlobalHeap, 0, Entries);
+            HeapFree(GlobalHeap, 0, PollBuffer);
+            NtClose(SockEvent);
+            return SOCKET_ERROR;
         }
+        InSets[j] |= SELECT_IN_WRITE;
+        PollInfo->Handles[j].Events |= AFD_EVENT_SEND;
+        if (Socket->SharedData->NonBlocking != 0)
+            PollInfo->Handles[j].Events |= AFD_EVENT_CONNECT;
     }
-    if (exceptfds != NULL)
+    for (i = 0; i < ExceptCount; i++)
     {
-        for (i = 0; i < exceptfds->fd_count; i++)
+        j = Slots[ReadCount + WriteCount + i];
+        Handle = PollInfo->Handles[j].Handle;
+        Socket = GetSocketStructure(Handle);
+        if (!Socket)
         {
-            for (j = 0; j < HandleCount; j++)
-            {
-                if (PollInfo->Handles[j].Handle == exceptfds->fd_array[i])
-                    break;
-            }
-            /* As for the other sets: a socket that did not fit into selectfds has no slot */
-            if (j >= HandleCount)
-            {
-                ERR("Error while counting exceptfds %ld > %ld\n", j, HandleCount);
-                if (lpErrno) *lpErrno = WSAEFAULT;
-                HeapFree(GlobalHeap, 0, PollBuffer);
-                NtClose(SockEvent);
-                return SOCKET_ERROR;
-            }
-            Socket = GetSocketStructure(exceptfds->fd_array[i]);
-            if (!Socket)
-            {
-                TRACE("Invalid socket handle provided in exceptfds %d\n", exceptfds->fd_array[i]);
-                if (lpErrno) *lpErrno = WSAENOTSOCK;
-                HeapFree(GlobalHeap, 0, PollBuffer);
-                NtClose(SockEvent);
-                return SOCKET_ERROR;
-            }
-            InSets[j] |= SELECT_IN_EXCEPT;
-            PollInfo->Handles[j].Handle = exceptfds->fd_array[i];
-            if (Socket->SharedData->OobInline == 0)
-                PollInfo->Handles[j].Events |= AFD_EVENT_OOB_RECEIVE;
-            if (Socket->SharedData->NonBlocking != 0)
-                PollInfo->Handles[j].Events |= AFD_EVENT_CONNECT_FAIL;
+            TRACE("Invalid socket handle provided in exceptfds %d\n", Handle);
+            if (lpErrno) *lpErrno = WSAENOTSOCK;
+            HeapFree(GlobalHeap, 0, Entries);
+            HeapFree(GlobalHeap, 0, PollBuffer);
+            NtClose(SockEvent);
+            return SOCKET_ERROR;
         }
+        InSets[j] |= SELECT_IN_EXCEPT;
+        if (Socket->SharedData->OobInline == 0)
+            PollInfo->Handles[j].Events |= AFD_EVENT_OOB_RECEIVE;
+        if (Socket->SharedData->NonBlocking != 0)
+            PollInfo->Handles[j].Events |= AFD_EVENT_CONNECT_FAIL;
     }
+
+    /* The slots are not needed any more */
+    HeapFree(GlobalHeap, 0, Entries);
+    Entries = NULL;
 
     PollInfo->HandleCount = HandleCount;
     PollBufferSize = FIELD_OFFSET(AFD_POLL_INFO, Handles) + PollInfo->HandleCount * sizeof(AFD_HANDLE);
@@ -1561,102 +1643,133 @@ WSPSelect(IN int nfds,
     /* AFD cancels the poll when a socket of the set is closed */
     Cancelled = (Status == STATUS_CANCELLED);
 
-    /* Clear the Structures */
-    if( readfds )
-        FD_ZERO(readfds);
-    if( writefds )
-        FD_ZERO(writefds);
-    if( exceptfds )
-        FD_ZERO(exceptfds);
-
-    /* Loop through return structure */
-    HandleCount = PollInfo->HandleCount;
-
-    /* Return in FDSET Format */
-    for (i = 0; i < HandleCount; i++)
+    /* The result goes into the caller's sets, which were read above and hold at least as many
+     * sockets as they did then: a result set never gets more than that. A set that has
+     * gone away meanwhile is a fault */
+    Fault = FALSE;
+    x = 0;      /* the error of the loop below, 0 = none */
+    _SEH2_TRY
     {
-        Events = PollInfo->Handles[i].Events;
-        Handle = PollInfo->Handles[i].Handle;
+        /* Clear the Structures */
+        if( readfds )
+            readfds->fd_count = 0;
+        if( writefds )
+            writefds->fd_count = 0;
+        if( exceptfds )
+            exceptfds->fd_count = 0;
 
-        /* Like Windows, a socket that was closed under a select() that waits for it (the poll was
-         * cancelled, and a cancelled request returns no events) is reported in the sets that read it
-         * or check its errors; a socket that only waits to write it is an error, which is what the
-         * next lines return for a socket that is gone */
-        if (Cancelled && (InSets[i] & (SELECT_IN_READ | SELECT_IN_EXCEPT)) &&
-            !GetSocketStructure(Handle))
+        /* Loop through return structure */
+        HandleCount = PollInfo->HandleCount;
+
+        /* The request cannot come back with more handles than it was given */
+        if (HandleCount > Total)
+            HandleCount = Total;
+
+        /* Return in FDSET Format */
+        for (i = 0; i < HandleCount; i++)
         {
-            if (readfds && (InSets[i] & SELECT_IN_READ))
-                FD_SET(Handle, readfds);
-            if (exceptfds && (InSets[i] & SELECT_IN_EXCEPT))
-                FD_SET(Handle, exceptfds);
-            continue;
-        }
+            ULONG Bit;
 
-        /* A cancelled request returns nothing: the events are what select() asked for, not what happened */
-        if (Cancelled)
-            Events = 0;
+            Events = PollInfo->Handles[i].Events;
+            Handle = PollInfo->Handles[i].Handle;
 
-        for(x = 1; x; x<<=1)
-        {
+            /* Like Windows, a socket that was closed under a select() that waits for it (the poll was
+             * cancelled, and a cancelled request returns no events) is reported in the sets that read it
+             * or check its errors; a socket that only waits to write it is an error, which is what the
+             * next lines return for a socket that is gone */
+            if (Cancelled && (InSets[i] & (SELECT_IN_READ | SELECT_IN_EXCEPT)) &&
+                !GetSocketStructure(Handle))
+            {
+                if (readfds && (InSets[i] & SELECT_IN_READ))
+                    SelectAddResult(readfds, Handle);
+                if (exceptfds && (InSets[i] & SELECT_IN_EXCEPT))
+                    SelectAddResult(exceptfds, Handle);
+                continue;
+            }
+
+            /* A cancelled request returns nothing: the events are what select() asked for, not what happened */
+            if (Cancelled)
+                Events = 0;
+
+            /* The socket is the same for every event of it */
             Socket = GetSocketStructure(Handle);
             if (!Socket)
             {
                 TRACE("Invalid socket handle found %d\n", Handle);
-                if (lpErrno) *lpErrno = WSAENOTSOCK;
-                HeapFree(GlobalHeap, 0, PollBuffer);
-                NtClose(SockEvent);
-                return SOCKET_ERROR;
+                x = WSAENOTSOCK;
+                break;
             }
-            switch (Events & x)
+
+            for (Bit = 1; Bit; Bit <<= 1)
             {
-                case AFD_EVENT_RECEIVE:
-                case AFD_EVENT_DISCONNECT:
-                case AFD_EVENT_ABORT:
-                case AFD_EVENT_ACCEPT:
-                case AFD_EVENT_CLOSE:
-                    TRACE("Event %x on handle %x\n",
-                        Events,
-                        Handle);
-                    /* SO_ERROR stays 0 after a reset or an abort, as on Windows */
-                    if( readfds )
-                        FD_SET(Handle, readfds);
-                    break;
-                case AFD_EVENT_SEND:
-                    TRACE("Event %x on handle %x\n",
-                        Events,
-                        Handle);
-                    if (writefds)
-                        FD_SET(Handle, writefds);
-                    break;
-                case AFD_EVENT_CONNECT:
-                    TRACE("Event %x on handle %x\n",
-                        Events,
-                        Handle);
-                    if( writefds && Socket->SharedData->NonBlocking != 0 )
-                        FD_SET(Handle, writefds);
-                    break;
-                case AFD_EVENT_OOB_RECEIVE:
-                    TRACE("Event %x on handle %x\n",
-                        Events,
-                        Handle);
-                    if( readfds && Socket->SharedData->OobInline != 0 )
-                        FD_SET(Handle, readfds);
-                    if( exceptfds && Socket->SharedData->OobInline == 0 )
-                        FD_SET(Handle, exceptfds);
-                    break;
-                case AFD_EVENT_CONNECT_FAIL:
-                    TRACE("Event %x on handle %x\n",
-                        Events,
-                        Handle);
-                    if( exceptfds && Socket->SharedData->NonBlocking != 0 )
-                        FD_SET(Handle, exceptfds);
-                    break;
+                switch (Events & Bit)
+                {
+                    case AFD_EVENT_RECEIVE:
+                    case AFD_EVENT_DISCONNECT:
+                    case AFD_EVENT_ABORT:
+                    case AFD_EVENT_ACCEPT:
+                    case AFD_EVENT_CLOSE:
+                        TRACE("Event %x on handle %x\n",
+                            Events,
+                            Handle);
+                        /* SO_ERROR stays 0 after a reset or an abort, as on Windows */
+                        if( readfds )
+                            SelectAddResult(readfds, Handle);
+                        break;
+                    case AFD_EVENT_SEND:
+                        TRACE("Event %x on handle %x\n",
+                            Events,
+                            Handle);
+                        if (writefds)
+                            SelectAddResult(writefds, Handle);
+                        break;
+                    case AFD_EVENT_CONNECT:
+                        TRACE("Event %x on handle %x\n",
+                            Events,
+                            Handle);
+                        if( writefds && Socket->SharedData->NonBlocking != 0 )
+                            SelectAddResult(writefds, Handle);
+                        break;
+                    case AFD_EVENT_OOB_RECEIVE:
+                        TRACE("Event %x on handle %x\n",
+                            Events,
+                            Handle);
+                        if( readfds && Socket->SharedData->OobInline != 0 )
+                            SelectAddResult(readfds, Handle);
+                        if( exceptfds && Socket->SharedData->OobInline == 0 )
+                            SelectAddResult(exceptfds, Handle);
+                        break;
+                    case AFD_EVENT_CONNECT_FAIL:
+                        TRACE("Event %x on handle %x\n",
+                            Events,
+                            Handle);
+                        if( exceptfds && Socket->SharedData->NonBlocking != 0 )
+                            SelectAddResult(exceptfds, Handle);
+                        break;
+                }
             }
         }
     }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Fault = TRUE;
+    }
+    _SEH2_END;
 
     HeapFree( GlobalHeap, 0, PollBuffer );
     NtClose( SockEvent );
+
+    if (Fault)
+    {
+        if (lpErrno) *lpErrno = WSAEFAULT;
+        return SOCKET_ERROR;
+    }
+
+    if (x != 0)
+    {
+        if (lpErrno) *lpErrno = x;
+        return SOCKET_ERROR;
+    }
 
     if( lpErrno )
     {
