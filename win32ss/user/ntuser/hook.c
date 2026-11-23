@@ -1390,8 +1390,10 @@ co_HOOK_CallHooks( INT HookId,
        }
 
        Hook = CONTAINING_RECORD(pLastHead->Flink, HOOK, Chain);
-       ObReferenceObject(pti->pEThread);
-       IntReferenceThreadInfo(pti);
+       /* No reference on pti (nor its ETHREAD) across the hook procedures: it is the running thread, whose
+          THREADINFO is freed only after its exit cleanup, and a thread that ends inside a hook procedure
+          never comes back here to give such a reference back (its THREADINFO, queue, ETHREAD and process
+          were kept for good) */
 
        ClientInfo = pti->pClientInfo;
        SaveHook = pti->sphkCurrent;
@@ -1476,9 +1478,6 @@ co_HOOK_CallHooks( INT HookId,
              break;
           Hook = NextToTry;
        }
-
-       IntDereferenceThreadInfo(pti);
-       ObDereferenceObject(pti->pEThread);
     }
 
     if ( Global )
@@ -1534,8 +1533,9 @@ co_HOOK_CallHooks( INT HookId,
              else if (ptiHook->ppi == pti->ppi)
              {
                 TRACE("\nGlobal Hook calling to another Thread! %d\n",HookId );
-                ObReferenceObject(ptiHook->pEThread);
-                IntReferenceThreadInfo(ptiHook);
+                /* ptiHook is kept by the held hook (a hook references the THREADINFO of its thread), and
+                   is not used after the call; a reference of its own would never be given back when this
+                   thread ends inside the hook procedure */
                 if (co_HOOK_DebugBlocks(pti, pdo, Hook, HookId, Code, wParam, lParam))
                    Result = 0;
                 else
@@ -1548,15 +1548,12 @@ co_HOOK_CallHooks( INT HookId,
                                                 Hook->offPfn,
                                                 Hook->Ansi,
                                                &Hook->ModuleName);
-                IntDereferenceThreadInfo(ptiHook);
-                ObDereferenceObject(ptiHook->pEThread);
              }
           }
           else
           { /* Make the direct call. */
              TRACE("Global going Local Hook calling to Thread! %d\n",HookId );
-             ObReferenceObject(pti->pEThread);
-             IntReferenceThreadInfo(pti);
+             /* No reference on the running thread: see the local hooks above */
              if (co_HOOK_DebugBlocks(pti, pdo, Hook, HookId, Code, wParam, lParam))
                 Result = 0;
              else
@@ -1569,8 +1566,6 @@ co_HOOK_CallHooks( INT HookId,
                                              Hook->offPfn,
                                              Hook->Ansi,
                                             &Hook->ModuleName);
-             IntDereferenceThreadInfo(pti);
-             ObDereferenceObject(pti->pEThread);
           }
           UserDerefObjectCo(Hook);
        }

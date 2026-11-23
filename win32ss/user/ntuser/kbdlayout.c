@@ -684,7 +684,8 @@ co_UserActivateKeyboardLayout(
     PCLIENTINFO ClientInfo;
     BOOL bSetForProcess = !!(uFlags & KLF_SETFORPROCESS);
 
-    IntReferenceThreadInfo(pti);
+    /* pti is the running thread: no reference across the messages below (a thread that ends inside
+       WM_INPUTLANGCHANGE would never give it back, and its THREADINFO, queue and ETHREAD would stay) */
     ClientInfo = pti->pClientInfo;
 
     pOldKL = pti->KeyboardLayout;
@@ -698,7 +699,6 @@ co_UserActivateKeyboardLayout(
 
     if (!bSetForProcess && pKL == pti->KeyboardLayout)
     {
-        IntDereferenceThreadInfo(pti);
         return hOldKL;
     }
 
@@ -780,7 +780,6 @@ co_UserActivateKeyboardLayout(
     if (pOldKL)
         UserDerefObjectCo(pOldKL);
 
-    IntDereferenceThreadInfo(pti);
     return hOldKL;
 }
 
