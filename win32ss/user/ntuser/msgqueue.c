@@ -114,6 +114,11 @@ UserSetCursor(
     /* Update cursor for this message queue */
     MessageQueue->CursorObject = NewCursor;
 
+    /* The caller gives up the queue's reference to the old cursor, which may be destroyed by now: the
+     * pointer information must not keep it */
+    if (OldCursor && IntGetSysCursorInfo()->CurrentCursorObject == OldCursor)
+        IntGetSysCursorInfo()->CurrentCursorObject = NULL;
+
     /* If cursor is not visible we have nothing to do */
     if (MessageQueue->iCursorLevel < 0)
         return OldCursor;

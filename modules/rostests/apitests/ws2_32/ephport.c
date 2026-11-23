@@ -107,6 +107,8 @@ ConnectOnce(const LISTENER *To, USHORT *LocalPort)
     return Error;
 }
 
+static void Test_NonBlockingConnectWithoutPort(const LISTENER *To);
+
 static
 void
 Test_EphemeralPortsAndTimeWait(void)
@@ -162,6 +164,8 @@ Test_EphemeralPortsAndTimeWait(void)
     Error = ConnectOnce(&First, &Port);
     ok(Error == WSAEADDRINUSE, "connect to the first listener again failed with %d\n", Error);
 
+    Test_NonBlockingConnectWithoutPort(&First);
+
     /* Every connect that succeeded was accepted */
     for (i = 0; i < 50 && (First.Accepted < Ok || Second.Accepted < SecondOk); i++)
         Sleep(100);
@@ -170,6 +174,62 @@ Test_EphemeralPortsAndTimeWait(void)
 
     StopListener(&First, FirstThread);
     StopListener(&Second, SecondThread);
+}
+
+/* With every port in TIME-WAIT towards the listener, a non-blocking connect to it does not fail at once: it returns
+ * WSAEWOULDBLOCK and the error comes with the completion (Windows Server 2022: FD_CONNECT with error WSAEADDRINUSE,
+ * the except set of select, SO_ERROR WSAEADDRINUSE). Run while the ports of the listener are taken. */
+static
+void
+Test_NonBlockingConnectWithoutPort(const LISTENER *To)
+{
+    struct sockaddr_in Addr;
+    WSANETWORKEVENTS Events;
+    WSAEVENT Event;
+    SOCKET Socket;
+    fd_set Write, Except;
+    struct timeval Timeout = { 10, 0 };
+    u_long Nonblocking = 1;
+    int Result, SoError = 0, Length = sizeof(SoError);
+
+    ZeroMemory(&Addr, sizeof(Addr));
+    Addr.sin_family = AF_INET;
+    Addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    Addr.sin_port = htons(To->Port);
+
+    /* events */
+    Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    Event = WSACreateEvent();
+    ok_int(ioctlsocket(Socket, FIONBIO, &Nonblocking), 0);
+    ok_int(WSAEventSelect(Socket, Event, FD_CONNECT | FD_WRITE), 0);
+    Result = connect(Socket, (struct sockaddr *)&Addr, sizeof(Addr));
+    ok_int(Result, SOCKET_ERROR);
+    ok_int(WSAGetLastError(), WSAEWOULDBLOCK);
+    ok_int(WaitForSingleObject(Event, 10000), WAIT_OBJECT_0);
+    ZeroMemory(&Events, sizeof(Events));
+    ok_int(WSAEnumNetworkEvents(Socket, Event, &Events), 0);
+    ok(Events.lNetworkEvents & FD_CONNECT, "events %lx\n", Events.lNetworkEvents);
+    ok_int(Events.iErrorCode[FD_CONNECT_BIT], WSAEADDRINUSE);
+    WSACloseEvent(Event);
+    closesocket(Socket);
+
+    /* select and SO_ERROR */
+    Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ok_int(ioctlsocket(Socket, FIONBIO, &Nonblocking), 0);
+    Result = connect(Socket, (struct sockaddr *)&Addr, sizeof(Addr));
+    ok_int(Result, SOCKET_ERROR);
+    ok_int(WSAGetLastError(), WSAEWOULDBLOCK);
+    FD_ZERO(&Write);
+    FD_ZERO(&Except);
+    FD_SET(Socket, &Write);
+    FD_SET(Socket, &Except);
+    Result = select(0, NULL, &Write, &Except, &Timeout);
+    ok_int(Result, 1);
+    ok_int(FD_ISSET(Socket, &Write) ? 1 : 0, 0);
+    ok_int(FD_ISSET(Socket, &Except) ? 1 : 0, 1);
+    ok_int(getsockopt(Socket, SOL_SOCKET, SO_ERROR, (char *)&SoError, &Length), 0);
+    ok_int(SoError, WSAEADDRINUSE);
+    closesocket(Socket);
 }
 
 START_TEST(ephport)

@@ -744,6 +744,11 @@ SpiProcessCompletedRequest(
                            SrbInfo->NumberOfMapRegisters);
     }
 
+    /* The SRB info is reused: a later request without data transfer must not
+     * flush and free the map registers of this one again */
+    SrbInfo->BaseOfMapRegister = NULL;
+    SrbInfo->NumberOfMapRegisters = 0;
+
     /* Acquire spinlock (we're freeing SrbExtension) */
     KeAcquireSpinLockAtDpcLevel(&DeviceExtension->SpinLock);
 

@@ -63,6 +63,11 @@ static ULONG UefiBootRootIndex = 0;
 static ULONG PublicBootArcDisk = 0;
 static INTERNAL_UEFI_DISK* InternalUefiDisk = NULL;
 static EFI_GUID BlockIoGuid = BLOCK_IO_PROTOCOL;
+
+/* Size of the buffer that reads go through when the caller's memory cannot be read into directly,
+   and the most that one direct read asks the firmware for */
+#define UEFI_DISK_READ_BUFFER_SIZE  0x40000
+#define UEFI_DISK_DIRECT_READ_SIZE  0x100000
 static EFI_HANDLE* handles = NULL;
 static ULONG HandleCount = 0;
 
@@ -608,14 +613,39 @@ UefiDiskRead(ULONG FileId, VOID *Buffer, ULONG N, ULONG *Count)
 
     while (TotalSectors)
     {
-        ReadSectors = min(TotalSectors, MaxSectors);
+        if (N >= Context->SectorSize &&
+            UefiIsAlignedPointer(Ptr, (BlockIo->Media->IoAlign == 0) ? 1 : BlockIo->Media->IoAlign))
+        {
+            /* Whole blocks into memory the firmware may write to: no copy, one command for the run */
+            ReadSectors = min(N / Context->SectorSize, UEFI_DISK_DIRECT_READ_SIZE / Context->SectorSize);
+            Length = ReadSectors * Context->SectorSize;
 
-        Status = BlockIo->ReadBlocks(
-            BlockIo,
-            BlockIo->Media->MediaId,
-            SectorOffset,
-            ReadSectors * Context->SectorSize,
-            DiskReadBuffer);
+            Status = BlockIo->ReadBlocks(
+                BlockIo,
+                BlockIo->Media->MediaId,
+                SectorOffset,
+                Length,
+                Ptr);
+        }
+        else
+        {
+            ReadSectors = min(TotalSectors, MaxSectors);
+
+            Status = BlockIo->ReadBlocks(
+                BlockIo,
+                BlockIo->Media->MediaId,
+                SectorOffset,
+                ReadSectors * Context->SectorSize,
+                DiskReadBuffer);
+
+            if (!EFI_ERROR(Status))
+            {
+                Length = ReadSectors * Context->SectorSize;
+                Length = min(Length, N);
+
+                RtlCopyMemory(Ptr, DiskReadBuffer, Length);
+            }
+        }
 
         if (EFI_ERROR(Status))
         {
@@ -623,11 +653,6 @@ UefiDiskRead(ULONG FileId, VOID *Buffer, ULONG N, ULONG *Count)
             ret = FALSE;
             break;
         }
-
-        Length = ReadSectors * Context->SectorSize;
-        Length = min(Length, N);
-
-        RtlCopyMemory(Ptr, DiskReadBuffer, Length);
 
         Ptr += Length;
         N -= Length;
@@ -1219,15 +1244,21 @@ UefiInitializeBootDevices(VOID)
     EFI_STATUS Status;
     ULONG ArcDriveIndex;
 
-    DiskReadBufferSize = EFI_PAGE_SIZE;
+    /* The firmware is asked for one block run per call and every call costs a command on the device:
+       the bounce buffer is large, one page only if memory for more cannot be had */
+    DiskReadBufferSize = UEFI_DISK_READ_BUFFER_SIZE;
     DiskReadBuffer = NULL;
     DiskReadBufferRaw = NULL;
     DiskReadBufferAlignment = 1;
     DiskReadBufferFromPool = FALSE;
     if (!UefiEnsureDiskReadBufferAligned(1))
     {
-        ERR("Failed to allocate disk read buffer\n");
-        return FALSE;
+        DiskReadBufferSize = EFI_PAGE_SIZE;
+        if (!UefiEnsureDiskReadBufferAligned(1))
+        {
+            ERR("Failed to allocate disk read buffer\n");
+            return FALSE;
+        }
     }
 
     UefiSetupBlockDevices();

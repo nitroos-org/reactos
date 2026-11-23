@@ -358,22 +358,74 @@ static void FormatIpv6( const UCHAR *Address, PCHAR Out )
     Out[n] = '\0';
 }
 
+/* The names of a chain of CNAME records in an answer: the owners of the CNAME records are the aliases, the owner
+   of the first address record is the canonical name (Windows prints the canonical name as the name and the aliases
+   after the addresses; measured on Windows Server 2022: no limit on the length of a chain was seen) */
+#define MAX_ALIASES 32
+typedef struct
+{
+    int AliasCount;
+    BOOL HaveCanonical;
+    CHAR Canonical[EXTRACT_NAME_OUT_MAX + 1];
+    CHAR Alias[MAX_ALIASES][EXTRACT_NAME_OUT_MAX + 1];
+} NAME_LIST;
+
+/* Rec[Owner..) is the owner name of a record of Type */
+static void NoteOwnerName( PCHAR Rec, ULONG RecLen, int Owner, USHORT Type, USHORT WantType, NAME_LIST *Names )
+{
+    if( !Names ) return;
+
+    if( TYPE_CNAME == Type )
+    {
+        if( Names->AliasCount < MAX_ALIASES )
+        {
+            ExtractName( Rec, RecLen, Names->Alias[Names->AliasCount], (USHORT)Owner, 0 );
+            Names->AliasCount += 1;
+        }
+    }
+    else if( WantType == Type && !Names->HaveCanonical )
+    {
+        ExtractName( Rec, RecLen, Names->Canonical, (USHORT)Owner, 0 );
+        Names->HaveCanonical = TRUE;
+    }
+}
+
+/* The name that "Name:" shows: the canonical one when the answer went through CNAME records */
+static PCSTR AnswerName( const NAME_LIST *Names, PCSTR pName )
+{
+    return (Names && Names->AliasCount > 0 && Names->HaveCanonical) ? Names->Canonical : pName;
+}
+
+static void PrintAliases( const NAME_LIST *Names )
+{
+    int a;
+
+    if( !Names || Names->AliasCount == 0 || !Names->HaveCanonical ) return;
+
+    for( a = 0; a < Names->AliasCount; a += 1 )
+        _tprintf( a == 0 ? _T("Aliases:  %s\n") : _T("\t  %s\n"), Names->Alias[a] );
+}
+
 /* The A (WantType TYPE_A) or AAAA (TYPE_AAAA) records of the answer section, all of those that are in the packet
    (k is the offset of its first record) */
 static void PrintAddressAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswers, UCHAR Header1, PCHAR pName,
                                  USHORT WantType )
 {
     CHAR Text[48];
-    int Pass, n = 0, Printed = 0, a, Start = k;
+    int Pass, n = 0, Printed = 0, a, Start = k, Owner;
     USHORT Type, DataLength;
+    static NAME_LIST Names;
 
-    /* pass 0 counts the addresses, pass 1 prints them */
+    RtlZeroMemory( &Names, sizeof(Names) );
+
+    /* pass 0 counts the addresses and notes the names, pass 1 prints them */
     for( Pass = 0; Pass < 2; Pass += 1 )
     {
         k = Start;
         for( a = 0; a < NumAnswers; a += 1 )
         {
             if( (ULONG)k >= RecLen ) break;
+            Owner = k;
             k = SkipName( Rec, RecLen, k );
             if( k < 0 || (ULONG)k + 10 > RecLen ) break;
             Type = ntohs( ((PUSHORT)&Rec[k])[0] );
@@ -381,6 +433,8 @@ static void PrintAddressAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswe
             DataLength = ntohs( ((PUSHORT)&Rec[k])[0] );
             k += 2;
             if( (ULONG)k + DataLength > RecLen ) break;
+            if( Pass == 0 )
+                NoteOwnerName( Rec, RecLen, Owner, Type, WantType, &Names );
             if( WantType == Type && DataLength == (TYPE_AAAA == Type ? 16 : 4) )
             {
                 if( Pass == 0 )
@@ -417,9 +471,10 @@ static void PrintAddressAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswe
             if( !( Header1 & 0x04 ) )
                 _tprintf( _T("Non-authoritative answer:\n") );
 
-            _tprintf( _T("Name:    %s\n"), pName );
+            _tprintf( _T("Name:    %s\n"), AnswerName( &Names, pName ) );
         }
     }
+    PrintAliases( &Names );
     _tprintf( _T("\n") );
 }
 
@@ -650,14 +705,15 @@ typedef CHAR ADDRESS_TEXT[48];
 /* Appends the A (WantType TYPE_A) or AAAA (TYPE_AAAA) records of the answer section to List (Count of Max used);
    returns the new count (k is the offset of the first record) */
 static int CollectAddressAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswers, USHORT WantType,
-                                  ADDRESS_TEXT *List, int Count )
+                                  ADDRESS_TEXT *List, int Count, NAME_LIST *Names )
 {
-    int a;
+    int a, Owner;
     USHORT Type, DataLength;
 
     for( a = 0; a < NumAnswers && Count < MAX_ADDRESSES; a += 1 )
     {
         if( (ULONG)k >= RecLen ) break;
+        Owner = k;
         k = SkipName( Rec, RecLen, k );
         if( k < 0 || (ULONG)k + 10 > RecLen ) break;
         Type = ntohs( ((PUSHORT)&Rec[k])[0] );
@@ -665,6 +721,7 @@ static int CollectAddressAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnsw
         DataLength = ntohs( ((PUSHORT)&Rec[k])[0] );
         k += 2;
         if( (ULONG)k + DataLength > RecLen ) break;
+        NoteOwnerName( Rec, RecLen, Owner, Type, WantType, Names );
         if( WantType == Type && DataLength == (TYPE_AAAA == Type ? 16 : 4) )
         {
             if( TYPE_AAAA == Type )
@@ -709,7 +766,7 @@ typedef enum
  * (Count of them already in it). *pRcode is the RCODE of an error reply, *pAuthoritative the AA bit of a good one.
  */
 static LQ_RESULT QueryAddresses( PCHAR pName, USHORT WantType, ADDRESS_TEXT *List, int *pCount, int *pRcode,
-                                 BOOL *pAuthoritative )
+                                 BOOL *pAuthoritative, NAME_LIST *Names )
 {
     PCHAR Buffer, RecBuffer;
     ULONG BufferLength = 12 + (ULONG)(strlen( pName ) + 2) + 4, RecBufferLength = DNS_MAX_MESSAGE;
@@ -738,7 +795,7 @@ static LQ_RESULT QueryAddresses( PCHAR pName, USHORT WantType, ADDRESS_TEXT *Lis
             else if( SkipQuestions( RecBuffer, RecBufferLength, ntohs( ((PSHORT)&RecBuffer[4])[0] ), &k ) )
             {
                 *pCount = CollectAddressAnswers( RecBuffer, RecBufferLength, k, ntohs( ((PUSHORT)&RecBuffer[6])[0] ),
-                                                 WantType, List, *pCount );
+                                                 WantType, List, *pCount, Names );
                 Result = LQ_REPLY;
             }
         }
@@ -762,19 +819,26 @@ static void PerformPlainLookup( PCHAR pName )
     int Count6 = 0, Count4 = 0, Rcode4, Rcode6, n;
     BOOL Auth4, Auth6;
     LQ_RESULT Result4, Result6;
+    static NAME_LIST Names4, Names6;
+    const NAME_LIST *Names;
 
+    RtlZeroMemory( &Names4, sizeof(Names4) );
+    RtlZeroMemory( &Names6, sizeof(Names6) );
     g_bQuietTimeout = TRUE;
-    Result4 = QueryAddresses( pName, TYPE_A, List4, &Count4, &Rcode4, &Auth4 );
-    Result6 = QueryAddresses( pName, TYPE_AAAA, List6, &Count6, &Rcode6, &Auth6 );
+    Result4 = QueryAddresses( pName, TYPE_A, List4, &Count4, &Rcode4, &Auth4, &Names4 );
+    Result6 = QueryAddresses( pName, TYPE_AAAA, List6, &Count6, &Rcode6, &Auth6, &Names6 );
     g_bQuietTimeout = FALSE;
     (void)Result6;
 
     if( Count4 + Count6 > 0 )
     {
+        /* the chain of the answer that has addresses (the A one when both have) */
+        Names = (Count4 > 0 || !Names6.AliasCount) ? &Names4 : &Names6;
+
         if( LQ_REPLY == Result4 && Count4 > 0 && !Auth4 )
             _tprintf( _T("Non-authoritative answer:\n") );
 
-        _tprintf( _T("Name:    %s\n"), pName );
+        _tprintf( _T("Name:    %s\n"), AnswerName( Names, pName ) );
         for( n = 0; n < Count6 + Count4; n += 1 )
         {
             PCSTR Text = n < Count6 ? List6[n] : List4[n - Count6];
@@ -784,6 +848,7 @@ static void PerformPlainLookup( PCHAR pName )
             else
                 _tprintf( _T("          %s\n"), Text );
         }
+        PrintAliases( Names );
         _tprintf( _T("\n") );
         return;
     }
