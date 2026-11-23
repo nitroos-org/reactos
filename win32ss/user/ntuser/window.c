@@ -5202,6 +5202,7 @@ IntShowOwnedPopups(PWND OwnerWnd, BOOL fShow )
    PWND pWnd;
    HWND *win_array;
    USER_REFERENCE_ENTRY Ref;
+   USER_HELD_POOL_ENTRY HeldList;
 
 //   ASSERT(OwnerWnd);
 
@@ -5212,6 +5213,9 @@ IntShowOwnedPopups(PWND OwnerWnd, BOOL fShow )
 
    if (!win_array)
       return TRUE;
+
+   /* WM_SHOWWINDOW to each popup: the list goes with the thread if it ends in one */
+   UserHoldPoolCo(win_array, USERTAG_WINDOWLIST, &HeldList);
 
    while (win_array[count])
       count++;
@@ -5257,7 +5261,7 @@ IntShowOwnedPopups(PWND OwnerWnd, BOOL fShow )
          }
       }
    }
-   ExFreePoolWithTag(win_array, USERTAG_WINDOWLIST);
+   UserFreePoolCo(&HeldList);
    TRACE("Leave ShowOwnedPopups\n");
    return TRUE;
 }
