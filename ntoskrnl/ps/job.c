@@ -948,7 +948,9 @@ PspNestProcessInJob(
        enough to refuse: a process under UI limits stays under them. */
     if (Target->UIRestrictionsClass != 0)
     {
-        Status = STATUS_ACCESS_DENIED;
+        /* Windows Server 2022 answers ERROR_NOT_SUPPORTED (50) here, not ERROR_ACCESS_DENIED
+           (a process of a job with UI limits joining a second job with UI limits, measured) */
+        Status = STATUS_NOT_SUPPORTED;
         goto Exit;
     }
     for (Walk = Leaf; Walk != NULL; Walk = Walk->ParentJob)
