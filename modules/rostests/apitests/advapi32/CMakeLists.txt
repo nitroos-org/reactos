@@ -52,6 +52,7 @@ list(APPEND SOURCE
     GetUserNameImpersonated.c
     IsTextUnicode.c
     LockServiceDatabase.c
+    LookupPrivilegeNames.c
     LookupAccountSidCaller.c
     LogonUser.c
     LogonUserCleartext.c
