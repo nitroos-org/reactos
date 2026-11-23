@@ -683,6 +683,11 @@ SeGetCurrentProcessIntegrityLevel(VOID);
 
 BOOLEAN
 NTAPI
+SeTokenHasEnabledPrivilegeBeyondChangeNotify(
+    _In_ PTOKEN Token);
+
+BOOLEAN
+NTAPI
 SeIsTokenAboveProcessIntegrity(
     _In_ PTOKEN Token);
 

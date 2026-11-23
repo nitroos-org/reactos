@@ -80,6 +80,7 @@ list(APPEND SOURCE
     LsaManageSidNameMapping.c
     LsaSecretStorage.c
     MandatoryLabelOpen.c
+    TokenDuplicateLimit.c
     ProcessThreadLabel.c
     QueryServiceConfig.c
     QueryServiceConfig2.c
