@@ -10,6 +10,7 @@ list(APPEND SOURCE
     AutoRotation.c
     BroadcastHung.c
     ../include/msgtrace.c
+    CallbackLifetimes.c
     CharFuncs.c
     CloseWindow.c
     CopyImage.c
