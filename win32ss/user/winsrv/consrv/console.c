@@ -1487,6 +1487,76 @@ ConSrvIsTerminatingCtrlEvent(IN ULONG CtrlEvent)
             CtrlEvent == CTRL_SHUTDOWN_EVENT);
 }
 
+/*
+ * The service control manager answers CTRL_SHUTDOWN_EVENT by telling its services to shut down, and a service
+ * that is entitled to a long preshutdown (its PreshutdownTimeout, as long as it reports progress) needs more
+ * time than WaitToKillServiceTimeout. The SCM counts every sign of progress of that phase in the volatile value
+ * Progress of the key below; the wait for its handler ends when no progress has been counted for the whole
+ * WaitToKillServiceTimeout (without a counter it ends then, as before), and in any case after
+ * CONSRV_SERVICE_SHUTDOWN_MAX_WAIT, so an SCM that counts for ever cannot hold the shutdown.
+ */
+#define CONSRV_SERVICE_SHUTDOWN_MAX_WAIT 600000
+#define CONSRV_SERVICE_SHUTDOWN_POLL     250
+
+static BOOLEAN
+ConSrvReadScmShutdownProgress(OUT PULONG Progress)
+{
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE KeyHandle;
+    UCHAR Buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PVOID)Buffer;
+    ULONG Length;
+    NTSTATUS Status;
+
+    RtlInitUnicodeString(&Name, L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\ScmShutdown");
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenKey(&KeyHandle, KEY_QUERY_VALUE, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    RtlInitUnicodeString(&Name, L"Progress");
+    Status = NtQueryValueKey(KeyHandle, &Name, KeyValuePartialInformation, Buffer, sizeof(Buffer), &Length);
+    NtClose(KeyHandle);
+    if (!NT_SUCCESS(Status) || Info->Type != REG_DWORD || Info->DataLength != sizeof(ULONG))
+        return FALSE;
+
+    *Progress = *(PULONG)Info->Data;
+    return TRUE;
+}
+
+static ULONG
+ConSrvWaitServiceShutdown(IN HANDLE Thread,
+                          IN ULONG Timeout)
+{
+    ULONG Idle = 0, Total = 0, Slice, Progress, Last = 0;
+    BOOLEAN HaveLast = FALSE;
+    ULONG Wait;
+
+    if (Timeout == 0)
+        return WaitForSingleObject(Thread, 0);
+
+    for (;;)
+    {
+        Slice = min(CONSRV_SERVICE_SHUTDOWN_POLL, Timeout - Idle);
+        Wait = WaitForSingleObject(Thread, Slice);
+        if (Wait != WAIT_TIMEOUT)
+            return Wait;
+
+        Idle += Slice;
+        Total += Slice;
+        if (ConSrvReadScmShutdownProgress(&Progress) && (!HaveLast || Progress != Last))
+        {
+            /* The first value is progress too: the SCM has begun the phase */
+            Last = Progress;
+            HaveLast = TRUE;
+            Idle = 0;
+        }
+        if (Idle >= Timeout || Total >= CONSRV_SERVICE_SHUTDOWN_MAX_WAIT)
+            return WAIT_TIMEOUT;
+    }
+}
+
 static NTSTATUS
 ConSrvSendCtrlEvent(IN HANDLE ProcessHandle,
                     IN LPTHREAD_START_ROUTINE CtrlRoutine,
@@ -1515,7 +1585,14 @@ ConSrvSendCtrlEvent(IN HANDLE ProcessHandle,
                 BOOLEAN Terminate = FALSE;
                 BOOLEAN Service = (CtrlEvent & CTRL_EVENT_SERVICE_FLAG) != 0;
 
-                if (WaitForSingleObject(Thread, Timeout) != WAIT_OBJECT_0)
+                ULONG Wait;
+
+                if (Service && (CtrlEvent & ~CTRL_EVENT_SERVICE_FLAG) == CTRL_SHUTDOWN_EVENT)
+                    Wait = ConSrvWaitServiceShutdown(Thread, Timeout);
+                else
+                    Wait = WaitForSingleObject(Thread, Timeout);
+
+                if (Wait != WAIT_OBJECT_0)
                 {
                     /* The handler did not return in time */
                     Terminate = !Service || (CtrlEvent & ~CTRL_EVENT_SERVICE_FLAG) == CTRL_SHUTDOWN_EVENT;

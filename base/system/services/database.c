@@ -5021,6 +5021,33 @@ ScmAutoStartServices(VOID)
 #define SCM_PRESHUTDOWN_POLL            50
 #define SCM_PRESHUTDOWN_THREAD_WAIT     10000
 
+/*
+ * The console server (csrss) ends this process WaitToKillServiceTimeout after the shutdown event unless it is
+ * told that the phase goes on: every sign of progress (the phase begins, a service changes its state or check
+ * point, the phase ends so the SHUTDOWN controls get their time) is counted in the volatile value Progress of
+ * HKLM\SYSTEM\CurrentControlSet\Control\ScmShutdown, which csrss reads (consrv, ConSrvWaitServiceShutdown).
+ * Only the monitor loop below calls it.
+ */
+static
+VOID
+ScmCountShutdownProgress(VOID)
+{
+    static HKEY hKey = NULL;
+    static DWORD dwProgress = 0;
+
+    if (hKey == NULL &&
+        RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+                        L"SYSTEM\\CurrentControlSet\\Control\\ScmShutdown",
+                        0, NULL, REG_OPTION_VOLATILE, KEY_SET_VALUE, NULL, &hKey, NULL) != ERROR_SUCCESS)
+    {
+        hKey = NULL;
+        return;
+    }
+
+    dwProgress++;
+    RegSetValueExW(hKey, L"Progress", 0, REG_DWORD, (LPBYTE)&dwProgress, sizeof(dwProgress));
+}
+
 typedef struct _SCM_PRESHUTDOWN_ITEM
 {
     PSERVICE Service;
@@ -5213,6 +5240,8 @@ ScmPreshutdownServices(VOID)
     }
 
     /* Wait while the services make progress */
+    if (Count != 0)
+        ScmCountShutdownProgress();
     for (;;)
     {
         bAllDone = TRUE;
@@ -5250,6 +5279,7 @@ ScmPreshutdownServices(VOID)
                 Item->dwProgressTick = dwNow;
                 Item->dwLastState = dwState;
                 Item->dwLastCheckPoint = dwCheckPoint;
+                ScmCountShutdownProgress();
             }
 
             if (dwNow - Item->dwProgressTick >= Item->dwTimeout ||
@@ -5300,6 +5330,10 @@ ScmPreshutdownServices(VOID)
         if (Items[i].hCancel != NULL)
             CloseHandle(Items[i].hCancel);
     }
+    /* The services that accept the shutdown control only are next: they get their time */
+    if (Count != 0)
+        ScmCountShutdownProgress();
+
     HeapFree(GetProcessHeap(), 0, Items);
 
     DPRINT("ScmPreshutdownServices() done\n");
