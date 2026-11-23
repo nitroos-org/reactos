@@ -233,12 +233,16 @@ int NgAssignNewSecurity(PNG_VCB Vcb, ngc_node *Node, PSECURITY_DESCRIPTOR Parent
 
     if (!As)
         return 0;
-    /* Auto-inheritance only below an ACL marked auto-inherited, and only for an ACL the create does not supply. */
+    /* Auto-inheritance of the DACL only below an ACL marked auto-inherited, and only for an ACL the create does not supply. */
     Parent = ParentSd ? ((PISECURITY_DESCRIPTOR)ParentSd)->Control : 0;
     Creator = As->SecurityDescriptor ? ((PISECURITY_DESCRIPTOR)As->SecurityDescriptor)->Control : 0;
     if ((Parent & SE_DACL_AUTO_INHERITED) && !(Creator & SE_DACL_PRESENT))
         AutoInherit |= SEF_DACL_AUTO_INHERIT;
-    if ((Parent & SE_SACL_AUTO_INHERITED) && !(Creator & SE_SACL_PRESENT))
+    /*
+     * The SACL is auto-inherited below a parent that has an auto-inherited SACL and also when the create supplies one
+     * (an explicit label): Windows Server 2022 marks it so and keeps one label ACE (the explicit one).
+     */
+    if ((Parent & SE_SACL_AUTO_INHERITED) || (Creator & SE_SACL_PRESENT))
         AutoInherit |= SEF_SACL_AUTO_INHERIT;
     Status = SeAssignSecurityEx(ParentSd, As->SecurityDescriptor, &New, NULL, IsDir, AutoInherit,
                                 &As->SubjectSecurityContext, IoGetFileObjectGenericMapping(), PagedPool);

@@ -566,7 +566,25 @@ ObAssignSecurity(IN PACCESS_STATE AccessState,
     PSECURITY_DESCRIPTOR NewDescriptor;
     NTSTATUS Status;
     KIRQL CalloutIrql;
+    ULONG AutoInheritFlags = 0;
     PAGED_CODE();
+
+    /*
+     * The SACL of an object is auto-inherited when the creator supplies one or
+     * the parent has one (Windows Server 2022, measured with events in object
+     * directories with and without a label, explicit labels, Low, Medium and
+     * High creators): the label ACE inherited from the parent carries
+     * INHERITED_ACE, the descriptor's control has SE_SACL_AUTO_INHERITED; an
+     * object made where nothing has a SACL, with the creator's own level
+     * label, has neither.
+     */
+    if ((SecurityDescriptor != NULL &&
+         (((PISECURITY_DESCRIPTOR)SecurityDescriptor)->Control & SE_SACL_PRESENT)) ||
+        (AccessState->SecurityDescriptor != NULL &&
+         (((PISECURITY_DESCRIPTOR)AccessState->SecurityDescriptor)->Control & SE_SACL_PRESENT)))
+    {
+        AutoInheritFlags = SEF_SACL_AUTO_INHERIT;
+    }
 
     /*
      * Build the new security descriptor. An object created by a subject below
@@ -581,7 +599,7 @@ ObAssignSecurity(IN PACCESS_STATE AccessState,
                                &NewDescriptor,
                                NULL,
                                (Type == ObpDirectoryObjectType),
-                               0,
+                               AutoInheritFlags,
                                &AccessState->SubjectSecurityContext,
                                &Type->TypeInfo.GenericMapping,
                                !(Type == SeTokenObjectType ||
