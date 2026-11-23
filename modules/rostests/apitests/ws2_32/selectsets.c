@@ -85,16 +85,14 @@ START_TEST(selectsets)
                Names[Where], Result[Where], Error[Where]);
         }
 
-        /* 65: the same answer whether the 65th is in the read or the except set (Windows: 0, ReactOS: WSAEFAULT) */
+        /* 65: the same answer whether the 65th is in the read, write or except set: the count the sets carry rules */
         for (Where = 0; Where < 3; Where++)
             Result[Where] = SelectSplit(Sockets, SOCKETS, Where, &Error[Where]);
         trace("65 sockets: read %d (%d), write %d (%d), except %d (%d)\n",
               Result[0], Error[0], Result[1], Error[1], Result[2], Error[2]);
-        ok(Result[0] == 0 || (Result[0] == SOCKET_ERROR && Error[0] == WSAEFAULT),
-           "65 sockets, the last in the read set: select returned %d, error %d\n", Result[0], Error[0]);
-        ok(Result[2] == Result[0] && Error[2] == Error[0],
-           "65 sockets, the last in the except set: select returned %d, error %d; in the read set %d, error %d\n",
-           Result[2], Error[2], Result[0], Error[0]);
+        ok(Result[0] == 0, "65 sockets, the last in the read set: select returned %d, error %d\n", Result[0], Error[0]);
+        ok(Result[1] == 1, "65 sockets, the last in the write set: select returned %d, error %d\n", Result[1], Error[1]);
+        ok(Result[2] == 0, "65 sockets, the last in the except set: select returned %d, error %d\n", Result[2], Error[2]);
     }
 
     for (i = 0; i < Count; i++)

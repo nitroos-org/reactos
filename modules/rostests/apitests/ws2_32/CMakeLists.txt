@@ -78,6 +78,7 @@ list(APPEND SOURCE
     selectclose.c
     eventhandle.c
     selectsets.c
+    selectmany.c
     shutdownrecv.c
     sotimeout.c
     socketscale.c
