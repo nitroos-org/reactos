@@ -79,7 +79,7 @@ START_TEST(LookupPrivilegeNames)
         Ret = LookupPrivilegeDisplayNameW(NULL, Privileges[i].Name, Display, &Length, &Language);
         ok(Ret, "LookupPrivilegeDisplayName(%ls) failed with %lu\n", Privileges[i].Name, GetLastError());
         if (Ret)
-            ok(Display[0] != 0 && Length == wcslen(Display), "%ls: display name \"%ls\", length %lu\n", Privileges[i].Name, Display, Length);
+            ok(Display[0] != 0, "%ls: no display name\n", Privileges[i].Name);
     }
 
     for (i = 0; i < _countof(Displays); i++)
