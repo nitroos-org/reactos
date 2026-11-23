@@ -364,6 +364,16 @@ BochsSetCurrentMode(
     Ret = BochsWriteDispIAndCheck(DeviceExtension, VBE_DISPI_INDEX_XRES, AvailableModeInfo->XResolution) &&
           BochsWriteDispIAndCheck(DeviceExtension, VBE_DISPI_INDEX_YRES, AvailableModeInfo->YResolution) &&
           BochsWriteDispIAndCheck(DeviceExtension, VBE_DISPI_INDEX_BPP, 32);
+    /*
+     * The scan line length and the display start: the firmware (the UEFI GOP)
+     * may have left a larger virtual width, which the adapter keeps for a
+     * smaller mode (QEMU bochs-display does), and the mode would be shown
+     * with the wrong line length. The mode information reports a stride of
+     * XResolution * 4 and the display starting at the framebuffer.
+     */
+    BochsWriteDispI(DeviceExtension, VBE_DISPI_INDEX_VIRT_WIDTH, AvailableModeInfo->XResolution);
+    BochsWriteDispI(DeviceExtension, VBE_DISPI_INDEX_X_OFFSET, 0);
+    BochsWriteDispI(DeviceExtension, VBE_DISPI_INDEX_Y_OFFSET, 0);
     /* Always enable screen, even if display settings change failed */
     BochsWriteDispI(DeviceExtension, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_LFB_ENABLED | VBE_DISPI_ENABLED);
     if (!Ret)
