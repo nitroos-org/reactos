@@ -1200,6 +1200,116 @@ static DWORD WINAPI KlwThread(LPVOID Param)
     return 0;
 }
 
+/*
+ * SendSenderEnds: thread S calls SetWindowPos on a window of this thread, so win32k sends WM_WINDOWPOSCHANGING
+ * from S with a WINDOWPOS on S's kernel stack. While the window procedure runs, thread K terminates S and
+ * waits until it is gone; then the procedure changes the WINDOWPOS and returns. The change must not be written
+ * to the stack of S, which is freed. A second part checks that a sender that still waits gets the change.
+ */
+#define SSE_ROUNDS 20
+static struct
+{
+    HANDLE hInProc, hSenderGone, hSender;
+    HWND hwnd;
+    BOOL Hold;
+    LONG Calls;
+} gSse;
+
+static LRESULT CALLBACK SseWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (msg == WM_WINDOWPOSCHANGING && gSse.hwnd == hwnd && !(((WINDOWPOS *)lParam)->flags & SWP_NOSIZE))
+    {
+        WINDOWPOS *Pos = (WINDOWPOS *)lParam;
+
+        InterlockedIncrement(&gSse.Calls);
+        if (gSse.Hold)
+        {
+            SetEvent(gSse.hInProc);
+            WaitForSingleObject(gSse.hSenderGone, 10000);
+        }
+        Pos->cx = 177;
+        Pos->cy = 133;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static DWORD WINAPI SseSender(LPVOID Param)
+{
+    SetWindowPos(gSse.hwnd, NULL, 0, 0, 100 + (int)(INT_PTR)Param, 90, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    return 0;
+}
+
+static DWORD WINAPI SseKiller(LPVOID Param)
+{
+    if (WaitForSingleObject(gSse.hInProc, 10000) == WAIT_OBJECT_0)
+    {
+        TerminateThread(gSse.hSender, 1);
+        WaitForSingleObject(gSse.hSender, 10000);
+        /* the kernel stack goes with the thread object's last reference and the reaper */
+        Sleep(200);
+    }
+    SetEvent(gSse.hSenderGone);
+    return 0;
+}
+
+START_TEST(LifetimeSendSenderEnds)
+{
+    WNDCLASSW wc = { 0 };
+    HANDLE hKiller;
+    RECT rc;
+    int Round;
+    DWORD r;
+
+    wc.lpfnWndProc = SseWndProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"SseClass";
+    RegisterClassW(&wc);
+    gSse.hwnd = CreateWindowExW(0, L"SseClass", L"sse", WS_OVERLAPPEDWINDOW, 50, 50, 120, 100, NULL, NULL,
+                                wc.hInstance, NULL);
+    ok(gSse.hwnd != NULL, "no window\n");
+    if (!gSse.hwnd)
+        return;
+    gSse.hInProc = CreateEventW(NULL, FALSE, FALSE, NULL);
+    gSse.hSenderGone = CreateEventW(NULL, FALSE, FALSE, NULL);
+
+    /* the sender ends inside the send */
+    gSse.Hold = TRUE;
+    for (Round = 0; Round < SSE_ROUNDS; Round++)
+    {
+        gSse.Calls = 0;
+        gSse.hSender = CreateThread(NULL, 0, SseSender, (LPVOID)(INT_PTR)Round, 0, NULL);
+        hKiller = CreateThread(NULL, 0, SseKiller, NULL, 0, NULL);
+        ok(gSse.hSender && hKiller, "round %d: no threads\n", Round);
+        if (!gSse.hSender || !hKiller)
+            break;
+        r = ClWait(gSse.hSender, 10000);
+        ok(r, "round %d: the sender did not end\n", Round);
+        ok(ClWait(hKiller, 10000), "round %d: the killer did not end\n", Round);
+        ok(gSse.Calls == 1, "round %d: %ld WM_WINDOWPOSCHANGING\n", Round, gSse.Calls);
+        CloseHandle(gSse.hSender);
+        CloseHandle(hKiller);
+        ClPump();
+    }
+    ok(IsWindow(gSse.hwnd), "the window is gone\n");
+
+    /* a sender that waits gets what the procedure wrote */
+    gSse.Hold = FALSE;
+    gSse.Calls = 0;
+    gSse.hSender = CreateThread(NULL, 0, SseSender, (LPVOID)(INT_PTR)5, 0, NULL);
+    ok(ClWait(gSse.hSender, 10000), "the sender did not end\n");
+    CloseHandle(gSse.hSender);
+    ok(gSse.Calls == 1, "%ld WM_WINDOWPOSCHANGING\n", gSse.Calls);
+    GetWindowRect(gSse.hwnd, &rc);
+    ok(rc.right - rc.left == 177 && rc.bottom - rc.top == 133, "size %ld x %ld, expected 177 x 133\n",
+       rc.right - rc.left, rc.bottom - rc.top);
+
+    DestroyWindow(gSse.hwnd);
+    CloseHandle(gSse.hInProc);
+    CloseHandle(gSse.hSenderGone);
+    UnregisterClassW(L"SseClass", wc.hInstance);
+}
+
 START_TEST(LifetimeKeyboardLayoutWalk)
 {
     HKL hklOld, hklNew, hklRet;
