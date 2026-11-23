@@ -1,13 +1,16 @@
 /*
  * PROJECT:     ReactOS API tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     schannel attributes of an established context: SECPKG_ATTR_CIPHER_INFO, SECPKG_ATTR_STREAM_SIZES
- *              (header and trailer of a record), SECPKG_ATTR_CONNECTION_INFO strengths. A client and a server context
- *              of one process shake hands over memory; Windows Server 2022 rows are in the evidence of kbatch8.
+ * PURPOSE:     schannel attributes of an established client context: SECPKG_ATTR_CIPHER_INFO, SECPKG_ATTR_STREAM_SIZES
+ *              (header and trailer of a record), SECPKG_ATTR_CONNECTION_INFO strengths. Needs TLS servers that offer
+ *              one suite each (openssl s_server -www -cipher ...), named by SCHANNEL_ATTR_HOST and SCHANNEL_ATTR_PORTS
+ *              (one port per case, see Cases); without them the test is skipped. Windows Server 2022 rows are in the
+ *              evidence of kbatch8.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
 #define SECURITY_WIN32
+#include <winsock2.h>
 #include <apitest.h>
 #include <wincrypt.h>
 #include <sspi.h>
@@ -28,164 +31,140 @@ typedef struct
     DWORD dwKeyType;
 } CIPHER_INFO_X;
 
-static PCCERT_CONTEXT Cert;
 
-static BOOL MakeCert(void)
-{
-    HCRYPTPROV Prov = 0;
-    HCRYPTKEY Key = 0;
-    CERT_NAME_BLOB Name;
-    BYTE Buf[256];
-    DWORD Len = sizeof(Buf);
-    CRYPT_KEY_PROV_INFO Kpi;
-    SYSTEMTIME St;
-
-    CryptAcquireContextW(&Prov, L"kb8sch", MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, CRYPT_DELETEKEYSET);
-    if (!CryptAcquireContextW(&Prov, L"kb8sch", MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, CRYPT_NEWKEYSET))
-    {
-        skip("no key container (%lu)\n", GetLastError());
-        return FALSE;
-    }
-    CryptGenKey(Prov, AT_KEYEXCHANGE, (2048u << 16) | CRYPT_EXPORTABLE, &Key);
-    CertStrToNameW(X509_ASN_ENCODING, L"CN=kb8sch.test", 0, NULL, Buf, &Len, NULL);
-    Name.cbData = Len;
-    Name.pbData = Buf;
-    ZeroMemory(&Kpi, sizeof(Kpi));
-    Kpi.pwszContainerName = L"kb8sch";
-    Kpi.pwszProvName = MS_ENH_RSA_AES_PROV_W;
-    Kpi.dwProvType = PROV_RSA_AES;
-    Kpi.dwKeySpec = AT_KEYEXCHANGE;
-    GetSystemTime(&St);
-    St.wYear += 1;
-    Cert = CertCreateSelfSignCertificate(Prov, &Name, 0, &Kpi, NULL, NULL, &St, NULL);
-    if (!Cert)
-        skip("no self-signed certificate (%lu)\n", GetLastError());
-    return Cert != NULL;
-}
-
-typedef struct { BYTE *Data; ULONG Size; } BUF;
-
-static void Put(BUF *B, const BYTE *D, ULONG N)
-{
-    B->Data = realloc(B->Data, B->Size + N);
-    memcpy(B->Data + B->Size, D, N);
-    B->Size += N;
-}
-
-static SECURITY_STATUS Step(BOOL Server, PCredHandle Cred, PCtxtHandle Ctx, BOOL *Have, BUF *In, BUF *Out)
-{
-    SecBuffer Ib[2], Ob[1];
-    SecBufferDesc Id, Od;
-    TimeStamp Ts;
-    ULONG Attr;
-    SECURITY_STATUS Status;
-    ULONG Flags = ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT | ISC_REQ_CONFIDENTIALITY | ISC_REQ_ALLOCATE_MEMORY |
-                  ISC_REQ_STREAM | ISC_REQ_EXTENDED_ERROR;
-
-    Ib[0].BufferType = SECBUFFER_TOKEN; Ib[0].pvBuffer = In->Data; Ib[0].cbBuffer = In->Size;
-    Ib[1].BufferType = SECBUFFER_EMPTY; Ib[1].pvBuffer = NULL; Ib[1].cbBuffer = 0;
-    Id.ulVersion = SECBUFFER_VERSION; Id.cBuffers = 2; Id.pBuffers = Ib;
-    Ob[0].BufferType = SECBUFFER_TOKEN; Ob[0].pvBuffer = NULL; Ob[0].cbBuffer = 0;
-    Od.ulVersion = SECBUFFER_VERSION; Od.cBuffers = 1; Od.pBuffers = Ob;
-
-    if (Server)
-        Status = AcceptSecurityContext(Cred, *Have ? Ctx : NULL, &Id, Flags, 0, Ctx, &Od, &Attr, &Ts);
-    else
-        Status = InitializeSecurityContextW(Cred, *Have ? Ctx : NULL, (SEC_WCHAR *)L"kb8sch.test", Flags, 0, 0,
-                                            In->Size ? &Id : NULL, 0, Ctx, &Od, &Attr, &Ts);
-    *Have = TRUE;
-    if (Ob[0].cbBuffer && Ob[0].pvBuffer)
-    {
-        Put(Out, Ob[0].pvBuffer, Ob[0].cbBuffer);
-        FreeContextBuffer(Ob[0].pvBuffer);
-    }
-    if (Status != SEC_E_INCOMPLETE_MESSAGE)
-        In->Size = 0;
-    return Status;
-}
 
 typedef struct
 {
     PCSTR Name;
-    DWORD ClientProtocols, ServerProtocols;
+    DWORD ClientProtocols;
     ALG_ID Alg;
 } CASE;
 
-static void CheckRecord(PCSTR Name, PCtxtHandle From, PCtxtHandle To, DWORD Header, DWORD Trailer)
+static BOOL SendAll(SOCKET S, const BYTE *D, int N)
+{
+    while (N > 0)
+    {
+        int R = send(S, (const char *)D, N, 0);
+        if (R <= 0) return FALSE;
+        D += R; N -= R;
+    }
+    return TRUE;
+}
+
+/* One request over the established context: sizes by STREAM_SIZES, the answer of the server proves that the record it
+   received (header, data, trailer in the sizes reported) was well formed */
+static void CheckRecord(PCSTR Name, SOCKET S, PCtxtHandle Ctx, DWORD Header, DWORD Trailer, BYTE *Extra, ULONG ExtraSize)
 {
     SecPkgContext_StreamSizes Sizes;
     SecBuffer B[4];
     SecBufferDesc D;
-    BYTE *Buf;
-    char Msg[] = "kbatch8 record";
+    BYTE *Buf, *In;
+    static const char Req[] = "GET / HTTP/1.0\r\n\r\n";
     SECURITY_STATUS Status;
-    ULONG Total;
+    ULONG Total, Have = 0, Cap = 65536;
+    int Tries;
+    BOOL Got = FALSE;
 
-    Status = QueryContextAttributesW(From, SECPKG_ATTR_STREAM_SIZES, &Sizes);
+    Status = QueryContextAttributesW(Ctx, SECPKG_ATTR_STREAM_SIZES, &Sizes);
     ok(Status == SEC_E_OK, "%s: STREAM_SIZES returned 0x%08lx\n", Name, Status);
     if (Status != SEC_E_OK)
         return;
     ok(Sizes.cbHeader == Header, "%s: cbHeader %lu, expected %lu\n", Name, Sizes.cbHeader, Header);
     ok(Sizes.cbTrailer == Trailer, "%s: cbTrailer %lu, expected %lu\n", Name, Sizes.cbTrailer, Trailer);
 
-    Buf = calloc(1, Sizes.cbHeader + sizeof(Msg) + Sizes.cbTrailer + 64);
-    memcpy(Buf + Sizes.cbHeader, Msg, sizeof(Msg));
+    Buf = calloc(1, Sizes.cbHeader + sizeof(Req) + Sizes.cbTrailer + 64);
+    memcpy(Buf + Sizes.cbHeader, Req, sizeof(Req) - 1);
     B[0].BufferType = SECBUFFER_STREAM_HEADER; B[0].pvBuffer = Buf; B[0].cbBuffer = Sizes.cbHeader;
-    B[1].BufferType = SECBUFFER_DATA; B[1].pvBuffer = Buf + Sizes.cbHeader; B[1].cbBuffer = sizeof(Msg);
-    B[2].BufferType = SECBUFFER_STREAM_TRAILER; B[2].pvBuffer = Buf + Sizes.cbHeader + sizeof(Msg); B[2].cbBuffer = Sizes.cbTrailer;
+    B[1].BufferType = SECBUFFER_DATA; B[1].pvBuffer = Buf + Sizes.cbHeader; B[1].cbBuffer = sizeof(Req) - 1;
+    B[2].BufferType = SECBUFFER_STREAM_TRAILER; B[2].pvBuffer = Buf + Sizes.cbHeader + sizeof(Req) - 1; B[2].cbBuffer = Sizes.cbTrailer;
     B[3].BufferType = SECBUFFER_EMPTY; B[3].pvBuffer = NULL; B[3].cbBuffer = 0;
     D.ulVersion = SECBUFFER_VERSION; D.cBuffers = 4; D.pBuffers = B;
-    Status = EncryptMessage(From, 0, &D, 0);
+    Status = EncryptMessage(Ctx, 0, &D, 0);
     ok(Status == SEC_E_OK, "%s: EncryptMessage returned 0x%08lx\n", Name, Status);
     if (Status == SEC_E_OK)
     {
-        SecBuffer R[4];
-        SecBufferDesc RD;
-
         ok(B[0].cbBuffer == Header, "%s: header after EncryptMessage %lu, expected %lu\n", Name, B[0].cbBuffer, Header);
-        ok(B[1].cbBuffer == sizeof(Msg), "%s: data after EncryptMessage %lu\n", Name, B[1].cbBuffer);
-        ok(B[2].cbBuffer <= Trailer && B[2].cbBuffer > 0, "%s: trailer after EncryptMessage %lu (limit %lu)\n", Name, B[2].cbBuffer, Trailer);
+        ok(B[1].cbBuffer == sizeof(Req) - 1, "%s: data after EncryptMessage %lu\n", Name, B[1].cbBuffer);
+        ok(B[2].cbBuffer > 0 && B[2].cbBuffer <= Trailer, "%s: trailer after EncryptMessage %lu (limit %lu)\n", Name, B[2].cbBuffer, Trailer);
         Total = B[0].cbBuffer + B[1].cbBuffer + B[2].cbBuffer;
-        R[0].BufferType = SECBUFFER_DATA; R[0].pvBuffer = Buf; R[0].cbBuffer = Total;
-        R[1].BufferType = R[2].BufferType = R[3].BufferType = SECBUFFER_EMPTY;
-        R[1].pvBuffer = R[2].pvBuffer = R[3].pvBuffer = NULL;
-        R[1].cbBuffer = R[2].cbBuffer = R[3].cbBuffer = 0;
-        RD.ulVersion = SECBUFFER_VERSION; RD.cBuffers = 4; RD.pBuffers = R;
-        Status = DecryptMessage(To, &RD, 0, NULL);
-        ok(Status == SEC_E_OK, "%s: DecryptMessage returned 0x%08lx\n", Name, Status);
+        ok(SendAll(S, Buf, Total), "%s: send failed\n", Name);
+
+        In = malloc(Cap);
+        if (ExtraSize) { memcpy(In, Extra, ExtraSize); Have = ExtraSize; }
+        for (Tries = 0; Tries < 20 && !Got; Tries++)
+        {
+            SecBuffer R[4];
+            SecBufferDesc RD;
+            int N;
+
+            for (;;)
+            {
+                R[0].BufferType = SECBUFFER_DATA; R[0].pvBuffer = In; R[0].cbBuffer = Have;
+                R[1].BufferType = R[2].BufferType = R[3].BufferType = SECBUFFER_EMPTY;
+                R[1].pvBuffer = R[2].pvBuffer = R[3].pvBuffer = NULL;
+                R[1].cbBuffer = R[2].cbBuffer = R[3].cbBuffer = 0;
+                RD.ulVersion = SECBUFFER_VERSION; RD.cBuffers = 4; RD.pBuffers = R;
+                Status = Have ? DecryptMessage(Ctx, &RD, 0, NULL) : SEC_E_INCOMPLETE_MESSAGE;
+                if (Status == SEC_E_OK)
+                {
+                    int k;
+                    for (k = 0; k < 4; k++)
+                        if (R[k].BufferType == SECBUFFER_DATA && R[k].cbBuffer >= 8 && !memcmp(R[k].pvBuffer, "HTTP/1.", 7))
+                            Got = TRUE;
+                    Have = 0;
+                    for (k = 0; k < 4; k++)
+                        if (R[k].BufferType == SECBUFFER_EXTRA && R[k].cbBuffer) { memmove(In, R[k].pvBuffer, R[k].cbBuffer); Have = R[k].cbBuffer; }
+                    if (Got || !Have) break;
+                    continue;
+                }
+                break;
+            }
+            if (Got || (Status != SEC_E_INCOMPLETE_MESSAGE && Status != SEC_E_OK))
+                break;
+            N = recv(S, (char *)In + Have, Cap - Have, 0);
+            if (N <= 0) break;
+            Have += N;
+        }
+        ok(Got, "%s: no HTTP answer to a record of the sizes reported (last status 0x%08lx)\n", Name, Status);
+        free(In);
     }
     free(Buf);
 }
 
-static void Run(const CASE *C)
+static void Run(const CASE *C, PCSTR Host, int Port)
 {
-    CredHandle Cc, Sc;
-    CtxtHandle Cx, Sx;
-    BOOL Ch = FALSE, Sh = FALSE;
-    BUF C2S = {0}, S2C = {0}, Tmp = {0};
-    SECURITY_STATUS Cs, Ss, A;
-    SCHANNEL_CRED Sched, Cl;
-    PCCERT_CONTEXT List[1];
+    SOCKET S;
+    struct sockaddr_in Addr;
+    DWORD Timeout = 15000;
+    CredHandle Cc;
+    CtxtHandle Cx;
+    BOOL Have = FALSE;
+    SCHANNEL_CRED Cl;
     ALG_ID Algs[1];
     TimeStamp Ts;
-    int i;
+    SECURITY_STATUS A, Cs;
+    BYTE *In = malloc(65536);
+    ULONG InSize = 0, ExtraSize = 0;
+    int Rounds;
     CIPHER_INFO_X Ci;
     SecPkgContext_ConnectionInfo Info;
     DWORD Header = 0, Trailer = 0;
 
-    List[0] = Cert;
-    Algs[0] = C->Alg;
-    ZeroMemory(&Sched, sizeof(Sched));
-    Sched.dwVersion = SCHANNEL_CRED_VERSION;
-    Sched.cCreds = 1;
-    Sched.paCred = List;
-    Sched.grbitEnabledProtocols = C->ServerProtocols;
-    Sched.cSupportedAlgs = C->Alg ? 1 : 0;
-    Sched.palgSupportedAlgs = C->Alg ? Algs : NULL;
-    A = AcquireCredentialsHandleW(NULL, (SEC_WCHAR *)UNISP_NAME_W, SECPKG_CRED_INBOUND, NULL, &Sched, NULL, NULL, &Sc, &Ts);
-    ok(A == SEC_E_OK, "%s: server credentials 0x%08lx\n", C->Name, A);
-    if (A != SEC_E_OK)
+    S = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    setsockopt(S, SOL_SOCKET, SO_RCVTIMEO, (const char *)&Timeout, sizeof(Timeout));
+    ZeroMemory(&Addr, sizeof(Addr));
+    Addr.sin_family = AF_INET;
+    Addr.sin_port = htons((u_short)Port);
+    Addr.sin_addr.s_addr = inet_addr(Host);
+    if (connect(S, (struct sockaddr *)&Addr, sizeof(Addr)))
+    {
+        ok(0, "%s: connect to %s:%d failed (%d)\n", C->Name, Host, Port, WSAGetLastError());
+        closesocket(S);
+        free(In);
         return;
+    }
+
+    Algs[0] = C->Alg;
     ZeroMemory(&Cl, sizeof(Cl));
     Cl.dwVersion = SCHANNEL_CRED_VERSION;
     Cl.dwFlags = SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS;
@@ -196,32 +175,65 @@ static void Run(const CASE *C)
     ok(A == SEC_E_OK, "%s: client credentials 0x%08lx\n", C->Name, A);
     if (A != SEC_E_OK)
     {
-        FreeCredentialsHandle(&Sc);
+        closesocket(S);
+        free(In);
         return;
     }
 
-    Cs = Step(FALSE, &Cc, &Cx, &Ch, &Tmp, &C2S);
-    Ss = SEC_I_CONTINUE_NEEDED;
-    for (i = 0; i < 30 && !(Cs == SEC_E_OK && Ss == SEC_E_OK); i++)
+    Cs = SEC_I_CONTINUE_NEEDED;
+    for (Rounds = 0; Rounds < 30 && (Cs == SEC_I_CONTINUE_NEEDED || Cs == SEC_E_INCOMPLETE_MESSAGE); Rounds++)
     {
-        if (C2S.Size && Ss != SEC_E_OK)
+        SecBuffer Ib[2], Ob[1];
+        SecBufferDesc Id, Od;
+        ULONG Attr;
+
+        Ib[0].BufferType = SECBUFFER_TOKEN; Ib[0].pvBuffer = In; Ib[0].cbBuffer = InSize;
+        Ib[1].BufferType = SECBUFFER_EMPTY; Ib[1].pvBuffer = NULL; Ib[1].cbBuffer = 0;
+        Id.ulVersion = SECBUFFER_VERSION; Id.cBuffers = 2; Id.pBuffers = Ib;
+        Ob[0].BufferType = SECBUFFER_TOKEN; Ob[0].pvBuffer = NULL; Ob[0].cbBuffer = 0;
+        Od.ulVersion = SECBUFFER_VERSION; Od.cBuffers = 1; Od.pBuffers = &Ob[0];
+        if (Cs == SEC_E_INCOMPLETE_MESSAGE)
         {
-            Put(&Tmp, C2S.Data, C2S.Size); C2S.Size = 0;
-            Ss = Step(TRUE, &Sc, &Sx, &Sh, &Tmp, &S2C);
-            if (Ss != SEC_I_CONTINUE_NEEDED && Ss != SEC_E_OK) break;
-            Tmp.Size = 0;
+            int N = recv(S, (char *)In + InSize, 65536 - InSize, 0);
+            if (N <= 0) break;
+            InSize += N;
+            Ib[0].cbBuffer = InSize;
         }
-        if (S2C.Size && Cs != SEC_E_OK)
+        Cs = InitializeSecurityContextW(&Cc, Have ? &Cx : NULL, (SEC_WCHAR *)L"kb8sch.test",
+                                        ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT | ISC_REQ_CONFIDENTIALITY |
+                                        ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_STREAM | ISC_REQ_EXTENDED_ERROR, 0, 0,
+                                        InSize ? &Id : NULL, 0, &Cx, &Od, &Attr, &Ts);
+        Have = TRUE;
+        if (Ob[0].cbBuffer && Ob[0].pvBuffer)
         {
-            Put(&Tmp, S2C.Data, S2C.Size); S2C.Size = 0;
-            Cs = Step(FALSE, &Cc, &Cx, &Ch, &Tmp, &C2S);
-            if (Cs != SEC_I_CONTINUE_NEEDED && Cs != SEC_E_OK) break;
-            Tmp.Size = 0;
+            SendAll(S, Ob[0].pvBuffer, Ob[0].cbBuffer);
+            FreeContextBuffer(Ob[0].pvBuffer);
+        }
+        if (Cs == SEC_E_INCOMPLETE_MESSAGE)
+            continue;
+        if (InSize)
+        {
+            if (Ib[1].BufferType == SECBUFFER_EXTRA && Ib[1].cbBuffer)
+            {
+                memmove(In, In + InSize - Ib[1].cbBuffer, Ib[1].cbBuffer);
+                ExtraSize = InSize = Ib[1].cbBuffer;
+            }
+            else
+                ExtraSize = InSize = 0;
+        }
+        if (Cs == SEC_I_CONTINUE_NEEDED && !InSize)
+        {
+            int N = recv(S, (char *)In, 65536, 0);
+            if (N <= 0) break;
+            InSize = N;
+            ExtraSize = 0;
         }
     }
-    ok(Cs == SEC_E_OK && Ss == SEC_E_OK, "%s: handshake client 0x%08lx server 0x%08lx\n", C->Name, Cs, Ss);
-    if (Cs == SEC_E_OK && Ss == SEC_E_OK)
+    ok(Cs == SEC_E_OK, "%s: handshake 0x%08lx\n", C->Name, Cs);
+    if (Cs == SEC_E_OK)
     {
+        BOOL Aead = FALSE, Cbc = FALSE;
+
         ZeroMemory(&Ci, sizeof(Ci));
         A = QueryContextAttributesW(&Cx, SECPKG_ATTR_CIPHER_INFO_X, &Ci);
         ok(A == SEC_E_OK, "%s: CIPHER_INFO returned 0x%08lx\n", C->Name, A);
@@ -229,13 +241,11 @@ static void Run(const CASE *C)
         ok(QueryContextAttributesW(&Cx, SECPKG_ATTR_CONNECTION_INFO, &Info) == SEC_E_OK, "%s: CONNECTION_INFO failed\n", C->Name);
         if (A == SEC_E_OK)
         {
-            BOOL Aead = FALSE, Cbc = FALSE;
-            DWORD KeyBits = 0;
-
-            trace("%s: suite 0x%lx %ls cipher %ls/%lu hash '%ls'/%lu exch '%ls' %lu..%lu cert '%ls' type %lu; connection hash %u/%lu exch %u/%lu\n",
-                  C->Name, Ci.dwCipherSuite, Ci.szCipherSuite, Ci.szCipher, Ci.dwCipherLen, Ci.szHash, Ci.dwHashLen,
-                  Ci.szExchange, Ci.dwMinExchangeLen, Ci.dwMaxExchangeLen, Ci.szCertificate, Ci.dwKeyType,
-                  Info.aiHash, Info.dwHashStrength, Info.aiExch, Info.dwExchStrength);
+            trace("%s: proto 0x%lx suite 0x%lx %ls cipher %ls/%lu/%lu hash '%ls'/%lu exch '%ls' %lu..%lu cert '%ls' type %lu; connection proto 0x%lx cipher 0x%x/%lu hash 0x%x/%lu exch 0x%x/%lu\n",
+                  C->Name, Ci.dwProtocol, Ci.dwCipherSuite, Ci.szCipherSuite, Ci.szCipher, Ci.dwCipherLen, Ci.dwCipherBlockLen,
+                  Ci.szHash, Ci.dwHashLen, Ci.szExchange, Ci.dwMinExchangeLen, Ci.dwMaxExchangeLen, Ci.szCertificate,
+                  Ci.dwKeyType, Info.dwProtocol, Info.aiCipher, Info.dwCipherStrength, Info.aiHash, Info.dwHashStrength,
+                  Info.aiExch, Info.dwExchStrength);
             ok(Ci.dwVersion == 1, "%s: dwVersion %lu\n", C->Name, Ci.dwVersion);
             ok(Ci.dwProtocol >= 0x301 && Ci.dwProtocol <= 0x303, "%s: dwProtocol 0x%lx\n", C->Name, Ci.dwProtocol);
             ok(Ci.dwBaseCipherSuite == Ci.dwCipherSuite, "%s: base suite 0x%lx, suite 0x%lx\n", C->Name, Ci.dwBaseCipherSuite, Ci.dwCipherSuite);
@@ -243,7 +253,6 @@ static void Run(const CASE *C)
             ok(wcschr(Ci.szCipherSuite, L'-') == NULL, "%s: suite name has hyphens '%ls'\n", C->Name, Ci.szCipherSuite);
             ok(!wcscmp(Ci.szCertificate, L"RSA"), "%s: certificate '%ls'\n", C->Name, Ci.szCertificate);
 
-            /* known suites: the rows of Windows Server 2022 */
             switch (Ci.dwCipherSuite)
             {
                 case 0xc030: case 0xc02f: case 0x9d: case 0x9c: case 0x9f: case 0x9e: Aead = TRUE; break;
@@ -266,18 +275,19 @@ static void Run(const CASE *C)
                     ok(Ci.dwCipherLen == 168 && Info.dwCipherStrength == 168, "%s: 3DES key %lu/%lu\n", C->Name, Ci.dwCipherLen, Info.dwCipherStrength);
                     ok(Ci.dwCipherBlockLen == 8, "%s: 3DES block %lu\n", C->Name, Ci.dwCipherBlockLen);
                     Header = 5 + (Ci.dwProtocol >= 0x302 ? 8 : 0); Trailer = 20 + 8;
+                    /* TLS 1.0: two records (the first byte alone, a countermeasure that Windows does not take: 5 + 28 there) */
+                    if (Ci.dwProtocol == 0x301) Trailer = 2 * (20 + 8) + 5;
                 }
                 else
                 {
                     Header = 5 + (Ci.dwProtocol >= 0x302 ? 16 : 0); Trailer = 20 + 16;
+                    /* TLS 1.0: two records (the first byte alone, a countermeasure that Windows does not take: 5 + 36 there) */
+                    if (Ci.dwProtocol == 0x301) Trailer = 2 * (20 + 16) + 5;
                 }
             }
-            KeyBits = 0;
             if (!wcscmp(Ci.szExchange, L"ECDH"))
             {
                 ok(Ci.dwMinExchangeLen == 0 && Ci.dwMaxExchangeLen == 65536, "%s: ECDH range %lu..%lu\n", C->Name, Ci.dwMinExchangeLen, Ci.dwMaxExchangeLen);
-                ok(Info.dwExchStrength == 255 || Info.dwExchStrength == 256 || Info.dwExchStrength == 384 || Info.dwExchStrength == 521,
-                   "%s: ECDH exchange strength %lu\n", C->Name, Info.dwExchStrength);
                 ok((Info.dwExchStrength == 256 && Ci.dwKeyType == 23) || (Info.dwExchStrength == 384 && Ci.dwKeyType == 24) ||
                    (Info.dwExchStrength == 521 && Ci.dwKeyType == 25) || (Info.dwExchStrength == 255 && Ci.dwKeyType == 29),
                    "%s: ECDH key type %lu for strength %lu\n", C->Name, Ci.dwKeyType, Info.dwExchStrength);
@@ -285,7 +295,7 @@ static void Run(const CASE *C)
             else if (!wcscmp(Ci.szExchange, L"RSA"))
             {
                 ok(Ci.dwMinExchangeLen == 512 && Ci.dwMaxExchangeLen == 16384, "%s: RSA range %lu..%lu\n", C->Name, Ci.dwMinExchangeLen, Ci.dwMaxExchangeLen);
-                ok(Info.dwExchStrength == 2048, "%s: RSA exchange strength %lu\n", C->Name, Info.dwExchStrength);
+                ok(Info.dwExchStrength == 2048 || Info.dwExchStrength == 4096 || Info.dwExchStrength == 3072, "%s: RSA exchange strength %lu\n", C->Name, Info.dwExchStrength);
                 ok(Ci.dwKeyType == 0, "%s: RSA key type %lu\n", C->Name, Ci.dwKeyType);
             }
             else if (!wcscmp(Ci.szExchange, L"DH"))
@@ -293,39 +303,49 @@ static void Run(const CASE *C)
                 ok(Ci.dwMinExchangeLen == 1024 && Ci.dwMaxExchangeLen == 1024, "%s: DH range %lu..%lu\n", C->Name, Ci.dwMinExchangeLen, Ci.dwMaxExchangeLen);
                 ok(Info.dwExchStrength >= 1024, "%s: DH exchange strength %lu\n", C->Name, Info.dwExchStrength);
             }
-            (void)KeyBits;
             if (Header)
-            {
-                CheckRecord(C->Name, &Cx, &Sx, Header, Trailer);
-                CheckRecord(C->Name, &Sx, &Cx, Header, Trailer);
-            }
+                CheckRecord(C->Name, S, &Cx, Header, Trailer, In, ExtraSize);
         }
     }
-    if (Ch) DeleteSecurityContext(&Cx);
-    if (Sh) DeleteSecurityContext(&Sx);
+    if (Have) DeleteSecurityContext(&Cx);
     FreeCredentialsHandle(&Cc);
-    FreeCredentialsHandle(&Sc);
-    free(C2S.Data); free(S2C.Data); free(Tmp.Data);
+    closesocket(S);
+    free(In);
 }
 
 START_TEST(SchannelAttributes)
 {
-    HCRYPTPROV Prov;
+    /* Port i of SCHANNEL_ATTR_PORTS offers only Cases[i] (openssl s_server -www -no_tls1_3 -cipher / -tls1_1 ...):
+       0: TLS 1.2 ECDHE-RSA-AES256-GCM-SHA384, 1: TLS 1.1 ECDHE-RSA-AES256-SHA, 2: TLS 1.0 AES256-SHA,
+       3: TLS 1.2 AES256-GCM-SHA384 (RSA), 4: TLS 1.2 DHE-RSA-AES256-GCM-SHA384, 5: TLS 1.2 DES-CBC3-SHA */
     static const CASE Cases[] =
     {
-        { "TLS 1.2", SP_PROT_TLS1_2_CLIENT, SP_PROT_TLS1_2_SERVER, 0 },
-        { "TLS 1.1", SP_PROT_TLS1_1_CLIENT, SP_PROT_TLS1_1_SERVER, 0 },
-        { "TLS 1.0", SP_PROT_TLS1_0_CLIENT, SP_PROT_TLS1_0_SERVER, 0 },
-        { "TLS 1.2, RSA key exchange", SP_PROT_TLS1_2_CLIENT, SP_PROT_TLS1_2_SERVER, CALG_RSA_KEYX },
-        { "TLS 1.2, DHE", SP_PROT_TLS1_2_CLIENT, SP_PROT_TLS1_2_SERVER, CALG_DH_EPHEM },
-        { "TLS 1.2, 3DES", SP_PROT_TLS1_2_CLIENT, SP_PROT_TLS1_2_SERVER, CALG_3DES },
+        { "TLS 1.2 ECDHE GCM", SP_PROT_TLS1_2_CLIENT, 0 },
+        { "TLS 1.1 ECDHE CBC", SP_PROT_TLS1_1_CLIENT, 0 },
+        { "TLS 1.0 RSA CBC", SP_PROT_TLS1_0_CLIENT, 0 },
+        { "TLS 1.2 RSA GCM", SP_PROT_TLS1_2_CLIENT, 0 },
+        { "TLS 1.2 DHE GCM", SP_PROT_TLS1_2_CLIENT, 0 },
+        { "TLS 1.2 3DES", SP_PROT_TLS1_2_CLIENT, 0 },
     };
+    char Host[64], Ports[128], *P;
+    WSADATA Wsa;
     int i;
 
-    if (!MakeCert())
+    if (!GetEnvironmentVariableA("SCHANNEL_ATTR_HOST", Host, sizeof(Host)) ||
+        !GetEnvironmentVariableA("SCHANNEL_ATTR_PORTS", Ports, sizeof(Ports)))
+    {
+        skip("SCHANNEL_ATTR_HOST / SCHANNEL_ATTR_PORTS name no TLS servers\n");
         return;
-    for (i = 0; i < (int)ARRAYSIZE(Cases); i++)
-        Run(&Cases[i]);
-    CertFreeCertificateContext(Cert);
-    CryptAcquireContextW(&Prov, L"kb8sch", MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, CRYPT_DELETEKEYSET);
+    }
+    WSAStartup(MAKEWORD(2, 2), &Wsa);
+    P = Ports;
+    for (i = 0; i < (int)ARRAYSIZE(Cases) && *P; i++)
+    {
+        int Port = atoi(P);
+        P = strchr(P, ',');
+        Run(&Cases[i], Host, Port);
+        if (!P) break;
+        P++;
+    }
+    WSACleanup();
 }
