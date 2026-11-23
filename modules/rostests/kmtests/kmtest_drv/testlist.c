@@ -118,6 +118,7 @@ KMT_TESTFUNC Test_MmContiguousStandby;
 KMT_TESTFUNC Test_MmFaultFileHeld;
 KMT_TESTFUNC Test_MmOomRetry;
 KMT_TESTFUNC Test_MmSection;
+KMT_TESTFUNC Test_MmSectionNonFile;
 KMT_TESTFUNC Test_MmSpecialPool;
 KMT_TESTFUNC Test_MmSpecialPoolOverrun;
 KMT_TESTFUNC Test_MmSpecialPoolUnderrun;
@@ -304,6 +305,7 @@ const KMT_TEST TestList[] =
     { "MmFaultFileHeld",                    Test_MmFaultFileHeld },
     { "MmOomRetry",                         Test_MmOomRetry },
     { "MmSection",                          Test_MmSection },
+    { "MmSectionNonFile",                   Test_MmSectionNonFile },
     { "MmSpecialPool",                      Test_MmSpecialPool },
     { "-MmSpecialPoolOverrun",              Test_MmSpecialPoolOverrun },
     { "-MmSpecialPoolUnderrun",             Test_MmSpecialPoolUnderrun },
