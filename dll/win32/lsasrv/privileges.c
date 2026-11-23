@@ -153,7 +153,7 @@ LsarpLookupPrivilegeDisplayName(PRPC_UNICODE_STRING Name,
         {
             TRACE("Index: %u\n", Index);
             nLength = LsapGetResourceStringLengthEx(hInstance,
-                                                    IDS_CREATE_TOKEN_PRIVILEGE + Index,
+                                                    WellKnownPrivileges[Index].DisplayNameId,
                                                     ClientLanguage);
             if (nLength != 0)
             {
@@ -172,7 +172,7 @@ LsarpLookupPrivilegeDisplayName(PRPC_UNICODE_STRING Name,
                 }
 
                 LsapLoadStringEx(hInstance,
-                                 IDS_CREATE_TOKEN_PRIVILEGE + Index,
+                                 WellKnownPrivileges[Index].DisplayNameId,
                                  ClientLanguage,
                                  DisplayNameBuffer->Buffer,
                                  nLength);
@@ -183,7 +183,7 @@ LsarpLookupPrivilegeDisplayName(PRPC_UNICODE_STRING Name,
             else
             {
                 nLength = LsapGetResourceStringLengthEx(hInstance,
-                                                        IDS_CREATE_TOKEN_PRIVILEGE + Index,
+                                                        WellKnownPrivileges[Index].DisplayNameId,
                                                         ClientSystemDefaultLanguage);
                 if (nLength != 0)
                 {
@@ -202,7 +202,7 @@ LsarpLookupPrivilegeDisplayName(PRPC_UNICODE_STRING Name,
                     }
 
                     LsapLoadStringEx(hInstance,
-                                     IDS_CREATE_TOKEN_PRIVILEGE + Index,
+                                     WellKnownPrivileges[Index].DisplayNameId,
                                      ClientSystemDefaultLanguage,
                                      DisplayNameBuffer->Buffer,
                                      nLength);
@@ -215,7 +215,7 @@ LsarpLookupPrivilegeDisplayName(PRPC_UNICODE_STRING Name,
                     return STATUS_INVALID_PARAMETER;
 #if 0
                     nLength = LsapGetResourceStringLengthEx(hInstance,
-                                                            IDS_CREATE_TOKEN_PRIVILEGE + Index,
+                                                            WellKnownPrivileges[Index].DisplayNameId,
                                                             0x409);
 #endif
                 }
