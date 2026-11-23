@@ -152,9 +152,9 @@ SepDaclHasOwnerRightsAce(
 /**
  * @brief
  * Tells whether an ACE of a DACL walk lies within the ACL: its header, its
- * size (at least a header) and, for the ACE types the access check
- * evaluates (allow and deny, plain and object), every field the check reads
- * (mask, flags, object types, the whole SID).
+ * size (at least a header, not past the ACL) and, for the ACE types the access
+ * check evaluates (allow and deny, plain and object), every field the check
+ * reads (mask, flags, object types, the whole SID) within that size.
  *
  * @param[in] Ace
  * The ACE the walk is at; it starts inside the ACL.
@@ -188,6 +188,14 @@ SepAceWithinAcl(
 
     if (Left < sizeof(ACE_HEADER) || Ace->AceSize < sizeof(ACE_HEADER) || Left < Ace->AceSize)
         return FALSE;
+
+    /*
+     * The fields the check reads must lie within the ACE itself (as RtlValidAcl
+     * and the label walk require), not only within the ACL: the bytes behind
+     * AceSize belong to the next ACE, and an ACE does not mean something else
+     * depending on what follows it
+     */
+    Left = Ace->AceSize;
 
     switch (Ace->AceType)
     {
