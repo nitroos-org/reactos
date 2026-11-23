@@ -55,6 +55,31 @@
 
 #include <rosdhcp.h>
 
+/* advapi32: RtlGenRandom (the system random number generator, ksecdd.sys) */
+BOOLEAN WINAPI SystemFunction036(PVOID Buffer, ULONG Length);
+
+/*
+ * A transaction id for a DHCP exchange. The reply is accepted when it carries this number (and the
+ * hardware address), so it must not be guessable: the system random number generator, not the tick count
+ * (two machines that start in the same way would also send the same ids). When the generator refuses,
+ * the old source (a generator seeded with the tick count, here also with the performance counter)
+ * is used, so that the exchange still starts.
+ */
+static ULONG
+DhcpRandomXid(VOID)
+{
+	ULONG Xid;
+	LARGE_INTEGER Counter;
+
+	if (SystemFunction036(&Xid, sizeof(Xid)))
+		return Xid;
+
+	Counter.QuadPart = 0;
+	QueryPerformanceCounter(&Counter);
+	Xid = (ULONG)GetTickCount() ^ Counter.LowPart ^ GetCurrentProcessId();
+	return RtlRandom(&Xid);
+}
+
 #define	PERIOD 0x2e
 #define	hyphenchar(c) ((c) == 0x2d)
 #define	bslashchar(c) ((c) == 0x5c)
@@ -179,7 +204,6 @@ void
 state_reboot(void *ipp)
 {
 	struct interface_info *ip = ipp;
-	ULONG foo = (ULONG) GetTickCount();
 
 	/* If we don't remember an active lease, go straight to INIT. */
 	if (!ip->client->active || ip->client->active->is_bootp) {
@@ -193,7 +217,7 @@ state_reboot(void *ipp)
 	/* make_request doesn't initialize xid because it normally comes
 	   from the DHCPDISCOVER, but we haven't sent a DHCPDISCOVER,
 	   so pick an xid now. */
-	ip->client->xid = RtlRandom(&foo);
+	ip->client->xid = DhcpRandomXid();
 
 	/* Make a DHCPREQUEST packet, and set appropriate per-interface
 	   flags. */
@@ -238,7 +262,6 @@ void
 state_release(void *ipp)
 {
 	struct interface_info *ip = ipp;
-	ULONG foo = (ULONG) GetTickCount();
 
 	ASSERT_STATE(state, S_BOUND);
 
@@ -249,7 +272,7 @@ state_release(void *ipp)
 	/* make_request doesn't initialize xid because it normally comes
 	   from the DHCPDISCOVER, but we haven't sent a DHCPDISCOVER,
 	   so pick an xid now. */
-	ip->client->xid = RtlRandom(&foo);
+	ip->client->xid = DhcpRandomXid();
 	send_release(ip);
 
 	ip->client->state = S_RELEASED;
@@ -1861,7 +1884,6 @@ make_discover(struct interface_info *ip, struct client_lease *lease)
 	struct tree_cache *options[256];
 	struct tree_cache option_elements[256];
 	int i;
-	ULONG foo = (ULONG) GetTickCount();
 
 	memset(option_elements, 0, sizeof(option_elements));
 	memset(options, 0, sizeof(options));
@@ -1920,7 +1942,7 @@ make_discover(struct interface_info *ip, struct client_lease *lease)
 	ip->client->packet.htype = ip->hw_address.htype;
 	ip->client->packet.hlen = ip->hw_address.hlen;
 	ip->client->packet.hops = 0;
-	ip->client->packet.xid = RtlRandom(&foo);
+	ip->client->packet.xid = DhcpRandomXid();
 	ip->client->packet.secs = 0; /* filled in by send_discover. */
 	ip->client->packet.flags = 0;
 
