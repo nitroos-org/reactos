@@ -117,7 +117,7 @@ static VOID RunRows(PCSTR Caller, BOOL Elevated)
         }
 
         /* A name that does not exist: not found for the elevated administrator, denied for the others; a store creates it */
-        wsprintfW(Fresh, L"LpdcNone%lu", h);
+        StringCchPrintfW(Fresh, RTL_NUMBER_OF(Fresh), L"LpdcNone%lu", h);
         St = RetrieveAs(Policy, Fresh);
         ok(St == (Elevated ? STATUS_OBJECT_NAME_NOT_FOUND : STATUS_ACCESS_DENIED),
            "%s, handle %s: retrieve of a missing name 0x%08lx\n", Caller, Handles[h].Name, St);
@@ -213,7 +213,7 @@ START_TEST(LsaPrivateDataCaller)
 
     /* 3: a standard user */
     StdToken = NULL;
-    if (LogonUserW(UserName, L".", Password, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &StdToken))
+    if (LogonUserW((LPWSTR)UserName, (LPWSTR)L".", Password, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &StdToken))
     {
         if (ImpersonateLoggedOnUser(StdToken))
         {
