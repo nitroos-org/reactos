@@ -1159,6 +1159,15 @@ ExpInitializeExecutive(IN ULONG Cpu,
     CmGetSystemControlValues(LoaderBlock->RegistryBase, CmControlVector);
 
     /*
+     * NitroSessions 3: the console belongs to session 1, as on Windows (WTSGetActiveConsoleSessionId and
+     * KUSER_SHARED_DATA.ActiveConsoleId report 1 there). Session 0 keeps the services and system processes,
+     * and its win32k, started before any other, then draws into memory. Set before any win32k loads; every
+     * other value leaves the console with session 0, as before.
+     */
+    if (MmNitroSessions == 3)
+        SharedUserData->ActiveConsoleId = 1;
+
+    /*
      * NitroPagerDebug (fault injection, test commands) is a test value: a free build honours it only
      * when booted with the /NITROPAGERDEBUG option, so that a value planted in the SYSTEM hive (writable
      * by any user until registry ACLs are enforced) cannot make every paging write fail or force a
