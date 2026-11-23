@@ -20,6 +20,7 @@
 #include <userenv.h>
 #include <ndk/setypes.h>
 #include <ndk/sefuncs.h>
+#include <ndk/obfuncs.h>
 
 /* GLOBALS ******************************************************************/
 
@@ -504,6 +505,152 @@ FreeWlxMprInfo(
     }
 }
 
+/*
+ * NitroSessions: the named-object directories of a session other than 0 (\Sessions\<n>\BaseNamedObjects and
+ * \Sessions\<n>\AppContainerNamedObjects) give the user who is logged on in the session the entries Windows
+ * gives them (measured on Windows 10 22H2, session 1): the user full access, the logon SID query, traverse,
+ * create object and subdirectory, read control, and full access inherited by what is created in them.
+ * Without them the user can create no named object in its own session. They are given at logon and taken
+ * away at logoff (the next logon in the session is another logon). Session 0 is never changed.
+ */
+static
+VOID
+WlSetSessionNamespaceAccess(
+    _In_ HANDLE UserToken,
+    _In_ BOOL Grant)
+{
+    static const PCWSTR Directories[] = { L"BaseNamedObjects", L"AppContainerNamedObjects" };
+    const ACCESS_MASK LogonAccess = DIRECTORY_QUERY | DIRECTORY_TRAVERSE | DIRECTORY_CREATE_OBJECT |
+                                    DIRECTORY_CREATE_SUBDIRECTORY | READ_CONTROL;
+    UCHAR UserBuffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    PTOKEN_USER User = (PTOKEN_USER)UserBuffer;
+    PTOKEN_GROUPS Groups = NULL;
+    PSID UserSid, LogonSid = NULL;
+    ULONG Length, i, d;
+    NTSTATUS Status;
+
+    if (WlSessionId == 0 || !UserToken)
+        return;
+
+    Status = NtQueryInformationToken(UserToken, TokenUser, User, sizeof(UserBuffer), &Length);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("WL: no user of the logon token, Status 0x%08lx\n", Status);
+        return;
+    }
+    UserSid = User->User.Sid;
+
+    Status = NtQueryInformationToken(UserToken, TokenGroups, NULL, 0, &Length);
+    if (Status == STATUS_BUFFER_TOO_SMALL)
+    {
+        Groups = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+        if (Groups)
+            Status = NtQueryInformationToken(UserToken, TokenGroups, Groups, Length, &Length);
+        else
+            Status = STATUS_NO_MEMORY;
+    }
+    if (NT_SUCCESS(Status) && Groups)
+    {
+        for (i = 0; i < Groups->GroupCount; i++)
+        {
+            if ((Groups->Groups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
+            {
+                LogonSid = Groups->Groups[i].Sid;
+                break;
+            }
+        }
+    }
+    if (!LogonSid)
+    {
+        ERR("WL: no logon SID in the logon token, Status 0x%08lx\n", Status);
+        goto Quit;
+    }
+
+    for (d = 0; d < RTL_NUMBER_OF(Directories); d++)
+    {
+        WCHAR Path[64];
+        UNICODE_STRING Name;
+        OBJECT_ATTRIBUTES ObjectAttributes;
+        HANDLE Directory;
+        PSECURITY_DESCRIPTOR OldSd = NULL;
+        SECURITY_DESCRIPTOR NewSd;
+        PACL OldDacl = NULL, NewDacl = NULL;
+        BOOLEAN Present = FALSE, Defaulted;
+        PACE_HEADER Ace;
+        ULONG AclLength;
+
+        StringCchPrintfW(Path, RTL_NUMBER_OF(Path), L"\\Sessions\\%lu\\%s", WlSessionId, Directories[d]);
+        RtlInitUnicodeString(&Name, Path);
+        InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        Status = NtOpenDirectoryObject(&Directory, READ_CONTROL | WRITE_DAC, &ObjectAttributes);
+        if (!NT_SUCCESS(Status))
+        {
+            ERR("WL: cannot open %S, Status 0x%08lx\n", Path, Status);
+            continue;
+        }
+
+        Status = NtQuerySecurityObject(Directory, DACL_SECURITY_INFORMATION, NULL, 0, &Length);
+        if (Status == STATUS_BUFFER_TOO_SMALL)
+        {
+            OldSd = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+            Status = OldSd ? NtQuerySecurityObject(Directory, DACL_SECURITY_INFORMATION, OldSd, Length, &Length)
+                           : STATUS_NO_MEMORY;
+        }
+        if (NT_SUCCESS(Status))
+            Status = RtlGetDaclSecurityDescriptor(OldSd, &Present, &OldDacl, &Defaulted);
+        if (!NT_SUCCESS(Status) || !Present || !OldDacl)
+        {
+            ERR("WL: no DACL on %S, Status 0x%08lx\n", Path, Status);
+            goto Next;
+        }
+
+        /* The old entries, without any of this logon's, then this logon's when granting */
+        AclLength = OldDacl->AclSize + 3 * (sizeof(ACCESS_ALLOWED_ACE) + SECURITY_MAX_SID_SIZE);
+        NewDacl = RtlAllocateHeap(RtlGetProcessHeap(), 0, AclLength);
+        if (!NewDacl)
+            goto Next;
+        Status = RtlCreateAcl(NewDacl, AclLength, ACL_REVISION);
+        for (i = 0; NT_SUCCESS(Status) && i < OldDacl->AceCount; i++)
+        {
+            if (!NT_SUCCESS(RtlGetAce(OldDacl, i, (PVOID*)&Ace)))
+                continue;
+            if (Ace->AceType == ACCESS_ALLOWED_ACE_TYPE)
+            {
+                PSID AceSid = (PSID)&((PACCESS_ALLOWED_ACE)Ace)->SidStart;
+                if (RtlEqualSid(AceSid, UserSid) || RtlEqualSid(AceSid, LogonSid))
+                    continue;
+            }
+            Status = RtlAddAce(NewDacl, ACL_REVISION, MAXULONG, Ace, Ace->AceSize);
+        }
+        if (NT_SUCCESS(Status) && Grant)
+        {
+            Status = RtlAddAccessAllowedAceEx(NewDacl, ACL_REVISION, 0, DIRECTORY_ALL_ACCESS, UserSid);
+            if (NT_SUCCESS(Status))
+                Status = RtlAddAccessAllowedAceEx(NewDacl, ACL_REVISION,
+                                                  OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+                                                  GENERIC_ALL, LogonSid);
+            if (NT_SUCCESS(Status))
+                Status = RtlAddAccessAllowedAceEx(NewDacl, ACL_REVISION, 0, LogonAccess, LogonSid);
+        }
+        if (NT_SUCCESS(Status))
+            Status = RtlCreateSecurityDescriptor(&NewSd, SECURITY_DESCRIPTOR_REVISION);
+        if (NT_SUCCESS(Status))
+            Status = RtlSetDaclSecurityDescriptor(&NewSd, TRUE, NewDacl, FALSE);
+        if (NT_SUCCESS(Status))
+            Status = NtSetSecurityObject(Directory, DACL_SECURITY_INFORMATION, &NewSd);
+        if (!NT_SUCCESS(Status))
+            ERR("WL: cannot set the logon's access on %S, Status 0x%08lx\n", Path, Status);
+
+Next:
+        if (NewDacl) RtlFreeHeap(RtlGetProcessHeap(), 0, NewDacl);
+        if (OldSd) RtlFreeHeap(RtlGetProcessHeap(), 0, OldSd);
+        NtClose(Directory);
+    }
+
+Quit:
+    if (Groups) RtlFreeHeap(RtlGetProcessHeap(), 0, Groups);
+}
+
 static
 BOOL
 HandleLogon(
@@ -538,6 +685,9 @@ HandleLogon(
             ERR("WL: cannot give the logon token session %lu, Status 0x%08lx\n", WlSessionId, Status);
             goto cleanup;
         }
+
+        /* The user's named objects in this session */
+        WlSetSessionNamespaceAccess(Session->UserToken, TRUE);
     }
 
     /* Loading personal settings */
@@ -687,6 +837,9 @@ cleanup:
         // (revert what security.c!AllowAccessOnSession() does).
         SetWindowStationUser(Session->InteractiveWindowStation,
                              &LuidNone, NULL, 0);
+
+        /* The session's named objects are no longer this logon's */
+        WlSetSessionNamespaceAccess(Session->UserToken, FALSE);
 
         /* Switch back to default SYSTEM user */
         CloseHandle(Session->UserToken);
@@ -1066,6 +1219,9 @@ HandleLogoff(
 
     // TODO: Remove session access to window station
     // (revert what security.c!AllowAccessOnSession() does).
+
+    /* The session's named objects are no longer this logon's */
+    WlSetSessionNamespaceAccess(Session->UserToken, FALSE);
 
     /* Switch back to default SYSTEM user */
     CloseHandle(Session->UserToken);
