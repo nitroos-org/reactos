@@ -7,6 +7,7 @@ list(APPEND SOURCE
     AccessCheckMandatory.c
     AccessCheckNoAccess.c
     AccessCheckGenericAce.c
+    AccessCheckMalformedAcl.c
     AccessCheckObjectTypeList.c
     AddMandatoryAce.c
     RegSaveKeyExFormat.c

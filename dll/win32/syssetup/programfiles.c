@@ -7,6 +7,10 @@
 #define NDEBUG
 #include <debug.h>
 
+/* userenv (private): creates the folder with the DACL of Windows' Program Files; what is installed in it while setup
+ * runs inherits that, not what the root of the volume passes on (Authenticated Users: Modify) */
+BOOL WINAPI CreateProgramFilesDirectory(PCWSTR pszPath);
+
 #if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
 /* Windows 10 x64 keeps the same six values in both registry views: the
  * ProgramFilesDir / CommonFilesDir pair of the view's own bitness, the (x86)
@@ -73,7 +77,7 @@ InitializeWow64ProgramFiles(PCWSTR Program, PCWSTR Common)
     Result = SetProgramFilesValues(Key, Program32, Common32, Program32, Common32, Program, Common);
     RegCloseKey(Key);
     if (!Result) return FALSE;
-    if (!CreateDirectoryW(Program32, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return FALSE;
+    if (!CreateProgramFilesDirectory(Program32) && GetLastError() != ERROR_ALREADY_EXISTS) return FALSE;
     if (!CreateDirectoryW(Common32, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return FALSE;
     return TRUE;
 }
@@ -167,9 +171,8 @@ InitializeProgramFilesDir(VOID)
 
     RegCloseKey(hKey);
 
-    /* Create directory */
-    // FIXME: Security!
-    if (!CreateDirectoryW(szProgramFilesDirPath, NULL))
+    /* Create directory, with the DACL of Program Files */
+    if (!CreateProgramFilesDirectory(szProgramFilesDirPath))
     {
         if (GetLastError() != ERROR_ALREADY_EXISTS)
         {
@@ -178,8 +181,7 @@ InitializeProgramFilesDir(VOID)
         }
     }
 
-    /* Create directory */
-    // FIXME: Security!
+    /* Create directory (it inherits the DACL of Program Files) */
     if (!CreateDirectoryW(szCommonFilesDirPath, NULL))
     {
         if (GetLastError() != ERROR_ALREADY_EXISTS)

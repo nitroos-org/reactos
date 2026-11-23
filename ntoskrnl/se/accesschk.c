@@ -582,7 +582,8 @@ SepAnalyzeAcesForObjectTypeList(
     _Inout_ POBJECT_TYPE_LIST_INTERNAL ObjectTypeList,
     _In_ ULONG ObjectTypeListLength)
 {
-    NTSTATUS Status;
+    SEP_ACE_CURSOR Cursor;
+    BOOLEAN Found;
     PACE CurrentAce;
     ULONG AceIndex;
     ULONG ObjectTypeIndex;
@@ -593,10 +594,14 @@ SepAnalyzeAcesForObjectTypeList(
 
     PAGED_CODE();
 
+    /* One pass (RtlGetAce per index starts over from the first ACE), see SepAnalyzeAcesFromDacl */
+    SepInitAceCursor(&Cursor, Dacl);
     for (AceIndex = 0; AceIndex < Dacl->AceCount; AceIndex++)
     {
-        Status = RtlGetAce(Dacl, AceIndex, (PVOID*)&CurrentAce);
-        ASSERT(NT_SUCCESS(Status));
+        Found = SepNextAce(&Cursor, (PVOID*)&CurrentAce);
+        ASSERT(Found);
+        if (!Found)
+            break;
 
         if (CurrentAce->Header.AceFlags & INHERIT_ONLY_ACE)
             continue;
@@ -850,7 +855,8 @@ SepAnalyzeAcesFromDacl(
     _In_ PGENERIC_MAPPING GenericMapping,
     _Inout_ PACCESS_CHECK_RIGHTS AccessCheckRights)
 {
-    NTSTATUS Status;
+    SEP_ACE_CURSOR Cursor;
+    BOOLEAN Found;
     PACE CurrentAce;
     ULONG AceIndex;
     PSID Sid;
@@ -873,14 +879,22 @@ SepAnalyzeAcesFromDacl(
         AccessCheckRights->RemainingAccessRights = RemainingAccess;
     }
 
-    /* Loop over the DACL to retrieve ACEs */
+    /*
+     * Loop over the DACL in one pass: the cursor gives the ACE RtlGetAce gives
+     * for each index (RtlGetAce itself starts over from the first ACE for every
+     * index, quadratic in the ACE count). Where RtlGetAce fails (a bad revision,
+     * an ACE at or beyond the end of the ACL) the walk asserts as before and
+     * then ends: the ACE pointer RtlGetAce leaves then lies outside the ACL (or
+     * is not set at all).
+     */
+    SepInitAceCursor(&Cursor, Dacl);
     for (AceIndex = 0; AceIndex < Dacl->AceCount; AceIndex++)
     {
-        /* Obtain a ACE now */
-        Status = RtlGetAce(Dacl, AceIndex, (PVOID*)&CurrentAce);
-
         /* Getting this ACE is important, otherwise something is seriously wrong */
-        ASSERT(NT_SUCCESS(Status));
+        Found = SepNextAce(&Cursor, (PVOID*)&CurrentAce);
+        ASSERT(Found);
+        if (!Found)
+            break;
 
         if (CurrentAce->Header.AceFlags & INHERIT_ONLY_ACE)
             continue;

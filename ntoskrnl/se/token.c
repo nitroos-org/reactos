@@ -1929,6 +1929,7 @@ SepGetDescriptorLabel(
     PACL Sacl = NULL;
     ULONG Rid, MaxRid = 0, i;
     ACCESS_MASK Policy = 0;
+    SEP_ACE_CURSOR Cursor;
 
     *HasLabel = FALSE;
     if (!NT_SUCCESS(RtlGetSaclSecurityDescriptor(SecurityDescriptor, &Present, &Sacl, &Defaulted)) ||
@@ -1937,9 +1938,10 @@ SepGetDescriptorLabel(
         return STATUS_SUCCESS;
     }
 
+    SepInitAceCursor(&Cursor, Sacl);
     for (i = 0; i < Sacl->AceCount; i++)
     {
-        if (!NT_SUCCESS(RtlGetAce(Sacl, i, (PVOID*)&Entry)))
+        if (!SepNextAce(&Cursor, (PVOID*)&Entry))
             return STATUS_INVALID_ACL;
         if (Entry->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
             continue;
@@ -1979,6 +1981,7 @@ SepDescriptorHasObjectLabelAbove(
     PACE_HEADER Entry;
     PACL Sacl = NULL;
     ULONG Rid, i;
+    SEP_ACE_CURSOR Cursor;
 
     if (!NT_SUCCESS(RtlGetSaclSecurityDescriptor(SecurityDescriptor, &Present, &Sacl, &Defaulted)) ||
         !Present || !Sacl)
@@ -1986,9 +1989,10 @@ SepDescriptorHasObjectLabelAbove(
         return FALSE;
     }
 
+    SepInitAceCursor(&Cursor, Sacl);
     for (i = 0; i < Sacl->AceCount; i++)
     {
-        if (!NT_SUCCESS(RtlGetAce(Sacl, i, (PVOID*)&Entry)))
+        if (!SepNextAce(&Cursor, (PVOID*)&Entry))
             break;
         if (Entry->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE || (Entry->AceFlags & INHERIT_ONLY_ACE))
             continue;
@@ -2137,6 +2141,8 @@ SeAssignProcessObjectLabel(
     PACL Sacl;
     PACE_HEADER Header;
     NTSTATUS Status;
+    SEP_ACE_CURSOR Cursor;
+    BOOLEAN Found;
 
     PAGED_CODE();
 
@@ -2161,10 +2167,13 @@ SeAssignProcessObjectLabel(
 
     RtlGetSaclSecurityDescriptor(*SecurityDescriptor, &Present, &Sacl, &Defaulted);
     ASSERT(Present && Sacl);
+    SepInitAceCursor(&Cursor, Sacl);
     for (Index = 0; Index < Sacl->AceCount; ++Index)
     {
-        Status = RtlGetAce(Sacl, Index, (PVOID *)&Header);
-        ASSERT(NT_SUCCESS(Status));
+        Found = SepNextAce(&Cursor, (PVOID *)&Header);
+        ASSERT(Found);
+        if (!Found)
+            break;
         if (Header->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
             ((PSYSTEM_MANDATORY_LABEL_ACE)Header)->Mask |= Policy;
     }

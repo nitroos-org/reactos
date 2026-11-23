@@ -90,18 +90,18 @@ VOID
 SepDumpAces(
     _In_ PACL Acl)
 {
-    NTSTATUS Status;
+    SEP_ACE_CURSOR Cursor;
     PACE Ace;
     ULONG AceIndex;
     PSID Sid;
     UNICODE_STRING SidString;
 
-    /* Loop all ACEs and dump their info */
+    /* Loop all ACEs and dump their info (in one pass, the ACEs RtlGetAce gives) */
+    SepInitAceCursor(&Cursor, Acl);
     for (AceIndex = 0; AceIndex < Acl->AceCount; AceIndex++)
     {
         /* Get the ACE at this index */
-        Status = RtlGetAce(Acl, AceIndex, (PVOID*)&Ace);
-        if (!NT_SUCCESS(Status))
+        if (!SepNextAce(&Cursor, (PVOID*)&Ace))
         {
             /*
              * Normally this should never happen.

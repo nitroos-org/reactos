@@ -64,6 +64,12 @@ static BOOL WINAPI MockDirectory(PCWSTR Name, LPSECURITY_ATTRIBUTES Security)
     return TRUE;
 }
 
+/* Program Files and Program Files (x86) are created through userenv, with their DACL: counted like the others */
+static BOOL WINAPI MockProgramFilesDirectory(PCWSTR Name)
+{
+    return MockDirectory(Name, NULL);
+}
+
 /* Execute the production functions with deterministic registry/filesystem
  * failures. No registry values or directories in the test machine are changed. */
 #define LoadStringW MockLoadString
@@ -73,6 +79,7 @@ static BOOL WINAPI MockDirectory(PCWSTR Name, LPSECURITY_ATTRIBUTES Security)
 #define RegSetValueExW MockSet
 #define RegCloseKey MockClose
 #define CreateDirectoryW MockDirectory
+#define CreateProgramFilesDirectory MockProgramFilesDirectory
 #include "../../../../dll/win32/syssetup/programfiles.c"
 
 /* open + 6 values, create + 6 values, 2 directories */

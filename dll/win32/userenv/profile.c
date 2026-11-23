@@ -12,6 +12,7 @@
 #include <reactos/buildno.h>
 
 #include <sddl.h>
+#include <namedobjtrust.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -401,10 +402,36 @@ CreateProfileMutex(
     SecurityAttributes.lpSecurityDescriptor = &SecurityDescriptor;
     SecurityAttributes.bInheritHandle = FALSE;
 
-    /* Create the profile mutex */
-    hMutex = CreateMutexW(&SecurityAttributes,
-                          FALSE,
-                          pszMutexName);
+    /*
+     * Only SYSTEM and the Administrators take it (LoadUserProfile needs the backup and restore privileges): with
+     * the NULL DACL any process, a Low one too, could hold the mutex of another account and stall its logon,
+     * which waits for it without a timeout. A mutex of that name that a less trusted process made first is not
+     * waited for (nor one this caller may not open): the caller takes an unnamed one, as if alone.
+     */
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)", SDDL_REVISION_1,
+                                                             &SecurityAttributes.lpSecurityDescriptor, NULL))
+    {
+        hMutex = CreateMutexW(&SecurityAttributes, FALSE, pszMutexName);
+        LocalFree(SecurityAttributes.lpSecurityDescriptor);
+    }
+    else
+    {
+        /* Create the profile mutex */
+        SecurityAttributes.lpSecurityDescriptor = &SecurityDescriptor;
+        hMutex = CreateMutexW(&SecurityAttributes,
+                              FALSE,
+                              pszMutexName);
+    }
+    if (hMutex != NULL && GetLastError() == ERROR_ALREADY_EXISTS && !NamedObjectIsTrusted(hMutex, TRUE))
+    {
+        DPRINT1("The profile mutex %S was made by another process: not used\n", pszMutexName);
+        CloseHandle(hMutex);
+        hMutex = CreateMutexW(NULL, FALSE, NULL);
+    }
+    else if (hMutex == NULL && GetLastError() == ERROR_ACCESS_DENIED)
+    {
+        hMutex = CreateMutexW(NULL, FALSE, NULL);
+    }
     if (hMutex == NULL)
     {
         DPRINT1("Failed to create the profile mutex (Error %lu)\n", GetLastError());
