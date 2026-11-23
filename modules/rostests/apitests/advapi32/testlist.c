@@ -164,6 +164,7 @@ extern void func_ServiceVirtualAccount(void);
 extern void func_ServiceNetwork(void);
 extern void func_SetEntriesInAclOld(void);
 extern void func_SetSecurityGenericMap(void);
+extern void func_SetSecurityTypeMask(void);
 extern void func_SetSecurityInfoKey(void);
 extern void func_SetSecurityInfoKeyInherit(void);
 extern void func_RegistryRestrictedOpen(void);
@@ -365,6 +366,7 @@ const struct test winetest_testlist[] =
     { "ServiceNetwork", func_ServiceNetwork },
     { "SetEntriesInAclOld", func_SetEntriesInAclOld },
     { "SetSecurityGenericMap", func_SetSecurityGenericMap },
+    { "SetSecurityTypeMask", func_SetSecurityTypeMask },
     { "SetSecurityInfoKey", func_SetSecurityInfoKey },
     { "SetSecurityInfoKeyInherit", func_SetSecurityInfoKeyInherit },
     { "RegistryRestrictedOpen", func_RegistryRestrictedOpen },

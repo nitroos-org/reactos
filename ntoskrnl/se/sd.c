@@ -482,12 +482,24 @@ SepAppendAces(
  * dropped). The access check does not map ACE masks (Windows does not either):
  * a generic right left in an effective ACE would grant or deny nothing there.
  * Label ACEs carry no generic rights and are left alone.
+ *
+ * Restrict: the access rights of an allow or deny ACE of a DACL that is not
+ * inherit-only are reduced to the rights of the object type (its GenericAll),
+ * as Windows Server 2022 stores them (measured with every single bit and
+ * combinations on event, mutant, semaphore, section, token, process, thread,
+ * key, file, directory and service: an ACE (A;;0x1F01FF;;;SY) reads back as
+ * 0x1F0003 on an event, 0x1F0001 on a mutant, 0xF001F on a section, 0xF01FF
+ * on a token and a service, 0x1FFFFF on a process and a thread, 0xF003F on a
+ * key; ACCESS_SYSTEM_SECURITY and MAXIMUM_ALLOWED are dropped; the ACE stays
+ * with whatever mask is left, also none, deny ACEs the same). The SACL's
+ * audit ACEs and the other ACE types are not restricted (not measured).
  */
 static
 VOID
 SepMapGenericAcl(
     _Inout_opt_ PACL Acl,
-    _In_ PGENERIC_MAPPING GenericMapping)
+    _In_ PGENERIC_MAPPING GenericMapping,
+    _In_ BOOLEAN Restrict)
 {
     PUCHAR End;
     PACE_HEADER Ace;
@@ -513,6 +525,12 @@ SepMapGenericAcl(
             Mask = (PACCESS_MASK)(Ace + 1);
             if (*Mask & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL))
                 RtlMapGenericMask(Mask, GenericMapping);
+
+            if (Restrict && GenericMapping->GenericAll != 0 &&
+                (Ace->AceType == ACCESS_ALLOWED_ACE_TYPE || Ace->AceType == ACCESS_DENIED_ACE_TYPE))
+            {
+                *Mask &= GenericMapping->GenericAll;
+            }
         }
 
         Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize);
@@ -1347,9 +1365,9 @@ SeSetSecurityDescriptorInfoEx(
 
     /* What the caller set is stored with its generic rights mapped (see SepMapGenericAcl) */
     if ((SecurityInformation & DACL_SECURITY_INFORMATION) && NewSd->Dacl)
-        SepMapGenericAcl((PACL)((PUCHAR)NewSd + NewSd->Dacl), GenericMapping);
+        SepMapGenericAcl((PACL)((PUCHAR)NewSd + NewSd->Dacl), GenericMapping, TRUE);
     if ((SecurityInformation & SACL_SECURITY_INFORMATION) && NewSd->Sacl)
-        SepMapGenericAcl((PACL)((PUCHAR)NewSd + NewSd->Sacl), GenericMapping);
+        SepMapGenericAcl((PACL)((PUCHAR)NewSd + NewSd->Sacl), GenericMapping, FALSE);
 
     NewSd->Control |= Control;
     *ObjectsSecurityDescriptor = NewSd;
