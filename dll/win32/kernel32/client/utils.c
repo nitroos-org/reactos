@@ -222,6 +222,10 @@ WINAPI
 BasepCheckNamedObjectDirectory(
     _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes)
 {
+    /* "Alias\Object", where Alias names a private namespace of the process: the object in that namespace */
+    if (ObjectAttributes && ObjectAttributes->ObjectName)
+        BasepAdjustObjectAttributesForPrivateNamespace(ObjectAttributes);
+
     if (ObjectAttributes && ObjectAttributes->ObjectName && !ObjectAttributes->RootDirectory)
         return NT_SUCCESS(BaseNamedObjectDirectoryStatus) ? STATUS_ACCESS_DENIED : BaseNamedObjectDirectoryStatus;
     return STATUS_SUCCESS;

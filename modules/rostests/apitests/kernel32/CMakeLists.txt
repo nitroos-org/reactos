@@ -87,6 +87,7 @@ list(APPEND SOURCE
     GetAppContainerNamedObjectPath.c
     CompareObjectHandles.c
     PrivateNamespaceSecurity.c
+    PrivateNamespaceBoundary.c
     CancelSynchronousIo.c
     IdnTo.c
     NormalizeString.c

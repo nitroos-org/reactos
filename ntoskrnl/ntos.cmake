@@ -270,6 +270,7 @@ list(APPEND SOURCE
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ob/oblife.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ob/oblink.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ob/obname.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/ob/obnamesp.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ob/obref.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ob/obsdcach.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ob/obsecure.c
