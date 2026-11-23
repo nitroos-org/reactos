@@ -126,9 +126,9 @@ KdReceivePacket(
     for (;;)
     {
         /* Step 1 - Read PacketLeader */
-        KdpByteSpin = WaitForAck ? KdpAckSpin() : 0;
+        KdpByteWait = WaitForAck ? KdpAckWait() : 0;
         KdStatus = KdpReceivePacketLeader(&Packet.PacketLeader);
-        KdpByteSpin = 0;
+        KdpByteWait = 0;
         if (KdStatus != KDP_PACKET_RECEIVED)
         {
             /* Check if we got a breakin  */

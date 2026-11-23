@@ -8,6 +8,7 @@
 
 #include "kddll.h"
 
+#include <intrin.h>
 #include <arc/arc.h>
 #include <stdlib.h>
 #include <ndk/halfuncs.h>
@@ -20,19 +21,22 @@
 CPPORT KdComPort;
 
 /*
- * The wait for an acknowledge is counted in polls of the port, and is short:
- * a host that is attached answers within milliseconds, and one that is not
- * must not hold the machine for minutes (each packet used to wait 20 times
- * 200,000 polls, 2.7 s each under a hypervisor). Before any host was heard
- * a single wait of KDP_ACK_SPIN_NOHOST ends the attempt; afterwards the
- * packet is resent a few times (KDP_HOST_RETRIES in kddll.c). A boot with
+ * The wait for an acknowledge is short, and bounded by time and not by the
+ * number of polls of the port (a poll costs 1 us on hardware and 7 us in a
+ * hypervisor): a host that is attached answers within milliseconds, and one
+ * that is not must not hold the machine for minutes (each packet used to
+ * wait 20 times 200,000 polls, 2.7 s each under a hypervisor). The time is
+ * counted in processor cycles, the only clock that runs this early with
+ * interrupts off: about 100 ms (a processor of 3 GHz) before any host was
+ * heard, one wait ends the attempt; about 200 ms afterwards, and the packet
+ * is resent a few times (KDP_HOST_RETRIES in kddll.c). A boot with
  * /BREAK is patient: the user said a debugger is coming, so its first stop
  * waits until the host is there.
  */
-#define KDP_ACK_SPIN_NOHOST     8000
-#define KDP_ACK_SPIN_HOST       12000
+#define KDP_ACK_CYCLES_NOHOST   300000000ULL
+#define KDP_ACK_CYCLES_HOST     600000000ULL
 
-ULONG KdpByteSpin;          /* 0: wait as long as the port library does */
+ULONG64 KdpByteWait;        /* cycles; 0: wait as long as the port library does */
 BOOLEAN KdpHostSeen;
 BOOLEAN KdpPatient;
 BOOLEAN KdpBreakInSeen;
@@ -81,11 +85,11 @@ ULONG KdpDbgPrint(const char *Format, ...)
 
 /* FUNCTIONS ******************************************************************/
 
-ULONG
+ULONG64
 NTAPI
-KdpAckSpin(VOID)
+KdpAckWait(VOID)
 {
-    return KdpHostSeen ? KDP_ACK_SPIN_HOST : KDP_ACK_SPIN_NOHOST;
+    return KdpHostSeen ? KDP_ACK_CYCLES_HOST : KDP_ACK_CYCLES_NOHOST;
 }
 
 /* A packet leader or a break-in byte arrived: there is a debugger on the other end */
@@ -321,20 +325,21 @@ NTAPI
 KdpReceiveByte(OUT PUCHAR OutByte)
 {
     USHORT Status;
-    ULONG Spin = KdpByteSpin;
+    ULONG64 Wait = KdpByteWait, End;
 
-    if (!Spin)
+    if (!Wait)
     {
         /* Wait as long as the port library does */
         Status = CpGetByte(&KdComPort, OutByte, TRUE, FALSE);
     }
     else
     {
-        /* A bounded wait: poll the port Spin times */
+        /* A bounded wait: poll the port until the time is up */
+        End = __rdtsc() + Wait;
         do
         {
             Status = CpGetByte(&KdComPort, OutByte, FALSE, FALSE);
-        } while ((Status == CP_GET_NODATA) && (--Spin != 0));
+        } while ((Status == CP_GET_NODATA) && (__rdtsc() < End));
     }
 
     switch (Status)

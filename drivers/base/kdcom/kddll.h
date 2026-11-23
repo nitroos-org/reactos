@@ -67,7 +67,7 @@ KdpPollBreakIn(VOID);
  * last, whether a host was ever heard, and a break-in byte that was seen
  * while a packet was being exchanged.
  */
-extern ULONG KdpByteSpin;
+extern ULONG64 KdpByteWait;
 extern BOOLEAN KdpHostSeen;
 extern BOOLEAN KdpPatient;
 extern BOOLEAN KdpBreakInSeen;
@@ -77,8 +77,8 @@ VOID
 NTAPI
 KdpHostIsPresent(VOID);
 
-ULONG
+ULONG64
 NTAPI
-KdpAckSpin(VOID);
+KdpAckWait(VOID);
 
 #endif /* _KDDLL_H_ */
