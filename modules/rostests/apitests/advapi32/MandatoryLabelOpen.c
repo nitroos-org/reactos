@@ -164,21 +164,6 @@ static ACCESS_MASK LabelAllows(DWORD Token, DWORD Level, DWORD Policy, const GEN
     return Allowed;
 }
 
-static DWORD RegAclMode(void)
-{
-    DWORD Mode = 1, Size = sizeof(Mode);
-    HKEY Key;
-
-    /* The value is published by the kernel's registry ACL code; a system without the RegAcl key enforces keys (Windows) */
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl", 0, KEY_READ, &Key) != ERROR_SUCCESS)
-        return 2;
-    RegCloseKey(Key);
-    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl\\AuditStats", L"Mode",
-                     RRF_RT_REG_DWORD, NULL, &Mode, &Size) != ERROR_SUCCESS)
-        Mode = 1;
-    return Mode;
-}
-
 /* ---------------------------------------------------------------- child */
 
 /*
@@ -269,7 +254,6 @@ static VOID ChildObjectRows(DWORD Level)
 
     static const ACCESS_MASK Requests[] = {GENERIC_READ, GENERIC_WRITE, GENERIC_EXECUTE, DELETE, WRITE_DAC, MAXIMUM_ALLOWED};
     static const PCSTR RequestNames[] = {"read", "write", "execute", "delete", "write_dac", "maximum"};
-    BOOL KeysEnforced = (RegAclMode() == 2);
     ULONG Kind, Variant, r;
 
     for (Kind = 0; Kind < KindCount; Kind++)
@@ -277,9 +261,6 @@ static VOID ChildObjectRows(DWORD Level)
         for (Variant = 0; Variant < NVARIANTS; Variant++)
         {
             ACCESS_MASK Allowed = LabelAllows(Level, Variants[Variant].Level, Variants[Variant].Policy, &Mappings[Kind]);
-
-            if (Kind == KindKey && !KeysEnforced)
-                Allowed = MAXDWORD;
 
             for (r = 0; r < _countof(Requests); r++)
             {
@@ -550,7 +531,7 @@ static VOID ChildCreateRows(DWORD Level)
     /* A key created below the Low key carries the creator's level */
     StringCchPrintfW(Name, _countof(Name), L"Software\\MloTest%lu\\k-low", ParentPid);
     Result = RegOpenKeyExW(HKEY_CURRENT_USER, Name, 0, KEY_CREATE_SUB_KEY, &Key);
-    if (Level >= SECURITY_MANDATORY_LOW_RID || RegAclMode() != 2)
+    if (Level >= SECURITY_MANDATORY_LOW_RID)
         ok(Result == ERROR_SUCCESS, "level %lx: k-low for KEY_CREATE_SUB_KEY: %ld\n", Level, Result);
     if (Result == ERROR_SUCCESS)
     {
@@ -987,7 +968,6 @@ static VOID ChildRowsV13V7(DWORD Level)
     static const PCWSTR High = L"D:(A;;GA;;;WD)S:(ML;;NW;;;HI)";
     static const PCWSTR HighIo = L"D:(A;OICI;GA;;;WD)S:(ML;OICIIO;NW;;;HI)";
     SECURITY_ATTRIBUTES Sa = {sizeof(Sa), NULL, FALSE};
-    BOOL KeysEnforced = (RegAclMode() == 2);
     WCHAR Name[MAX_PATH];
     HANDLE Handle;
     DWORD Error, Policy;
@@ -1046,7 +1026,7 @@ static VOID ChildRowsV13V7(DWORD Level)
     if (Level >= SECURITY_MANDATORY_LOW_RID)
         ok(Result == ERROR_PRIVILEGE_NOT_HELD, "V13-key level %lx: %ld\n", Level, Result);
     else
-        todo_ros_if(!KeysEnforced) ok(Result == ERROR_ACCESS_DENIED, "V13-key level %lx: %ld (Windows 5)\n", Level, Result);
+        ok(Result == ERROR_ACCESS_DENIED, "V13-key level %lx: %ld (Windows 5)\n", Level, Result);
     LocalFree(Sa.lpSecurityDescriptor);
 
     if (FileAcls)
@@ -1136,7 +1116,7 @@ static VOID ChildRowsV13V7(DWORD Level)
     if (Level >= SECURITY_MANDATORY_LOW_RID)
         ok(Result == ERROR_SUCCESS, "V7-key level %lx: %ld\n", Level, Result);
     else
-        todo_ros_if(!KeysEnforced) ok(Result == ERROR_ACCESS_DENIED, "V7-key level %lx: %ld (Windows 5)\n", Level, Result);
+        ok(Result == ERROR_ACCESS_DENIED, "V7-key level %lx: %ld (Windows 5)\n", Level, Result);
 }
 
 /* V14: the window station and the desktop of a Low process (an Untrusted process cannot load user32 on Windows) */
@@ -1875,7 +1855,7 @@ START_TEST(MandatoryLabelOpen)
     ok(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &Token), "OpenProcessToken: %lu\n", GetLastError());
     Level = TokenLevel(Token);
     CloseHandle(Token);
-    trace("parent level %lx, registry ACL mode %lu\n", Level, RegAclMode());
+    trace("parent level %lx\n", Level);
     if (Level < SECURITY_MANDATORY_MEDIUM_RID)
     {
         skip("the test needs a caller at Medium or above\n");

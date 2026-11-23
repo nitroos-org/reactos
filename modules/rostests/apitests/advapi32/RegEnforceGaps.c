@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS API tests
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
- * PURPOSE:     Registry key access under enforcement (registry ACL mode 2): the paths to a key that the
+ * PURPOSE:     Registry key access under enforcement: the paths to a key that the
  *              other tests do not cover: symbolic links (target check, OPEN_LINK, links that leave the
  *              user's hives), KEY_CREATE_LINK on the parent, inheritance through keys without a stored
  *              descriptor (NO_PROPAGATE_INHERIT_ACE), mandatory integrity (Low tokens), handle duplication
@@ -10,8 +10,8 @@
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * Runs as an administrator (the "standard user" rows impersonate the process token with Administrators
- * deny-only and no privileges, as RegSecurityEnforce does). In registry ACL modes 0 and 1 the kernel does
- * not enforce key descriptors and the rows assert the old results; in mode 2 the enforced ones. Writes only
+ * deny-only and no privileges, as RegSecurityEnforce does). The rows assert the enforced results (there is no
+ * mode that does not enforce). Writes only
  * below HKCU\Software\RegEnforceGaps (deleted at the end) and, for the inheritance rows, the DACL of
  * HKCU\AppEvents\Schemes\Apps (set back to what it reported before).
  */
@@ -24,23 +24,8 @@
 
 #define SCRATCH     L"Software\\RegEnforceGaps"
 
-static BOOL Enforced;
 static HANDLE StdToken;
 static PWSTR UserSidString;
-
-static DWORD ReadAclMode(void)
-{
-    HKEY Key;
-    DWORD Mode = MAXDWORD, Size = sizeof(Mode), Type;
-
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl\\AuditStats",
-                      0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
-        return MAXDWORD;
-    if (RegQueryValueExW(Key, L"Mode", NULL, &Type, (LPBYTE)&Mode, &Size) != ERROR_SUCCESS || Type != REG_DWORD)
-        Mode = MAXDWORD;
-    RegCloseKey(Key);
-    return Mode;
-}
 
 static PSID AllocWellKnown(WELL_KNOWN_SID_TYPE Type)
 {
@@ -214,10 +199,9 @@ static void TestLinks(void)
         Error = OpenAs(NULL, HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft", 0, KEY_READ, NULL);
         ok(Error == ERROR_SUCCESS, "admin opens the target directly: %ld\n", Error);
         Error = OpenAs(NULL, HKEY_CURRENT_USER, SCRATCH L"\\LinkOut", 0, KEY_READ, NULL);
-        ok(Error == (Enforced ? ERROR_ACCESS_DENIED : ERROR_SUCCESS),
-           "link from the user's hive to HKLM: %ld (enforced %d)\n", Error, Enforced);
+        ok(Error == ERROR_ACCESS_DENIED, "link from the user's hive to HKLM: %ld\n", Error);
         Error = OpenAs(StdToken, HKEY_CURRENT_USER, SCRATCH L"\\LinkOut", 0, KEY_SET_VALUE, NULL);
-        ok(Error == (Enforced ? ERROR_ACCESS_DENIED : ERROR_SUCCESS),
+        ok(Error == ERROR_ACCESS_DENIED,
            "standard: set through a link to HKLM\\SOFTWARE\\Microsoft: %ld\n", Error);
 
         /* The link key itself (OPEN_LINK) is checked against its own descriptor */
@@ -226,7 +210,7 @@ static void TestLinks(void)
 
         /* A create through the link (NtCreateKey of the existing target) */
         Error = RegCreateKeyExW(HKEY_CURRENT_USER, SCRATCH L"\\LinkOut", 0, NULL, 0, KEY_READ, NULL, &Key, NULL);
-        ok(Error == (Enforced ? ERROR_ACCESS_DENIED : ERROR_SUCCESS), "create through the link: %ld\n", Error);
+        ok(Error == ERROR_ACCESS_DENIED, "create through the link: %ld\n", Error);
         if (Error == ERROR_SUCCESS)
             RegCloseKey(Key);
     }
@@ -247,23 +231,14 @@ static void TestLinks(void)
     if (MakeLink(L"LinkLookalike", Target))
     {
         Error = OpenAs(NULL, HKEY_CURRENT_USER, SCRATCH L"\\LinkLookalike", 0, KEY_READ, NULL);
-        ok(Error == (Enforced ? ERROR_ACCESS_DENIED : ERROR_FILE_NOT_FOUND), "link to a look-alike hive name: %ld\n", Error);
+        ok(Error == ERROR_ACCESS_DENIED, "link to a look-alike hive name: %ld\n", Error);
     }
 
     /* Another user's place (the system profile) */
     if (MakeLink(L"LinkOther", L"\\REGISTRY\\USER\\.DEFAULT"))
     {
         Error = OpenAs(NULL, HKEY_CURRENT_USER, SCRATCH L"\\LinkOther", 0, KEY_READ, NULL);
-        if (!Enforced && Error == ERROR_FILE_NOT_FOUND)
-        {
-            /* Seen once after the whole advapi32/ntdll suite in mode 1 (not reproduced alone): say what the direct open gives */
-            trace("link to HKU\\.DEFAULT: %ld; direct open of HKU\\.DEFAULT: %ld\n", Error,
-                  OpenAs(NULL, HKEY_USERS, L".DEFAULT", 0, KEY_READ, NULL));
-        }
-        else
-        {
-            ok(Error == (Enforced ? ERROR_ACCESS_DENIED : ERROR_SUCCESS), "link to HKU\\.DEFAULT: %ld\n", Error);
-        }
+        ok(Error == ERROR_ACCESS_DENIED, "link to HKU\\.DEFAULT: %ld\n", Error);
     }
 
     DeleteKeyItself(HKEY_CURRENT_USER, SCRATCH L"\\LinkIn");
@@ -304,7 +279,7 @@ static void TestCreateLinkRight(void)
     ok(Error == ERROR_SUCCESS, "standard: create a subkey with KEY_CREATE_SUB_KEY: %ld\n", Error);
     Error = CreateAs(StdToken, HKEY_CURRENT_USER, SCRATCH L"\\NoLink\\Link", REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK,
                      KEY_READ);
-    ok(Error == (Enforced ? ERROR_ACCESS_DENIED : ERROR_SUCCESS),
+    ok(Error == ERROR_ACCESS_DENIED,
        "standard: create a link without KEY_CREATE_LINK on the parent: %ld\n", Error);
     DeleteKeyItself(HKEY_CURRENT_USER, SCRATCH L"\\NoLink\\Link");
     RegDeleteKeyW(HKEY_CURRENT_USER, SCRATCH L"\\NoLink\\Plain");
@@ -455,17 +430,16 @@ static void TestIntegrity(void)
     Error = OpenAs(Low, HKEY_CURRENT_USER, SCRATCH, 0, KEY_READ, NULL);
     ok(Error == ERROR_SUCCESS, "Low: read HKCU scratch: %ld\n", Error);
     Error = OpenAs(Low, HKEY_CURRENT_USER, SCRATCH, 0, KEY_SET_VALUE, NULL);
-    ok(Error == (Enforced ? ERROR_ACCESS_DENIED : ERROR_SUCCESS), "Low: set HKCU scratch: %ld\n", Error);
+    ok(Error == ERROR_ACCESS_DENIED, "Low: set HKCU scratch: %ld\n", Error);
     Error = CreateAs(Low, HKEY_CURRENT_USER, SCRATCH L"\\LowChild", REG_OPTION_VOLATILE, KEY_READ);
-    ok(Error == (Enforced ? ERROR_ACCESS_DENIED : ERROR_SUCCESS), "Low: create under HKCU scratch: %ld\n", Error);
+    ok(Error == ERROR_ACCESS_DENIED, "Low: create under HKCU scratch: %ld\n", Error);
     RegDeleteKeyW(HKEY_CURRENT_USER, SCRATCH L"\\LowChild");
     Error = OpenAs(Low, HKEY_CURRENT_USER, SCRATCH, 0, MAXIMUM_ALLOWED, &Granted);
     ok(Error == ERROR_SUCCESS, "Low: MAXIMUM_ALLOWED: %ld\n", Error);
-    if (Enforced)
-        ok(!(Granted & (KEY_SET_VALUE | KEY_CREATE_SUB_KEY | DELETE | WRITE_DAC | WRITE_OWNER)),
-           "Low: MAXIMUM_ALLOWED granted 0x%lx (write rights above its level)\n", Granted);
+    ok(!(Granted & (KEY_SET_VALUE | KEY_CREATE_SUB_KEY | DELETE | WRITE_DAC | WRITE_OWNER)),
+       "Low: MAXIMUM_ALLOWED granted 0x%lx (write rights above its level)\n", Granted);
     Error = OpenAs(Low, HKEY_CURRENT_USER, SCRATCH, 0, WRITE_DAC, NULL);
-    ok(Error == (Enforced ? ERROR_ACCESS_DENIED : ERROR_SUCCESS), "Low: WRITE_DAC on HKCU scratch: %ld\n", Error);
+    ok(Error == ERROR_ACCESS_DENIED, "Low: WRITE_DAC on HKCU scratch: %ld\n", Error);
 
     /* A key labelled Low (AppDataLow's label) takes the Low token's writes */
     swprintf(Sddl, ARRAYSIZE(Sddl), L"D:P(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)(A;OICI;KA;;;%s)S:(ML;OICI;NW;;;LW)", UserSidString);
@@ -531,11 +505,11 @@ static void TestOtherPaths(void)
 
     /* NtCreateKey of an existing key is an open of it */
     Error = CreateAs(StdToken, HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft", 0, KEY_SET_VALUE);
-    ok(Error == (Enforced ? ERROR_ACCESS_DENIED : ERROR_SUCCESS), "standard: create (open) HKLM\\SOFTWARE\\Microsoft for set: %ld\n", Error);
+    ok(Error == ERROR_ACCESS_DENIED, "standard: create (open) HKLM\\SOFTWARE\\Microsoft for set: %ld\n", Error);
 
     /* The 32-bit view is checked at the key it opens */
     Error = OpenAs(StdToken, HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft", 0, KEY_SET_VALUE | KEY_WOW64_32KEY, NULL);
-    ok(Error == (Enforced ? ERROR_ACCESS_DENIED : ERROR_SUCCESS), "standard: 32-bit view of HKLM\\SOFTWARE\\Microsoft for set: %ld\n", Error);
+    ok(Error == ERROR_ACCESS_DENIED, "standard: 32-bit view of HKLM\\SOFTWARE\\Microsoft for set: %ld\n", Error);
     Error = OpenAs(StdToken, HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft", 0, KEY_READ | KEY_WOW64_64KEY, NULL);
     ok(Error == ERROR_SUCCESS, "standard: 64-bit view read: %ld\n", Error);
 
@@ -550,11 +524,11 @@ static void TestOtherPaths(void)
     {
         Status = NtOpenKeyEx(&Key, KEY_SET_VALUE, &Attributes, REG_OPTION_BACKUP_RESTORE);
         SetThreadToken(NULL, NULL);
-        ok(Enforced ? Status == STATUS_ACCESS_DENIED : NT_SUCCESS(Status),
+        ok(Status == STATUS_ACCESS_DENIED,
            "standard: backup/restore open without the privileges: 0x%lx\n", Status);
         if (NT_SUCCESS(Status)) NtClose(Key);
         Error = OpenAs(StdToken, HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft", REG_OPTION_BACKUP_RESTORE, KEY_SET_VALUE, NULL);
-        ok(Error == (Enforced ? ERROR_ACCESS_DENIED : ERROR_SUCCESS), "standard: RegOpenKeyEx backup/restore without the privileges: %ld\n", Error);
+        ok(Error == ERROR_ACCESS_DENIED, "standard: RegOpenKeyEx backup/restore without the privileges: %ld\n", Error);
     }
 
     /* At identification level an enabled SeBackupPrivilege grants nothing (SAM\SAM gives admins RC|WD only) */
@@ -587,10 +561,6 @@ static void TestOtherPaths(void)
 
 START_TEST(RegEnforceGaps)
 {
-    DWORD Mode = ReadAclMode();
-
-    Enforced = (Mode == 2);
-    trace("registry ACL mode %lu\n", Mode);
     if (!InitTokens())
     {
         skip("no tokens\n");

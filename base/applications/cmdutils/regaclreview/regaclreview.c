@@ -91,6 +91,8 @@ typedef struct _HIVE
 static PWCHAR g_Text;
 static SIZE_T g_TextChars, g_TextMax;
 static ULONG g_Entries, g_Marked, g_Unread;
+/* AuditStats: the value RegistryAclMode of earlier kernels was found and deleted at this boot (its data) */
+static DWORD g_ModeValueRemoved, g_ModeValueWas = MAXDWORD;
 static BOOL g_OutOfMemory;
 
 /* Administrators' members (SIDs), read once */
@@ -1925,21 +1927,24 @@ ReadMode(
     _Out_writes_(Chars) PWCHAR Buffer,
     _In_ SIZE_T Chars)
 {
-    DWORD Mode = MAXDWORD, Transition = MAXDWORD, Bytes;
+    DWORD Transition = MAXDWORD, Removed = 0, Was = MAXDWORD, Bytes;
     HKEY Key;
 
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl\\AuditStats", 0,
                       KEY_QUERY_VALUE, &Key) == ERROR_SUCCESS)
     {
-        Bytes = sizeof(Mode);
-        RegQueryValueExW(Key, L"Mode", NULL, NULL, (LPBYTE)&Mode, &Bytes);
         Bytes = sizeof(Transition);
         RegQueryValueExW(Key, L"Transition", NULL, NULL, (LPBYTE)&Transition, &Bytes);
+        Bytes = sizeof(Removed);
+        RegQueryValueExW(Key, L"ModeValueRemoved", NULL, NULL, (LPBYTE)&Removed, &Bytes);
+        Bytes = sizeof(Was);
+        RegQueryValueExW(Key, L"ModeValueWas", NULL, NULL, (LPBYTE)&Was, &Bytes);
         RegCloseKey(Key);
     }
-    StringCchPrintfW(Buffer, Chars, L"registry key security %s (Mode %ld, Transition %ld)",
-                     Mode == 2 ? L"enforced" : Mode == 1 ? L"audited, not enforced" : Mode == 0 ? L"off" : L"unknown",
-                     (LONG)Mode, (LONG)Transition);
+    StringCchPrintfW(Buffer, Chars, L"registry key security is enforced (always; transition state %ld)",
+                     (LONG)Transition);
+    g_ModeValueRemoved = Removed;
+    g_ModeValueWas = Was;
 }
 
 static

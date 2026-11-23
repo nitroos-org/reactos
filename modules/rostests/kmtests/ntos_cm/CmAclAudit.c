@@ -1,32 +1,28 @@
 /*
  * PROJECT:     ReactOS kernel-mode tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     Kernel-Mode Test Suite registry ACL audit mode test
+ * PURPOSE:     Kernel-Mode Test Suite registry key access control and denial log test
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
 /*
- * The configuration manager's audit mode runs a shadow access check against
- * the descriptor a key has on Windows and logs what Windows would deny, while
- * the open or create itself goes on exactly as before; enforce mode takes the
- * same decision before the open or create and lets it stand. This test opens
- * and creates keys through a token that Windows would refuse (the caller's
- * token with its user and Administrators made deny-only) and checks that:
- *  - in audit mode every open and create still succeeds (no behaviour change),
- *    in enforce mode exactly those are denied (STATUS_ACCESS_DENIED);
- *  - in both a denial is counted (Control\RegAcl\AuditStats) and written to
- *    \SystemRoot\System32\LogFiles\RegAcl\audit.log;
- *  - a granted open, and a kernel-mode open (not access checked), are not;
- *  - in legacy mode nothing is logged;
- *  - the published mode is the configured one.
- * The mode itself is chosen at boot (/REGACL=...); run the test under each.
+ * The configuration manager decides every user-mode open and create of a key
+ * by the key's own descriptor, before the open or create, and the decision
+ * stands (there is no mode and no switch). This test opens and creates keys
+ * through a token that Windows would refuse (the caller's token with its user
+ * and Administrators made deny-only) and checks that:
+ *  - exactly those opens and creates are denied (STATUS_ACCESS_DENIED);
+ *  - a denial is counted (Control\RegAcl\AuditStats) and written to
+ *    \SystemRoot\System32\LogFiles\RegAcl\audit.log, which is bounded;
+ *  - a granted open, and a kernel-mode open (not access checked), are not
+ *    denied and not logged;
+ *  - the statistics have no mode: Mode, ConfiguredMode, ModeSource and
+ *    EnforceFallback are not published.
  */
 
 #include <kmt_test.h>
 
-/* Mode 2 runs: the opens and creates the audit logs are denied */
-static BOOLEAN Enforced;
-#define DENIED_STATUS   (Enforced ? STATUS_ACCESS_DENIED : STATUS_SUCCESS)
+#define DENIED_STATUS   STATUS_ACCESS_DENIED
 
 #define STATS_KEY   L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\RegAcl\\AuditStats"
 #define AUDIT_LOG   L"\\SystemRoot\\System32\\LogFiles\\RegAcl\\audit.log"
@@ -36,17 +32,15 @@ static BOOLEAN Enforced;
 typedef struct _AUDIT_STATS
 {
     BOOLEAN Present;
-    ULONG Mode;
-    ULONG ConfiguredMode;
-    ULONG ModeSource;
     ULONG Checks;
     ULONG Denials;
     ULONG Entries;
     ULONG Dropped;
     ULONG StoresDescriptors;
     ULONG SetupExclusion;
-    ULONG SwitchesIgnored;
-    ULONG EnforceFallback;
+    ULONG SetupValueIgnored;
+    ULONG BootKeysUnrepaired;
+    BOOLEAN ModePublished;      /* a name of the removed modes is in the statistics */
 } AUDIT_STATS, *PAUDIT_STATS;
 
 static
@@ -84,17 +78,19 @@ ReadStats(
     if (!NT_SUCCESS(Status))
         return;
     Stats->Present = TRUE;
-    Stats->Mode = ReadDword(Key, L"Mode");
-    Stats->ConfiguredMode = ReadDword(Key, L"ConfiguredMode");
-    Stats->ModeSource = ReadDword(Key, L"ModeSource");
     Stats->Checks = ReadDword(Key, L"Checks");
     Stats->Denials = ReadDword(Key, L"Denials");
     Stats->Entries = ReadDword(Key, L"Entries");
     Stats->Dropped = ReadDword(Key, L"Dropped");
     Stats->StoresDescriptors = ReadDword(Key, L"StoresDescriptors");
     Stats->SetupExclusion = ReadDword(Key, L"SetupExclusion");
-    Stats->SwitchesIgnored = ReadDword(Key, L"SwitchesIgnored");
-    Stats->EnforceFallback = ReadDword(Key, L"EnforceFallback");
+    Stats->SetupValueIgnored = ReadDword(Key, L"SetupValueIgnored");
+    Stats->BootKeysUnrepaired = ReadDword(Key, L"BootKeysUnrepaired");
+    Stats->ModePublished = ReadDword(Key, L"Mode") != MAXULONG ||
+                           ReadDword(Key, L"ConfiguredMode") != MAXULONG ||
+                           ReadDword(Key, L"ModeSource") != MAXULONG ||
+                           ReadDword(Key, L"EnforceFallback") != MAXULONG ||
+                           ReadDword(Key, L"SwitchesIgnored") != MAXULONG;
     ZwClose(Key);
 }
 
@@ -437,7 +433,7 @@ CheckLogLine(
             ok((Quotes % 2) == 0, "the line with %s has unbalanced quotes (%lu)\n", Needle, Quotes);
             ok(End - Start < 2048, "the line with %s is %lu bytes\n", Needle, (ULONG)(End - Start));
             /* The fields after the key are still there: the cut is in the key, not the end of the line */
-            ok(strstr(Start, "\"mode\":\"") != NULL && strstr(Start, "\"mode\":\"") < End,
+            ok(strstr(Start, "\"imp\":") != NULL && strstr(Start, "\"imp\":") < End,
                "the line with %s lost its tail\n", Needle);
         }
     }
@@ -627,7 +623,7 @@ TestEntryCap(
         else
             Failed++;
     }
-    ok_eq_ulong(Failed, Enforced ? (ULONG)CAP_KEYS : 0UL);
+    ok_eq_ulong(Failed, (ULONG)CAP_KEYS);
     Failed = 0;
 
     /* At least the keys past the cap are dropped */
@@ -644,7 +640,7 @@ TestEntryCap(
         else
             Failed++;
     }
-    ok_eq_ulong(Failed, Enforced ? (ULONG)CAP_REPEATS : 0UL);
+    ok_eq_ulong(Failed, (ULONG)CAP_REPEATS);
     Seen = WaitDropped(Capped.Dropped + CAP_REPEATS, 130, &Repeated);
     ok(Seen, "Dropped %lu -> %lu after %d repeats of a dropped denial\n", Capped.Dropped, Repeated.Dropped, CAP_REPEATS);
 
@@ -676,41 +672,28 @@ START_TEST(CmAclAudit)
     BOOLEAN HaveUserHive;
     ULONG Tag, Disposition = 0;
     NTSTATUS Status;
-    BOOLEAN Audit, Impersonating = FALSE;
+    BOOLEAN Impersonating = FALSE;
 
     ReadStats(&Before);
     ok(Before.Present, "AuditStats key is missing\n");
     if (skip(Before.Present, "No AuditStats\n"))
         return;
 
-    trace("RegAcl mode %lu, configured %lu, source %lu, checks %lu, denials %lu, entries %lu\n",
-          Before.Mode, Before.ConfiguredMode, Before.ModeSource, Before.Checks, Before.Denials, Before.Entries);
-    ok(Before.ConfiguredMode <= 2, "ConfiguredMode = %lu\n", Before.ConfiguredMode);
-    ok(Before.ModeSource <= 2, "ModeSource = %lu\n", Before.ModeSource);
-    /* The configured mode runs (ENFORCE falls back to AUDIT only when SYSTEM would be locked out) */
-    ok_eq_ulong(Before.EnforceFallback, 0UL);
-    ok_eq_ulong(Before.Mode, Before.ConfiguredMode);
-    Audit = (Before.Mode == 1 || Before.Mode == 2);
-    Enforced = (Before.Mode == 2);
+    trace("RegAcl checks %lu, denials %lu, entries %lu\n", Before.Checks, Before.Denials, Before.Entries);
+    /* There is no mode: none of its statistics is published, and the boot keys needed no repair that failed */
+    ok(!Before.ModePublished, "a statistic of the removed modes is published\n");
+    ok_eq_ulong(Before.BootKeysUnrepaired, 0UL);
 
     /*
-     * The switches that turn storage off for a boot: legacy mode, and setup
-     * (text mode, or SystemSetupInProgress from a key only administrators can
-     * change). A registry value that would turn storage off from a key that
-     * others may change is ignored (bit 1 the mode value, bit 2 the setup
-     * value), and then storage stays on. A booted, installed system runs with
-     * neither switch.
+     * The one thing that turns storage off for a boot is setup (text mode, or SystemSetupInProgress from a key
+     * only administrators can change); a setup value from a key that others may change is ignored, and then
+     * storage stays on. A booted, installed system runs without it.
      */
-    trace("stores descriptors %lu, setup exclusion %lu, switches ignored 0x%lx\n",
-          Before.StoresDescriptors, Before.SetupExclusion, Before.SwitchesIgnored);
-    ok(Before.SwitchesIgnored <= 3, "SwitchesIgnored = 0x%lx\n", Before.SwitchesIgnored);
-    ok_eq_ulong(Before.StoresDescriptors, (Audit && !Before.SetupExclusion) ? 1UL : 0UL);
-    if (Before.SwitchesIgnored & 1)
-        ok(Audit, "the ignored legacy value did not leave the audit on\n");
-    if (Before.SwitchesIgnored & 2)
+    trace("stores descriptors %lu, setup exclusion %lu, setup value ignored %lu\n",
+          Before.StoresDescriptors, Before.SetupExclusion, Before.SetupValueIgnored);
+    ok_eq_ulong(Before.StoresDescriptors, Before.SetupExclusion ? 0UL : 1UL);
+    if (Before.SetupValueIgnored)
         ok(Before.SetupExclusion == 0, "the ignored setup value still excluded setup\n");
-    if (!Audit)
-        ok(Before.SetupExclusion == 0, "setup exclusion in legacy mode\n");
 
     /* Names nobody else uses, so their log lines are this run's */
     Tag = (ULONG)(KeQueryInterruptTime() / 10000);
@@ -743,13 +726,13 @@ START_TEST(CmAclAudit)
         goto Cleanup;
     Impersonating = TRUE;
 
-    /* A: write access to an HKLM\SOFTWARE key. Windows denies it; audit mode still opens it */
+    /* A: write access to an HKLM\SOFTWARE key. Windows denies it, and so do we */
     ok_eq_hex(OpenAs(SOFTWARE, NameA, KEY_SET_VALUE, TRUE), DENIED_STATUS);
 
     /* B: read access to an HKLM\HARDWARE key, which Everyone may read: granted, not logged */
     ok_eq_hex(OpenAs(HARDWARE, NameB, KEY_READ, TRUE), STATUS_SUCCESS);
 
-    /* C: a subkey under A, which needs KEY_CREATE_SUB_KEY on A. Windows denies it; audit mode creates it */
+    /* C: a subkey under A, which needs KEY_CREATE_SUB_KEY on A. Windows denies it, and so do we */
     Status = CreateAs(KeyA, NameC, &Disposition, &KeyC);
     ok_eq_hex(Status, DENIED_STATUS);
     if (NT_SUCCESS(Status))
@@ -768,7 +751,6 @@ START_TEST(CmAclAudit)
     PsRevertToSelf();
     Impersonating = FALSE;
 
-    if (Audit)
     {
         ok(WaitForLog(NeedleA, 40), "open of %s not in the audit log\n", NeedleA);
         ok(WaitForLog(NeedleC, 15), "create of %s not in the audit log\n", NeedleC);
@@ -785,18 +767,6 @@ START_TEST(CmAclAudit)
         ok(After.Denials >= Before.Denials + 2, "Denials %lu -> %lu\n", Before.Denials, After.Denials);
         ok(After.Entries >= Before.Entries + 2, "Entries %lu -> %lu\n", Before.Entries, After.Entries);
         ok(After.Checks > Before.Checks, "Checks %lu -> %lu\n", Before.Checks, After.Checks);
-    }
-    else
-    {
-        /* Legacy: no shadow check at all */
-        LARGE_INTEGER Interval;
-        Interval.QuadPart = -15LL * 10 * 1000 * 1000;
-        KeDelayExecutionThread(KernelMode, FALSE, &Interval);
-        ok(!LogContains(NeedleA), "legacy mode logged %s\n", NeedleA);
-        ok(!LogContains(NeedleC), "legacy mode logged %s\n", NeedleC);
-        ReadStats(&After);
-        ok_eq_ulong(After.Denials, Before.Denials);
-        ok_eq_ulong(After.Checks, Before.Checks);
     }
 
 Cleanup:

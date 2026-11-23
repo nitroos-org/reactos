@@ -25,7 +25,6 @@
  *  - owner and group are the creator's token owner and primary group;
  *  - the stored control has SE_SACL_AUTO_INHERITED (0x8804, 0x9804 when the
  *    DACL is protected).
- * In legacy mode (/REGACL=LEGACY) nothing is stored: every key has none.
  */
 
 #include <kmt_test.h>
@@ -50,7 +49,6 @@ NTSYSAPI NTSTATUS NTAPI ZwUnloadKey(_In_ POBJECT_ATTRIBUTES KeyObjectAttributes)
 #define FILE1       L"\\SystemRoot\\Temp\\CmSkStore1.hiv"
 #define FILE2       L"\\SystemRoot\\Temp\\CmSkStore2.hiv"
 #define FILE3       L"\\SystemRoot\\Temp\\CmSkStore3.hiv"
-#define STATS_KEY   L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\RegAcl\\AuditStats"
 
 /* Evaluates the call once (ok_eq_hex evaluates its argument twice) */
 #define CHK(Call) do { NTSTATUS Chk_ = (Call); ok(Chk_ == STATUS_SUCCESS, "%s = 0x%08lx\n", #Call, Chk_); } while (0)
@@ -618,30 +616,6 @@ GetTokenSids(VOID)
     g_Sid[S_GROUP] = GroupBuf;
 }
 
-static
-ULONG
-StoreMode(VOID)
-{
-    UNICODE_STRING Name = RTL_CONSTANT_STRING(STATS_KEY), ValueName = RTL_CONSTANT_STRING(L"Mode");
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
-    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
-    HANDLE Key;
-    ULONG Length, Mode = MAXULONG;
-
-    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
-    if (NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &ObjectAttributes)))
-    {
-        if (NT_SUCCESS(ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length)) &&
-            Info->Type == REG_DWORD)
-        {
-            Mode = *(PULONG)Info->Data;
-        }
-        ZwClose(Key);
-    }
-    return Mode;
-}
-
 static HIVE_IMAGE g_Image, g_Image2, g_Image3;
 
 START_TEST(CmSkStore)
@@ -651,7 +625,6 @@ START_TEST(CmSkStore)
     HANDLE Seed, Root, Key, Sub, Sub2, Vol, Vol2;
     UNICODE_STRING NewName = RTL_CONSTANT_STRING(L"K8r");
     NTSTATUS Status;
-    BOOLEAN Legacy;
     SK *Sk, *ChildSk;
     ULONG i;
 
@@ -661,8 +634,6 @@ START_TEST(CmSkStore)
     g_Sid[S_WD] = WellKnown(3, 1, SECURITY_WORLD_RID, 0);
     g_Sid[S_CO] = WellKnown(4, 3, SECURITY_CREATOR_OWNER_RID, 0);
     GetTokenSids();
-    Legacy = (StoreMode() == 0);
-    trace("registry ACL mode %lu: %s\n", StoreMode(), Legacy ? "legacy, nothing is stored" : "descriptors are stored");
 
     /* Leftovers of an earlier run */
     UnloadHive(MOUNT2);
@@ -715,9 +686,7 @@ START_TEST(CmSkStore)
     if (ReadHiveImage(FILE2, &g_Image2))
     {
         Sk = KeySk(&g_Image2, L"");
-        if (Legacy)
-            ok(Sk == NULL, "legacy: the volatile key has a stored descriptor\n");
-        else if (Sk && Sk->Sd)
+        if (Sk && Sk->Sd)
             SdMatches(Sk->Sd, Sk->Length, CTL, ChildAces, RTL_NUMBER_OF(ChildAces), "volatile V");
         else
             ok(0, "the volatile key has no descriptor\n");
@@ -729,15 +698,6 @@ START_TEST(CmSkStore)
     CHK(UnloadHive(MOUNT1));
     if (ReadHiveImage(FILE1, &g_Image))
     {
-        if (Legacy)
-        {
-            for (i = 0; i < g_Image.NkCount; i++)
-            {
-                if (!(g_Image.Nk[i].Flags & NK_HIVE_ENTRY))
-                    ok(g_Image.Nk[i].Security == NIL_CELL, "legacy: key %S has a descriptor\n", g_Image.Nk[i].Name);
-            }
-        }
-        else
         {
             /* root, child, E, E\C: four cells; the eight children (one renamed) and N share one */
             CheckRingAndCounts(&g_Image, 4, "after create");
@@ -775,7 +735,7 @@ START_TEST(CmSkStore)
     ZwClose(Key);
     ZwClose(Root);
     CHK(UnloadHive(MOUNT1));
-    if (!Legacy && ReadHiveImage(FILE1, &g_Image))
+    if (ReadHiveImage(FILE1, &g_Image))
     {
         CheckRingAndCounts(&g_Image, 4, "after deleting 8 of 10");
         ChildSk = KeySk(&g_Image, L"K8r");
@@ -789,7 +749,7 @@ START_TEST(CmSkStore)
     DeleteKeyByName(Root, L"K9");
     ZwClose(Root);
     CHK(UnloadHive(MOUNT1));
-    if (!Legacy && ReadHiveImage(FILE1, &g_Image))
+    if (ReadHiveImage(FILE1, &g_Image))
     {
         /* The children's cell is gone from the ring and from the file's allocated cells */
         CheckRingAndCounts(&g_Image, 3, "after deleting all children");
@@ -811,7 +771,6 @@ START_TEST(CmSkStore)
     CHK(UnloadHive(MOUNT1));
     if (ReadHiveImage(FILE1, &g_Image) && ReadHiveImage(FILE2, &g_Image2) && ReadHiveImage(FILE3, &g_Image3))
     {
-        if (!Legacy)
         {
             /* root, E, E\C and S1's (the children's) descriptor */
             CheckRingAndCounts(&g_Image2, 4, "saved copy");

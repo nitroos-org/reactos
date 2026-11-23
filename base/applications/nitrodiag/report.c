@@ -289,15 +289,15 @@ void WriteSystemHeader(WBUF *out)
     WbAppend(out, L"\r\n");
 
     {
-        DWORD mode = 0, src = 0, cfg = 0;
-        if (RegDword(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl\\AuditStats", L"Mode", &mode))
+        DWORD denials = 0, transition = 0;
+        if (RegDword(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl\\AuditStats", L"Denials", &denials))
         {
-            RegDword(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl\\AuditStats", L"ModeSource", &src);
-            RegDword(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl\\AuditStats", L"ConfiguredMode", &cfg);
-            WbPrintf(out, L"  Registry ACL:   mode %lu (configured %lu, source %lu; 0 = legacy, 1 = audit, 2 = enforce)\r\n", mode, cfg, src);
+            RegDword(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl\\AuditStats", L"Transition", &transition);
+            WbPrintf(out, L"  Registry ACL:   key permissions enforced; %lu denials this boot (transition state %lu)\r\n",
+                     denials, transition);
         }
         else
-            WbAppend(out, L"  Registry ACL:   mode not published\r\n");
+            WbAppend(out, L"  Registry ACL:   state not published\r\n");
     }
 
     GetUserDefaultLocaleName(loc, _countof(loc));

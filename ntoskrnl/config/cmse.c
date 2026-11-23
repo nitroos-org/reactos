@@ -23,11 +23,10 @@
  * (Windows does not). Its SACL holds a mandatory label at the Untrusted level, which
  * restricts no token: SeAccessCheck applies labels, and without one (an
  * implicit Medium label) the check would refuse a Low client every write to
- * every key, also to keys labelled Low, in the modes that do not enforce key
- * security at all. Key labels count where key descriptors count: under
- * enforcement (CmpAclDecide, the same SeAccessCheck with the key's own
- * descriptor) and in the audit mode's shadow check, which logs what
- * enforcement would deny.
+ * every key, also to keys labelled Low, for the opens that do not take key
+ * security into account (kernel mode). Key labels count where key descriptors
+ * count: for user mode (CmpAclDecide, the same SeAccessCheck with the key's
+ * own descriptor).
  */
 typedef struct _CMP_LEGACY_KEY_CHECK_SD
 {
@@ -110,15 +109,13 @@ static CMP_LEGACY_KEY_CHECK_SD CmpLegacyKeyCheckSdNoLabel =
 
 /*
  * The access decision of a key open (CmpDoOpen, through CmpAclCheckKeyOpen)
- * when key access is not enforced, and for kernel-mode opens: made in the
+ * for kernel-mode opens (and before the policy tables exist): made in the
  * configuration manager rather than by the object manager, since
  * ObCheckObjectAccess would check the descriptor the key reports
- * (NtQuerySecurityObject), which is the key's real one, and so would enforce
- * key security in every mode. The check runs against the legacy descriptor,
- * so it grants what was granted before (and still asks for SeSecurityPrivilege
- * for ACCESS_SYSTEM_SECURITY), and the audit mode's shadow check records what
- * the key's own descriptor decides; registry ACL mode 2 (enforce) decides by
- * that descriptor instead (cmacl.c). Same steps as ObCheckObjectAccess: the
+ * (NtQuerySecurityObject), which is the key's real one. The check runs against
+ * the legacy descriptor, so it grants what kernel callers always got (and
+ * still asks for SeSecurityPrivilege for ACCESS_SYSTEM_SECURITY); user-mode
+ * opens are decided by the key's own descriptor instead (cmacl.c). Same steps as ObCheckObjectAccess: the
  * privileges used go into the access state, the granted access moves from
  * the remaining to the granted mask, and the open audit alarm runs.
  *
