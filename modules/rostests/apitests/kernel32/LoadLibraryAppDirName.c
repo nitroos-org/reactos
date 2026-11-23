@@ -13,11 +13,60 @@
 
 #include "precomp.h"
 
+/* A known DLL (imagehlp.dll) is taken from the system directory of the program's bitness, also when a file of that
+ * name is in the application directory: for a 32-bit program that is \KnownDlls32 (Windows Server 2022 has it, 43
+ * sections; a 32-bit program with its own imagehlp.dll gets SysWOW64's, measured). */
+static void TestKnownDllName(void)
+{
+    WCHAR AppDir[MAX_PATH], Source[MAX_PATH], Copy[MAX_PATH], Path[MAX_PATH], System[MAX_PATH];
+    HMODULE Lib;
+    PWCHAR Slash;
+
+    if (GetModuleHandleW(L"imagehlp.dll"))
+    {
+        skip("imagehlp.dll is loaded in the test process already\n");
+        return;
+    }
+
+    GetModuleFileNameW(NULL, AppDir, _countof(AppDir));
+    Slash = wcsrchr(AppDir, L'\\');
+    *Slash = 0;
+    _snwprintf(Source, MAX_PATH, L"%ls\\ll_search_dep.dll", AppDir);
+    _snwprintf(Copy, MAX_PATH, L"%ls\\imagehlp.dll", AppDir);
+    if (!CopyFileW(Source, Copy, FALSE))
+    {
+        skip("cannot write %ls: %lu\n", Copy, GetLastError());
+        return;
+    }
+
+    Lib = LoadLibraryW(L"imagehlp.dll");
+    ok(Lib != NULL, "LoadLibrary(imagehlp.dll) failed: %lu\n", GetLastError());
+    if (Lib)
+    {
+        /* the directory of the system files of this program's bitness: SysWOW64 for a 32-bit program on a 64-bit
+         * system (GetSystemDirectory is not asked: it names System32 there on NitroOS, another difference) */
+        {
+            BOOL Wow64 = FALSE;
+
+            IsWow64Process(GetCurrentProcess(), &Wow64);
+            if (!Wow64 || !GetSystemWow64DirectoryW(System, _countof(System)))
+                GetSystemDirectoryW(System, _countof(System));
+        }
+        wcscat(System, L"\\imagehlp.dll");
+        ok(GetModuleFileNameW(Lib, Path, _countof(Path)) != 0, "GetModuleFileName failed\n");
+        ok(!_wcsicmp(Path, System), "LoadLibrary(imagehlp.dll) loaded \"%ls\", expected \"%ls\"\n", Path, System);
+        FreeLibrary(Lib);
+    }
+    DeleteFileW(Copy);
+}
+
 START_TEST(LoadLibraryAppDirName)
 {
     WCHAR AppDir[MAX_PATH], Source[MAX_PATH], Copy[MAX_PATH], Path[MAX_PATH];
     HMODULE Lib;
     PWCHAR Slash;
+
+    TestKnownDllName();
 
     if (GetModuleHandleW(L"dbghelp.dll"))
     {
