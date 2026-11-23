@@ -26,6 +26,9 @@
 #define SERVICE_TAG 0x63765368  /* 'hSvc' */
 #define INVALID_TAG 0xAABBCCDD
 
+/* The dwControlsAccepted bits SetServiceStatus takes (see RSetServiceStatus) */
+#define SCM_VALID_CONTROLS_ACCEPTED 0x77FF
+
 typedef struct _SCMGR_HANDLE
 {
     DWORD Tag;
@@ -2227,8 +2230,11 @@ RSetServiceStatus(
         return ERROR_INVALID_DATA;
     }
 
-    /* Check accepted controls */
-    if (lpServiceStatus->dwControlsAccepted & ~0xFF)
+    /* Check accepted controls. Measured on Windows Server 2022: SERVICE_ACCEPT_STOP to SERVICE_ACCEPT_TRIGGEREVENT
+       (0x1 to 0x400, winsvc.h) and 0x1000, 0x2000 and 0x4000 are taken, and the service is shown in the new state with
+       them; 0x800 (SERVICE_ACCEPT_USERMODEREBOOT in the current header) and every other bit make the call fail
+       with ERROR_INVALID_DATA and change nothing. */
+    if (lpServiceStatus->dwControlsAccepted & ~SCM_VALID_CONTROLS_ACCEPTED)
     {
         DPRINT("Invalid controls accepted\n");
         return ERROR_INVALID_DATA;
