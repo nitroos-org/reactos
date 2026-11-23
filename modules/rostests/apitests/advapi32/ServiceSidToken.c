@@ -523,8 +523,9 @@ RunService(SC_HANDLE hScm, PCSTR Name, PCSTR Account, DWORD SidType, PCSTR Privi
         StringCbPrintfA(Key, sizeof(Key), "SYSTEM\\CurrentControlSet\\Services\\%s", Name);
         if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, Key, 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
         {
-            ok(RegSetValueExA(hKey, "RequiredPrivileges", 0, REG_MULTI_SZ, RunRawBlob, RunRawSize) == ERROR_SUCCESS,
-               "%s: RegSetValueEx failed\n", Name);
+            LONG SetResult = RegSetValueExA(hKey, "RequiredPrivileges", 0, REG_MULTI_SZ, RunRawBlob, RunRawSize);
+
+            ok(SetResult == ERROR_SUCCESS, "%s: RegSetValueEx of %lu bytes failed with %ld\n", Name, RunRawSize, SetResult);
             RegCloseKey(hKey);
         }
     }
