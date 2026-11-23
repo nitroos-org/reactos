@@ -168,6 +168,7 @@ extern void func_SetSecurityGenericMap(void);
 extern void func_SetSecurityTypeMask(void);
 extern void func_SetSecurityInfoKey(void);
 extern void func_SetSecurityInfoKeyInherit(void);
+extern void func_SetSecurityInfoSplit(void);
 extern void func_RegistryRestrictedOpen(void);
 extern void func_SetNamedSecurityInfoInherit(void);
 extern void func_SddlRights(void);
@@ -372,6 +373,7 @@ const struct test winetest_testlist[] =
     { "SetSecurityTypeMask", func_SetSecurityTypeMask },
     { "SetSecurityInfoKey", func_SetSecurityInfoKey },
     { "SetSecurityInfoKeyInherit", func_SetSecurityInfoKeyInherit },
+    { "SetSecurityInfoSplit", func_SetSecurityInfoSplit },
     { "RegistryRestrictedOpen", func_RegistryRestrictedOpen },
     { "SetNamedSecurityInfoInherit", func_SetNamedSecurityInfoInherit },
     { "SddlRights", func_SddlRights },

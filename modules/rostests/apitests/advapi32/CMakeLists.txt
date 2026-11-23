@@ -151,6 +151,7 @@ list(APPEND SOURCE
     SetSecurityTypeMask.c
     SetSecurityInfoKey.c
     SetSecurityInfoKeyInherit.c
+    SetSecurityInfoSplit.c
     RegistryRestrictedOpen.c
     SetNamedSecurityInfoInherit.c
     SddlRights.c
