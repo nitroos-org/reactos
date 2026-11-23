@@ -1304,12 +1304,13 @@ WSPListen(SOCKET Handle,
 #define SELECT_IN_EXCEPT    0x04
 
 /*
- * The most sockets (entries of the three sets together) one select() takes. The count is whatever the
- * caller's fd_set carries (an application may define a larger FD_SETSIZE than this DLL was built
- * with), so it is bounded here instead: with every size below computed in 64 bits, this keeps the
- * request and the buffers far under the 32-bit sizes of the I/O request.
+ * The most sockets one set of a select() takes. The count is whatever the caller's fd_set carries (an
+ * application may define a larger FD_SETSIZE than this DLL was built with), so it is bounded here instead:
+ * with every size below computed in 64 bits, this keeps the request and the buffers (three sets at most) far
+ * under the 32-bit sizes of the I/O request. Like Windows Server 2022: 65535, one more in any set is
+ * WSAENOBUFS, before any socket is looked at.
  */
-#define SELECT_MAX_ENTRIES  0x100000UL
+#define SELECT_MAX_SET_ENTRIES  0xFFFFUL
 
 typedef struct _SELECT_ENTRY
 {
@@ -1396,20 +1397,21 @@ WSPSelect(IN int nfds,
         return SOCKET_ERROR;
     }
 
-    /* The counts are 32-bit: the sum cannot wrap in 64 bits */
+    if (ReadCount > SELECT_MAX_SET_ENTRIES || WriteCount > SELECT_MAX_SET_ENTRIES ||
+        ExceptCount > SELECT_MAX_SET_ENTRIES)
+    {
+        WARN("Too many handles in a set: %lu %lu %lu\n", ReadCount, WriteCount, ExceptCount);
+        if (lpErrno) *lpErrno = WSAENOBUFS;
+        return SOCKET_ERROR;
+    }
+
+    /* The counts are at most 16 bits now: the sum cannot wrap */
     Needed = (ULONGLONG)ReadCount + WriteCount + ExceptCount;
 
     if (Needed == 0)
     {
         WARN("No handles! Returning SOCKET_ERROR\n");
         if (lpErrno) *lpErrno = WSAEINVAL;
-        return SOCKET_ERROR;
-    }
-
-    if (Needed > SELECT_MAX_ENTRIES)
-    {
-        WARN("Too many handles: %I64u\n", Needed);
-        if (lpErrno) *lpErrno = WSAEFAULT;
         return SOCKET_ERROR;
     }
 

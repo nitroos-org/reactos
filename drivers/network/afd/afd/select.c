@@ -10,6 +10,10 @@
 
 #include "afd.h"
 
+/* The most sockets one poll takes (the limit of select() on Windows): the request and the array of referenced
+ * file objects are sized by the count, which a caller of the control code makes up */
+#define AFD_MAX_POLL_HANDLES 0xFFFF
+
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
 typedef struct
 {
@@ -46,7 +50,7 @@ AfdCapturePoll32(PIRP Irp, PIO_STACK_LOCATION IrpSp)
                  FIELD_OFFSET(AFD_POLL_INFO32, Handles))
         return STATUS_BUFFER_TOO_SMALL;
     Count = From->HandleCount;
-    if (!Count || Count > (MAXULONG - FIELD_OFFSET(AFD_POLL_INFO, Handles)) / sizeof(AFD_HANDLE))
+    if (!Count || Count > AFD_MAX_POLL_HANDLES)
         return STATUS_INVALID_PARAMETER;
     Length = FIELD_OFFSET(AFD_POLL_INFO32, Handles) + Count * sizeof(AFD_HANDLE32);
     if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < Length ||
@@ -290,6 +294,7 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
         InputLength < FIELD_OFFSET(AFD_POLL_INFO, Handles) ||
         OutputLength < InputLength ||
         PollReq->HandleCount == 0 ||
+        PollReq->HandleCount > AFD_MAX_POLL_HANDLES ||
         PollReq->HandleCount > (InputLength - FIELD_OFFSET(AFD_POLL_INFO, Handles)) / sizeof(AFD_HANDLE) ) {
         Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
         Irp->IoStatus.Information = 0;

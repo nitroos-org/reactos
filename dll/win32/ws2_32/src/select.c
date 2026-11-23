@@ -61,23 +61,30 @@ select(IN INT s,
         return SOCKET_ERROR;
     }
 
-    /* Use the first Socket from the first valid set */
-    if (readfds && readfds->fd_count)
+    /* Use the first Socket from the first valid set. The pointers are the caller's: a set that cannot
+     * be read is WSAEFAULT, as on Windows (the provider checks every count and every socket) */
+    ErrorCode = ERROR_SUCCESS;
+    Handle = INVALID_SOCKET;
+    _SEH2_TRY
     {
-        Handle = readfds->fd_array[0];
+        if (readfds && readfds->fd_count)
+            Handle = readfds->fd_array[0];
+        else if (writefds && writefds->fd_count)
+            Handle = writefds->fd_array[0];
+        else if (exceptfds && exceptfds->fd_count)
+            Handle = exceptfds->fd_array[0];
+        else
+            ErrorCode = WSAEINVAL;
     }
-    else if (writefds && writefds->fd_count)
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
-        Handle = writefds->fd_array[0];
+        ErrorCode = WSAEFAULT;
     }
-    else if (exceptfds && exceptfds->fd_count)
+    _SEH2_END;
+
+    if (ErrorCode != ERROR_SUCCESS)
     {
-        Handle = exceptfds->fd_array[0];
-    }
-    else
-    {
-        /* Invalid handles */
-        SetLastError(WSAEINVAL);
+        SetLastError(ErrorCode);
         return SOCKET_ERROR;
     }
 
