@@ -15,6 +15,7 @@
 #include <accctrl.h>
 #include <aclapi.h>
 #include <sddl.h>
+#include <winioctl.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -708,18 +709,191 @@ SecureExistingProfileDirectory(
  * what it points to (FILE_FLAG_OPEN_REPARSE_POINT, and the security is set through that handle), and nothing happens for
  * a plain directory (another Windows on the volume) or for one that is protected already.
  */
+static BOOL
+ReadPathValue(
+    _In_ PCWSTR pszKey,
+    _In_ PCWSTR pszValue,
+    _Out_writes_(cchPath) PWSTR pszPath,
+    _In_ DWORD cchPath);
+
+typedef enum _JUNCTION_RESULT
+{
+    JunctionNotThere,       /* no such object, or it cannot be opened */
+    JunctionNotJunction,    /* a plain directory or file, or a reparse point of another kind or target: left alone */
+    JunctionProtected,      /* its DACL is protected already: nothing to do */
+    JunctionSecured,        /* it got the DACL */
+    JunctionFailed          /* setting the DACL failed */
+} JUNCTION_RESULT;
+
+/* The DACL of a template, after a deny of FILE_LIST_DIRECTORY to Everyone when bDenyListing (a legacy junction) */
+static PACL
+BuildJunctionDacl(
+    _In_ PROFILE_DIR_KIND Kind,
+    _In_ BOOL bDenyListing)
+{
+    PSECURITY_DESCRIPTOR pSd;
+    PACL pTemplate = NULL, pAcl = NULL;
+    BYTE WorldSid[SECURITY_MAX_SID_SIZE];
+    DWORD cbSid = sizeof(WorldSid), dwSize, i;
+    BOOL bPresent, bDefaulted;
+    PACE_HEADER pAce;
+
+    pSd = BuildProfileDescriptor(Kind, NULL);
+    if (!pSd)
+        return NULL;
+    if (!GetSecurityDescriptorDacl(pSd, &bPresent, &pTemplate, &bDefaulted) || !bPresent || !pTemplate ||
+        !CreateWellKnownSid(WinWorldSid, NULL, WorldSid, &cbSid))
+    {
+        goto done;
+    }
+
+    dwSize = pTemplate->AclSize + sizeof(ACCESS_DENIED_ACE) - sizeof(DWORD) + GetLengthSid((PSID)WorldSid);
+    pAcl = LocalAlloc(LMEM_FIXED, dwSize);
+    if (!pAcl || !InitializeAcl(pAcl, dwSize, ACL_REVISION) ||
+        (bDenyListing && !AddAccessDeniedAce(pAcl, ACL_REVISION, FILE_LIST_DIRECTORY, (PSID)WorldSid)))
+    {
+        goto fail;
+    }
+    for (i = 0; i < pTemplate->AceCount; i++)
+    {
+        if (!GetAce(pTemplate, i, (PVOID *)&pAce) || !AddAce(pAcl, ACL_REVISION, MAXDWORD, pAce, pAce->AceSize))
+            goto fail;
+    }
+    goto done;
+
+fail:
+    if (pAcl)
+        LocalFree(pAcl);
+    pAcl = NULL;
+done:
+    LocalFree(pSd);
+    return pAcl;
+}
+
+/* The substitute name of a mount point (a junction) is \??\pszTarget */
+static BOOL
+JunctionPointsTo(
+    _In_ HANDLE hLink,
+    _In_ PCWSTR pszTarget)
+{
+    struct
+    {
+        ULONG ReparseTag;
+        USHORT ReparseDataLength;
+        USHORT Reserved;
+        USHORT SubstituteNameOffset;
+        USHORT SubstituteNameLength;
+        USHORT PrintNameOffset;
+        USHORT PrintNameLength;
+        WCHAR PathBuffer[MAX_PATH + 8 + MAX_PATH];
+    } Data;
+    WCHAR szName[MAX_PATH + 8];
+    DWORD dwLength;
+    USHORT cch;
+
+    if (!DeviceIoControl(hLink, FSCTL_GET_REPARSE_POINT, NULL, 0, &Data, sizeof(Data), &dwLength, NULL) ||
+        Data.ReparseTag != IO_REPARSE_TAG_MOUNT_POINT ||
+        (ULONG)Data.SubstituteNameOffset + Data.SubstituteNameLength > sizeof(Data.PathBuffer))
+    {
+        return FALSE;
+    }
+    cch = Data.SubstituteNameLength / sizeof(WCHAR);
+    if (cch < 4 || cch >= ARRAYSIZE(szName))
+        return FALSE;
+    CopyMemory(szName, &Data.PathBuffer[Data.SubstituteNameOffset / sizeof(WCHAR)], cch * sizeof(WCHAR));
+    szName[cch] = UNICODE_NULL;
+    /* "C:\Users" and "C:\Users\" are the same directory */
+    if (cch > 7 && szName[cch - 1] == L'\\')
+        szName[cch - 1] = UNICODE_NULL;
+    return !wcsncmp(szName, L"\\??\\", 4) && !_wcsicmp(szName + 4, pszTarget);
+}
+
+/*
+ * A junction object gets the DACL of the directory it points to (the template of that directory), protected. Only the
+ * object is opened, never what it points to (FILE_FLAG_OPEN_REPARSE_POINT, and the security is set through that
+ * handle). Nothing happens for a plain directory, for a reparse point that is not a junction to pszTarget (when given)
+ * or for one whose DACL is protected already.
+ */
+static JUNCTION_RESULT
+SecureJunctionObject(
+    _In_ PCWSTR pszLink,
+    _In_opt_ PCWSTR pszTarget,
+    _In_ PROFILE_DIR_KIND Kind,
+    _In_ BOOL bDenyListing,
+    _Out_opt_ PDWORD pdwError)
+{
+    BY_HANDLE_FILE_INFORMATION Info;
+    SECURITY_DESCRIPTOR_CONTROL Control;
+    PSECURITY_DESCRIPTOR pSd = NULL;
+    PACL pAcl = NULL;
+    DWORD dwRevision, dwError = ERROR_SUCCESS;
+    JUNCTION_RESULT Result = JunctionNotJunction;
+    HANDLE hLink;
+
+    hLink = CreateFileW(pszLink, READ_CONTROL | WRITE_DAC, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (hLink == INVALID_HANDLE_VALUE)
+    {
+        if (pdwError)
+            *pdwError = GetLastError();
+        return JunctionNotThere;
+    }
+
+    if (!GetFileInformationByHandle(hLink, &Info) || !(Info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+        !(Info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (pszTarget && !JunctionPointsTo(hLink, pszTarget)))
+    {
+        goto done;
+    }
+
+    /* The DACL of the object itself: nothing to do when it is protected */
+    Result = JunctionFailed;
+    dwError = GetSecurityInfo(hLink, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &pAcl, NULL, &pSd);
+    if (dwError != ERROR_SUCCESS)
+        goto done;
+    if (!GetSecurityDescriptorControl(pSd, &Control, &dwRevision))
+    {
+        dwError = GetLastError();
+        goto done;
+    }
+    if (Control & SE_DACL_PROTECTED)
+    {
+        Result = JunctionProtected;
+        goto done;
+    }
+
+    pAcl = BuildJunctionDacl(Kind, bDenyListing);
+    if (!pAcl)
+    {
+        dwError = ERROR_NOT_ENOUGH_MEMORY;
+        goto done;
+    }
+    dwError = SetSecurityInfo(hLink, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                              NULL, NULL, pAcl, NULL);
+    LocalFree(pAcl);
+    if (dwError == ERROR_SUCCESS)
+        Result = JunctionSecured;
+    else
+        DPRINT1("Failed to secure %S, error: %lu\n", pszLink, dwError);
+
+done:
+    if (pSd)
+        LocalFree(pSd);
+    CloseHandle(hLink);
+    if (pdwError)
+        *pdwError = dwError;
+    return Result;
+}
+
+/*
+ * C:\Windows is a junction to the system directory when that is somewhere else (setup makes it). The junction object has a
+ * DACL of its own, which an older install left at what the volume root gave it (Authenticated Users: Modify): any user could
+ * delete it and put another directory in its place. It gets the DACL of the Windows directory.
+ */
 static VOID
 SecureWindowsJunction(
     _In_ PCWSTR pszSystemDirectory)
 {
     WCHAR szLink[] = L"X:\\Windows";
-    BY_HANDLE_FILE_INFORMATION Info;
-    SECURITY_DESCRIPTOR_CONTROL Control;
-    PSECURITY_DESCRIPTOR pSd = NULL, pNewSd;
-    PACL pAcl = NULL;
-    BOOL bPresent, bDefaulted;
-    DWORD dwRevision, dwError;
-    HANDLE hLink;
 
     if (pszSystemDirectory[1] != L':' || pszSystemDirectory[2] != L'\\')
         return;
@@ -727,37 +901,94 @@ SecureWindowsJunction(
     if (!_wcsicmp(pszSystemDirectory, szLink))
         return;
 
-    hLink = CreateFileW(szLink, READ_CONTROL | WRITE_DAC, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                        NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-    if (hLink == INVALID_HANDLE_VALUE)
+    SecureJunctionObject(szLink, NULL, ProfileDirSystem, FALSE, NULL);
+}
+
+/*
+ * "Documents and Settings" in the root of the system volume is the junction of NT 5 programs to the profiles directory
+ * (directory.c, CreateLegacyProgramDataJunctions). Made after the root got its DACL, the object inherited the root's
+ * entries (Authenticated Users: Modify), so any user could delete the junction and put a directory of its own in its
+ * place, where programs that use the NT 5 path then look for profiles. It gets the DACL of the profiles directory
+ * (UsersAces: SYSTEM and Administrators full, Users and Everyone read), protected, after the deny of the listing to
+ * Everyone that the legacy junctions carry. Only a junction that points to the profiles directory is changed.
+ *
+ * SecureLegacyUsersJunction: when setup makes the junction. RepairLegacyUsersJunction: an existing install (winlogon at
+ * every start; once in effect, as a protected DACL is left alone): every change is a line in
+ * System32\LogFiles\FolderAcl\legacy-junction-repair.txt.
+ */
+#define LJ_REPAIR_LOG L"%SystemRoot%\\System32\\LogFiles\\FolderAcl\\legacy-junction-repair.txt"
+
+BOOL
+SecureLegacyUsersJunction(
+    _In_ PCWSTR pszLink,
+    _In_ PCWSTR pszProfilesPath)
+{
+    JUNCTION_RESULT Result = SecureJunctionObject(pszLink, pszProfilesPath, ProfileDirUsers, TRUE, NULL);
+
+    return Result == JunctionSecured || Result == JunctionProtected;
+}
+
+static VOID
+RepairLegacyUsersJunction(VOID)
+{
+    WCHAR szLink[MAX_PATH], szProfiles[MAX_PATH], szLog[MAX_PATH], szLine[3 * MAX_PATH], szDir[MAX_PATH];
+    CHAR szUtf8[9 * MAX_PATH];
+    JUNCTION_RESULT Result;
+    SYSTEMTIME st;
+    DWORD dwError = ERROR_SUCCESS, dwWritten;
+    HANDLE hLog;
+    PWCHAR p;
+    int n;
+
+    if (!ReadPathValue(L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList", L"ProfilesDirectory",
+                       szProfiles, ARRAYSIZE(szProfiles)) ||
+        !ExpandEnvironmentStringsW(L"%SystemDrive%\\Documents and Settings", szLink, ARRAYSIZE(szLink)))
+    {
+        return;
+    }
+    n = (int)wcslen(szProfiles);
+    if (n > 3 && szProfiles[n - 1] == L'\\')
+        szProfiles[n - 1] = UNICODE_NULL;
+
+    Result = SecureJunctionObject(szLink, szProfiles, ProfileDirUsers, TRUE, &dwError);
+    if (Result != JunctionSecured && Result != JunctionFailed)
         return;
 
-    if (!GetFileInformationByHandle(hLink, &Info) || !(Info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
-        goto done;
-
-    /* The DACL of the object itself: nothing to do when it is protected */
-    if (GetSecurityInfo(hLink, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &pAcl, NULL, &pSd) != ERROR_SUCCESS)
-        goto done;
-    if (!GetSecurityDescriptorControl(pSd, &Control, &dwRevision) || (Control & SE_DACL_PROTECTED))
-        goto done;
-
-    pNewSd = BuildProfileDescriptor(ProfileDirSystem, NULL);
-    if (pNewSd)
+    GetSystemTime(&st);
+    if (FAILED(StringCchPrintfW(szLine, ARRAYSIZE(szLine),
+                                L"%04u-%02u-%02uT%02u:%02u:%02uZ userenv: %s (junction to %s): %s (error %lu)\r\n",
+                                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, szLink, szProfiles,
+                                Result == JunctionSecured ? L"the root's entries replaced by the DACL of the profiles "
+                                L"directory, protected" : L"not repaired", dwError)))
     {
-        if (GetSecurityDescriptorDacl(pNewSd, &bPresent, &pAcl, &bDefaulted) && bPresent && pAcl)
-        {
-            dwError = SetSecurityInfo(hLink, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                                      NULL, NULL, pAcl, NULL);
-            if (dwError != ERROR_SUCCESS)
-                DPRINT1("Failed to secure %S, error: %lu\n", szLink, dwError);
-        }
-        LocalFree(pNewSd);
+        return;
     }
+    DPRINT1("%S", szLine);
+    if (!ExpandEnvironmentStringsW(LJ_REPAIR_LOG, szLog, ARRAYSIZE(szLog)))
+        return;
 
-done:
-    if (pSd)
-        LocalFree(pSd);
-    CloseHandle(hLink);
+    /* System32\LogFiles\FolderAcl (both inherit the DACL of the system folder) */
+    StringCchCopyW(szDir, ARRAYSIZE(szDir), szLog);
+    p = wcsrchr(szDir, L'\\');
+    if (!p)
+        return;
+    *p = UNICODE_NULL;
+    p = wcsrchr(szDir, L'\\');
+    if (p)
+    {
+        *p = UNICODE_NULL;
+        CreateDirectoryW(szDir, NULL);
+        *p = L'\\';
+    }
+    CreateDirectoryW(szDir, NULL);
+
+    hLog = CreateFileW(szLog, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hLog == INVALID_HANDLE_VALUE)
+        return;
+    n = WideCharToMultiByte(CP_UTF8, 0, szLine, -1, szUtf8, sizeof(szUtf8), NULL, NULL);
+    if (n > 1)
+        WriteFile(hLog, szUtf8, n - 1, &dwWritten, NULL);
+    CloseHandle(hLog);
 }
 
 /* The value of a registry string under HKLM, expanded; FALSE when it is not there */
@@ -1379,6 +1610,9 @@ SecureSystemDirectories(VOID)
         /* The \Windows junction to it, itself */
         SecureWindowsJunction(szWindows);
     }
+
+    /* The \Documents and Settings junction to the profiles directory, itself */
+    RepairLegacyUsersJunction();
 
     /* Program Files, and the 32-bit one */
     if (ReadPathValue(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion", L"ProgramFilesDir", szPath, ARRAYSIZE(szPath)))

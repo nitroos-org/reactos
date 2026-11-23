@@ -6,6 +6,7 @@
 
 #include <apitest.h>
 #include <winioctl.h>
+#include <aclapi.h>
 #include <userenv.h>
 #include <strsafe.h>
 
@@ -172,6 +173,73 @@ TestOpenThrough(PCWSTR ProfilePath)
     ok(GetFileAttributesW(Real) == INVALID_FILE_ATTRIBUTES, "The file is still in AppData\\Roaming\n");
 }
 
+/*
+ * The DACL of a junction object in the root of the volume (the object itself, not its target): not what the root passes
+ * on (Authenticated Users: Modify), but the DACL of its target, protected, after the deny of the listing. Users,
+ * Authenticated Users, Everyone and the interactive logon may neither write nor delete it nor change its DACL or owner.
+ * On ReactOS only: the DACL of the Windows object is not measured.
+ */
+static void
+TestRootJunctionDacl(PCWSTR Link)
+{
+    static const WELL_KNOWN_SID_TYPE Others[] = { WinBuiltinUsersSid, WinAuthenticatedUserSid, WinWorldSid, WinInteractiveSid };
+    const ACCESS_MASK Write = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_DELETE_CHILD |
+                              FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL;
+    BYTE Sid[SECURITY_MAX_SID_SIZE];
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    SECURITY_DESCRIPTOR_CONTROL Control = 0;
+    PACCESS_ALLOWED_ACE Ace;
+    PACL Dacl = NULL;
+    DWORD Error, Revision, Size, i, j;
+    HANDLE hLink;
+
+    if (!is_reactos())
+    {
+        skip("%S: the DACL of the Windows junction is not known\n", Link);
+        return;
+    }
+
+    hLink = CreateFileW(Link, READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    ok(hLink != INVALID_HANDLE_VALUE, "%S: open: error %lu\n", Link, GetLastError());
+    if (hLink == INVALID_HANDLE_VALUE)
+        return;
+    Error = GetSecurityInfo(hLink, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &Dacl, NULL, &Sd);
+    CloseHandle(hLink);
+    ok(Error == ERROR_SUCCESS, "%S: GetSecurityInfo: error %lu\n", Link, Error);
+    if (Error != ERROR_SUCCESS)
+        return;
+
+    ok(GetSecurityDescriptorControl(Sd, &Control, &Revision), "GetSecurityDescriptorControl: error %lu\n", GetLastError());
+    ok((Control & SE_DACL_PROTECTED) != 0, "%S: the DACL is not protected (control %#x)\n", Link, Control);
+    ok(Dacl != NULL && Dacl->AceCount > 2, "%S: DACL %p\n", Link, Dacl);
+    if (Dacl == NULL)
+        goto done;
+
+    /* The first entry denies the listing to Everyone */
+    Size = sizeof(Sid);
+    CreateWellKnownSid(WinWorldSid, NULL, Sid, &Size);
+    ok(GetAce(Dacl, 0, (PVOID *)&Ace) && Ace->Header.AceType == ACCESS_DENIED_ACE_TYPE &&
+       (Ace->Mask & FILE_LIST_DIRECTORY) && EqualSid((PSID)&Ace->SidStart, (PSID)Sid),
+       "%S: the first entry does not deny the listing to Everyone\n", Link);
+
+    for (i = 0; i < Dacl->AceCount; i++)
+    {
+        if (!GetAce(Dacl, i, (PVOID *)&Ace) || Ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE)
+            continue;
+        ok(!(Ace->Header.AceFlags & INHERITED_ACE), "%S: entry %lu is inherited\n", Link, i);
+        for (j = 0; j < _countof(Others); j++)
+        {
+            Size = sizeof(Sid);
+            if (CreateWellKnownSid(Others[j], NULL, Sid, &Size) && EqualSid((PSID)&Ace->SidStart, (PSID)Sid))
+                ok(!(Ace->Mask & Write), "%S: entry %lu grants %#lx to well-known SID %u\n", Link, i, Ace->Mask, Others[j]);
+        }
+    }
+
+done:
+    LocalFree(Sd);
+}
+
 START_TEST(LegacyProfileJunctions)
 {
     WCHAR DefaultPath[MAX_PATH], ProgramDataPath[MAX_PATH], Root[MAX_PATH], Link[MAX_PATH], Target[MAX_PATH];
@@ -210,6 +278,9 @@ START_TEST(LegacyProfileJunctions)
 
         ok(IsJunction, "%S: no junction, error %lu\n", Link, GetLastError());
         if (IsJunction)
+        {
             ok(!_wcsicmp(Target, ProfilesPath), "%S: target %S, expected %S\n", Link, Target, ProfilesPath);
+            TestRootJunctionDacl(Link);
+        }
     }
 }
