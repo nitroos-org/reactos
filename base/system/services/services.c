@@ -407,10 +407,13 @@ wWinMain(HINSTANCE hInstance,
     SetConsoleCtrlHandler(ShutdownHandlerRoutine, TRUE);
 
     /*
-     * Set our shutdown parameters: we want to shutdown after the maintained
-     * services (that inherit the default shutdown level of 640).
+     * Set our shutdown parameters. The session manager ends the processes with the
+     * highest level first. The service processes inherit the default level of 640, and
+     * the services need to be told about the shutdown (SERVICE_CONTROL_SHUTDOWN, from
+     * ShutdownHandlerRoutine) while their processes are still there: we shut down
+     * before them.
      */
-    SetProcessShutdownParameters(480, SHUTDOWN_NORETRY);
+    SetProcessShutdownParameters(700, SHUTDOWN_NORETRY);
 
     /* Start auto-start services */
     ScmAutoStartServices();
