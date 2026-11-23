@@ -1593,6 +1593,7 @@ co_WinPosNotifyOwnerGroup(PWND Window)
 {
    PWND Root, Desktop, Wnd;
    HWND *List, hWindow, hRoot;
+   USER_HELD_POOL_ENTRY HeldList;
    int i;
 
    hWindow = UserHMGetHandle(Window);
@@ -1604,6 +1605,8 @@ co_WinPosNotifyOwnerGroup(PWND Window)
    if (!List)
       return;
 
+   /* Held across the WM_WINDOWPOSCHANGING sends: the list goes if the thread ends in one of them */
+   UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
    for (i = 0; List[i]; i++)
    {
       USER_REFERENCE_ENTRY Ref;
@@ -1628,7 +1631,7 @@ co_WinPosNotifyOwnerGroup(PWND Window)
       co_IntSendMessage(WinPos.hwnd, WM_WINDOWPOSCHANGING, 0, (LPARAM)&WinPos);
       UserDerefObjectCo(Wnd);
    }
-   ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+   UserFreePoolCo(&HeldList);
 }
 
 ////
