@@ -255,10 +255,19 @@ static void TestFiles(VOID)
     ok(SetFileSecurityW(Deep, DACL_SECURITY_INFORMATION, Sd), "noaccess: %lu\n", GetLastError());
     LocalFree(Sd);
 
-    /* J: a junction to a directory outside the tree, with a file */
+    /*
+     * J: a junction to a directory outside the tree, with a file; both with entries flagged inherited, so that a walk
+     * that followed the junction would take them for children that inherit and change them
+     */
     ok(CreateDirectoryW(Target, NULL), "%S: %lu\n", Target, GetLastError());
+    Sd = SdFromSddl(L"D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;%s)");
+    ok(SetFileSecurityW(Target, DACL_SECURITY_INFORMATION, Sd), "target: %lu\n", GetLastError());
+    LocalFree(Sd);
     StringCbPrintfW(Path, sizeof(Path), L"%s\\tf", Target);
     MakeFile(Path);
+    Sd = SdFromSddl(L"D:(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;%s)");
+    ok(SetFileSecurityW(Path, DACL_SECURITY_INFORMATION, Sd), "tf: %lu\n", GetLastError());
+    LocalFree(Sd);
     StringCbPrintfW(Path, sizeof(Path), L"%s\\J", Root);
     ok(MakeJunction(Path, Target), "junction: %lu\n", GetLastError());
 
