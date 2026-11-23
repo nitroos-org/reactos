@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    AttributeEntities.c
     DOMDocument.c
     SchemaCache.c
     XPathFunc.c
