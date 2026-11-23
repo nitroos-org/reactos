@@ -34,6 +34,9 @@
   #define VBE_DISPI_ENABLED                    0x01
   #define VBE_DISPI_GETCAPS                    0x02
   #define VBE_DISPI_LFB_ENABLED                0x40
+#define VBE_DISPI_INDEX_VIRT_WIDTH           0x06
+#define VBE_DISPI_INDEX_X_OFFSET             0x08
+#define VBE_DISPI_INDEX_Y_OFFSET             0x09
 #define VBE_DISPI_INDEX_VIDEO_MEMORY_64K     0x0A
 
 #define BOCHS_TAG 'BCHS'

@@ -1,0 +1,20 @@
+; Firmware framebuffer miniport: the device is created by the kernel's firmware
+; mapper (Root\FIRMWARE_FRAMEBUFFER) only when the UEFI loader handed over a framebuffer
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\FIRMWARE_FRAMEBUFFER","Service",0x00000000,"lfbmp"
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\FIRMWARE_FRAMEBUFFER","ClassGUID",0x00000000,"{4D36E968-E325-11CE-BFC1-08002BE10318}"
+
+HKLM,"SYSTEM\CurrentControlSet\Services\lfbmp","ErrorControl",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\lfbmp","Group",0x00000000,"Video"
+HKLM,"SYSTEM\CurrentControlSet\Services\lfbmp","ImagePath",0x00020000,"system32\drivers\lfbmp.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\lfbmp","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\lfbmp","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\lfbmp\Video","Service",0x00000000,"lfbmp"
+
+HKLM,"SYSTEM\CurrentControlSet\Services\lfbmp\Device0","Device Description",0x00000000,"Firmware Framebuffer Display Adapter"
+HKLM,"SYSTEM\CurrentControlSet\Services\lfbmp\Device0","InstalledDisplayDrivers",0x00010000,"framebuf"
+HKLM,"SYSTEM\CurrentControlSet\Services\lfbmp\Device0","VgaCompatible",0x00010001,0
+HKLM,"SYSTEM\CurrentControlSet\Services\lfbmp\Device0","NitroFallbackDisplay",0x00010001,1
+HKLM,"SYSTEM\CurrentControlSet\Services\lfbmp\Device0","DefaultSettings.BitsPerPel",0x00010001,32
+HKLM,"SYSTEM\CurrentControlSet\Services\lfbmp\Device0","DefaultSettings.XResolution",0x00010001,1024
+HKLM,"SYSTEM\CurrentControlSet\Services\lfbmp\Device0","DefaultSettings.YResolution",0x00010001,768

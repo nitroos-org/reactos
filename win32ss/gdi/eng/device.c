@@ -36,11 +36,15 @@ InitDeviceImpl(VOID)
 
 static
 BOOLEAN
+EngpIsVgaDriverKey(
+    _In_ PCWSTR pwszDeviceKey);
+
+static
+BOOLEAN
 EngpHasVgaDriver(
     _In_ PGRAPHICS_DEVICE pGraphicsDevice)
 {
-    WCHAR awcDeviceKey[256], awcServiceName[100];
-    PWSTR lastBkSlash;
+    WCHAR awcDeviceKey[256];
     NTSTATUS Status;
     ULONG cbValue;
     HKEY hkey;
@@ -62,6 +66,24 @@ EngpHasVgaDriver(
         ERR("Could not read '%S' registry value: 0x%08lx\n", Status);
         return FALSE;
     }
+
+    return EngpIsVgaDriverKey(awcDeviceKey);
+}
+
+/* Is the service of this device key (...\Services\<name>\DeviceN) the VGA driver? */
+static
+BOOLEAN
+EngpIsVgaDriverKey(
+    _In_ PCWSTR pwszDeviceKey)
+{
+    WCHAR awcDeviceKey[256], awcServiceName[100];
+    PWSTR lastBkSlash;
+    NTSTATUS Status;
+    ULONG cbValue;
+    HKEY hkey;
+
+    if (!NT_SUCCESS(RtlStringCchCopyW(awcDeviceKey, ARRAYSIZE(awcDeviceKey), pwszDeviceKey)))
+        return FALSE;
 
     /* Replace 'DeviceN' by 'Video' */
     lastBkSlash = wcsrchr(awcDeviceKey, L'\\');
@@ -101,6 +123,86 @@ EngpHasVgaDriver(
 }
 
 static VOID EngpLinkGraphicsDevice(_In_ PGRAPHICS_DEVICE pToAdd);
+
+/*
+ * A fallback display device: the miniport serves only what the firmware left
+ * set up (lfbmp.sys, the UEFI framebuffer) and marks its device key with
+ * NitroFallbackDisplay = 1. It is used only when no device of a display
+ * driver could be opened (or for base video): a real driver of the display
+ * hardware always wins, and the same screen is never shown as two displays.
+ */
+static
+BOOLEAN
+EngpIsFallbackDevice(
+    _In_ PCWSTR pwszRegKey)
+{
+    NTSTATUS Status;
+    ULONG cbValue, ulFallback = 0;
+    HKEY hkey;
+
+    Status = RegOpenKey(pwszRegKey, &hkey);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    /* A miniport writes it with VideoPortSetRegistryParameters (REG_BINARY), a .inf as REG_DWORD */
+    cbValue = sizeof(ulFallback);
+    Status = RegQueryValue(hkey, L"NitroFallbackDisplay", REG_BINARY, &ulFallback, &cbValue);
+    if (!NT_SUCCESS(Status))
+    {
+        cbValue = sizeof(ulFallback);
+        Status = RegQueryValue(hkey, L"NitroFallbackDisplay", REG_DWORD, &ulFallback, &cbValue);
+    }
+    ZwClose(hkey);
+
+    return NT_SUCCESS(Status) && (ulFallback != 0);
+}
+
+/*
+ * Is \Device\VideoN registered already? Its \\.\DISPLAYn name need not be
+ * DISPLAY(N+1): a device that could not be opened (a miniport whose adapter
+ * failed to start) takes no DISPLAY number.
+ */
+static
+BOOLEAN
+EngpIsVideoDeviceRegistered(
+    _In_ PCWSTR pwszNtDeviceName)
+{
+    PGRAPHICS_DEVICE pGraphicsDevice;
+    BOOLEAN bFound = FALSE;
+
+    EngAcquireSemaphoreShared(ghsemGraphicsDeviceList);
+    for (pGraphicsDevice = gpGraphicsDeviceFirst;
+         pGraphicsDevice && !bFound;
+         pGraphicsDevice = pGraphicsDevice->pNextGraphicsDevice)
+    {
+        bFound = !_wcsicmp(pGraphicsDevice->szNtDeviceName, pwszNtDeviceName) ||
+                 (pGraphicsDevice->pVgaDevice &&
+                  !_wcsicmp(pGraphicsDevice->pVgaDevice->szNtDeviceName, pwszNtDeviceName));
+    }
+    EngReleaseSemaphore(ghsemGraphicsDeviceList);
+
+    return bFound;
+}
+
+/* Is there a device of a display driver (not a fallback one, not the VGA one)? */
+static
+BOOLEAN
+EngpHaveDisplayDriverDevice(VOID)
+{
+    PGRAPHICS_DEVICE pGraphicsDevice;
+    BOOLEAN bFound = FALSE;
+
+    EngAcquireSemaphoreShared(ghsemGraphicsDeviceList);
+    for (pGraphicsDevice = gpGraphicsDeviceFirst;
+         pGraphicsDevice && !bFound;
+         pGraphicsDevice = pGraphicsDevice->pNextGraphicsDevice)
+    {
+        bFound = !pGraphicsDevice->bFallbackDevice && !EngpHasVgaDriver(pGraphicsDevice);
+    }
+    EngReleaseSemaphore(ghsemGraphicsDeviceList);
+
+    return bFound;
+}
 
 /*
  * The virtual graphics device of a session without the console (NitroSessions): no device object, the
@@ -243,14 +345,14 @@ EngpUnlinkGraphicsDevice(
 NTSTATUS
 EngpUpdateGraphicsDeviceList(VOID)
 {
-    ULONG iDevNum, ulMaxObjectNumber = 0;
-    WCHAR awcDeviceName[20], awcWinDeviceName[20];
-    UNICODE_STRING ustrDeviceName;
+    ULONG iDevNum, ulMaxObjectNumber = 0, iPass;
+    WCHAR awcDeviceName[20];
     WCHAR awcBuffer[256];
     NTSTATUS Status;
     PGRAPHICS_DEVICE pGraphicsDevice, pNewPrimaryGraphicsDevice = NULL;
     ULONG cbValue;
     HKEY hkey;
+    BOOLEAN bFallback;
 
     /* A session without the console: one virtual device, and no video device */
     if (gbHeadlessSession)
@@ -272,35 +374,59 @@ EngpUpdateGraphicsDeviceList(VOID)
 
     TRACE("Found %lu devices\n", ulMaxObjectNumber + 1);
 
-    /* Loop through all adapters, to detect new ones */
-    for (iDevNum = 0; iDevNum <= ulMaxObjectNumber; iDevNum++)
+    /* Loop through all adapters, to detect new ones. The first pass takes the
+     * devices of display drivers, the second one the fallback devices: only if
+     * no display driver's device could be opened, or for base video. */
+    for (iPass = 0; iPass < 2; iPass++)
     {
-        /* Create the adapter's key name */
-        _swprintf(awcDeviceName, L"\\Device\\Video%lu", iDevNum);
+        if ((iPass == 1) && !gbBaseVideo && EngpHaveDisplayDriverDevice())
+            break;
 
-        /* Create the display device name */
-        _swprintf(awcWinDeviceName, L"\\\\.\\DISPLAY%lu", iDevNum + 1);
-        RtlInitUnicodeString(&ustrDeviceName, awcWinDeviceName);
-
-        /* Check if the device exists already */
-        pGraphicsDevice = EngpFindGraphicsDevice(&ustrDeviceName, iDevNum);
-        if (pGraphicsDevice != NULL)
+        for (iDevNum = 0; iDevNum <= ulMaxObjectNumber; iDevNum++)
         {
-            continue;
-        }
+            /* Create the adapter's key name */
+            _swprintf(awcDeviceName, L"\\Device\\Video%lu", iDevNum);
 
-        /* Read the reg key name */
-        cbValue = sizeof(awcBuffer);
-        Status = RegQueryValue(hkey, awcDeviceName, REG_SZ, awcBuffer, &cbValue);
-        if (!NT_SUCCESS(Status))
-        {
-            ERR("failed to query the registry path:0x%lx\n", Status);
-            continue;
-        }
+            /*
+             * Registered already? By its device name: its \\.\DISPLAYn name is
+             * not DISPLAY(N+1) when a device before it could not be opened, or
+             * when it is a fallback device registered after the other ones.
+             */
+            if (EngpIsVideoDeviceRegistered(awcDeviceName))
+                continue;
 
-        /* Initialize the driver for this device */
-        pGraphicsDevice = InitDisplayDriver(awcDeviceName, awcBuffer);
-        if (!pGraphicsDevice) continue;
+            /* Read the reg key name */
+            cbValue = sizeof(awcBuffer);
+            Status = RegQueryValue(hkey, awcDeviceName, REG_SZ, awcBuffer, &cbValue);
+            if (!NT_SUCCESS(Status))
+            {
+                if (iPass == 0)
+                    ERR("failed to query the registry path:0x%lx\n", Status);
+                continue;
+            }
+
+            bFallback = EngpIsFallbackDevice(awcBuffer);
+            if (bFallback != (iPass == 1))
+                continue;
+
+            /* Base video uses only the VGA device and the fallback ones: the
+             * device of a display driver is not opened at all, its
+             * initialization could reprogram the adapter the firmware
+             * framebuffer lies on */
+            if (gbBaseVideo && !bFallback && !EngpIsVgaDriverKey(awcBuffer))
+                continue;
+
+            /* Initialize the driver for this device */
+            pGraphicsDevice = InitDisplayDriver(awcDeviceName, awcBuffer);
+            if (!pGraphicsDevice) continue;
+
+            if (bFallback)
+            {
+                pGraphicsDevice->bFallbackDevice = TRUE;
+                ERR("No display driver for the display hardware: using %S (%S), the framebuffer the firmware set up\n",
+                    awcDeviceName, pGraphicsDevice->pwszDescription);
+            }
+        }
     }
 
     /* Close the device map registry key */
@@ -330,11 +456,12 @@ EngpUpdateGraphicsDeviceList(VOID)
         /* Lock list */
         EngAcquireSemaphore(ghsemGraphicsDeviceList);
 
-        /* Remove every device from linked list, except base-video one */
+        /* Remove every device from linked list, except base-video one
+         * (VGA, or the firmware framebuffer: a UEFI machine has no VGA) */
         pGraphicsDevice = gpGraphicsDeviceFirst;
         while (pGraphicsDevice)
         {
-            if (!EngpHasVgaDriver(pGraphicsDevice))
+            if (!EngpHasVgaDriver(pGraphicsDevice) && !pGraphicsDevice->bFallbackDevice)
             {
                 /* Not base-video device. Remove it */
                 pToDelete = pGraphicsDevice;

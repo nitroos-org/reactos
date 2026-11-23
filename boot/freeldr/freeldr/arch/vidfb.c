@@ -70,6 +70,24 @@ VidFbPrintFramebufferInfo(VOID)
 
 /**
  * @brief
+ * No usable framebuffer (a UEFI GOP that is BltOnly, or none): the console
+ * keeps a nominal 640x480 screen, so that the UI works, and draws nothing.
+ **/
+VOID
+VidFbSetNoDisplay(VOID)
+{
+    RtlZeroMemory(&framebufInfo, sizeof(framebufInfo));
+    framebufInfo.ScreenWidth = 640;
+    framebufInfo.ScreenHeight = 480;
+    framebufInfo.PixelsPerScanLine = 640;
+    framebufInfo.BitsPerPixel = 32;
+    framebufInfo.BytesPerPixel = 4;
+    framebufInfo.Delta = 640 * 4;
+    /* BaseAddress stays 0: the drawing functions do nothing */
+}
+
+/**
+ * @brief
  * Initializes internal framebuffer information based on the given parameters.
  *
  * @param[in]   BaseAddress
@@ -117,6 +135,7 @@ VidFbInitializeVideo(
     if ((ScreenWidth < 1) || (ScreenHeight < 1))
     {
         ERR("Invalid framebuffer dimensions\n");
+        VidFbSetNoDisplay();
         return FALSE;
     }
 
@@ -135,6 +154,8 @@ VidFbInitializeVideo(
     {
         ERR("Framebuffer doesn't fit inside the video RAM (FB size: %lu, VRAM size: %lu)\n",
             ScreenHeight * framebufInfo.Delta, BufferSize);
+        /* Nothing must be drawn to a framebuffer that was refused */
+        VidFbSetNoDisplay();
         return FALSE;
     }
 
@@ -143,6 +164,7 @@ VidFbInitializeVideo(
     {
         /* Unsupported BPP */
         ERR("Unsupported %lu bits per pixel format\n", BitsPerPixel);
+        VidFbSetNoDisplay();
         return FALSE;
     }
 
@@ -234,6 +256,9 @@ VidFbClearScreenColor(
     ULONG Line, Col;
     PUINT32 p;
 
+    if (!framebufInfo.BaseAddress)
+        return;
+
     for (Line = 0; Line < framebufInfo.ScreenHeight - (FullScreen ? 0 : 2 * TOP_BOTTOM_LINES); Line++)
     {
         p = (PUINT32)((PUCHAR)framebufInfo.BaseAddress + (Line + (FullScreen ? 0 : TOP_BOTTOM_LINES)) * framebufInfo.Delta);
@@ -262,8 +287,9 @@ VidFbOutputChar(
     UCHAR Mask;
     ULONG Line, Col;
 
-    /* Don't display outside of the screen, nor partial characters */
-    if ((X + CHAR_WIDTH - 1 >= framebufInfo.ScreenWidth) ||
+    /* Don't display outside of the screen, nor partial characters, nor without a framebuffer */
+    if (!framebufInfo.BaseAddress ||
+        (X + CHAR_WIDTH - 1 >= framebufInfo.ScreenWidth) ||
         (Y + CHAR_HEIGHT - 1 >= (framebufInfo.ScreenHeight - 2 * TOP_BOTTOM_LINES)))
     {
         return;
@@ -321,6 +347,9 @@ VidFbScrollUp(
     PUINT32 Dst = (PUINT32)((PUCHAR)framebufInfo.BaseAddress + TOP_BOTTOM_LINES * framebufInfo.Delta);
     PUINT32 Src = (PUINT32)((PUCHAR)framebufInfo.BaseAddress + (TOP_BOTTOM_LINES + Scroll) * framebufInfo.Delta);
     ULONG PixelCount = framebufInfo.ScreenWidth * ((framebufInfo.ScreenHeight - 2 * TOP_BOTTOM_LINES) - Scroll);
+
+    if (!framebufInfo.BaseAddress)
+        return;
 
     while (PixelCount--)
         *Dst++ = *Src++;
