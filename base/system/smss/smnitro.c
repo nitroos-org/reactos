@@ -32,6 +32,14 @@
  *      process of session 1 (its csrss and the test command) and wait for
  *      them to be gone before SMSS detaches, so that SMSS holds the last
  *      reference to the session.
+ * 5: as 4, but session 1 also gets its own win32k (a session image) and
+ *    every server of the Windows subsystem; session 0 keeps the console.
+ * 3: as 5, but session 1 holds the console (the kernel publishes session 1
+ *    as the console session before any win32k loads, so session 0's win32k
+ *    draws into memory) and its initial command is winlogon.exe, which logs
+ *    the interactive user on in session 1. Session 0's winlogon starts the
+ *    services and LSA only. NitroSessionsTestCommand, when set, replaces
+ *    winlogon.exe in session 1.
  */
 ULONG SmpNitroSessions;
 static ULONG SmpNitroSessionsTestKill;
@@ -39,6 +47,9 @@ ULONG SmpNitroSessionsTestForward;
 ULONG SmpNitroSessionsTestForwardStall;
 UNICODE_STRING SmpNitroSessionsTestCommand;
 UNICODE_STRING SmpNitroSessionsTestCommand0;
+
+/* Flag 3: what session 1 starts when no test command is set */
+static WCHAR SmpNitroLogonCommand[] = L"winlogon.exe";
 
 /*
  * Serialises the creation of sessions after session 0 (design 3.1): SMSS is
@@ -192,6 +203,10 @@ SmpReadNitroSessionsConfig(VOID)
                 SmpNitroSessionsTestForwardStall = *(PULONG)Info->Data;
             }
         }
+
+        /* Flag 3: session 1's initial command is the logon process (a test command replaces it) */
+        if ((SmpNitroSessions == SMP_NITRO_SESSIONS_CONSOLE) && !SmpNitroSessionsTestCommand.Length)
+            RtlInitUnicodeString(&SmpNitroSessionsTestCommand, SmpNitroLogonCommand);
     }
 
     NtClose(KeyHandle);
@@ -322,8 +337,8 @@ SmpBuildHeadlessCsrCommand(
             {
                 NameChars++;
             }
-            /* With a win32k of its own (flag 5), the session keeps every server */
-            Keep = (SmpNitroSessions == SMP_NITRO_SESSIONS_WIN32K) ||
+            /* With a win32k of its own (flags 3 and 5), the session keeps every server */
+            Keep = SMP_NITRO_SESSIONS_FULL(SmpNitroSessions) ||
                    ((NameChars == 7) && !_wcsnicmp(DllName, L"basesrv", 7));
         }
         if (!Keep) continue;
@@ -561,8 +576,8 @@ SmpStartNitroCsrSession(VOID)
     }
     AttachedSessionId = MuSessionId;
 
-    /* Flag 5: the session's own win32k (a session image), loaded while SMSS is attached to it */
-    if (SmpNitroSessions == SMP_NITRO_SESSIONS_WIN32K)
+    /* Flags 3 and 5: the session's own win32k (a session image), loaded while SMSS is attached to it */
+    if (SMP_NITRO_SESSIONS_FULL(SmpNitroSessions))
     {
         UNICODE_STRING Win32k = RTL_CONSTANT_STRING(L"\\SystemRoot\\System32\\win32k.sys");
 

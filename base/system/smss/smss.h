@@ -274,7 +274,10 @@ SmpUnhandledExceptionFilter(
 #define SMP_NITRO_SESSIONS_TEST     1   /* P0: session 1 with a native test command, no csrss */
 #define SMP_NITRO_SESSIONS_CSR      4   /* P2: session 1 with its own csrss (basesrv only) */
 #define SMP_NITRO_SESSIONS_WIN32K   5   /* P3b: session 1 with its own win32k and a full csrss */
-#define SMP_NITRO_SESSIONS_CSR_START(f) (((f) == SMP_NITRO_SESSIONS_CSR) || ((f) == SMP_NITRO_SESSIONS_WIN32K))
+#define SMP_NITRO_SESSIONS_CONSOLE  3   /* P3c/P4: session 1 holds the console and the interactive logon */
+/* Session 1 gets its own win32k and every server of the Windows subsystem */
+#define SMP_NITRO_SESSIONS_FULL(f) (((f) == SMP_NITRO_SESSIONS_WIN32K) || ((f) == SMP_NITRO_SESSIONS_CONSOLE))
+#define SMP_NITRO_SESSIONS_CSR_START(f) (((f) == SMP_NITRO_SESSIONS_CSR) || SMP_NITRO_SESSIONS_FULL(f))
 
 extern ULONG SmpNitroSessions;
 
