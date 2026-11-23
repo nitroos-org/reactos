@@ -164,6 +164,7 @@ list(APPEND SOURCE
     LCMapString.c
     LCMapStringHash.c
     LoadString.c
+    LoadLibraryAppDirName.c
     LoadLibraryErrorMode.c
     LoadLibraryExW.c
     LoadLibraryMalformed.c

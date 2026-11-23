@@ -166,6 +166,7 @@ extern void func_JobObject(void);
 extern void func_LCMapString(void);
 extern void func_LCMapStringHash(void);
 extern void func_LoadString(void);
+extern void func_LoadLibraryAppDirName(void);
 extern void func_LoadLibraryErrorMode(void);
 extern void func_LoadLibraryExW(void);
 extern void func_LoadLibraryMalformed(void);
@@ -457,6 +458,7 @@ const struct test winetest_testlist[] =
     { "LCMapString",                 func_LCMapString },
     { "LCMapStringHash",             func_LCMapStringHash },
     { "LoadString", func_LoadString },
+    { "LoadLibraryAppDirName",       func_LoadLibraryAppDirName },
     { "LoadLibraryErrorMode",        func_LoadLibraryErrorMode },
     { "LoadLibraryExW",              func_LoadLibraryExW },
     { "LoadLibraryMalformed",         func_LoadLibraryMalformed },
