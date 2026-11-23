@@ -523,7 +523,7 @@ RunService(SC_HANDLE hScm, PCSTR Name, PCSTR Account, DWORD SidType, PCSTR Privi
         StringCbPrintfA(Key, sizeof(Key), "SYSTEM\\CurrentControlSet\\Services\\%s", Name);
         if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, Key, 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
         {
-            LONG SetResult = RegSetValueExA(hKey, "RequiredPrivileges", 0, REG_MULTI_SZ, RunRawBlob, RunRawSize);
+            LONG SetResult = RegSetValueExW(hKey, L"RequiredPrivileges", 0, REG_MULTI_SZ, RunRawBlob, RunRawSize);
 
             ok(SetResult == ERROR_SUCCESS, "%s: RegSetValueEx of %lu bytes failed with %ld\n", Name, RunRawSize, SetResult);
             RegCloseKey(hKey);
@@ -1180,27 +1180,27 @@ START_TEST(ServiceSidToken)
 
         /* 9c. A list of 1600 names (76 KB; Windows Server 2022 applies it as it applies a short one) */
         {
-            static const CHAR Notify[] = "SeChangeNotifyPrivilege";
-            static const CHAR Imp[] = "SeImpersonatePrivilege";
-            DWORD Count = 1600, Size = Count * sizeof(Notify) + sizeof(Imp) + 1, k;
-            PSTR Big = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Size);
+            static const WCHAR Notify[] = L"SeChangeNotifyPrivilege";
+            static const WCHAR Imp[] = L"SeImpersonatePrivilege";
+            DWORD Count = 1600, Size = Count * sizeof(Notify) + sizeof(Imp) + sizeof(WCHAR), k;
+            PWSTR Big = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Size);
 
             ok(Big != NULL, "no memory\n");
             if (Big)
             {
                 for (k = 0; k < Count; k++)
-                    memcpy(Big + k * sizeof(Notify), Notify, sizeof(Notify));
-                /* only the names of SeChangeNotifyPrivilege: the token keeps it alone */
+                    memcpy((PBYTE)Big + k * sizeof(Notify), Notify, sizeof(Notify));
+                /* only the names of SeChangeNotifyPrivilege: the token keeps it alone (76 KB as Unicode) */
                 RunRawBlob = Big;
-                RunRawSize = Count * sizeof(Notify) + 1;
+                RunRawSize = Count * sizeof(Notify) + sizeof(WCHAR);
                 StringCbPrintfA(Name, sizeof(Name), "%sz", Base);
                 Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_NONE, NULL, &Dump);
                 ok(Error == ERROR_SUCCESS, "big list: StartService failed with %lu\n", Error);
                 if (Dump.Valid)
                     ok(Dump.PrivCount == 1, "big list: %lu privileges, expected 1\n", Dump.PrivCount);
                 /* the name that matters comes after the 64 KB mark */
-                memcpy(Big + Count * sizeof(Notify), Imp, sizeof(Imp));
-                RunRawSize = Count * sizeof(Notify) + sizeof(Imp) + 1;
+                memcpy((PBYTE)Big + Count * sizeof(Notify), Imp, sizeof(Imp));
+                RunRawSize = Count * sizeof(Notify) + sizeof(Imp) + sizeof(WCHAR);
                 StringCbPrintfA(Name, sizeof(Name), "%sZ", Base);
                 Error = RunService(hScm, Name, NULL, SERVICE_SID_TYPE_NONE, NULL, &Dump);
                 ok(Error == ERROR_SUCCESS, "big list, last name: StartService failed with %lu\n", Error);
