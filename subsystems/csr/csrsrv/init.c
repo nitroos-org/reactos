@@ -741,9 +741,7 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
  *
  * Windows has \Sessions\0\Windows, a symbolic link to \Windows, so that
  * the csrss directory of every session, including session 0, can be reached
- * as \Sessions\<id>\Windows. The fork's session 0 has \Windows only. The
- * link is created when the session feature flag (NitroSessions) is not 0;
- * without it, session 0 is as it always was.
+ * as \Sessions\<id>\Windows.
  *
  * @param Target
  *        The csrss object directory of session 0 (\Windows).
@@ -757,35 +755,11 @@ VOID
 NTAPI
 CsrCreateSession0WindowsLink(IN PUNICODE_STRING Target)
 {
-    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(SM_REG_KEY);
-    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"NitroSessions");
     UNICODE_STRING LinkName = RTL_CONSTANT_STRING(L"\\Sessions\\0\\Windows");
     OBJECT_ATTRIBUTES ObjectAttributes;
-    UCHAR KeyValueBuffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
-    PKEY_VALUE_PARTIAL_INFORMATION KeyValuePartialInfo = (PVOID)KeyValueBuffer;
-    ULONG ResultLength;
     SECURITY_DESCRIPTOR LinkSd;
-    HANDLE hKey, LinkHandle;
+    HANDLE LinkHandle;
     NTSTATUS Status;
-
-    /* Only when the flag is set to a non-zero DWORD */
-    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE, NULL, NULL);
-    Status = NtOpenKey(&hKey, KEY_QUERY_VALUE, &ObjectAttributes);
-    if (!NT_SUCCESS(Status)) return;
-    Status = NtQueryValueKey(hKey,
-                             &ValueName,
-                             KeyValuePartialInformation,
-                             KeyValueBuffer,
-                             sizeof(KeyValueBuffer),
-                             &ResultLength);
-    NtClose(hKey);
-    if (!NT_SUCCESS(Status) ||
-        (KeyValuePartialInfo->Type != REG_DWORD) ||
-        (KeyValuePartialInfo->DataLength != sizeof(ULONG)) ||
-        (*(PULONG)KeyValuePartialInfo->Data == 0))
-    {
-        return;
-    }
 
     /* Windows: only SYSTEM and Administrators have access to the link */
     Status = CsrBuildSessionProtection(CSR_PROTECT_WINDOWS_LINK, &LinkSd);

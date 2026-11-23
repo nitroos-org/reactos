@@ -65,7 +65,7 @@ SmpClientLogNumber(VOID)
     (sizeof(SM_SESSION_COMPLETE_MSG) + FIELD_OFFSET(SM_API_MSG, u) - sizeof(PORT_MESSAGE))
 
 /*
- * Security gate S8 (NitroSessions design). \SmApiPort is open to
+ * Security gate S8 (sessions design). \SmApiPort is open to
  * Administrators and SYSTEM (SmpCreateSecurityDescriptors). The APIs below
  * start processes or sessions on the caller's behalf, so they only serve SMSS
  * itself and LocalSystem processes in session 0. The session is the kernel's
@@ -304,7 +304,7 @@ SmpStartCsr(IN PSM_API_MSG SmApiMsg,
     NTSTATUS Status;
 
     /*
-     * One session create at a time (NitroSessions design 3.1). SMSS stays
+     * One session create at a time (sessions design 3.1). SMSS stays
      * attached to the new session until the initial command is started, so
      * the lock covers that too, up to the detach.
      */
@@ -314,7 +314,7 @@ SmpStartCsr(IN PSM_API_MSG SmApiMsg,
                                            &InitialCommand);
     if (!NT_SUCCESS(Status))
     {
-        if (SmpNitroSessions) SmpNitroDetach();
+        SmpDetachSession();
         RtlLeaveCriticalSection(&SmpMuSessionLock);
         DPRINT1("SMSS: SmpLoadSubSystemsForMuSession failed with status 0x%08x\n", Status);
         return Status;
@@ -330,8 +330,8 @@ SmpStartCsr(IN PSM_API_MSG SmApiMsg,
                                       &InitialCommand,
                                       &InitialCommandProcess,
                                       &InitialCommandProcessId);
-    /* A NitroSessions start leaves SMSS in no session; flag 0 is as before */
-    if (SmpNitroSessions) SmpNitroDetach();
+    /* A session start leaves SMSS in no session */
+    SmpDetachSession();
     RtlLeaveCriticalSection(&SmpMuSessionLock);
     if (!NT_SUCCESS(Status))
     {
@@ -465,16 +465,11 @@ Fail:
     return NULL;
 }
 
-/*
- * SbCreateRemoteProcess to the Windows subsystem of TargetSessionId. The
- * session in the message is the same one except in the SMSS self-test
- * (NitroSessionsTestForward), which checks that the target refuses another.
- */
+/* SbCreateRemoteProcess to the Windows subsystem of MuSessionId */
+static
 NTSTATUS
-NTAPI
-SmpSbCreateRemoteProcessEx(
+SmpSbCreateRemoteProcess(
     _In_ PCLIENT_ID ClientId,
-    _In_ ULONG TargetSessionId,
     _In_ ULONG MuSessionId,
     _In_ ULONG Flags)
 {
@@ -485,7 +480,7 @@ SmpSbCreateRemoteProcessEx(
     PSB_CREATE_REMOTE_PROCESS_MSG CreateRemote = &SbApiMsg.u.CreateRemoteProcess;
 
     /* The Windows subsystem of the target session, connected back to */
-    Target = SmpLocateKnownSubSysByType(TargetSessionId, IMAGE_SUBSYSTEM_WINDOWS_GUI);
+    Target = SmpLocateKnownSubSysByType(MuSessionId, IMAGE_SUBSYSTEM_WINDOWS_GUI);
     if (!Target) return STATUS_OBJECT_NAME_NOT_FOUND;
     if (!Target->SbApiPort)
     {
@@ -535,10 +530,6 @@ SmpForwardProcessRegistration(
     {
         DPRINT1("SMSS: Forwarded registration refused: %lx.%lx is not a csrss SMSS started\n",
                 SmApiMsg->h.ClientId.UniqueProcess, SmApiMsg->h.ClientId.UniqueThread);
-        if (SmpNitroSessionsTestForward & SMP_NITRO_TEST_FORWARD_COUNT)
-        {
-            DPRINT1("SMSS: session records: %lu\n", SmpCountSessions());
-        }
         return STATUS_ACCESS_DENIED;
     }
     SenderSessionId = Sender->MuSessionId;
@@ -593,19 +584,7 @@ SmpForwardProcessRegistration(
     }
     _SEH2_TRY
     {
-        if (SmpNitroSessionsTestForwardStall)
-        {
-            /* Test only: the target csrss that never answers (for a while) */
-            LARGE_INTEGER Stall;
-
-            Stall.QuadPart = -10000000LL * SmpNitroSessionsTestForwardStall;
-            NtDelayExecution(FALSE, &Stall);
-            Status = STATUS_IO_TIMEOUT;
-        }
-        else
-        {
-            Status = SmpSbCreateRemoteProcessEx(&ClientId, MuSessionId, MuSessionId, Flags);
-        }
+        Status = SmpSbCreateRemoteProcess(&ClientId, MuSessionId, Flags);
     }
     _SEH2_FINALLY
     {
@@ -922,16 +901,7 @@ SmpApiLoop(
                     _SEH2_TRY
                     {
                         Status = SmpApiDispatch[SmpSessionCompleteApi](&RequestMsg, ClientContext, SmApiPort);
-                        if (SmpNitroSessionsTestForward & SMP_NITRO_TEST_FORWARD_COMPLETE)
-                        {
-                            DPRINT1("SMSS: SmSessionComplete(%lu) from %lx.%lx %s: %lx, session records: %lu\n",
-                                    RequestMsg.u.SessionComplete.SessionId,
-                                    RequestMsg.h.ClientId.UniqueProcess,
-                                    RequestMsg.h.ClientId.UniqueThread,
-                                    ClientContext->Subsystem ? "csrss" : "non-csrss", Status,
-                                    SmpCountSessions());
-                        }
-                        else if (!NT_SUCCESS(Status) && (Status != STATUS_NOT_FOUND))
+                        if (!NT_SUCCESS(Status) && (Status != STATUS_NOT_FOUND))
                         {
                             Number = SmpClientLogNumber();
                             if (Number)

@@ -2200,13 +2200,13 @@ SSI_DEF(SystemExtendServiceTableInformation)
     }
 
     /*
-     * Load the image: with NitroSessions, as a session image of the caller's session (smss, attached to the
-     * session it starts), so that every session has a win32k of its own at the same address
+     * Load the image as a session image of the caller's session (smss, attached to the session it
+     * starts), so that every session has a win32k of its own at the same address
      */
     Status = MmLoadSystemImage((PUNICODE_STRING)Buffer,
                                NULL,
                                NULL,
-                               (MmNitroSessions && PsGetCurrentProcess()->ProcessInSession) ? 1 : 0,
+                               PsGetCurrentProcess()->ProcessInSession ? 1 : 0,
                                (PVOID)&ModuleObject,
                                &ImageBase);
 

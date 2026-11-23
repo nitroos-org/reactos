@@ -499,9 +499,6 @@ _main(IN INT argc,
             _SEH2_LEAVE;
         }
 
-        /* Read the NitroSessions feature flag (absent = 0) */
-        SmpReadNitroSessionsConfig();
-
         /* Get the global flags */
         Status = NtQuerySystemInformation(SystemFlagsInformation,
                                           &Flags,
@@ -541,12 +538,18 @@ _main(IN INT argc,
         }
         SmpReleasePrivilege(State);
 
-        /* NitroSessions: 1, a second session with a test command; 4, a
-           second session with its own csrss */
-        if (SmpNitroSessions == SMP_NITRO_SESSIONS_TEST)
-            SmpStartNitroTestSession();
-        else if (SMP_NITRO_SESSIONS_CSR_START(SmpNitroSessions))
-            SmpStartNitroCsrSession();
+        /*
+         * The console session (session 1): the interactive logon. Without it the machine has no display
+         * and no logon: stop it with a clear message instead of running on dark. The boot is not accepted
+         * (the console session's Winlogon accepts it), so the last known good configuration stays.
+         */
+        Status = SmpStartConsoleSession();
+        if (!NT_SUCCESS(Status))
+        {
+            RtlInitUnicodeString(&DbgString, L"Session Manager: the console session (session 1) could not be started");
+            Parameters[1] = Status;
+            _SEH2_LEAVE;
+        }
 
         /* Wait on either CSRSS or the initial command to die */
         Status = NtWaitForMultipleObjects(RTL_NUMBER_OF(Handles),

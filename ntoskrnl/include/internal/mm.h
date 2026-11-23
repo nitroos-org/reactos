@@ -947,9 +947,8 @@ extern KSPIN_LOCK MiPagingFileSlotLock;
 #define MiNitroPagerMode ((ULONG)0)
 #endif
 extern ULONG MiNitroPagerDebug;
-extern ULONG MmNitroSessions;
 
-/* Session images (NitroSessions) */
+/* Session images (win32k and the images it imports, one copy per session) */
 BOOLEAN NTAPI MmIsSessionImage(_In_ PVOID ImageHandle);
 PVOID NTAPI MmGetWin32kSessionImage(VOID);
 BOOLEAN NTAPI MmIsWin32kASessionImage(VOID);

@@ -29,8 +29,8 @@ BOOL WINAPI SecureRegistryKeys(VOID);
 BOOL WINAPI UpgradeNetworkCatalog(VOID);
 PWLSESSION WLSession = NULL;
 
-/* NitroSessions 3: what this Winlogon does (see WlGetSessionRole) */
-WL_SESSION_ROLE WlSessionRole = WlRoleSingle;
+/* What this Winlogon does (see WlGetSessionRole) */
+WL_SESSION_ROLE WlSessionRole = WlRoleServices;
 ULONG WlSessionId = 0;
 
 /* FUNCTIONS *****************************************************************/
@@ -126,58 +126,40 @@ StartLsass(VOID)
 
 
 /*
- * NitroSessions 3 (HKLM\SYSTEM\CurrentControlSet\Control\Session Manager, DWORD): session 1 holds the
- * console. Session 0's Winlogon then only starts the services and the LSA (the part Windows gives
- * wininit); session 1's Winlogon, started by the Session Manager, logs the interactive user on and serves
- * the shutdown requests. Any other value: one Winlogon in session 0 does everything, as before.
+ * Session 1 holds the console. Session 0's Winlogon only starts the services and the LSA (the part
+ * Windows gives wininit); session 1's Winlogon, started by the Session Manager, logs the interactive
+ * user on and serves the shutdown requests. The role comes from the kernel's session id of the
+ * process, never from the PEB. When the session id cannot be read, the process stops: a Winlogon
+ * that guessed its role would either start a second set of services or none.
  */
 static
-VOID
+BOOL
 WlGetSessionRole(VOID)
 {
-    HKEY hKey;
-    DWORD dwType, dwValue = 0, cbData = sizeof(dwValue);
     PROCESS_SESSION_INFORMATION SessionInfo;
     NTSTATUS Status;
 
-    WlSessionRole = WlRoleSingle;
-    WlSessionId = 0;
-
-    /* The kernel's value, never the PEB's */
     Status = NtQueryInformationProcess(NtCurrentProcess(),
                                        ProcessSessionInformation,
                                        &SessionInfo,
                                        sizeof(SessionInfo),
                                        NULL);
-    if (NT_SUCCESS(Status))
-        WlSessionId = SessionInfo.SessionId;
-
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                      L"SYSTEM\\CurrentControlSet\\Control\\Session Manager",
-                      0,
-                      KEY_QUERY_VALUE,
-                      &hKey) != ERROR_SUCCESS)
+    if (!NT_SUCCESS(Status))
     {
-        return;
+        ERR("WL: cannot read the session id, Status 0x%lx\n", Status);
+        return FALSE;
     }
-    if ((RegQueryValueExW(hKey, L"NitroSessions", NULL, &dwType, (PBYTE)&dwValue, &cbData) != ERROR_SUCCESS) ||
-        (dwType != REG_DWORD) || (cbData != sizeof(dwValue)))
-    {
-        dwValue = 0;
-    }
-    RegCloseKey(hKey);
 
-    if (dwValue == 3)
-        WlSessionRole = (WlSessionId == 0) ? WlRoleServices : WlRoleInteractive;
-
-    if (WlSessionRole != WlRoleSingle)
-        ERR("WL: session %lu, %s\n", WlSessionId,
-            (WlSessionRole == WlRoleServices) ? "services and LSA only" : "interactive logon");
+    WlSessionId = SessionInfo.SessionId;
+    WlSessionRole = (WlSessionId == 0) ? WlRoleServices : WlRoleInteractive;
+    ERR("WL: session %lu, %s\n", WlSessionId,
+        (WlSessionRole == WlRoleServices) ? "services and LSA only" : "interactive logon");
+    return TRUE;
 }
 
 
 /*
- * NitroSessions 3: a shutdown that the console session's Winlogon carries out ends the processes of its own
+ * A shutdown that the console session's Winlogon carries out ends the processes of its own
  * session only (its csrss knows no other). The services and the other processes of session 0 are ended,
  * and the services told about the shutdown (SERVICE_CONTROL_SHUTDOWN), by session 0's Winlogon, the
  * registered logon process of session 0's csrss, which it asks through two events. Both are created by
@@ -647,11 +629,15 @@ WinMain(
     RtlSetProcessIsCritical(TRUE, NULL, FALSE);
     RtlSetThreadIsCritical(TRUE, NULL, FALSE);
 
-    /* Which part of the work is ours (NitroSessions) */
-    WlGetSessionRole();
+    /* Which part of the work is ours */
+    if (!WlGetSessionRole())
+    {
+        NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
+        ExitProcess(1);
+    }
 
     /* The machine-wide work is session 0's */
-    if (WlSessionRole != WlRoleInteractive)
+    if (WlSessionRole == WlRoleServices)
     {
         /* Installs from before the well-known folders had the DACLs of Windows get them now (nothing happens once they have) */
         SecureSystemDirectories();
@@ -721,7 +707,7 @@ WinMain(
      * The shutdown requests (InitiateSystemShutdown) go to the Winlogon of the console session: it shows
      * the warning where the user is and logs the user off before the system goes down
      */
-    if ((WlSessionRole != WlRoleServices) && !StartRpcServer())
+    if ((WlSessionRole == WlRoleInteractive) && !StartRpcServer())
     {
         ERR("WL: Could not start the RPC server\n");
         NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
@@ -729,11 +715,10 @@ WinMain(
     }
 
     /* The services and the LSA run in session 0 */
-    if (WlSessionRole != WlRoleInteractive)
+    if (WlSessionRole == WlRoleServices)
     {
         /* Before any service runs: the events the console session's Winlogon asks for session 0's shutdown with */
-        if (WlSessionRole == WlRoleServices)
-            WlCreateSession0ShutdownEvents();
+        WlCreateSession0ShutdownEvents();
 
         if (!StartServicesManager())
         {
@@ -755,8 +740,10 @@ WinMain(
 
     if (WlSessionRole == WlRoleServices)
     {
-        /* No logon in this session: the console session's Winlogon does it */
-        NtInitializeRegistry(CM_BOOT_FLAG_ACCEPTED | 1);
+        /*
+         * No logon in this session: the console session's Winlogon does it, and it accepts the boot
+         * (last known good) once it is up. A boot whose console session never comes up is not accepted.
+         */
         ERR("WL: services and LSA started, the interactive logon is in another session\n");
         WlServeSession0Shutdown();
         return 0;
@@ -840,10 +827,9 @@ WinMain(
         PostMessageW(WLSession->SASWindow, WLX_WM_SAS, WLX_SAS_TYPE_CTRL_ALT_DEL, 0);
     }
 
-    /* Tell kernel that CurrentControlSet is good (needed
-     * to support Last good known configuration boot); session 0's Winlogon does it */
-    if (WlSessionRole == WlRoleSingle)
-        NtInitializeRegistry(CM_BOOT_FLAG_ACCEPTED | 1);
+    /* Tell kernel that CurrentControlSet is good (needed to support Last good known configuration
+     * boot): the console session's logon is up, so the boot is good */
+    NtInitializeRegistry(CM_BOOT_FLAG_ACCEPTED | 1);
 
     /* Message loop for the SAS window */
     while (GetMessageW(&Msg, WLSession->SASWindow, 0, 0))

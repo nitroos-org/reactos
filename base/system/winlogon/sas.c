@@ -506,7 +506,7 @@ FreeWlxMprInfo(
 }
 
 /*
- * NitroSessions: the named-object directories of a session other than 0 (\Sessions\<n>\BaseNamedObjects and
+ * The named-object directories of a session other than 0 (\Sessions\<n>\BaseNamedObjects and
  * \Sessions\<n>\AppContainerNamedObjects) give the user who is logged on in the session the entries Windows
  * gives them (measured on Windows 10 22H2, session 1): the user full access, the logon SID query, traverse,
  * create object and subdirectory, read control, and full access inherited by what is created in them.
@@ -659,7 +659,7 @@ HandleLogon(
     BOOL ret = FALSE;
 
     /*
-     * The LSA hands out the logon token for session 0. In another session (NitroSessions) the token gets
+     * The LSA hands out the logon token for session 0. In another session (the console session) the token gets
      * this session's id before anything runs with it, so that the shell, the screen saver and every
      * process of the user start here and not in session 0 (setting it needs SeTcbPrivilege, which
      * Winlogon holds). Session 0 is left as it was.
@@ -1312,7 +1312,7 @@ HandleShutdown(
     // SwitchDesktop(Session->WinlogonDesktop); // Re-enable if you notice the desktop may have switched to something else.
     DisplayStatusMessage(Session, Session->WinlogonDesktop, uMsgId);
 
-    /* NitroSessions 3: session 0's processes and services are ended by session 0's Winlogon */
+    /* Session 0's processes and services are ended by session 0's Winlogon */
     WlShutdownSession0();
 
     /* Destroy SAS window */
