@@ -559,26 +559,22 @@ SepAppContainerAllowedAccess(
             break;
         Left = Ace->AceSize;
 
-        if (Ace->AceFlags & INHERIT_ONLY_ACE)
-            continue;
-
         switch (Ace->AceType)
         {
             case ACCESS_ALLOWED_ACE_TYPE:
             case ACCESS_DENIED_ACE_TYPE:
                 IsDenied = (Ace->AceType == ACCESS_DENIED_ACE_TYPE);
                 SidOffset = FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart);
+                Flags = 0;
                 break;
 
             case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
             case ACCESS_DENIED_OBJECT_ACE_TYPE:
+                /* An allow or deny ACE whose fields do not lie within it ends the walk, as in the normal pass */
                 if (Left < FIELD_OFFSET(ACCESS_ALLOWED_OBJECT_ACE, ObjectType))
-                    continue;
+                    goto Stop;
                 IsDenied = (Ace->AceType == ACCESS_DENIED_OBJECT_ACE_TYPE);
                 Flags = ((PACCESS_ALLOWED_OBJECT_ACE)Ace)->Flags;
-                /* As the normal pass: an allow with an object type is for the list only, a deny denies */
-                if (!IsDenied && (Flags & ACE_OBJECT_TYPE_PRESENT))
-                    continue;
                 SidOffset = FIELD_OFFSET(ACCESS_ALLOWED_OBJECT_ACE, ObjectType) +
                             ((Flags & ACE_OBJECT_TYPE_PRESENT) ? sizeof(GUID) : 0) +
                             ((Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT) ? sizeof(GUID) : 0);
@@ -588,15 +584,25 @@ SepAppContainerAllowedAccess(
                 continue;
         }
 
-        /* The SID must lie within the ACE */
+        /*
+         * The SID must lie within the ACE; one that does not ends the walk (the normal pass stops there too, so
+         * skipping it here could leave a later allow in the AppContainer pass that the normal pass never sees)
+         */
         if (Left < SidOffset + FIELD_OFFSET(SID, SubAuthority))
-            continue;
+            goto Stop;
         Sid = (PISID)((PUCHAR)Ace + SidOffset);
-        if (Left < SidOffset + RtlLengthRequiredSid(Sid->SubAuthorityCount) ||
-            !SepIsAppContainerSidOf(Token->Lowbox, Sid, RtlLengthRequiredSid(Sid->SubAuthorityCount)))
-        {
+        if (Left < SidOffset + RtlLengthRequiredSid(Sid->SubAuthorityCount))
+            goto Stop;
+
+        if (Ace->AceFlags & INHERIT_ONLY_ACE)
             continue;
-        }
+
+        /* As the normal pass: an allow with an object type is for the list only, a deny denies */
+        if (!IsDenied && (Flags & ACE_OBJECT_TYPE_PRESENT))
+            continue;
+
+        if (!SepIsAppContainerSidOf(Token->Lowbox, Sid, RtlLengthRequiredSid(Sid->SubAuthorityCount)))
+            continue;
 
         Mask = ((PACCESS_ALLOWED_ACE)Ace)->Mask;
         if (IsDenied)
@@ -605,6 +611,7 @@ SepAppContainerAllowedAccess(
             Granted |= Mask & ~Denied;
     }
 
+Stop:
     return Granted;
 }
 
