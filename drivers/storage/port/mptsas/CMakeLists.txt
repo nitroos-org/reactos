@@ -1,0 +1,5 @@
+add_library(mptsas MODULE mptsas.c mptsas.rc)
+set_module_type(mptsas kernelmodedriver)
+add_importlibs(mptsas scsiport ntoskrnl hal)
+add_cd_file(TARGET mptsas DESTINATION reactos/system32/drivers NO_CAB FOR all)
+add_registry_inf(mptsas_reg.inf)

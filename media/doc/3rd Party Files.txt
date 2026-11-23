@@ -204,6 +204,12 @@ Used Version: OpenBSD sys/dev/pci/vmwpvs.c revision 1.31 (definitions only, the 
 License: ISC (https://spdx.org/licenses/ISC.html)
 URL: https://github.com/openbsd/src/blob/master/sys/dev/pci/vmwpvs.c
 
+Title: LSI Logic Fusion-MPT device interface (register, message and scatter/gather layouts)
+Path: drivers/storage/port/mptsas
+Used Version: OpenBSD sys/dev/ic/mpireg.h revision 1.45 and sys/dev/ic/mpi.c revision 1.226 (definitions and the start-up order only, the driver code is new)
+License: ISC (https://spdx.org/licenses/ISC.html)
+URL: https://github.com/openbsd/src/blob/master/sys/dev/ic/mpireg.h
+
 Title: VirtIO NetKVM Windows guest driver
 Path: drivers/network/dd/netkvm
 Used Version: git commit 5e01b36

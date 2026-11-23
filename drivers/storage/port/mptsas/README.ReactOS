@@ -1,0 +1,27 @@
+LSI Logic Fusion-MPT SAS (SAS1068) miniport, PCI 1000:0054 (the VMware "LSI Logic SAS" controller; also
+emulated by QEMU: -device mptsas1068)
+
+The driver (mptsas.c) is new code, GPL-2.0-or-later, written against the legacy SCSI port
+interface (scsiport) like the BusLogic and PVSCSI miniports.
+
+Origin of the device interface
+  Project:  OpenBSD
+  Files:    sys/dev/ic/mpireg.h revision 1.45 (2014/03/25) and sys/dev/ic/mpi.c revision 1.226
+            (2023/07/06): the initialisation sequence only
+  URL:      https://github.com/openbsd/src/blob/master/sys/dev/ic/mpireg.h
+  License:  ISC, notice kept in the header of mptsas.c
+  Used:     the register offsets, the doorbell and reply queue bits, the function numbers, the layouts of
+            the IOC facts, IOC init, port facts, port enable and SCSI I/O messages and of the
+            scatter/gather elements, and the order of the start-up steps (doorbell handshake for IOC facts
+            and IOC init, reply frames, port facts, port enable). No code was copied: the OpenBSD driver is
+            written for its own SCSI midlayer and DMA API.
+
+Not used: the Linux drivers mptbase/mptsas/mpt3sas (GPL-2.0-only, not compatible with this tree), and any
+LSI or VMware binary driver.
+
+What it does not do: events (no hot plug of disks), configuration pages (no RAID volume handling, no
+transfer parameters), MSI, more than one logical unit per target, CDBs longer than 16 bytes, more than
+35 scatter/gather elements per request, the parallel SCSI chip LSI 1030 (PCI 1000:0030: not emulated by
+QEMU, so not tried). The sizes that the controller reports (request frame, reply queue depth, credits,
+number of devices) are checked before they are used, every wait on the controller is bounded, and every
+address and context that the controller writes into a reply is validated.
