@@ -3168,6 +3168,23 @@ LdrpInitializeProcess(IN PCONTEXT Context,
                 DPRINT1("LDR: %s - failed call to ZwQuerySymbolicLinkObject with status %x\n", "", Status);
                 return Status;
             }
+#ifdef _M_IX86
+            /*
+             * A 32-bit process on a 64-bit system names the system DLLs it takes from \KnownDlls32 by the
+             * logical System32 directory, the one GetSystemDirectory returns and the other DLLs of the
+             * process are named by (measured on Windows Server 2022: GetModuleFileName of kernel32, user32
+             * or imagehlp is ...\System32\..., as for a DLL found by the search path). File system
+             * redirection maps that name to SysWOW64 where a file is opened by it.
+             */
+            if (NtCurrentTeb()->WOW32Reserved &&
+                LdrpKnownDllPath.Length >= 9 * sizeof(WCHAR) &&
+                !_wcsnicmp(&LdrpKnownDllPath.Buffer[LdrpKnownDllPath.Length / sizeof(WCHAR) - 9], L"\\SysWOW64", 9))
+            {
+                RtlCopyMemory(&LdrpKnownDllPath.Buffer[LdrpKnownDllPath.Length / sizeof(WCHAR) - 9],
+                              L"\\System32",
+                              9 * sizeof(WCHAR));
+            }
+#endif
         }
     }
 
