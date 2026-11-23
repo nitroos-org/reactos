@@ -54,6 +54,7 @@ HKR, , Icon,           0, "-27"
 %*PNP0C15.DeviceDesc% = NO_DRV,*PNP0C15
 %*QEMU0002.DeviceDesc% = NO_DRV,*QEMU0002
 %*QEMUVGID.DeviceDesc% = NO_DRV,*QEMUVGID
+%HDAUDIO\FUNC_01.DeviceDesc% = NO_DRV,HDAUDIO\FUNC_01
 
 %SWENUM.DeviceDesc%   = SWENUM_Inst, ROOT\SWENUM
 %ACPI\FixedButton.DeviceDesc% = NO_DRV,ACPI\FixedButton
@@ -216,6 +217,7 @@ GenericMfg = "(Generic system devices)"
 *PNP0C15.DeviceDesc = "Docking Station"
 *QEMU0002.DeviceDesc = "QEMU firmware configuration device"
 *QEMUVGID.DeviceDesc = "QEMU VM generation ID device"
+HDAUDIO\FUNC_01.DeviceDesc = "High Definition Audio Function Group (no sound driver)"
 
 SWENUM.DeviceDesc  = "Plug & Play Software Bus Enumerator"
 ACPI\FixedButton.DeviceDesc = "ACPI fixed feature button"
