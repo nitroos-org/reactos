@@ -1744,6 +1744,7 @@ co_UserSetCapture(HWND hWnd)
    PUSER_MESSAGE_QUEUE ThreadQueue;
    PWND pWnd, Window = NULL;
    HWND hWndPrev;
+   USER_REFERENCE_ENTRY Ref, RefPrev;
 
    pti = PsGetCurrentThreadWin32Thread();
    ThreadQueue = pti->MessageQueue;
@@ -1760,13 +1761,23 @@ co_UserSetCapture(HWND hWnd)
       }
    }
 
+   /* The capture events can run in-context WinEvent procedures in this thread, which can destroy either
+      window or attach the input of the thread (which frees its queue): both windows are held across them,
+      and the queue is used only while it is still the thread's */
+   if (Window)
+      UserRefObjectCo(Window, &Ref);
+
    hWndPrev = MsqSetStateWindow(pti, MSQ_STATE_CAPTURE, hWnd);
 
    if (hWndPrev)
    {
       pWnd = UserGetWindowObject(hWndPrev);
       if (pWnd)
+      {
+         UserRefObjectCo(pWnd, &RefPrev);
          IntNotifyWinEvent(EVENT_SYSTEM_CAPTUREEND, pWnd, OBJID_WINDOW, CHILDID_SELF, WEF_SETBYWNDPTI);
+         UserDerefObjectCo(pWnd);
+      }
    }
 
    if (Window)
@@ -1778,7 +1789,7 @@ co_UserSetCapture(HWND hWnd)
    //
    if (hWndPrev)
    {
-      if (ThreadQueue->MenuOwner && Window) ThreadQueue->QF_flags |= QF_CAPTURELOCKED;
+      if (ThreadQueue == pti->MessageQueue && ThreadQueue->MenuOwner && Window) ThreadQueue->QF_flags |= QF_CAPTURELOCKED;
 
       co_IntSendMessage(hWndPrev, WM_CAPTURECHANGED, 0, (LPARAM)hWnd);
 
@@ -1804,6 +1815,8 @@ co_UserSetCapture(HWND hWnd)
       mi.dwExtraInfo = 0;
       UserSendMouseInput(&mi, FALSE);
    }
+   if (Window)
+      UserDerefObjectCo(Window);
    return hWndPrev;
 }
 
