@@ -115,6 +115,10 @@ HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1000&DEV_0
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1000&DEV_0060","ClassGUID",0x00000000,"{4D36E97B-E325-11CE-BFC1-08002BE10318}"
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1000&DEV_0079","Service",0x00000000,"megasas"
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1000&DEV_0079","ClassGUID",0x00000000,"{4D36E97B-E325-11CE-BFC1-08002BE10318}"
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1000&DEV_0012","Service",0x00000000,"sym53c8xx"
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1000&DEV_0012","ClassGUID",0x00000000,"{4D36E97B-E325-11CE-BFC1-08002BE10318}"
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1000&DEV_0001","Service",0x00000000,"sym53c8xx"
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1000&DEV_0001","ClassGUID",0x00000000,"{4D36E97B-E325-11CE-BFC1-08002BE10318}"
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1000&DEV_0054","ClassGUID",0x00000000,"{4D36E97B-E325-11CE-BFC1-08002BE10318}"
 
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0600","Service",0x00000000,"atapi"

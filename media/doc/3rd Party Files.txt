@@ -215,6 +215,11 @@ Path: drivers/storage/port/megasas
 Used Version: OpenBSD sys/dev/ic/mfireg.h revision 1.52 and sys/dev/ic/mfi.c (definitions and the start-up order only, the driver code is new)
 License: ISC (https://spdx.org/licenses/ISC.html)
 URL: https://github.com/openbsd/src/blob/master/sys/dev/ic/mfireg.h
+Title: Symbios/LSI 53C8xx SCSI processor (registers, SCRIPTS program)
+Path: drivers/storage/port/sym53c8xx
+Used Version: OpenBSD sys/dev/ic/siopreg.h, siop_common.c, siop.c (revision 1.90; register names, chip set-up and interrupt handling only, the driver code is new) and sys/dev/microcode/siop/siop.ss revision 1.10 (the SCRIPTS program sym53c8xx.ss is derived from it; sym53c8xx_script.h is its assembled form, made with the assembler ncr53cxxx.c of the same directory)
+License: BSD-2-Clause (https://spdx.org/licenses/BSD-2-Clause.html), Copyright (c) 2000 Manuel Bouyer
+URL: https://github.com/openbsd/src/blob/master/sys/dev/microcode/siop/siop.ss
 
 Title: VirtIO NetKVM Windows guest driver
 Path: drivers/network/dd/netkvm
