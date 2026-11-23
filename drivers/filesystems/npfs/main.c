@@ -341,6 +341,13 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
 
     NpInitializeVersion();
 
+    Status = NpInitializeCreateCheckSd();
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Failed to build the descriptor of the pipe creation check! (Status %lx)\n", Status);
+        return Status;
+    }
+
     Status = NpInitializeAliases();
     if (!NT_SUCCESS(Status))
     {
