@@ -100,6 +100,8 @@ HKR, , Icon,           0, "-27"
 [RedHatMfg]
 %PCI\VEN_1AF4&DEV_1002.DeviceDesc% = NO_DRV,PCI\VEN_1AF4&DEV_1002
 %PCI\VEN_1AF4&DEV_1045.DeviceDesc% = NO_DRV,PCI\VEN_1AF4&DEV_1045
+%PCI\VEN_1AF4&DEV_1003.DeviceDesc% = NO_DRV,PCI\VEN_1AF4&DEV_1003
+%PCI\VEN_1AF4&DEV_1043.DeviceDesc% = NO_DRV,PCI\VEN_1AF4&DEV_1043
 
 [VirtualBoxMfg]
 %PCI\VEN_80EE&DEV_CAFE.DeviceDesc% = NO_DRV,PCI\VEN_80EE&DEV_CAFE
@@ -251,6 +253,8 @@ PCI\VEN_10DE&DEV_02A6.DeviceDesc = "nVidia MCPX PCI RAM Controller"
 
 PCI\VEN_1AF4&DEV_1002.DeviceDesc = "VirtIO Balloon Device"
 PCI\VEN_1AF4&DEV_1045.DeviceDesc = "VirtIO Balloon Device"
+PCI\VEN_1AF4&DEV_1003.DeviceDesc = "VirtIO Serial Controller (no driver)"
+PCI\VEN_1AF4&DEV_1043.DeviceDesc = "VirtIO Serial Controller (no driver)"
 
 PCI\VEN_80EE&DEV_CAFE.DeviceDesc = "VirtualBox Guest Device"
 
