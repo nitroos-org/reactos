@@ -1248,6 +1248,15 @@ UINT UDPAllocatePort( UINT HintPort ) {
                  UDP_STARTING_PORT + UDP_DYNAMIC_PORTS - 1 );
 }
 
+/* RFC 6056, as for TCP (tcp.c): the next ephemeral port of this start is a random port of the range, drawn under
+   the key of this start (iid6.c); the ports follow each other as before. Windows starts them anywhere in its dynamic
+   range after every boot and then counts up (kbatch8 rows: 62015, 61504, 59329 in three boots). NextPort is a
+   host-order port (ports.c). */
+VOID UDPRandomizeFirstPort( VOID ) {
+    if (!UDPInitialized) return;
+    UDPPorts.NextPort = UDP_STARTING_PORT + TCPConnectionRandom() % UDP_DYNAMIC_PORTS;
+}
+
 BOOLEAN UDPReservePort( UINT Port ) {
     return ReservePort( &UDPPorts, Port );
 }

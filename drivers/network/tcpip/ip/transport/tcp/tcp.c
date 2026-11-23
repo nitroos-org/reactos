@@ -239,6 +239,7 @@ NTSTATUS TCPStartup(VOID)
        in every start (NextPort is a host-order port, ports.c) */
     TCPConnectionKeyInit();
     TCPPorts.NextPort = TCP_EPHEMERAL_FIRST + TCPConnectionRandom() % (TCP_EPHEMERAL_LAST - TCP_EPHEMERAL_FIRST + 1);
+    UDPRandomizeFirstPort();
 
     /* the lock of the persistent IPv6 configuration, which interfaces read when they start */
     TCP6PersistInit();
