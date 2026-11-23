@@ -517,6 +517,10 @@ SepIsAppContainerSidOf(
  * @param[in] SecurityDescriptor
  * The security descriptor of the object (captured, or a kernel caller's).
  *
+ * @param[in] OwnPackageOnly
+ * TRUE to count only the entries of the token's own package SID (the rights the mandatory label does not
+ * hold back: see the callers); FALSE for all the SIDs the pass applies to.
+ *
  * @return
  * MAXULONG when the token is not a lowbox token (no AppContainer pass),
  * else the rights the DACL grants the token's AppContainer SIDs (none
@@ -526,7 +530,8 @@ static
 ACCESS_MASK
 SepAppContainerAllowedAccess(
     _In_ PTOKEN Token,
-    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor)
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _In_ BOOLEAN OwnPackageOnly)
 {
     ACCESS_MASK Granted = 0, Denied = 0, Mask;
     BOOLEAN Present, Defaulted, IsDenied;
@@ -602,6 +607,8 @@ SepAppContainerAllowedAccess(
             continue;
 
         if (!SepIsAppContainerSidOf(Token->Lowbox, Sid, RtlLengthRequiredSid(Sid->SubAuthorityCount)))
+            continue;
+        if (OwnPackageOnly && !RtlEqualSid(Sid, Token->Lowbox->PackageSid))
             continue;
 
         Mask = ((PACCESS_ALLOWED_ACE)Ace)->Mask;
@@ -1950,6 +1957,19 @@ SepAccessCheckCaptured(
      * one a privilege granted, whatever the DACL says
      */
     MandatoryAllowed = SepMandatoryAllowedAccess(Token, CapturedSecurityDescriptor, CapturedGenericMapping);
+    if (MandatoryAllowed != MAXULONG)
+    {
+        /*
+         * What the descriptor grants the package SID of a lowbox token itself is not held back by the label
+         * (Windows: an AppContainer writes the storage key of its package, which has no label, through its
+         * package SID's entry; the other SIDs of the pass, ALL APPLICATION PACKAGES and the capabilities, do
+         * not lift the label)
+         */
+        ACCESS_MASK PackageGranted = SepAppContainerAllowedAccess(Token, CapturedSecurityDescriptor, TRUE);
+
+        if (PackageGranted != MAXULONG)
+            MandatoryAllowed |= PackageGranted;
+    }
     if (MandatoryAllowed != MAXULONG &&
         ((DesiredAccess | PreviouslyGrantedAccess) & ~(MAXIMUM_ALLOWED | MandatoryAllowed)) != 0)
     {
@@ -1967,7 +1987,7 @@ SepAccessCheckCaptured(
      * The AppContainer pass of a lowbox token (SepAppContainerAllowedAccess): a right it does not
      * grant is refused, as the label's, before the owner's implicit rights and the DACL count
      */
-    AppContainerAllowed = SepAppContainerAllowedAccess(Token, CapturedSecurityDescriptor);
+    AppContainerAllowed = SepAppContainerAllowedAccess(Token, CapturedSecurityDescriptor, FALSE);
     if (AppContainerAllowed != MAXULONG)
     {
         ACCESS_MASK MappedAccess = DesiredAccess | PreviouslyGrantedAccess;
@@ -2716,6 +2736,14 @@ SeAccessCheck(
     CallerGrantedAccess = 0;
     if (MandatoryAllowed != MAXULONG)
     {
+        /* What the descriptor grants the package SID of a lowbox token itself is not held back by the label (see SepAccessCheckCaptured) */
+        ACCESS_MASK PackageGranted = SepAppContainerAllowedAccess((PTOKEN)Token, SecurityDescriptor, TRUE);
+
+        if (PackageGranted != MAXULONG)
+            MandatoryAllowed |= PackageGranted;
+    }
+    if (MandatoryAllowed != MAXULONG)
+    {
         CallerGrantedAccess = PreviouslyGrantedAccess;
         RtlMapGenericMask(&CallerGrantedAccess, GenericMapping);
         MappedAccess = DesiredAccess;
@@ -2734,7 +2762,7 @@ SeAccessCheck(
      * The AppContainer pass of a lowbox token (SepAppContainerAllowedAccess), with the same rule:
      * a right it does not grant is refused first; the rights the caller grants itself stay
      */
-    AppContainerAllowed = SepAppContainerAllowedAccess((PTOKEN)Token, SecurityDescriptor);
+    AppContainerAllowed = SepAppContainerAllowedAccess((PTOKEN)Token, SecurityDescriptor, FALSE);
     AppContainerCallerGranted = 0;
     if (AppContainerAllowed != MAXULONG)
     {
