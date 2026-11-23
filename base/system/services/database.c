@@ -942,12 +942,20 @@ done:
     return dwError;
 }
 
+static
+DWORD
+ScmSetServiceDefaultDacl(
+    _In_ HANDLE hToken,
+    _In_ PSCM_TOKEN_CONFIG pConfig);
+
 /*
  * The token of a LocalSystem own-process service that has a service SID: a copy of the SCM's own token (it runs as
- * SYSTEM: same user, groups, privileges, owner, default DACL and logon session) with the group NT SERVICE\<name>
+ * SYSTEM: same user, groups, privileges and logon session) with the group NT SERVICE\<name>
  * (attributes 0xe) and, for ServiceSidType RESTRICTED, the group WRITE RESTRICTED (attributes 0x7). Measured on
- * Windows Server 2022: both groups are in the token of such a service, which is made with its own logon there; this
- * token stays in the logon session of the SCM. Needs SeCreateTokenPrivilege, which the SYSTEM token has (disabled): it
+ * Windows Server 2022: both groups are in the token of such a service, which is made with its own logon there, and so
+ * are NT AUTHORITY\SERVICE (attributes 0x7), the owner SYSTEM (the controller's own token has the Administrators) and the
+ * default DACL (SY GENERIC_ALL)(OWNER RIGHTS READ_CONTROL)(service SID GENERIC_ALL); this token stays in the logon
+ * session of the SCM. Needs SeCreateTokenPrivilege, which the SYSTEM token has (disabled): it
  * is enabled on a copy of the SCM's token that this thread impersonates while the token is made.
  */
 static
@@ -960,6 +968,9 @@ ScmCreateSystemServiceToken(
     PSID *ppSids;
     ULONG cSids;
     ULONG WriteRestrictedSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    ULONG ServiceGroupSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    TOKEN_OWNER NewOwner;
     HANDLE hSelf = NULL, hImpersonation = NULL;
     PTOKEN_USER pUser = NULL;
     PTOKEN_GROUPS pGroups = NULL, pNewGroups = NULL;
@@ -978,7 +989,7 @@ ScmCreateSystemServiceToken(
 
     *phToken = NULL;
     ppSids = ScmTokenConfigSids(pConfig, &cSids);
-    dwExtra = cSids + (bRestricted ? 1 : 0);
+    dwExtra = cSids + (bRestricted ? 1 : 0) + 1;    /* the service SIDs, WRITE RESTRICTED, NT AUTHORITY\SERVICE */
 
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_QUERY_SOURCE | TOKEN_DUPLICATE, &hSelf))
         return GetLastError();
@@ -1022,6 +1033,14 @@ ScmCreateSystemServiceToken(
         pNewGroups->GroupCount++;
     }
 
+    /* A service logon token has NT AUTHORITY\SERVICE; the owner of the token is its user (SYSTEM), not the Administrators */
+    RtlInitializeSid((PSID)ServiceGroupSidBuffer, &NtAuthority, 1);
+    *RtlSubAuthoritySid((PSID)ServiceGroupSidBuffer, 0) = SECURITY_SERVICE_RID;
+    pNewGroups->Groups[pNewGroups->GroupCount].Sid = (PSID)ServiceGroupSidBuffer;
+    pNewGroups->Groups[pNewGroups->GroupCount].Attributes = SCM_GROUP_ENABLED_ALL;
+    pNewGroups->GroupCount++;
+    NewOwner.Owner = pUser->User.Sid;
+
     /* SeCreateTokenPrivilege, on an impersonation copy of the token of the controller */
     if (!DuplicateTokenEx(hSelf, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenImpersonation, &hImpersonation))
     {
@@ -1063,7 +1082,7 @@ ScmCreateSystemServiceToken(
                            pUser,
                            pNewGroups,
                            pPrivileges,
-                           pOwner,
+                           &NewOwner,
                            pPrimaryGroup,
                            pDefaultDacl,
                            pSource);
@@ -1072,6 +1091,17 @@ ScmCreateSystemServiceToken(
         DPRINT1("NtCreateToken() failed (Status 0x%08lx)\n", Status);
         *phToken = NULL;
         dwError = RtlNtStatusToDosError(Status);
+    }
+    else
+    {
+        /* The default DACL of a service token (the controller's has the Administrators in it) */
+        dwError = ScmSetServiceDefaultDacl(*phToken, pConfig);
+        if (dwError != ERROR_SUCCESS)
+        {
+            DPRINT1("ScmSetServiceDefaultDacl() failed (Error %lu)\n", dwError);
+            CloseHandle(*phToken);
+            *phToken = NULL;
+        }
     }
 
 done:
@@ -1119,6 +1149,45 @@ ScmSetServiceDefaultDacl(
     /* The service SID of every service of a shared process is granted (the default DACL of a shared
      * process was not measured) */
     ppSids = ScmTokenConfigSids(pConfig, &cSids);
+    if (cSids == 0)
+    {
+        /* No service SID: (SY GENERIC_ALL)(the user of the token GENERIC_ALL) */
+        PTOKEN_USER pUser = NULL;
+
+        dwSize = 0;
+        GetTokenInformation(hToken, TokenUser, NULL, 0, &dwSize);
+        if (dwSize != 0)
+            pUser = HeapAlloc(GetProcessHeap(), 0, dwSize);
+        if (pUser == NULL || !GetTokenInformation(hToken, TokenUser, pUser, dwSize, &dwSize))
+        {
+            dwError = pUser ? GetLastError() : ERROR_NOT_ENOUGH_MEMORY;
+            HeapFree(GetProcessHeap(), 0, pUser);
+            return dwError;
+        }
+        dwSize = sizeof(ACL) + 2 * FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + RtlLengthSid(pSystemSid) +
+                 RtlLengthSid(pUser->User.Sid);
+        pDacl = HeapAlloc(GetProcessHeap(), 0, dwSize);
+        if (pDacl == NULL)
+        {
+            HeapFree(GetProcessHeap(), 0, pUser);
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        if (!InitializeAcl(pDacl, dwSize, ACL_REVISION) ||
+            !AddAccessAllowedAce(pDacl, ACL_REVISION, GENERIC_ALL, pSystemSid) ||
+            !AddAccessAllowedAce(pDacl, ACL_REVISION, GENERIC_ALL, pUser->User.Sid))
+        {
+            dwError = GetLastError();
+        }
+        else
+        {
+            DefaultDacl.DefaultDacl = pDacl;
+            if (!SetTokenInformation(hToken, TokenDefaultDacl, &DefaultDacl, sizeof(DefaultDacl)))
+                dwError = GetLastError();
+        }
+        HeapFree(GetProcessHeap(), 0, pUser);
+        HeapFree(GetProcessHeap(), 0, pDacl);
+        return dwError;
+    }
     dwSize = sizeof(ACL) + (2 + cSids) * FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) +
              RtlLengthSid(pSystemSid) + RtlLengthSid(pOwnerRightsSid);
     for (i = 0; i < cSids; i++)
@@ -1699,12 +1768,14 @@ ScmLogonService(
     pImage->hProfile = ProfileInfo.hProfile;
 
     /* The default DACL of the service SID, then the privileges (after the profile: loading it may need them) */
-    if (cSids != 0)
+    if (cSids != 0 || (pszDomainName != NULL && !_wcsicmp(pszDomainName, L"NT AUTHORITY")))
     {
+        /* LocalService and NetworkService without a service SID: (SY GENERIC_ALL)(the account GENERIC_ALL), as on Windows */
         dwError = ScmSetServiceDefaultDacl(pImage->hToken, &TokenConfig);
         if (dwError != ERROR_SUCCESS)
             DPRINT1("ScmSetServiceDefaultDacl() failed (Error %lu)\n", dwError);
-        pImage->bServiceSid = TRUE;
+        if (cSids != 0)
+            pImage->bServiceSid = TRUE;
     }
     if (dwError == ERROR_SUCCESS)
         dwError = ScmApplyTokenPrivileges(pService, pImage->hToken, &TokenConfig);
