@@ -845,26 +845,36 @@ IntQueueWindowOfThread(_In_opt_ PWND pWnd, _In_ PTHREADINFO pti)
     return (pWnd && pWnd->head.pti == pti) ? pWnd : NULL;
 }
 
-/* A thread other than ptiLeaving that uses Queue: threads share a queue only through attachments */
+/* A live thread other than ptiLeaving that uses Queue. Threads share a queue only through attachments; the
+   one that leaves can be a thread whose THREADINFO is being freed, long after it left its desktop and the
+   attachment list: every thread of every process is looked at (a few hundred list nodes, only when a
+   shared queue loses a thread) */
 static PTHREADINFO FASTCALL
 IntQueueOtherThread(_In_ PUSER_MESSAGE_QUEUE Queue, _In_ PTHREADINFO ptiLeaving)
 {
-    PATTACHINFO pai;
+    PPROCESSINFO ppi;
+    PTHREADINFO pti, ptiEnding = NULL;
 
-    for (pai = gpai; pai; pai = pai->paiNext)
+    for (ppi = gppiList; ppi; ppi = ppi->ppiNext)
     {
-        if (pai->pti1 != ptiLeaving && pai->pti1->MessageQueue == Queue)
-            return pai->pti1;
-        if (pai->pti2 != ptiLeaving && pai->pti2->MessageQueue == Queue)
-            return pai->pti2;
+        for (pti = ppi->ptiList; pti; pti = pti->ptiSibling)
+        {
+            if (pti == ptiLeaving || pti->MessageQueue != Queue)
+                continue;
+            if (!(pti->TIF_flags & TIF_INCLEANUP))
+                return pti;
+            /* Still listed, so not freed; it hands the queue on in turn when it leaves it */
+            ptiEnding = pti;
+        }
     }
-    return NULL;
+    return ptiEnding;
 }
 
-/* pti leaves Queue, which other threads keep: Queue forgets the windows of pti, and pti as the thread
-   that gets its keyboard and mouse input (ptiKeyboard / ptiMouse, the thread that created the queue):
-   nothing else changes them, and pti's THREADINFO is freed when pti ends while Queue lives on */
-static VOID FASTCALL
+/* pti leaves Queue, which other threads keep (MsqDestroyMessageQueue: pti attaches elsewhere, or ends while
+   still attached): Queue forgets the windows of pti, and pti as the thread that gets its keyboard and mouse
+   input (ptiKeyboard / ptiMouse, the thread that created the queue): nothing else changes them, and pti's
+   THREADINFO is freed when pti ends while Queue lives on */
+VOID FASTCALL
 IntQueueForgetThreadWindows(_In_ PUSER_MESSAGE_QUEUE Queue, _In_ PTHREADINFO pti)
 {
     if (Queue->ptiKeyboard == pti || Queue->ptiMouse == pti)
@@ -1010,9 +1020,7 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
                                                              : pumqFrom->spwndFocus;
            }
 
-           if (bShared)
-              IntQueueForgetThreadWindows(pumqFrom, ptiFrom);
-
+           /* (A shared queue forgets ptiFrom's windows in MsqDestroyMessageQueue) */
            /* The cursor of the queue: the queue holds a reference on it, which MsqCleanupMessageQueue gives back
               when the queue goes away. It is held here before that (a cursor its owner destroyed lives on that
               reference only), and handed to ptiTo's queue or given back below. A queue other threads stay on
@@ -1114,6 +1122,14 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
 
            /* Raw input posted to ptiFrom stays behind in the shared queue */
            MsqPurgeRawInputOfThread(ptiFrom);
+
+           /* ptiFrom may be the thread that created the shared queue, which names it as the thread of its
+              keyboard and mouse input: ptiTo, which keeps the queue, takes over (ptiFrom's THREADINFO is
+              freed when it ends, the queue lives on) */
+           if (ptiTo->MessageQueue->ptiKeyboard == ptiFrom)
+              ptiTo->MessageQueue->ptiKeyboard = ptiTo;
+           if (ptiTo->MessageQueue->ptiMouse == ptiFrom)
+              ptiTo->MessageQueue->ptiMouse = ptiTo;
 
            ptiFrom->MessageQueue = MsqCreateMessageQueue(ptiFrom);
 

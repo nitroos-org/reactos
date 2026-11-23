@@ -2996,6 +2996,8 @@ MsqDestroyMessageQueue(_In_ PTHREADINFO pti)
       good. */
    if (MessageQueue->cThreads <= 1)
       MessageQueue->QF_flags |= QF_INDESTROY;
+   else
+      IntQueueForgetThreadWindows(MessageQueue, pti);
 
    /* remove the message queue from any desktops */
    if ((desk = InterlockedExchangePointer((PVOID*)&MessageQueue->Desktop, 0)))
