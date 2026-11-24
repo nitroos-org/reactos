@@ -33,6 +33,7 @@ extern void func_LifetimeOtherDesktopOwner(void);
 extern void func_LifetimeOwnerDestroyRace(void);
 extern void func_LifetimeOwnerReparentedFreed(void);
 extern void func_LifetimeSendSenderEnds(void);
+extern void func_LifetimeSenderCopyTerminated(void);
 extern void func_LifetimeSentCopyExitLeak(void);
 extern void func_LifetimeSetActiveHookAttach(void);
 extern void func_LifetimeSetFocusTopDestroy(void);
@@ -250,6 +251,7 @@ const struct test winetest_testlist[] =
     { "LifetimeOwnerDestroyRace", func_LifetimeOwnerDestroyRace },
     { "LifetimeOwnerReparentedFreed", func_LifetimeOwnerReparentedFreed },
     { "LifetimeSendSenderEnds", func_LifetimeSendSenderEnds },
+    { "LifetimeSenderCopyTerminated", func_LifetimeSenderCopyTerminated },
     { "LifetimeSentCopyExitLeak", func_LifetimeSentCopyExitLeak },
     { "LifetimeSetActiveHookAttach", func_LifetimeSetActiveHookAttach },
     { "LifetimeSetFocusTopDestroy", func_LifetimeSetFocusTopDestroy },
