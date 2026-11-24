@@ -718,6 +718,39 @@ NpInitializeCreateCheckSd(VOID)
     return STATUS_SUCCESS;
 }
 
+/*
+ * Whether the token is a lowbox (AppContainer) token whose integrity level is at least Low, the rule that decides the
+ * creation of a pipe (see NpCreateCheckSd). Any other token, or one whose level cannot be read, gives FALSE: the
+ * access check's answer stands.
+ */
+static
+BOOLEAN
+NpLowboxTokenAtLeastLow(IN PACCESS_TOKEN Token)
+{
+    struct
+    {
+        TOKEN_MANDATORY_LABEL Label;
+        UCHAR Sid[SECURITY_MAX_SID_SIZE];
+    } Buffer;
+    HANDLE Handle;
+    ULONG IsAppContainer = 0, Length;
+    BOOLEAN Result = FALSE;
+    PISID Sid;
+    PAGED_CODE();
+
+    if (!NT_SUCCESS(ObOpenObjectByPointer(Token, OBJ_KERNEL_HANDLE, NULL, TOKEN_QUERY, *SeTokenObjectType, KernelMode, &Handle)))
+        return FALSE;
+    if (NT_SUCCESS(ZwQueryInformationToken(Handle, TokenIsAppContainer, &IsAppContainer, sizeof(IsAppContainer), &Length)) &&
+        IsAppContainer &&
+        NT_SUCCESS(ZwQueryInformationToken(Handle, TokenIntegrityLevel, &Buffer, sizeof(Buffer), &Length)))
+    {
+        Sid = (PISID)Buffer.Label.Label.Sid;
+        Result = (Sid->SubAuthorityCount == 1 && Sid->SubAuthority[0] >= SECURITY_MANDATORY_LOW_RID);
+    }
+    ZwClose(Handle);
+    return Result;
+}
+
 static
 NTSTATUS
 NpCheckCreateNamedPipe(IN PACCESS_STATE AccessState,
@@ -747,7 +780,19 @@ NpCheckCreateNamedPipe(IN PACCESS_STATE AccessState,
                             PreviousMode,
                             &Granted,
                             &AccessStatus);
+    /*
+     * The descriptor has no DACL: only the label can refuse a token, and the AppContainer pass of the access check,
+     * which grants a lowbox token nothing without an entry of its package SID, a capability or ALL APPLICATION
+     * PACKAGES. A process in an AppContainer (Edge's renderers, which make their pipes under \pipe\LOCAL) is decided
+     * by its integrity level alone, as it was before the pass existed: the level was what Windows measured for the
+     * other tokens.
+     */
     SeUnlockSubjectContext(SubjectContext);
+    if (!Allowed && AccessStatus == STATUS_ACCESS_DENIED &&
+        NpLowboxTokenAtLeastLow(SeQuerySubjectContextToken(SubjectContext)))
+    {
+        Allowed = TRUE;
+    }
 
     return Allowed ? STATUS_SUCCESS : (NT_SUCCESS(AccessStatus) ? STATUS_ACCESS_DENIED : AccessStatus);
 }

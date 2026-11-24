@@ -16,7 +16,9 @@
 
 /*
  * The descriptor every key had before keys had their own (owner and group
- * Everyone, a DACL that grants Everyone all key rights): what the open
+ * Everyone, a DACL that grants Everyone all key rights, and ALL APPLICATION
+ * PACKAGES too, so that the AppContainer pass of a lowbox token takes nothing
+ * away where keys have no security): what the open
  * decision is still made against (CmpCheckKeyOpenAccess) until key access is
  * enforced. KEY_ALL_ACCESS (what GENERIC_ALL maps to for keys), not
  * GENERIC_ALL: the access check does not map generic rights inside an ACE
@@ -40,6 +42,15 @@ typedef struct _CMP_LEGACY_KEY_CHECK_SD
         ACCESS_MASK Mask;
         SID Sid;
     } Ace;
+    struct
+    {
+        ACE_HEADER Header;
+        ACCESS_MASK Mask;
+        UCHAR Revision;
+        UCHAR SubAuthorityCount;
+        SID_IDENTIFIER_AUTHORITY IdentifierAuthority;
+        ULONG SubAuthority[2];
+    } PackagesAce;  /* ALL APPLICATION PACKAGES: the AppContainer pass of a lowbox token (no key security here either) */
     ACL Sacl;
     struct
     {
@@ -61,11 +72,18 @@ static CMP_LEGACY_KEY_CHECK_SD CmpLegacyKeyCheckSd =
     },
     { SID_REVISION, 1, {SECURITY_WORLD_SID_AUTHORITY}, {SECURITY_WORLD_RID} },
     { SID_REVISION, 1, {SECURITY_WORLD_SID_AUTHORITY}, {SECURITY_WORLD_RID} },
-    { ACL_REVISION, 0, sizeof(ACL) + sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->Ace), 1, 0 },
+    { ACL_REVISION, 0, sizeof(ACL) + sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->Ace) +
+                       sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->PackagesAce), 2, 0 },
     {
         { ACCESS_ALLOWED_ACE_TYPE, 0, sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->Ace) },
         KEY_ALL_ACCESS,
         { SID_REVISION, 1, {SECURITY_WORLD_SID_AUTHORITY}, {SECURITY_WORLD_RID} }
+    },
+    {
+        { ACCESS_ALLOWED_ACE_TYPE, 0, sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->PackagesAce) },
+        KEY_ALL_ACCESS,
+        SID_REVISION, 2, {SECURITY_APP_PACKAGE_AUTHORITY},
+        { SECURITY_APP_PACKAGE_BASE_RID, SECURITY_BUILTIN_PACKAGE_ANY_PACKAGE }
     },
     { ACL_REVISION, 0, sizeof(ACL) + sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->Label), 1, 0 },
     {
@@ -93,11 +111,18 @@ static CMP_LEGACY_KEY_CHECK_SD CmpLegacyKeyCheckSdNoLabel =
     },
     { SID_REVISION, 1, {SECURITY_WORLD_SID_AUTHORITY}, {SECURITY_WORLD_RID} },
     { SID_REVISION, 1, {SECURITY_WORLD_SID_AUTHORITY}, {SECURITY_WORLD_RID} },
-    { ACL_REVISION, 0, sizeof(ACL) + sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->Ace), 1, 0 },
+    { ACL_REVISION, 0, sizeof(ACL) + sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->Ace) +
+                       sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->PackagesAce), 2, 0 },
     {
         { ACCESS_ALLOWED_ACE_TYPE, 0, sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->Ace) },
         KEY_ALL_ACCESS,
         { SID_REVISION, 1, {SECURITY_WORLD_SID_AUTHORITY}, {SECURITY_WORLD_RID} }
+    },
+    {
+        { ACCESS_ALLOWED_ACE_TYPE, 0, sizeof(((CMP_LEGACY_KEY_CHECK_SD *)0)->PackagesAce) },
+        KEY_ALL_ACCESS,
+        SID_REVISION, 2, {SECURITY_APP_PACKAGE_AUTHORITY},
+        { SECURITY_APP_PACKAGE_BASE_RID, SECURITY_BUILTIN_PACKAGE_ANY_PACKAGE }
     }
     /* (no SACL: the rest stays zero) */
 };

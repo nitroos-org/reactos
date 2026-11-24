@@ -29,8 +29,7 @@
 
 #define KEY_R   0x20019     /* KEY_READ */
 #define KEY_W   0x20006     /* KEY_WRITE */
-#define KEY_X   0x20019     /* generic execute as the reactos object type maps it */
-#define KEY_WIN10_X 0x20039 /* generic execute as Windows 10 maps it */
+#define KEY_WIN10_X 0x20039 /* generic execute: KEY_EXECUTE | KEY_NOTIFY, as Windows 10 maps it */
 #define KEY_A   0xF003F     /* KEY_ALL_ACCESS */
 
 /* CHK(gap, cond, fmt, ...): gap != 0 marks an assertion that depends on the kernel enforcing key security
@@ -673,8 +672,8 @@ START_TEST(RegSecurityMapping)
     {
         Granted = GrantedAccessOf(Key);
         /* Windows 10 maps GENERIC_EXECUTE of a key to KEY_READ | KEY_NOTIFY (0x20039 is KEY_EXECUTE
-         * 0x20019 plus KEY_NOTIFY): the object type of the reactos kernel uses 0x20019 */
-        CHK(1, Granted == KEY_WIN10_X, "GENERIC_EXECUTE granted 0x%lx, expected 0x%x\n", (ULONG)Granted, KEY_WIN10_X);
+         * 0x20019 plus KEY_NOTIFY), and so does the key object type of this kernel */
+        ok(Granted == KEY_WIN10_X, "GENERIC_EXECUTE granted 0x%lx, expected 0x%x\n", (ULONG)Granted, KEY_WIN10_X);
         RegCloseKey(Key);
     }
     Error = RegOpenKeyExW(HKEY_CURRENT_USER, L"Software", 0, GENERIC_ALL, &Key);

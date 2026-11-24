@@ -308,6 +308,7 @@ IntGetCodePageEntry(UINT CodePage)
     UINT FileNamePos;
     PCODEPAGE_ENTRY CodePageEntry;
     DWORD SavedError;
+    BOOLEAN PrivateSection;
 
     if (CodePage == CP_ACP)
     {
@@ -407,8 +408,17 @@ IntGetCodePageEntry(UINT CodePage)
                            SECTION_MAP_READ,
                            &ObjectAttributes);
 
+    /*
+     * A process in an AppContainer is granted only what an ACE for its package, its capabilities or ALL
+     * APPLICATION PACKAGES grants it. The code page sections are not open to it (on Windows the descriptors of
+     * \NLS\NlsSection* name only the system and the administrators, and the kernel maps the tables): it reads the
+     * table file, which every application package may read, and makes a section of its own.
+     */
+    PrivateSection = (Status == STATUS_ACCESS_DENIED);
+
     /* If the section doesn't exist, try to create it. */
-    if (Status == STATUS_UNSUCCESSFUL ||
+    if (PrivateSection ||
+        Status == STATUS_UNSUCCESSFUL ||
         Status == STATUS_OBJECT_NAME_NOT_FOUND ||
         Status == STATUS_OBJECT_PATH_NOT_FOUND)
     {
@@ -427,17 +437,27 @@ IntGetCodePageEntry(UINT CodePage)
                                      0,
                                      NULL);
 
-            Status = NtCreateSection(&SectionHandle,
-                                     SECTION_MAP_READ,
-                                     &ObjectAttributes,
-                                     NULL,
-                                     PAGE_READONLY,
-                                     SEC_COMMIT,
-                                     FileHandle);
+            if (PrivateSection && FileHandle == INVALID_HANDLE_VALUE)
+            {
+                Status = STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+            else
+            {
+                Status = NtCreateSection(&SectionHandle,
+                                         SECTION_MAP_READ,
+                                         PrivateSection ? NULL : &ObjectAttributes,
+                                         NULL,
+                                         PAGE_READONLY,
+                                         SEC_COMMIT,
+                                         FileHandle);
+                /* The section keeps the file open */
+                if (PrivateSection)
+                    NtClose(FileHandle);
+            }
 
             /* HACK: Check if another process was faster
              * and already created this section. See bug 3626 for details */
-            if (Status == STATUS_OBJECT_NAME_COLLISION)
+            if (!PrivateSection && Status == STATUS_OBJECT_NAME_COLLISION)
             {
                 /* Close the file then */
                 NtClose(FileHandle);
