@@ -323,6 +323,10 @@ typedef struct _NG_CCB
     BOOLEAN Orphaned;               /* the name this handle was opened by was removed by a POSIX delete while it stayed open:
                                        Path names the file in $Extend\$Deleted; a rename or disposition is refused */
     BOOLEAN AppendOnly;             /* opened with FILE_APPEND_DATA but not FILE_WRITE_DATA */
+    BOOLEAN ReparseIndex;           /* opened as "$Extend\$Reparse:$R:$INDEX_ALLOCATION": only FileReparsePointInformation queries */
+    BOOLEAN RpiStarted;             /* such a handle has returned an entry: the key of the last one is below */
+    ULONG RpiTag;
+    ULONGLONG RpiRef;
     PNG_DIRENT *Entries;            /* directory snapshot taken at the first query */
     PNG_ARENA Arena;                /* storage of the snapshot's entries */
     ULONG EntryCount;

@@ -328,6 +328,104 @@ static ULONG NgFillEntry(FILE_INFORMATION_CLASS Class, PUCHAR Out, ULONG Room, P
 #undef NG_COMMON
 }
 
+/*
+ * The buffer of a query: the volume device does neither buffered nor direct I/O, so the caller's buffer is locked
+ * (attached to the IRP, freed at completion) and a bad or vanishing buffer cannot fault here.
+ */
+static NTSTATUS NgQueryBuffer(PIRP Irp, ULONG Length, PUCHAR *Buffer)
+{
+    if (!Irp->MdlAddress && Length)
+    {
+        NTSTATUS Lock = STATUS_SUCCESS;
+        if (!IoAllocateMdl(Irp->UserBuffer, Length, FALSE, FALSE, Irp))
+            return STATUS_INSUFFICIENT_RESOURCES;
+        _SEH2_TRY
+        {
+            MmProbeAndLockPages(Irp->MdlAddress, Irp->RequestorMode, IoWriteAccess);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Lock = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        if (!NT_SUCCESS(Lock))
+        {
+            IoFreeMdl(Irp->MdlAddress);
+            Irp->MdlAddress = NULL;
+            return Lock;
+        }
+    }
+    *Buffer = Irp->MdlAddress ? MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority) : Irp->UserBuffer;
+    if (!*Buffer && Length)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * FileReparsePointInformation on the handle of the reparse point index ("$Extend\$Reparse:$R:$INDEX_ALLOCATION"): the
+ * (file reference, tag) pairs of the volume in index order, as the mount manager reads them.  A restart, or the first
+ * query, starts at the key in the file name (a reparse tag, then optionally the 8 byte file reference; none: the
+ * beginning); every other query continues after the entry returned last.  STATUS_NO_MORE_FILES past the last entry.
+ */
+static NTSTATUS NgQueryReparseIndex(PIRP Irp, PIO_STACK_LOCATION Stack, PNG_VCB Vcb, PNG_CCB Ccb)
+{
+    ULONG Length = Stack->Parameters.QueryDirectory.Length, Count = 0, Tag = 0;
+    PUNICODE_STRING Name = Stack->Parameters.QueryDirectory.FileName;
+    BOOLEAN Restart = (Stack->Flags & SL_RESTART_SCAN) != 0, Single = (Stack->Flags & SL_RETURN_SINGLE_ENTRY) != 0;
+    BOOLEAN After = Ccb->RpiStarted && !Restart;
+    ULONGLONG Ref = 0;
+    PFILE_REPARSE_POINT_INFORMATION Out;
+    NG_SHARED_HOLD Hold;
+    NTSTATUS Status;
+    PUCHAR Buffer;
+    int Err = 0;
+
+    if (Length < sizeof(FILE_REPARSE_POINT_INFORMATION))
+        return STATUS_BUFFER_TOO_SMALL;
+    Status = NgQueryBuffer(Irp, Length, &Buffer);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    if (After)
+    {
+        Tag = Ccb->RpiTag;
+        Ref = Ccb->RpiRef;
+    }
+    else if (Name && Name->Length >= sizeof(ULONG))
+    {
+        RtlCopyMemory(&Tag, Name->Buffer, sizeof(ULONG));
+        if (Name->Length >= sizeof(ULONG) + sizeof(ULONGLONG))
+            RtlCopyMemory(&Ref, (PUCHAR)Name->Buffer + sizeof(ULONG), sizeof(ULONGLONG));
+    }
+    Out = (PFILE_REPARSE_POINT_INFORMATION)Buffer;
+    NgAcquireCoreShared(Vcb, &Hold);
+    while ((Count + 1) * sizeof(FILE_REPARSE_POINT_INFORMATION) <= Length)
+    {
+        unsigned int OTag;
+        unsigned long long ORef;
+        Err = ngc_reparse_next(Vcb->Core, Tag, Ref, After, &OTag, &ORef);
+        if (Err)
+            break;
+        Out[Count].FileReference = (LONGLONG)ORef;
+        Out[Count].Tag = OTag;
+        Count++;
+        Tag = OTag;
+        Ref = ORef;
+        After = TRUE;
+        if (Single)
+            break;
+    }
+    NgReleaseCoreShared(Vcb, &Hold);
+    if (Count)
+    {
+        Ccb->RpiStarted = TRUE;
+        Ccb->RpiTag = Tag;
+        Ccb->RpiRef = Ref;
+        Irp->IoStatus.Information = Count * sizeof(FILE_REPARSE_POINT_INFORMATION);
+        return STATUS_SUCCESS;
+    }
+    return Err == -NGC_ENOENT ? STATUS_NO_MORE_FILES : NgErrnoToStatus(Err);
+}
+
 static NTSTATUS NgQueryDirectory(PIRP Irp, PIO_STACK_LOCATION Stack, PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb)
 {
     FILE_INFORMATION_CLASS Class;
@@ -344,6 +442,8 @@ static NTSTATUS NgQueryDirectory(PIRP Irp, PIO_STACK_LOCATION Stack, PNG_VCB Vcb
     Pattern = Stack->Parameters.QueryDirectory.FileName;
     Restart = (Stack->Flags & SL_RESTART_SCAN) != 0;
     Single = (Stack->Flags & SL_RETURN_SINGLE_ENTRY) != 0;
+    if (Ccb->ReparseIndex)
+        return Class == FileReparsePointInformation ? NgQueryReparseIndex(Irp, Stack, Vcb, Ccb) : STATUS_INVALID_INFO_CLASS;
     switch (Class)
     {
         case FileDirectoryInformation: case FileFullDirectoryInformation:
@@ -396,32 +496,9 @@ static NTSTATUS NgQueryDirectory(PIRP Irp, PIO_STACK_LOCATION Stack, PNG_VCB Vcb
     if (Stack->Flags & SL_INDEX_SPECIFIED)
         Ccb->NextIndex = Stack->Parameters.QueryDirectory.FileIndex;
 
-    if (!Irp->MdlAddress && Length)
-    {
-        /* The volume device does neither buffered nor direct I/O: lock the caller's buffer
-         * (attached to the IRP, freed at completion) so a bad or vanishing buffer cannot fault here. */
-        NTSTATUS Lock = STATUS_SUCCESS;
-        if (!IoAllocateMdl(Irp->UserBuffer, Length, FALSE, FALSE, Irp))
-            return STATUS_INSUFFICIENT_RESOURCES;
-        _SEH2_TRY
-        {
-            MmProbeAndLockPages(Irp->MdlAddress, Irp->RequestorMode, IoWriteAccess);
-        }
-        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-        {
-            Lock = _SEH2_GetExceptionCode();
-        }
-        _SEH2_END;
-        if (!NT_SUCCESS(Lock))
-        {
-            IoFreeMdl(Irp->MdlAddress);
-            Irp->MdlAddress = NULL;
-            return Lock;
-        }
-    }
-    Buffer = Irp->MdlAddress ? MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority) : Irp->UserBuffer;
-    if (!Buffer && Length)
-        return STATUS_INSUFFICIENT_RESOURCES;
+    Status = NgQueryBuffer(Irp, Length, &Buffer);
+    if (!NT_SUCCESS(Status))
+        return Status;
     if (!Ccb->PatternIsStar)
     {
         /* Work table of the matcher: (pattern length + 1) x (longest name + 1). */
@@ -552,7 +629,7 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     if (Stack->MinorFunction != IRP_MN_QUERY_DIRECTORY)
         return STATUS_INVALID_DEVICE_REQUEST;
-    if (!Fcb || !Ccb || !Fcb->IsDirectory)
+    if (!Fcb || !Ccb || (!Fcb->IsDirectory && !Ccb->ReparseIndex))
         return STATUS_INVALID_PARAMETER;
     NgLockQuery(Ccb);
     Status = NgQueryDirectory(Irp, Stack, Vcb, Fcb, Ccb);
