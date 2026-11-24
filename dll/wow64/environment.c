@@ -21,63 +21,45 @@ static BOOLEAN GetVariable(PVOID Environment, PCWSTR Name, PWSTR Value, USHORT C
     return TRUE;
 }
 
+/* The environment a guest process starts with, made from the one it was created with (the creator's, or the block
+ * it passed to CreateProcess). Measured on Windows Server 2022 with a 32-bit probe started by 64-bit and by 32-bit
+ * parents (inherited environment, CreateEnvironmentBlock, a minimal block, blocks without individual variables):
+ *  - nothing is added or removed except these changes, and nothing is made up: a variable that is not in the block
+ *    stays absent (a block without ProgramFiles(x86) keeps ProgramFiles as it is; one with only SystemRoot gets no
+ *    PROCESSOR_ARCHITECTURE; ProgramW6432 and CommonProgramW6432 come only from the creator's block);
+ *  - PROCESSOR_ARCHITECTURE other than x86 becomes x86 and PROCESSOR_ARCHITEW6432 gets the native value;
+ *  - ProgramFiles takes the value of ProgramFiles(x86), and CommonProgramFiles that of CommonProgramFiles(x86),
+ *    each one only when its (x86) variable is in the block. */
 NTSTATUS Wow64CreateEnvironment(PVOID *Environment)
 {
-    WCHAR Program[MAX_PATH], Common[MAX_PATH], Program32[MAX_PATH], Common32[MAX_PATH];
+    static const struct { PCWSTR Name, Guest; } Map[] = {
+        {L"ProgramFiles", L"ProgramFiles(x86)"},
+        {L"CommonProgramFiles", L"CommonProgramFiles(x86)"},
+    };
+    WCHAR Value[MAX_PATH];
     NTSTATUS Status;
-    ULONG Length;
+    ULONG i;
 
     /* Work on a private native-addressed copy, then serialize it below 4 GB.
      * This also preserves custom inherited variables and drive directories. */
     Status = RtlCreateEnvironment(TRUE, Environment);
     if (!NT_SUCCESS(Status)) return Status;
-    Status = SetVariable(Environment, L"PROCESSOR_ARCHITECTURE", L"x86");
-    if (!NT_SUCCESS(Status)) return Status;
-    Status = SetVariable(Environment, L"PROCESSOR_ARCHITEW6432", L"AMD64");
-    if (!NT_SUCCESS(Status)) return Status;
 
-    /* A native parent may already provide the architecture-specific paths.
-     * Keep those values, including non-default installation directories. */
-    if (GetVariable(*Environment, L"ProgramW6432", Program, sizeof(Program)) ||
-        GetVariable(*Environment, L"ProgramFiles", Program, sizeof(Program)))
+    if (GetVariable(*Environment, L"PROCESSOR_ARCHITECTURE", Value, sizeof(Value)) && _wcsicmp(Value, L"x86"))
     {
-        if (!GetVariable(*Environment, L"ProgramFiles(x86)", Program32, sizeof(Program32)))
-        {
-            if (wcslen(Program) + 6 >= RTL_NUMBER_OF(Program32)) return STATUS_NAME_TOO_LONG;
-            wcscpy(Program32, Program);
-            wcscat(Program32, L" (x86)");
-        }
-        Status = SetVariable(Environment, L"ProgramW6432", Program);
+        Status = SetVariable(Environment, L"PROCESSOR_ARCHITEW6432", Value);
         if (!NT_SUCCESS(Status)) return Status;
-        Status = SetVariable(Environment, L"ProgramFiles(x86)", Program32);
+        Status = SetVariable(Environment, L"PROCESSOR_ARCHITECTURE", L"x86");
         if (!NT_SUCCESS(Status)) return Status;
-        Status = SetVariable(Environment, L"ProgramFiles", Program32);
-        if (!NT_SUCCESS(Status)) return Status;
-        if (GetVariable(*Environment, L"CommonProgramW6432", Common, sizeof(Common)) ||
-            GetVariable(*Environment, L"CommonProgramFiles", Common, sizeof(Common)))
-        {
-            if (!GetVariable(*Environment, L"CommonProgramFiles(x86)", Common32, sizeof(Common32)))
-            {
-                Length = wcslen(Program);
-                /* Derive only a component beneath the native Program Files.
-                 * A separately configured common path is preserved. */
-                if (!_wcsnicmp(Common, Program, Length) && Common[Length] == L'\\')
-                {
-                    if (wcslen(Program32) + wcslen(Common + Length) >= RTL_NUMBER_OF(Common32))
-                        return STATUS_NAME_TOO_LONG;
-                    wcscpy(Common32, Program32);
-                    wcscat(Common32, Common + Length);
-                }
-                else wcscpy(Common32, Common);
-            }
-            Status = SetVariable(Environment, L"CommonProgramW6432", Common);
-            if (!NT_SUCCESS(Status)) return Status;
-            Status = SetVariable(Environment, L"CommonProgramFiles(x86)", Common32);
-            if (!NT_SUCCESS(Status)) return Status;
-            Status = SetVariable(Environment, L"CommonProgramFiles", Common32);
-        }
     }
-    return Status;
+
+    for (i = 0; i < RTL_NUMBER_OF(Map); ++i)
+    {
+        if (!GetVariable(*Environment, Map[i].Guest, Value, sizeof(Value))) continue;
+        Status = SetVariable(Environment, Map[i].Name, Value);
+        if (!NT_SUCCESS(Status)) return Status;
+    }
+    return STATUS_SUCCESS;
 }
 
 /* A guest process that starts a native (64-bit) child hands over the environment it inherited. That is

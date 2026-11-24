@@ -130,6 +130,8 @@ extern unsigned long kshim_jnl_fault;
 /* Test only: where JournalFault stops the commit: 0 half way through the in-place pass, 1 before the COMMITTED header,
  * 2 right after it, 3 after the in-place pass; and a pause (ms) of the unlocked journal I/O between its phases. */
 extern unsigned long kshim_jnl_fault_stage, kshim_jnl_stall_ms;
+/* Test only: the next n COMMITTED header writes complete but report a failure (the header may be on the medium). */
+extern unsigned long kshim_jnl_hdr_fail, kshim_jnl_hdr_fail_after;
 #else
 #define kshim_jnl_fault 0UL   /* fault injection compiled out of release */
 #define kshim_jnl_fault_stage 0UL
