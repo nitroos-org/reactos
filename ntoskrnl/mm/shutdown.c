@@ -378,7 +378,7 @@ MiShutdownSystem(VOID)
     PFN_NUMBER Page;
     BOOLEAN Dirty, Failed;
 
-    /* NitroPager: the modified page writer stops before the paging files are closed and the file systems shut down */
+    /* NitroPager: the modified page writer stops before the file systems shut down (nothing is paged out from here on) */
     MiPagerShutdownWriter();
 
     /* Views unmapped lazily give their pages and segments back (their TB flush first) */
@@ -483,12 +483,22 @@ MiShutdownSystem(VOID)
                 MiShutdownGivenUpPages);
     }
 
-    /* The data files are written: now the paging files can go */
+    /*
+     * The paging files stay open. The shutdown goes on after this (the cache manager and the file systems' own
+     * shutdown, the lazy writer, threads of processes that still run) and any of it may fault in a page that lives
+     * in a paging file. A paging file is created delete-on-close, so closing it here would let its file system give
+     * its clusters back while such pages are still read from it (fastfat: FAT_FILE_SYSTEM in FatPagingFileIo). The
+     * file stays on the disk; the next boot replaces it (FILE_SUPERSEDE).
+     *
+     * ClearPageFileAtShutdown (the registry asks for it) keeps its order: the file is cleared, then closed, so that
+     * its clusters are given back holding zeros.
+     */
+    if (!MmZeroPageFile)
+        return;
+
     for (i = 0; i < MmNumberOfPagingFiles; i++)
     {
-        /* Nothing uses the file any more: clear it before it is closed (the close deletes it) when the registry asks for it */
-        if (MmZeroPageFile)
-            MiClearPagingFile(MmPagingFile[i]);
+        MiClearPagingFile(MmPagingFile[i]);
 
         /* Free page file name */
         ASSERT(MmPagingFile[i]->PageFileName.Buffer != NULL);
