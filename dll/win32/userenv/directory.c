@@ -796,6 +796,9 @@ CreateLegacyProgramDataJunctions(
     CreateJunctions(pszProgramDataPath, pszPublicPath,
                     PublicJunctions, ARRAYSIZE(PublicJunctions));
 
+    /* They were made after ProgramData got its DACL and inherited its entry for Users: protect them as Windows has them */
+    SecureLegacyJunctionsInFolder(pszProgramDataPath);
+
     if (ExpandEnvironmentStringsW(L"%SystemDrive%", szSystemDrive, ARRAYSIZE(szSystemDrive)))
     {
         CreateJunctions(szSystemDrive, pszProfilesPath, &UsersJunction, 1);

@@ -112,6 +112,29 @@ StandardProfiles[] =
     },
 };
 
+/*
+ * A folder directly below pszParent that has a descriptor of its own (not the one it would inherit): ProgramData\Microsoft
+ * and Public\Desktop. What is created below it afterwards inherits that one. One that is there already (an older install)
+ * gets it when its DACL is not protected.
+ */
+static BOOL
+CreateSecuredSubfolder(
+    _In_ PCWSTR pszParent,
+    _In_ PCWSTR pszName,
+    _In_ PROFILE_DIR_KIND Kind)
+{
+    WCHAR szPath[MAX_PATH];
+
+    if (FAILED(StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\%s", pszParent, pszName)))
+        return FALSE;
+    if (CreateSecuredProfileDir(szPath, Kind, NULL))
+        return TRUE;
+    if (GetLastError() != ERROR_ALREADY_EXISTS)
+        return FALSE;
+    SecureExistingProfileDirectory(szPath, Kind, NULL, FALSE);
+    return TRUE;
+}
+
 static BOOL
 CreateDirectoryRecursive(
     _In_ PCWSTR Path,
@@ -239,7 +262,10 @@ CreateStandardProfile(
         StringCbCatW(szBuffer, sizeof(szBuffer), L"\\");
         StringCbCatW(szBuffer, sizeof(szBuffer), lpFolderData->lpPath);
 
-        // FIXME: Security!
+        /* The all-users Desktop is for what an administrator puts there: users read only */
+        if (pProfileParams->bCommon && !lpFolderData->bProgramData && !_wcsicmp(lpFolderData->lpPath, L"Desktop"))
+            CreateSecuredSubfolder(szProfilePath, L"Desktop", ProfileDirPublicDesktop);
+
         if (!CreateDirectoryRecursive(szBuffer, NULL))
         {
             if (GetLastError() != ERROR_ALREADY_EXISTS)
@@ -428,6 +454,22 @@ InitializeProfiles(VOID)
         SecureExistingProfileDirectory(szProgramDataPath, ProfileDirProgramData, NULL, TRUE);
     }
     SetFileAttributesW(szProgramDataPath, FILE_ATTRIBUTE_HIDDEN);
+
+    /* The folder of the recycle bins of the system volume: made here, by the system, not by the first user who deletes a file */
+    {
+        WCHAR szSystemRoot[MAX_PATH];   /* not szBuffer: that holds the unexpanded path stored below */
+
+        if (ExpandEnvironmentStringsW(L"%SystemDrive%\\", szSystemRoot, ARRAYSIZE(szSystemRoot)))
+            SecureRecycleBinRoot(szSystemRoot);
+    }
+
+    /* Microsoft below it holds the all-users Start Menu (with Startup) and Templates: users read only, as on Windows */
+    if (!CreateSecuredSubfolder(szProgramDataPath, L"Microsoft", ProfileDirProgramDataMicrosoft))
+    {
+        DPRINT1("Error: %lu\n", GetLastError());
+        RegCloseKey(hKey);
+        return FALSE;
+    }
 
     /* Store the profiles directory path (unexpanded) in the registry */
     dwLength = (wcslen(szBuffer) + 1) * sizeof(WCHAR);
