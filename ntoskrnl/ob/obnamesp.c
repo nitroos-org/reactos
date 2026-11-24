@@ -316,6 +316,7 @@ ObpCheckWithinBoundary(
     SeCaptureSubjectContext(&SubjectContext);
 
     /*
+     * A thread impersonating below SecurityImpersonation (identification or anonymous) may not act as its
      * client: it is not judged by the client's SIDs, it is refused. Measured on Windows Server 2022: a create at
      * either level fails with ERROR_ACCESS_DENIED, while an open (the access check of the directory) fails with
      * ERROR_BAD_IMPERSONATION_LEVEL.
