@@ -38,6 +38,7 @@ list(APPEND SOURCE
     RestrictedTokenCrypt.c
     CreateService.c
     CreateProcessAsUserToken.c
+    CreateProcessAsUserRights.c
     CreateProcessWithLogon.c
     CreateProcessWithToken.c
     CreateEnvironmentBlockProfile.c
