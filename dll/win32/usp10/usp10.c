@@ -3256,6 +3256,15 @@ HRESULT WINAPI ScriptShapeOpenType( HDC hdc, SCRIPT_CACHE *psc,
             if (rtl) idx = cChars - 1 - i;
             if (!cluster)
             {
+#ifdef __REACTOS__
+                /* A right-to-left run is walked from its last character, so a surrogate pair is met at its low
+                   surrogate first: it starts one character before. Looking for it at the high surrogate found a
+                   pair only after its low surrogate had been taken as a character of its own, and for the pair
+                   at the start of the run wrote one character past the end of rChars. */
+                if (rtl)
+                    chInput = idx ? decode_surrogate_pair(pwcChars, idx - 1, cChars) : 0;
+                else
+#endif
                 chInput = decode_surrogate_pair(pwcChars, idx, cChars);
                 if (!chInput)
                 {

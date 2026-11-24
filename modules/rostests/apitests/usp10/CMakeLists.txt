@@ -1,4 +1,4 @@
-add_executable(usp10_apitest usp10_nogpos.c testlist.c)
+add_executable(usp10_apitest usp10_nogpos.c usp10_surrogate.c testlist.c)
 target_link_libraries(usp10_apitest wine)
 set_module_type(usp10_apitest win32cui)
 add_importlibs(usp10_apitest usp10 gdi32 user32 msvcrt kernel32)
