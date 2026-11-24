@@ -136,6 +136,7 @@ typedef struct _PARTITION_EXTENSION
     UINT32 DetectedNumber;
     UINT32 OnDiskNumber; // partition number for issuing Io requests to the kernel
     BOOLEAN IsEnumerated; // reported via IRP_MN_QUERY_DEVICE_RELATIONS
+    BOOLEAN Offline; // IOCTL_VOLUME_OFFLINE: taken out of use until IOCTL_VOLUME_ONLINE; not kept over a restart, as on Windows
     BOOLEAN SymlinkCreated;
     BOOLEAN Attached; // attached to PartitionList of the FDO
     union
