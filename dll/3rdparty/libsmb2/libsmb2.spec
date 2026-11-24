@@ -166,3 +166,4 @@
 @ cdecl NitroSmb2StatusToWin32()
 @ cdecl NitroSmb2ErrorToWin32()
 @ cdecl NitroSmb2GetAuthInfo()
+@ cdecl NitroSmb2SetPreviousSessionId()

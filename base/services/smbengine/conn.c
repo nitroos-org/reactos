@@ -377,6 +377,22 @@ TearDown(PSMBENG_CONN Conn, NTSTATUS Reason, ULONG Win32)
     Conn->Smb2 = NULL;
     Conn->TeardownStatus = Reason;
     Conn->TeardownWin32 = Win32;
+    /* A session lost while it was up (not closed when idle or abandoned): the next session of
+     * this key names it as PreviousSessionId, so that the server ends it and drops what it
+     * still holds for it (opens, byte-range locks), as the Windows client asks when it
+     * reconnects ([MS-SMB2] 2.2.5, 3.3.5.5.3). Kept over failed attempts to connect again,
+     * cleared once a new session is up. */
+    if (Conn->State == ConnUp && Reason != STATUS_SUCCESS && Reason != STATUS_CANCELLED)
+    {
+        uint64_t Previous = 0;
+
+        if (smb2_get_session_id(smb2, &Previous) == 0 && Previous != 0)
+            Conn->PreviousSessionId = Previous;
+    }
+    else if (Conn->State == ConnUp)
+    {
+        Conn->PreviousSessionId = 0;
+    }
     /* Every request libsmb2 holds is called back now (SHUTDOWN), a connect in progress
      * with CANCELLED: their callbacks answer the driver */
     smb2_destroy_context(smb2);
@@ -453,6 +469,7 @@ ConnectCb(struct smb2_context *smb2, int status, void *command_data, void *priva
     }
 
     Conn->State = ConnUp;
+    Conn->PreviousSessionId = 0;
     Conn->Epoch++;
     Conn->Backoff = 0;
     Conn->QuickRetries = 0;
@@ -717,6 +734,8 @@ ConnStart(PSMBENG_CONN Conn)
     else
         Rc = NitroSmb2SetCredentials(smb2, NULL, NULL, NULL, NULL);
     RevertToSelf();
+    if (Rc >= 0 && Conn->PreviousSessionId != 0)
+        NitroSmb2SetPreviousSessionId(smb2, Conn->PreviousSessionId);
     if (Rc < 0)
     {
         Status = ConnectStatus(smb2, Rc, &Win32);

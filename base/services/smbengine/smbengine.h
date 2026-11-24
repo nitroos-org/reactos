@@ -162,6 +162,7 @@ typedef struct _SMBENG_CONN
     BOOLEAN Dead;               /* lost or failed: destroy outside libsmb2's callbacks */
     HANDLE Token;               /* the user's impersonation token (query + impersonate) */
     ULONG Epoch;                /* session number: files of older sessions are gone */
+    uint64_t PreviousSessionId; /* the session lost while it was up: named by the next one */
     LIST_ENTRY Pending;         /* requests waiting for the session */
     LIST_ENTRY Backlog;         /* requests over the in-flight bound, in order */
     LIST_ENTRY InFlight;
