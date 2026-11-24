@@ -2485,7 +2485,7 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
    PTHREADINFO pti;
    DWORD dwShowMode = SW_SHOW;
    CREATESTRUCTW *pCsw = NULL;
-   USER_HELD_POOL_ENTRY HeldCsw, HeldCbtCreate;
+   USER_HELD_POOL_ENTRY HeldCsw, HeldCbtCreate, HeldClass, HeldName;
    BOOL bGuiConsoleClass = FALSE;
    PVOID pszClass = NULL, pszName = NULL;
    PWND ret = NULL;
@@ -2659,6 +2659,12 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
          thread ended inside one of the creation messages */
       UserHoldPoolCo(pCsw, TAG_HOOK, &HeldCsw);
       UserHoldPoolCo(pCbtCreate, TAG_HOOK, &HeldCbtCreate);
+      /* So are the class and window names of the structure, in the global USER heap (a name can be 64 KB:
+         a few threads ending in the hook used to fill the heap, for every process) */
+      if (pszClass)
+         UserHoldPoolCo(pszClass, USER_HELD_USER_HEAP, &HeldClass);
+      if (pszName)
+         UserHoldPoolCo(pszName, USER_HELD_USER_HEAP, &HeldName);
       Result = co_HOOK_CallHooks(WH_CBT, HCBT_CREATEWND, (WPARAM) hWnd, (LPARAM) pCbtCreate);
       if (Result == 0)
       {
@@ -2669,8 +2675,14 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
          Cs->y = pCsw->y;
          hwndInsertAfter = pCbtCreate->hwndInsertAfter;
       }
+      if (pszName)
+         UserFreePoolCo(&HeldName);
+      if (pszClass)
+         UserFreePoolCo(&HeldClass);
       UserFreePoolCo(&HeldCbtCreate);
       UserFreePoolCo(&HeldCsw);
+      pszName = NULL;
+      pszClass = NULL;
       pCbtCreate = NULL;
       pCsw = NULL;
       if (Result != 0)

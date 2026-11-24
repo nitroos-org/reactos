@@ -972,6 +972,7 @@ IntCallWndProc( PWND Window, HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam )
     CWPSTRUCT CWP;
     PVOID pszClass = NULL, pszName = NULL;
     CREATESTRUCTW Csw;
+    USER_HELD_POOL_ENTRY HeldClass, HeldName;
 
     //// Check for a hook to eliminate overhead. ////
     if ( !ISITHOOKED(WH_CALLWNDPROC) && !(Window->head.rpdesk->pDeskInfo->fsHooks & HOOKID_TO_FLAG(WH_CALLWNDPROC)) )
@@ -985,7 +986,10 @@ IntCallWndProc( PWND Window, HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam )
         // String pointers are in user heap space, like WH_CBT HCBT_CREATEWND.
         //
         if (!IntMsgCreateStructW( Window, &Csw, (CREATESTRUCTW *)lParam, &pszClass, &pszName ))
+        {
+            if (pszClass) UserHeapFree(pszClass);
             return;
+        }
         lParam = (LPARAM)&Csw;
     }
 
@@ -993,10 +997,13 @@ IntCallWndProc( PWND Window, HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam )
     CWP.message = Msg;
     CWP.wParam  = wParam;
     CWP.lParam  = lParam;
+    /* The names are in the global USER heap: held across the hook procedures, which the thread can end in */
+    if (pszClass) UserHoldPoolCo(pszClass, USER_HELD_USER_HEAP, &HeldClass);
+    if (pszName)  UserHoldPoolCo(pszName, USER_HELD_USER_HEAP, &HeldName);
     co_HOOK_CallHooks( WH_CALLWNDPROC, HC_ACTION, SameThread, (LPARAM)&CWP );
 
-    if (pszName)  UserHeapFree(pszName);
-    if (pszClass) UserHeapFree(pszClass);
+    if (pszName)  UserFreePoolCo(&HeldName);
+    if (pszClass) UserFreePoolCo(&HeldClass);
 }
 
 static VOID FASTCALL
@@ -1006,6 +1013,7 @@ IntCallWndProcRet( PWND Window, HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lPara
     CWPRETSTRUCT CWPR;
     PVOID pszClass = NULL, pszName = NULL;
     CREATESTRUCTW Csw;
+    USER_HELD_POOL_ENTRY HeldClass, HeldName;
 
     if ( !ISITHOOKED(WH_CALLWNDPROCRET) && !(Window->head.rpdesk->pDeskInfo->fsHooks & HOOKID_TO_FLAG(WH_CALLWNDPROCRET)) )
         return;
@@ -1016,7 +1024,10 @@ IntCallWndProcRet( PWND Window, HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lPara
     if ( Msg == WM_CREATE || Msg == WM_NCCREATE )
     {
         if (!IntMsgCreateStructW( Window, &Csw, (CREATESTRUCTW *)lParam, &pszClass, &pszName ))
+        {
+            if (pszClass) UserHeapFree(pszClass);
             return;
+        }
         lParam = (LPARAM)&Csw;
     }
 
@@ -1025,10 +1036,13 @@ IntCallWndProcRet( PWND Window, HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lPara
     CWPR.wParam  = wParam;
     CWPR.lParam  = lParam;
     CWPR.lResult = uResult ? (*uResult) : 0;
+    /* As in IntCallWndProc: the names are held across the hook procedures */
+    if (pszClass) UserHoldPoolCo(pszClass, USER_HELD_USER_HEAP, &HeldClass);
+    if (pszName)  UserHoldPoolCo(pszName, USER_HELD_USER_HEAP, &HeldName);
     co_HOOK_CallHooks( WH_CALLWNDPROCRET, HC_ACTION, SameThread, (LPARAM)&CWPR );
 
-    if (pszName)  UserHeapFree(pszName);
-    if (pszClass) UserHeapFree(pszClass);
+    if (pszName)  UserFreePoolCo(&HeldName);
+    if (pszClass) UserFreePoolCo(&HeldClass);
 }
 
 static LRESULT handle_internal_message( PWND pWnd, UINT msg, WPARAM wparam, LPARAM lparam )
