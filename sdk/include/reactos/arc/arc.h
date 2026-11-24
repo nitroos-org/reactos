@@ -351,6 +351,38 @@ typedef struct _ARC_DISK_SIGNATURE
     CHAR GptSignature[16];
 } ARC_DISK_SIGNATURE, *PARC_DISK_SIGNATURE;
 
+/*
+ * Where the firmware found a disk (the disk's position), for the one case in which the data cannot say:
+ * two disks with the same signature and the same first sector. The loader appends this record to the
+ * ArcName string of the disk's entry, after the terminating NUL, inside the ArcName buffer of its
+ * ARC_DISK_SIGNATURE_EX (MAX_PATH bytes); the ArcName pointer, the list and every other field are as before.
+ * A loader that does not write it leaves zeros there, a kernel that does not read it never looks:
+ * the pair is then the behaviour of before (the first disk that matches takes every ARC name).
+ *
+ *  Kind ARC_DISK_POSITION_EDD:  Data is the "device path information" of the INT 13h AH=48h result
+ *                               (from the key 0xBEDD on, Length bytes: key, length, 3 reserved, host bus type,
+ *                               interface type, interface path, device path), BiosDrive its drive number.
+ *  Kind ARC_DISK_POSITION_UEFI: Data is the UEFI device path of the disk's block I/O handle (Length bytes,
+ *                               up to the end node).
+ */
+#define ARC_DISK_POSITION_MAGIC  0x50444E42  /* 'BNDP' */
+#define ARC_DISK_POSITION_EDD    1
+#define ARC_DISK_POSITION_UEFI   2
+#define ARC_DISK_POSITION_DATA   96
+
+/* No padding by construction; the record sits at an arbitrary byte offset, so copy it out before use */
+typedef struct _ARC_DISK_POSITION
+{
+    ULONG Magic;
+    USHORT Version;     /* 1 */
+    USHORT Kind;
+    ULONG BiosDrive;    /* EDD: the INT 13h drive number, else 0 */
+    ULONG Length;       /* bytes of Data that are valid */
+    USHORT IoBase;      /* EDD, ATA: I/O port base of the drive's channel from the DPTE of the EDD result (0170h, 01F0h), 0 = not given */
+    USHORT Reserved;
+    UCHAR Data[ARC_DISK_POSITION_DATA];
+} ARC_DISK_POSITION, *PARC_DISK_POSITION;
+
 typedef struct _ARC_DISK_INFORMATION
 {
     LIST_ENTRY DiskSignatureListHead;

@@ -30,6 +30,14 @@ AddReactOSArcDiskInfo(
     _In_ ULONG Checksum,
     _In_ BOOLEAN ValidPartitionTable);
 
+VOID
+SetLastReactOSArcDiskPosition(
+    _In_ USHORT Kind,
+    _In_ ULONG BiosDrive,
+    _In_ USHORT IoBase,
+    _In_reads_bytes_(Length) const VOID* Data,
+    _In_ ULONG Length);
+
 //
 // ARC Component Configuration Routines
 //

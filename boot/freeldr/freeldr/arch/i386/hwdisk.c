@@ -291,6 +291,18 @@ GetHarddiskInformation(
         return;
     }
 
+#if !defined(SARCH_XBOX) && !defined(SARCH_PC98)
+    /* Where the BIOS found the drive, for the kernel to tell apart disks that have the same contents */
+    {
+        UCHAR Path[ARC_DISK_POSITION_DATA];
+        USHORT IoBase = 0;
+        ULONG PathLength = PcDiskGetDevicePathInfo(DriveNumber, Path, sizeof(Path), &IoBase);
+
+        if (PathLength != 0)
+            SetLastReactOSArcDiskPosition(ARC_DISK_POSITION_EDD, DriveNumber, IoBase, Path, PathLength);
+    }
+#endif
+
     /* Convert checksum and signature to identifier string */
     Identifier[0] = Hex[(Checksum >> 28) & 0x0F];
     Identifier[1] = Hex[(Checksum >> 24) & 0x0F];

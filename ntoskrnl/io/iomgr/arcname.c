@@ -11,6 +11,7 @@
 /* INCLUDES ******************************************************************/
 
 #include <ntoskrnl.h>
+#include <ntddscsi.h>
 #define NDEBUG
 #include <debug.h>
 
@@ -442,6 +443,294 @@ Cleanup:
     return Status;
 }
 
+/*
+ * Where a disk is, in the terms of the INT 13h EDD device path of the BIOS: the PCI function of its controller
+ * (the nearest ancestor in the device tree that is a PCI device) and the SCSI address the port driver gives it
+ * (path = IDE channel or SCSI bus, target = IDE device or SCSI target).
+ */
+typedef struct _IOP_DISK_LOCATION
+{
+    BOOLEAN Valid;
+    ULONG Bus;
+    ULONG Slot;
+    ULONG Function;
+    ULONG Path;
+    ULONG Target;
+    ULONG Lun;
+    ULONG IoBase;       /* IDE: first I/O port of the channel, 0 = not known */
+} IOP_DISK_LOCATION, *PIOP_DISK_LOCATION;
+
+CODE_SEG("INIT")
+static VOID
+IopGetDiskLocation(
+    _In_ PDEVICE_OBJECT DiskDevice,
+    _Out_ PIOP_DISK_LOCATION Location)
+{
+    PDEVICE_OBJECT Pdo;
+    PDEVICE_NODE Node;
+    SCSI_ADDRESS Address;
+    KEVENT Event;
+    IO_STATUS_BLOCK Iosb;
+    PIRP Irp;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    BOOLEAN HavePci = FALSE;
+
+    RtlZeroMemory(Location, sizeof(*Location));
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp = IoBuildDeviceIoControlRequest(IOCTL_SCSI_GET_ADDRESS, DiskDevice, NULL, 0, &Address, sizeof(Address),
+                                        FALSE, &Event, &Iosb);
+    if (Irp)
+    {
+        Status = IoCallDriver(DiskDevice, Irp);
+        if (Status == STATUS_PENDING)
+        {
+            KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+            Status = Iosb.Status;
+        }
+    }
+    if (!NT_SUCCESS(Status))
+        return;
+    Location->Path = Address.PathId;
+    Location->Target = Address.TargetId;
+    Location->Lun = Address.Lun;
+
+    Pdo = IoGetDeviceAttachmentBaseRef(DiskDevice);
+    for (Node = IopGetDeviceNode(Pdo); Node != NULL; Node = Node->Parent)
+    {
+        ULONG Addr, Bus, Len;
+
+        /* An IDE channel: the first I/O port it was given */
+        if (Node->InstancePath.Length >= 8 * sizeof(WCHAR) &&
+            _wcsnicmp(Node->InstancePath.Buffer, L"PCIIDE\\", 7) == 0 &&
+            Node->ResourceList != NULL && Node->ResourceList->Count > 0)
+        {
+            PCM_PARTIAL_RESOURCE_LIST Partial = &Node->ResourceList->List[0].PartialResourceList;
+            ULONG k;
+
+            for (k = 0; k < Partial->Count; k++)
+            {
+                if (Partial->PartialDescriptors[k].Type == CmResourceTypePort)
+                {
+                    Location->IoBase = Partial->PartialDescriptors[k].u.Port.Start.LowPart;
+                    break;
+                }
+            }
+        }
+
+        if (Node->InstancePath.Length < 4 * sizeof(WCHAR) ||
+            _wcsnicmp(Node->InstancePath.Buffer, L"PCI\\", 4) != 0 ||
+            Node->PhysicalDeviceObject == NULL)
+        {
+            continue;
+        }
+        if (NT_SUCCESS(IoGetDeviceProperty(Node->PhysicalDeviceObject, DevicePropertyAddress, sizeof(Addr), &Addr, &Len)) &&
+            NT_SUCCESS(IoGetDeviceProperty(Node->PhysicalDeviceObject, DevicePropertyBusNumber, sizeof(Bus), &Bus, &Len)))
+        {
+            Location->Bus = Bus;
+            Location->Slot = Addr >> 16;
+            Location->Function = Addr & 0xFFFF;
+            HavePci = TRUE;
+        }
+        break;
+    }
+    ObDereferenceObject(Pdo);
+
+    Location->Valid = HavePci;
+}
+
+/* The position record the loader appended to the ArcName of an entry (ARC_DISK_POSITION), if there is one */
+CODE_SEG("INIT")
+static BOOLEAN
+IopGetArcDiskPosition(
+    _In_ PARC_DISK_SIGNATURE ArcDisk,
+    _Out_ PARC_DISK_POSITION Position)
+{
+    SIZE_T NameLength = strlen(ArcDisk->ArcName) + 1;
+
+    /* The loader's ArcName buffer is 260 bytes (MAX_PATH) long; a record that would not fit in it is not one */
+    if (NameLength + sizeof(*Position) > 260)
+        return FALSE;
+    RtlCopyMemory(Position, ArcDisk->ArcName + NameLength, sizeof(*Position));
+    if (Position->Magic != ARC_DISK_POSITION_MAGIC || Position->Version != 1 ||
+        Position->Length > ARC_DISK_POSITION_DATA)
+    {
+        return FALSE;
+    }
+    return (Position->Kind == ARC_DISK_POSITION_EDD && Position->Length >= 0x24) ||
+           (Position->Kind == ARC_DISK_POSITION_UEFI && Position->Length >= 4);
+}
+
+/*
+ * The UEFI device path of a disk against its location: one PCI node (a path through a bridge has several and
+ * does not match), then, as the firmware's driver gives it, nothing (virtio-blk, one disk per function), an ATA
+ * (channel, device), SCSI (target, lun), SATA (port) or NVMe (one namespace per function) node.
+ */
+CODE_SEG("INIT")
+static BOOLEAN
+IopUefiPathMatches(
+    _In_ PARC_DISK_POSITION Position,
+    _In_ PIOP_DISK_LOCATION Location)
+{
+    ULONG Offset, Length, PciNodes = 0;
+    PUCHAR Data = Position->Data;
+    BOOLEAN Match = TRUE;
+
+    for (Offset = 0; Offset + 4 <= Position->Length; Offset += Length)
+    {
+        Length = Data[Offset + 2] | (Data[Offset + 3] << 8);
+        if (Length < 4 || Offset + Length > Position->Length)
+            return FALSE;
+        if (Data[Offset] == 0x7F)
+            break;
+        if (Data[Offset] == 1 && Data[Offset + 1] == 1 && Length >= 6)
+        {
+            /* PCI: function, device */
+            PciNodes++;
+            if (Location->Function != Data[Offset + 4] || Location->Slot != Data[Offset + 5])
+                Match = FALSE;
+        }
+        else if (Data[Offset] == 3 && Data[Offset + 1] == 1 && Length >= 8)
+        {
+            /* ATA: primary or secondary channel, master or slave */
+            if (Location->Path != Data[Offset + 4] || Location->Target != Data[Offset + 5])
+                Match = FALSE;
+        }
+        else if (Data[Offset] == 3 && Data[Offset + 1] == 2 && Length >= 8)
+        {
+            /* SCSI: target, lun */
+            if (Location->Target != (ULONG)(Data[Offset + 4] | (Data[Offset + 5] << 8)) ||
+                Location->Lun != (ULONG)(Data[Offset + 6] | (Data[Offset + 7] << 8)))
+            {
+                Match = FALSE;
+            }
+        }
+        else if (Data[Offset] == 3 && Data[Offset + 1] == 0x12 && Length >= 10)
+        {
+            /* SATA: HBA port */
+            if (Location->Path != (ULONG)(Data[Offset + 4] | (Data[Offset + 5] << 8)))
+                Match = FALSE;
+        }
+    }
+    return PciNodes == 1 && Match;
+}
+
+/* Two entries of the ARC list that are byte-identical copies of one disk */
+CODE_SEG("INIT")
+static BOOLEAN
+IopArcDisksAreCopies(
+    _In_ PARC_DISK_SIGNATURE A,
+    _In_ PARC_DISK_SIGNATURE B)
+{
+    if (A == B || !A->ValidPartitionTable || !B->ValidPartitionTable || A->IsGpt != B->IsGpt)
+        return FALSE;
+    if (A->CheckSum != B->CheckSum)
+        return FALSE;
+    if (A->IsGpt)
+        return RtlEqualMemory(A->GptSignature, B->GptSignature, sizeof(A->GptSignature));
+    return A->Signature != 0 && A->Signature == B->Signature;
+}
+
+/*
+ * Is the disk at the position the loader recorded for an entry? TRUE also when the record says nothing the kernel
+ * can compare (a host bus other than PCI): then the position cannot exclude the disk.
+ * The record is the EDD device path of INT 13h AH=48h: host bus "PCI ", interface "ATA" or "SCSI", interface path =
+ * PCI bus, slot, function, channel; device path = ATA device (0, 1); or a UEFI device path.
+ */
+CODE_SEG("INIT")
+static BOOLEAN
+IopPositionMatches(
+    _In_ PARC_DISK_POSITION Position,
+    _In_ PIOP_DISK_LOCATION Location)
+{
+    PUCHAR Path;
+
+    if (Position->Kind == ARC_DISK_POSITION_UEFI)
+        return IopUefiPathMatches(Position, Location);
+
+    /* Data: key (2), length, reserved (3), host bus type (4), interface type (8), interface path (8), device path (8) */
+    Path = Position->Data;
+    if (RtlCompareMemory(&Path[6], "PCI ", 4) != 4)
+        return TRUE;
+    if (Path[18] != Location->Bus || Path[19] != Location->Slot || Path[20] != Location->Function)
+        return FALSE;
+    if (RtlCompareMemory(&Path[10], "ATA     ", 8) == 8)
+    {
+        /* The channel: by the port base the BIOS gave (the channel byte of SeaBIOS is 0 for both channels), else by the byte */
+        if (Position->IoBase != 0 && Location->IoBase != 0)
+        {
+            if (Position->IoBase != Location->IoBase)
+                return FALSE;
+        }
+        else if (Path[21] != Location->Path)
+        {
+            return FALSE;
+        }
+        return Path[26] == Location->Target;
+    }
+    if (Path[21] != Location->Path)
+        return FALSE;
+    /* SCSI: SeaBIOS reports the controller only (measured): two disks of one controller have the same position */
+    return TRUE;
+}
+
+/*
+ * May this disk take the ARC names of this entry? Yes, unless the entry has a copy in the list (then the disks
+ * match each other by signature and checksum and the first one of the enumeration would take every name) and the
+ * disk is, by the recorded positions, the disk of ANOTHER copy and not of this entry. Everything else is as it was
+ * before this check: no copy, no record on the entry, a disk whose position cannot be found, a position that belongs
+ * to no copy, two copies with the same position (the firmware did not tell them apart): the first disk that
+ * matches takes the names. The check never leaves an entry without a disk that took its names before.
+ */
+CODE_SEG("INIT")
+static BOOLEAN
+IopArcPositionAllows(
+    _In_ PARC_DISK_INFORMATION ArcDiskInformation,
+    _In_ PARC_DISK_SIGNATURE Entry,
+    _In_ PIOP_DISK_LOCATION Location)
+{
+    PLIST_ENTRY NextEntry;
+    ARC_DISK_POSITION Position, Other;
+    BOOLEAN HasCopy = FALSE;
+
+    if (!Location->Valid)
+        return TRUE;
+
+    for (NextEntry = ArcDiskInformation->DiskSignatureListHead.Flink;
+         NextEntry != &ArcDiskInformation->DiskSignatureListHead;
+         NextEntry = NextEntry->Flink)
+    {
+        if (IopArcDisksAreCopies(Entry, CONTAINING_RECORD(NextEntry, ARC_DISK_SIGNATURE, ListEntry)))
+        {
+            HasCopy = TRUE;
+            break;
+        }
+    }
+    DPRINT("ARC %s: copy %d, disk at PCI %lu:%lu.%lu path %lu target %lu iobase %lx\n", Entry->ArcName, HasCopy,
+           Location->Bus, Location->Slot, Location->Function, Location->Path, Location->Target, Location->IoBase);
+    if (!HasCopy || !IopGetArcDiskPosition(Entry, &Position))
+        return TRUE;
+
+    if (IopPositionMatches(&Position, Location))
+        return TRUE;
+
+    /* Not this entry's position: refuse the names only if the disk is positively another copy's */
+    for (NextEntry = ArcDiskInformation->DiskSignatureListHead.Flink;
+         NextEntry != &ArcDiskInformation->DiskSignatureListHead;
+         NextEntry = NextEntry->Flink)
+    {
+        PARC_DISK_SIGNATURE Copy = CONTAINING_RECORD(NextEntry, ARC_DISK_SIGNATURE, ListEntry);
+
+        if (IopArcDisksAreCopies(Entry, Copy) && IopGetArcDiskPosition(Copy, &Other) &&
+            IopPositionMatches(&Other, Location))
+        {
+            DPRINT("ARC %s: the disk belongs to %s\n", Entry->ArcName, Copy->ArcName);
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 CODE_SEG("INIT")
 NTSTATUS
 NTAPI
@@ -464,6 +753,7 @@ IopCreateArcNamesDisk(IN PLOADER_PARAMETER_BLOCK LoaderBlock,
     BOOLEAN NotEnabledPresent = FALSE;
     STORAGE_DEVICE_NUMBER DeviceNumber;
     PARC_DISK_SIGNATURE ArcDiskSignature;
+    IOP_DISK_LOCATION DiskLocation;
     PWSTR SymbolicLinkList, lSymbolicLinkList;
     PDRIVE_LAYOUT_INFORMATION_EX DriveLayout = NULL;
     UNICODE_STRING DeviceStringW, ArcNameStringW, HalPathStringW;
@@ -613,6 +903,9 @@ IopCreateArcNamesDisk(IN PLOADER_PARAMETER_BLOCK LoaderBlock,
             continue;
         }
 
+        /* Where the disk is, for the copies of a disk that the loader found in the same ARC list */
+        IopGetDiskLocation(DeviceObject, &DiskLocation);
+
         /* Let's ask the disk for its geometry */
         Irp = IoBuildDeviceIoControlRequest(IOCTL_DISK_GET_DRIVE_GEOMETRY,
                                             DeviceObject,
@@ -741,10 +1034,11 @@ IopCreateArcNamesDisk(IN PLOADER_PARAMETER_BLOCK LoaderBlock,
              * Otherwise, verify whether the signatures and checksums match
              * before proceeding.
              */
-            if ((SingleDisk && (DiskCount == 1) &&
-                 (DriveLayout->PartitionStyle == PARTITION_STYLE_MBR)) ||
-                (IopVerifyDiskSignature(DriveLayout, ArcDiskSignature, &Signature) &&
-                 (ArcDiskSignature->CheckSum + CheckSum == 0)))
+            if (((SingleDisk && (DiskCount == 1) &&
+                  (DriveLayout->PartitionStyle == PARTITION_STYLE_MBR)) ||
+                 (IopVerifyDiskSignature(DriveLayout, ArcDiskSignature, &Signature) &&
+                  (ArcDiskSignature->CheckSum + CheckSum == 0))) &&
+                IopArcPositionAllows(ArcDiskInformation, ArcDiskSignature, &DiskLocation))
             {
                 /* Create device name */
                 sprintf(Buffer, "\\Device\\Harddisk%lu\\Partition0",

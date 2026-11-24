@@ -795,10 +795,70 @@ GptNumberCallback(
     return TRUE;
 }
 
+ULONG ArcGetDiskCount(VOID);
+PARC_DISK_SIGNATURE_EX ArcGetDiskInfo(ULONG Index);
+
+/* The UEFI device path the loader recorded for rdisk(Disk) (ARC_DISK_POSITION), if there is one */
+static BOOLEAN
+GptGetDiskPosition(
+    _In_ ULONG Disk,
+    _Out_ PARC_DISK_POSITION Position)
+{
+    CHAR Name[40];
+    ULONG Index;
+
+    RtlStringCbPrintfA(Name, sizeof(Name), "multi(0)disk(0)rdisk(%lu)", Disk);
+    for (Index = 0; Index < ArcGetDiskCount(); Index++)
+    {
+        PARC_DISK_SIGNATURE_EX Entry = ArcGetDiskInfo(Index);
+        SIZE_T NameLength;
+
+        if (!Entry || strcmp(Entry->ArcName, Name) != 0)
+            continue;
+        NameLength = strlen(Entry->ArcName) + 1;
+        if (NameLength + sizeof(*Position) > sizeof(Entry->ArcName))
+            return FALSE;
+        RtlCopyMemory(Position, &Entry->ArcName[NameLength], sizeof(*Position));
+        return Position->Magic == ARC_DISK_POSITION_MAGIC && Position->Version == 1 &&
+               Position->Kind == ARC_DISK_POSITION_UEFI && Position->Length >= 4 &&
+               Position->Length <= ARC_DISK_POSITION_DATA;
+    }
+    return FALSE;
+}
+
+/*
+ * TRUE if the firmware's device paths of the two disks are there, name a PCI device and differ: the kernel finds
+ * the NT disk of each by that path (see IopArcPositionAllows). Two paths that are the same, or no path, tell nothing.
+ */
+static BOOLEAN
+GptPositionsTellApart(
+    _In_ ULONG Disk,
+    _In_ ULONG Other)
+{
+    ARC_DISK_POSITION A, B;
+    ULONG Offset;
+    BOOLEAN Pci = FALSE;
+
+    if (!GptGetDiskPosition(Disk, &A) || !GptGetDiskPosition(Other, &B))
+        return FALSE;
+    /* a PCI node (type 1, sub type 1) must be in the path: that is what the kernel can look for */
+    for (Offset = 0; Offset + 4 <= A.Length; Offset += max(A.Data[Offset + 2] | (A.Data[Offset + 3] << 8), 4))
+    {
+        if (A.Data[Offset] == 1 && A.Data[Offset + 1] == 1)
+            Pci = TRUE;
+        if (A.Data[Offset] == 0x7F)
+            break;
+    }
+    if (!Pci)
+        return FALSE;
+    return A.Length != B.Length || !RtlEqualMemory(A.Data, B.Data, A.Length);
+}
+
 /*
  * TRUE if another hard disk than Disk has the disk GUID Guid. The kernel matches the disks of the loader's ARC
  * list to its own by that GUID (and a checksum that two copies of a disk share), so with two such disks it may
- * bring up the other copy of the partition the loader has just read: never boot in that case.
+ * bring up the other copy of the partition the loader has just read: never boot in that case, unless the
+ * firmware's device paths of the two disks differ, which the kernel then uses to tell them apart.
  */
 static BOOLEAN
 GptDiskGuidIsShared(
@@ -819,7 +879,7 @@ GptDiskGuidIsShared(
             continue;
         RtlZeroMemory(&Found, sizeof(Found));
         (VOID)DiskGptScan((UCHAR)(0x80 + Index), GptDiskGuidCallback, NULL, &Found);
-        if (RtlEqualMemory(&Found, Guid, sizeof(GUID)))
+        if (RtlEqualMemory(&Found, Guid, sizeof(GUID)) && !GptPositionsTellApart(Disk, Index))
         {
             *Other = Index;
             return TRUE;
