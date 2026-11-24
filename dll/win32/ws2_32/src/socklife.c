@@ -544,6 +544,30 @@ WSASocketW(IN INT af,
     /* Get the catalog */
     Catalog = WsProcGetTCatalog(Process);
 
+    if (lpProtocolInfo)
+    {
+        /* The structure supplies what the caller leaves open (0 or FROM_PROTOCOL_INFO); as measured on
+           Windows Server 2022 an address family that is still 0 or -1 then is not supported */
+        if (af == FROM_PROTOCOL_INFO || af == 0)
+            af = lpProtocolInfo->iAddressFamily;
+        if (type == FROM_PROTOCOL_INFO || type == 0)
+            type = lpProtocolInfo->iSocketType;
+        if (protocol == FROM_PROTOCOL_INFO || protocol == 0)
+            protocol = lpProtocolInfo->iProtocol;
+
+        if (af == 0 || af == FROM_PROTOCOL_INFO)
+        {
+            SetLastError(WSAEAFNOSUPPORT);
+            return INVALID_SOCKET;
+        }
+    }
+    else if (af == AF_UNSPEC && protocol == 0)
+    {
+        /* Nothing says which family to use */
+        SetLastError(WSAEINVAL);
+        return INVALID_SOCKET;
+    }
+
     /* Find a Provider for the Catalog ID */
     if (lpProtocolInfo)
     {
