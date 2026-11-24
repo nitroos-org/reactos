@@ -15,7 +15,11 @@ typedef struct _USER_MESSAGE
   LONG_PTR ExtraInfo;
   DWORD dwQEvent;
   PTHREADINFO pti;
+  BOOLEAN Counted;  // counted in pti->cPostedMessages
 } USER_MESSAGE, *PUSER_MESSAGE;
+
+/* Messages that can wait in the posted queue of one thread (Windows: USERPostMessageLimit, default 10000) */
+#define USER_POST_MESSAGE_LIMIT 10000
 
 struct _USER_MESSAGE_QUEUE;
 

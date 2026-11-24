@@ -74,6 +74,7 @@ extern void func_GetIconInfo(void);
 extern void func_GetKeyState(void);
 extern void func_GetMessageTime(void);
 extern void func_GetPeekMessage(void);
+extern void func_PostMessageLimit(void);
 extern void func_GetSetWindowInt(void);
 extern void func_GetSystemMetrics(void);
 extern void func_GetUpdatedClipboardFormats(void);
@@ -286,6 +287,7 @@ const struct test winetest_testlist[] =
     { "GetKeyState", func_GetKeyState },
     { "GetMessageTime", func_GetMessageTime },
     { "GetPeekMessage", func_GetPeekMessage },
+    { "PostMessageLimit", func_PostMessageLimit },
     { "GetSetWindowInt", func_GetSetWindowInt },
     { "GetSystemMetrics", func_GetSystemMetrics },
     { "GetUpdatedClipboardFormats", func_GetUpdatedClipboardFormats },

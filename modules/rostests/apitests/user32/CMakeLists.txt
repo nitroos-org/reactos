@@ -53,6 +53,7 @@ list(APPEND SOURCE
     GetKeyState.c
     GetMessageTime.c
     GetPeekMessage.c
+    PostMessageLimit.c
     GetSetWindowInt.c
     GetSystemMetrics.c
     GetUpdatedClipboardFormats.c
