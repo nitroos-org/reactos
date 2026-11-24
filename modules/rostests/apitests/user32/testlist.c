@@ -10,6 +10,7 @@ extern void func_AutoRotation(void);
 extern void func_BroadcastHung(void);
 extern void func_LifetimeActivePrevFreed(void);
 extern void func_LifetimeAttachSharedQueue(void);
+extern void func_LifetimeBeingActivatedExit(void);
 extern void func_LifetimeBroadcastDesktops(void);
 extern void func_LifetimeCallbackExitLeak(void);
 extern void func_LifetimeCaptureWinEvent(void);
@@ -18,6 +19,8 @@ extern void func_LifetimeEventProcExitThread(void);
 extern void func_LifetimeForegroundWinEvent(void);
 extern void func_LifetimeCreateNameExitLeak(void);
 extern void func_LifetimeDesktopHeldDelete(void);
+extern void func_LifetimeDesktopKeptByMenus(void);
+extern void func_LifetimeDesktopSenderHeld(void);
 extern void func_LifetimeFreeExitClass(void);
 extern void func_LifetimeHookExitLeak(void);
 extern void func_LifetimeHookNamesExitLeak(void);
@@ -26,6 +29,7 @@ extern void func_LifetimeKeyboardLayoutWalk(void);
 extern void func_LifetimeLayoutSenderEnds(void);
 extern void func_LifetimeOtherDesktopOwner(void);
 extern void func_LifetimeOwnerDestroyRace(void);
+extern void func_LifetimeOwnerReparentedFreed(void);
 extern void func_LifetimeSendSenderEnds(void);
 extern void func_LifetimeSentCopyExitLeak(void);
 extern void func_LifetimeSetActiveHookAttach(void);
@@ -221,6 +225,7 @@ const struct test winetest_testlist[] =
     { "AniMalformed", func_AniMalformed },
     { "LifetimeActivePrevFreed", func_LifetimeActivePrevFreed },
     { "LifetimeAttachSharedQueue", func_LifetimeAttachSharedQueue },
+    { "LifetimeBeingActivatedExit", func_LifetimeBeingActivatedExit },
     { "LifetimeBroadcastDesktops", func_LifetimeBroadcastDesktops },
     { "LifetimeCallbackExitLeak", func_LifetimeCallbackExitLeak },
     { "LifetimeCaptureWinEvent", func_LifetimeCaptureWinEvent },
@@ -229,6 +234,8 @@ const struct test winetest_testlist[] =
     { "LifetimeForegroundWinEvent", func_LifetimeForegroundWinEvent },
     { "LifetimeCreateNameExitLeak", func_LifetimeCreateNameExitLeak },
     { "LifetimeDesktopHeldDelete", func_LifetimeDesktopHeldDelete },
+    { "LifetimeDesktopKeptByMenus", func_LifetimeDesktopKeptByMenus },
+    { "LifetimeDesktopSenderHeld", func_LifetimeDesktopSenderHeld },
     { "LifetimeFreeExitClass", func_LifetimeFreeExitClass },
     { "LifetimeHookExitLeak", func_LifetimeHookExitLeak },
     { "LifetimeHookNamesExitLeak", func_LifetimeHookNamesExitLeak },
@@ -237,6 +244,7 @@ const struct test winetest_testlist[] =
     { "LifetimeLayoutSenderEnds", func_LifetimeLayoutSenderEnds },
     { "LifetimeOtherDesktopOwner", func_LifetimeOtherDesktopOwner },
     { "LifetimeOwnerDestroyRace", func_LifetimeOwnerDestroyRace },
+    { "LifetimeOwnerReparentedFreed", func_LifetimeOwnerReparentedFreed },
     { "LifetimeSendSenderEnds", func_LifetimeSendSenderEnds },
     { "LifetimeSentCopyExitLeak", func_LifetimeSentCopyExitLeak },
     { "LifetimeSetActiveHookAttach", func_LifetimeSetActiveHookAttach },
