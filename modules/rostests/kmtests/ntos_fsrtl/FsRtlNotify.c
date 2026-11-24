@@ -806,6 +806,132 @@ TestContextReuseDuringCancel(VOID)
     ExFreePoolWithTag(FoNew, TAG_NTFY);
 }
 
+/* The cancel routine runs in the thread that cancels: any thread, also one with a user-mode
+ * part and normal kernel APCs enabled (a cancel, the rundown of an exiting thread), not
+ * inside a file system. A system thread queues each request (inside a critical region, as
+ * a file system does); the test's own thread cancels it outside of one, in a loop. */
+
+#define CANCEL_LOOP_ROUNDS 500
+
+typedef struct _CANCEL_LOOP
+{
+    KEVENT Posted;
+    KEVENT Cancelled;
+    PIRP Irp;
+    LONG Rounds;
+    LONG Good;
+    BOOLEAN Stop;
+} CANCEL_LOOP, *PCANCEL_LOOP;
+
+static
+VOID
+NTAPI
+PostWorker(PVOID Context)
+{
+    PCANCEL_LOOP Loop = Context;
+    PFILE_OBJECT Fo;
+    TEST_IRP Test;
+    LARGE_INTEGER Timeout;
+    BOOLEAN Pending = FALSE;
+    LONG i;
+
+    RtlZeroMemory(&Test, sizeof(Test));
+    Fo = AllocateFileObject(&KeyB);
+    if (Fo != NULL)
+    {
+        for (i = 0; i < CANCEL_LOOP_ROUNDS; i++)
+        {
+            if (!BuildNotifyIrp(&Test, Fo))
+                break;
+            KeEnterCriticalRegion();
+            Watch(&Test, &NotifyList, &DirName, TRUE);
+            KeLeaveCriticalRegion();
+            if (Test.Calls != 0 || Test.Irp->CancelRoutine == NULL)
+            {
+                /* Not queued: nothing to cancel */
+                break;
+            }
+
+            Pending = TRUE;
+            Loop->Irp = Test.Irp;
+            KeSetEvent(&Loop->Posted, IO_NO_INCREMENT, FALSE);
+            Timeout.QuadPart = -10LL * 1000 * 1000 * 20; /* 20 s */
+            if (KeWaitForSingleObject(&Loop->Cancelled, Executive, KernelMode, FALSE, &Timeout) != STATUS_SUCCESS)
+                break;
+            Pending = FALSE;
+            if (Test.Calls == 1 && Test.Status == STATUS_CANCELLED)
+                Loop->Good++;
+            Loop->Rounds++;
+            FreeNotifyIrp(&Test);
+        }
+
+        /* Completes a request still queued (its completion routine keeps the IRP) */
+        KeEnterCriticalRegion();
+        FsRtlNotifyCleanup(Sync, &NotifyList, &KeyB);
+        KeLeaveCriticalRegion();
+        if (!Pending || Test.Calls != 0)
+            FreeNotifyIrp(&Test);
+        ExFreePoolWithTag(Fo, TAG_NTFY);
+    }
+
+    Loop->Irp = NULL;
+    Loop->Stop = TRUE;
+    KeSetEvent(&Loop->Posted, IO_NO_INCREMENT, FALSE);
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+static
+VOID
+TestCancelFromAnotherThread(VOID)
+{
+    CANCEL_LOOP Loop;
+    OBJECT_ATTRIBUTES Attributes;
+    LARGE_INTEGER Timeout;
+    HANDLE Handle;
+    PVOID Thread;
+    NTSTATUS Status;
+    LONG Cancels = 0;
+
+    /* The cancelling thread is not in a critical region */
+    ok(!KeAreApcsDisabled(), "normal kernel APCs are disabled in the test thread\n");
+    ok_irql(PASSIVE_LEVEL);
+
+    RtlZeroMemory(&Loop, sizeof(Loop));
+    KeInitializeEvent(&Loop.Posted, SynchronizationEvent, FALSE);
+    KeInitializeEvent(&Loop.Cancelled, SynchronizationEvent, FALSE);
+    InitializeObjectAttributes(&Attributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = PsCreateSystemThread(&Handle, THREAD_ALL_ACCESS, &Attributes, NULL, NULL, PostWorker, &Loop);
+    if (skip(NT_SUCCESS(Status), "No worker thread\n"))
+        return;
+    Status = ObReferenceObjectByHandle(Handle, SYNCHRONIZE, *PsThreadType, KernelMode, &Thread, NULL);
+    ZwClose(Handle);
+    if (skip(NT_SUCCESS(Status), "No thread object\n"))
+        return;
+
+    for (;;)
+    {
+        Timeout.QuadPart = -10LL * 1000 * 1000 * 20; /* 20 s */
+        Status = KeWaitForSingleObject(&Loop.Posted, Executive, KernelMode, FALSE, &Timeout);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (Status != STATUS_SUCCESS || Loop.Stop)
+            break;
+        if (IoCancelIrp(Loop.Irp))
+            Cancels++;
+        KeSetEvent(&Loop.Cancelled, IO_NO_INCREMENT, FALSE);
+    }
+
+    Status = KeWaitForSingleObject(Thread, Executive, KernelMode, FALSE, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ObDereferenceObject(Thread);
+
+    ok_eq_long(Cancels, (LONG)CANCEL_LOOP_ROUNDS);
+    ok_eq_long(Loop.Rounds, (LONG)CANCEL_LOOP_ROUNDS);
+    ok_eq_long(Loop.Good, (LONG)CANCEL_LOOP_ROUNDS);
+    ok(IsListEmpty(&NotifyList), "watcher left on the list\n");
+    if (!IsListEmpty(&NotifyList))
+        InitializeListHead(&NotifyList);
+}
+
 START_TEST(FsRtlNotify)
 {
     DirName.Buffer = (PCHAR)L"\\Dir";
@@ -836,6 +962,9 @@ START_TEST(FsRtlNotify)
     TestSuccessSkipsCancelInFlight();
     TestContextReuseDuringCancel();
     KeLeaveCriticalRegion();
+
+    /* Outside of a critical region: the cancel path enters its own */
+    TestCancelFromAnotherThread();
 
     FsRtlNotifyUninitializeSync(&Sync);
 }

@@ -103,6 +103,7 @@ list(APPEND SOURCE
     RegEnumValueW.c
     RegValueLookup.c
     RegFlushKey.c
+    RegFreedCells.c
     RegNotifyChangeKeyValue.c
     RegNotifyLeak.c
     RegLoadCraftedHive.c

@@ -628,6 +628,18 @@ HvpFreeCell(
     /* FIXME: Merge free blocks */
     Bin = (PHBIN)RegistryHive->Storage[CellType].BlockList[CellBlock].BinAddress;
 
+    /*
+     * What a stable cell held (a deleted or replaced value, key or name) does not stay in the hive file until the
+     * space is used again: its body is cleared now. The whole cell is marked dirty below (alone or merged with a free
+     * neighbour), so the zeros reach the file at the next flush. The free list link is written after this.
+     */
+    if (CellType == Stable &&
+        (ULONG)Free->Size > sizeof(HCELL) &&
+        (CellIndex & ~HCELL_TYPE_MASK) + (ULONG)Free->Size <= Bin->FileOffset + Bin->Size)
+    {
+        RtlZeroMemory(Free + 1, (ULONG)Free->Size - sizeof(HCELL));
+    }
+
     if ((CellIndex & ~HCELL_TYPE_MASK) + Free->Size <
         Bin->FileOffset + Bin->Size)
     {

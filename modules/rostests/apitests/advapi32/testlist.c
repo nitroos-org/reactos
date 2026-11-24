@@ -103,6 +103,7 @@ extern void func_RegEnumKeyClass(void);
 extern void func_RegEnumValueW(void);
 extern void func_RegValueLookup(void);
 extern void func_RegFlushKey(void);
+extern void func_RegFreedCells(void);
 extern void func_RegNotifyChangeKeyValue(void);
 extern void func_RegNotifyLeak(void);
 extern void func_RegLoadCraftedHive(void);
@@ -320,6 +321,7 @@ const struct test winetest_testlist[] =
     { "RegEnumValueW", func_RegEnumValueW },
     { "RegValueLookup", func_RegValueLookup },
     { "RegFlushKey", func_RegFlushKey },
+    { "RegFreedCells", func_RegFreedCells },
     { "RegNotifyChangeKeyValue", func_RegNotifyChangeKeyValue },
     { "RegNotifyLeak", func_RegNotifyLeak },
     { "RegLoadCraftedHive", func_RegLoadCraftedHive },
