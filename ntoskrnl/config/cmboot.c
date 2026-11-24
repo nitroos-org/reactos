@@ -638,6 +638,112 @@ CmpIsLoadType(
     return (*Data == LoadType);
 }
 
+#ifdef _BLDR_
+
+/**
+ * @brief
+ * For every key of the Critical Device Database whose device is present
+ * (as decided by the loader), adds the key's service to the boot driver list
+ * if the service is a demand-start driver (boot-start ones are in the list
+ * already; a disabled one stays out) and is allowed in the current safe mode.
+ *
+ * The Windows design: only the drivers of the hardware that is there are
+ * loaded at boot, and the database says which driver goes with which device.
+ *
+ * @remarks Used in bootloader only.
+ **/
+static
+VOID
+CmpAddPresentCriticalDeviceDrivers(
+    _In_ PHHIVE Hive,
+    _In_ PCM_KEY_NODE ControlNode,
+    _In_ PCM_KEY_NODE ServicesNode,
+    _In_ HCELL_INDEX GroupOrderCell,
+    _In_ HCELL_INDEX SafeBootCell,
+    _In_ PCUNICODE_STRING RegistryPath,
+    _In_ PCM_CRITICAL_DEVICE_PRESENT CriticalDevicePresent,
+    _Inout_ PLIST_ENTRY DriverListHead)
+{
+    HCELL_INDEX DatabaseCell, DeviceCell, ValueCell, DriverCell;
+    PCM_KEY_NODE DatabaseNode, DeviceNode;
+    PCM_KEY_VALUE Value;
+    UNICODE_STRING Name, Service;
+    WCHAR KeyName[160];
+    ULONG i, Length;
+    USHORT NameLength;
+    PWCHAR Buffer;
+
+    /* Sanity check: We shouldn't need to release any acquired cells */
+    ASSERT(Hive->ReleaseCellRoutine == NULL);
+
+    RtlInitUnicodeString(&Name, L"CriticalDeviceDatabase");
+    DatabaseCell = CmpFindSubKeyByName(Hive, ControlNode, &Name);
+    if (DatabaseCell == HCELL_NIL)
+        return;
+    DatabaseNode = (PCM_KEY_NODE)HvGetCell(Hive, DatabaseCell);
+    if (!DatabaseNode)
+        return;
+
+    for (i = 0; ; ++i)
+    {
+        DeviceCell = CmpFindSubKeyByNumber(Hive, DatabaseNode, i);
+        if (DeviceCell == HCELL_NIL)
+            break;
+        DeviceNode = (PCM_KEY_NODE)HvGetCell(Hive, DeviceCell);
+        if (!DeviceNode)
+            continue;
+
+        /* The key's name is the device's id */
+        NameLength = (DeviceNode->Flags & KEY_COMP_NAME) ?
+                     CmpCompressedNameSize(DeviceNode->Name, DeviceNode->NameLength) :
+                     DeviceNode->NameLength;
+        if ((NameLength < sizeof(WCHAR)) || (NameLength >= sizeof(KeyName)))
+            continue;
+        if (DeviceNode->Flags & KEY_COMP_NAME)
+            CmpCopyCompressedName(KeyName, NameLength, DeviceNode->Name, DeviceNode->NameLength);
+        else
+            RtlCopyMemory(KeyName, DeviceNode->Name, NameLength);
+        KeyName[NameLength / sizeof(WCHAR)] = UNICODE_NULL;
+
+        if (!CriticalDevicePresent(KeyName, NameLength / sizeof(WCHAR)))
+            continue;
+
+        /* Its service */
+        RtlInitUnicodeString(&Name, L"Service");
+        ValueCell = CmpFindValueByName(Hive, DeviceNode, &Name);
+        if (ValueCell == HCELL_NIL)
+            continue;
+        Value = (PCM_KEY_VALUE)HvGetCell(Hive, ValueCell);
+        if (!Value || (Value->Type != REG_SZ))
+            continue;
+        Buffer = (PWCHAR)CmpValueToData(Hive, Value, &Length);
+        if (!Buffer)
+            continue;
+        if (IS_NULL_TERMINATED(Buffer, Length))
+            Length -= sizeof(UNICODE_NULL);
+        if ((Length < sizeof(WCHAR)) || (Length > MAXUSHORT))
+            continue;
+        Service.Buffer = Buffer;
+        Service.Length = Service.MaximumLength = (USHORT)Length;
+
+        DriverCell = CmpFindSubKeyByName(Hive, ServicesNode, &Service);
+        if (DriverCell == HCELL_NIL)
+            continue;
+        if (!CmpIsLoadType(Hive, DriverCell, DemandLoad))
+            continue;
+        if (!CmpIsSafe(Hive, SafeBootCell, DriverCell))
+            continue;
+        if (CmpIsDriverInList(DriverListHead, &Service, NULL))
+            continue;
+
+        CMTRACE(CM_BOOT_DEBUG, "Critical device '%S' is present: boot driver '%wZ'\n", KeyName, &Service);
+        if (!CmpAddDriverToList(Hive, DriverCell, GroupOrderCell, RegistryPath, DriverListHead))
+            CMTRACE(CM_BOOT_DEBUG, "  Failed to add boot driver\n");
+    }
+}
+
+#endif /* _BLDR_ */
+
 /**
  * @brief
  * Enumerates all drivers within the given control set and load type,
@@ -656,6 +762,13 @@ CmpIsLoadType(
  * Optional name of the boot file system, for which to insert
  * its corresponding driver.
  *
+ * @param[in]   CriticalDevicePresent
+ * Optional (boot loader only, with the boot load type): tells whether a device
+ * named by a key of the Critical Device Database is in this machine. The
+ * demand-start service of every such device is then loaded with the boot
+ * drivers too, so that a disk on a controller whose driver is not boot-start
+ * can still be read. NULL: no such drivers.
+ *
  * @param[in,out]   DriverListHead
  * The driver list where to insert the enumerated drivers.
  *
@@ -671,6 +784,7 @@ CmpFindDrivers(
     _In_ HCELL_INDEX ControlSet,
     _In_ SERVICE_LOAD_TYPE LoadType,
     _In_opt_ PCWSTR BootFileSystem,
+    _In_opt_ PCM_CRITICAL_DEVICE_PRESENT CriticalDevicePresent,
     _Inout_ PLIST_ENTRY DriverListHead)
 {
     HCELL_INDEX ServicesCell, ControlCell, GroupOrderCell, DriverCell;
@@ -760,6 +874,27 @@ CmpFindDrivers(
         /* Go to the next sub-key */
         DriverCell = CmpFindSubKeyByNumber(Hive, ServicesNode, ++i);
     }
+
+#ifdef _BLDR_
+    /* Demand-start drivers of devices that the Critical Device Database names and that are present */
+    if (CriticalDevicePresent && (LoadType == BootLoad))
+    {
+        ControlNode = (PCM_KEY_NODE)HvGetCell(Hive, ControlCell);
+        if (ControlNode)
+        {
+            CmpAddPresentCriticalDeviceDrivers(Hive,
+                                               ControlNode,
+                                               ServicesNode,
+                                               GroupOrderCell,
+                                               SafeBootCell,
+                                               &KeyPath,
+                                               CriticalDevicePresent,
+                                               DriverListHead);
+        }
+    }
+#else
+    UNREFERENCED_PARAMETER(CriticalDevicePresent);
+#endif
 
     /* Check if we have a boot file system */
     if (BootFileSystem)

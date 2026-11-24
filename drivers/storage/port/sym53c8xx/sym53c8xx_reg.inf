@@ -1,7 +1,7 @@
-; LSI Logic 53C8xx miniport driver (boot start: Setup and the first boot find 53C895A and 53C810 disks)
+; LSI Logic 53C8xx miniport driver (demand start: the boot loader loads it when the Critical Device Database names it for a device that is present, so Setup and every boot find 53C895A and 53C810 disks)
 [AddReg]
 HKLM,"SYSTEM\CurrentControlSet\Services\sym53c8xx","ErrorControl",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\sym53c8xx","Group",0x00000000,"SCSI Miniport"
 HKLM,"SYSTEM\CurrentControlSet\Services\sym53c8xx","ImagePath",0x00020000,"system32\drivers\sym53c8xx.sys"
-HKLM,"SYSTEM\CurrentControlSet\Services\sym53c8xx","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\sym53c8xx","Start",0x00010001,0x00000003
 HKLM,"SYSTEM\CurrentControlSet\Services\sym53c8xx","Type",0x00010001,0x00000001

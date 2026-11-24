@@ -146,6 +146,70 @@ SetupLdrInitErrataInf(
     return TRUE;
 }
 
+/**
+ * A mass storage miniport of the [SCSI.Load] list is only worth loading when the machine has
+ * a device for it: every hardware id that [HardwareIdsDatabase] gives it is a PCI id and no
+ * PCI device matches one of them. (A driver that has an id of another kind, e.g. atapi's
+ * *PNP0600, or none, is always loaded.)
+ **/
+static BOOLEAN
+SetupLdrScsiDriverHasNoDevice(
+    _In_ HINF InfHandle,
+    _In_ PCSTR DriverFile)
+{
+    INFCONTEXT Context;
+    PCSTR Key, Value, HardwareId;
+    CHAR Name[64];
+    WCHAR IdW[96];
+    ULONG i, Length;
+    BOOLEAN InScsiList = FALSE, HaveIds = FALSE;
+
+    /* The service name: the file name without ".sys" */
+    for (i = 0; (i < sizeof(Name) - 1) && (DriverFile[i] != ANSI_NULL) && (DriverFile[i] != '.'); ++i)
+        Name[i] = DriverFile[i];
+    Name[i] = ANSI_NULL;
+
+    if (InfFindFirstLine(InfHandle, "SCSI.Load", NULL, &Context))
+    {
+        do
+        {
+            if (InfGetDataField(&Context, 0, &Key) && (_stricmp(Key, Name) == 0))
+            {
+                InScsiList = TRUE;
+                break;
+            }
+        } while (InfFindNextLine(&Context, &Context));
+    }
+    if (!InScsiList)
+        return FALSE;
+
+    if (!InfFindFirstLine(InfHandle, "HardwareIdsDatabase", NULL, &Context))
+        return FALSE;
+    do
+    {
+        if (!InfGetDataField(&Context, 1, &Value) || (_stricmp(Value, Name) != 0))
+            continue;
+        if (!InfGetDataField(&Context, 0, &HardwareId))
+            return FALSE;
+
+        /* An id of another kind of bus: the driver is not about a PCI device only */
+        Length = (ULONG)strlen(HardwareId);
+        if ((Length == 0) || (Length >= RTL_NUMBER_OF(IdW)))
+            return FALSE;
+        for (i = 0; i < Length; ++i)
+            IdW[i] = (WCHAR)(UCHAR)HardwareId[i];
+        IdW[Length] = UNICODE_NULL;
+        if ((Length < 5) || (_strnicmp(HardwareId, "PCI\\", 4) != 0))
+            return FALSE;
+
+        HaveIds = TRUE;
+        if (WinLdrPciDeviceIdPresent(IdW, Length))
+            return FALSE;
+    } while (InfFindNextLine(&Context, &Context));
+
+    return HaveIds;
+}
+
 static VOID
 SetupLdrScanBootDrivers(
     _Inout_ PLIST_ENTRY BootDriverListHead,
@@ -181,6 +245,13 @@ SetupLdrScanBootDrivers(
                 InfFindFirstLine(InfHandle, "Directories", dirIndex, &dirContext) &&
                 InfGetDataField(&dirContext, 1, &ImagePath))
             {
+                /* A storage miniport with no device in this machine is not loaded */
+                if (SetupLdrScsiDriverHasNoDevice(InfHandle, DriverName))
+                {
+                    TRACE("No device for '%s': not loaded\n", DriverName);
+                    continue;
+                }
+
                 /* Prepare image path */
                 RtlStringCbPrintfW(ImagePathW, sizeof(ImagePathW),
                                    L"%S\\%S", ImagePath, DriverName);
