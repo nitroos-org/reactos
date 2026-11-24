@@ -257,9 +257,10 @@ START_TEST(MmSessionTables)
         ViewCount++;
     }
     /* Needs a second session (NitroSessions 1 or 4): with one, nothing is
-       compared and the test would pass for nothing */
-    ok(ViewCount >= 2, "Only %lu session(s) with a member: no second session (NitroSessions 0?)\n",
-       ViewCount);
+       compared; that is reported as skipped, as the other session tests do, and
+       is not a failure of a default system (NitroSessions 0) */
+    if (ViewCount < 2)
+        skip(FALSE, "Only %lu session(s) with a member: no second session (NitroSessions=0)\n", ViewCount);
 
     /*
      * Every process against every session's view:
