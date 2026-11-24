@@ -3124,6 +3124,22 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, BOOL sacl, LPDWORD lpdwFlags,
             /* Parse ACE account sid */
             if (!AliasFieldEndsCleanly(StringAcl))
                 goto lerr;
+
+            /* the SID of a label entry is a label (S-1-16-<level>); another is refused (ERROR_INVALID_PARAMETER, measured) */
+            if (aceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+            {
+                static const SID_IDENTIFIER_AUTHORITY LabelAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
+                BYTE LabelSid[SECURITY_MAX_SID_SIZE];
+                DWORD cbLabel = 0;
+
+                if (ParseStringSidToSid(StringAcl, (PSID)LabelSid, &cbLabel) &&
+                    (*GetSidSubAuthorityCount((PSID)LabelSid) != 1 ||
+                     memcmp(GetSidIdentifierAuthority((PSID)LabelSid), &LabelAuthority, sizeof(LabelAuthority))))
+                {
+                    error = ERROR_INVALID_PARAMETER;
+                    goto lerr;
+                }
+            }
             if (!ParseStringSidToSid(StringAcl, pAce ? (PSID)((LPBYTE)pAce + sidoff) : NULL, &sidlen))
             {
                 LPCWSTR sidtext = StringAcl;
@@ -3794,7 +3810,13 @@ static BOOL DumpAce(LPVOID pace, WCHAR **pwptr, ULONG *plen)
     return TRUE;
 }
 
-static BOOL DumpAcl(PACL pacl, WCHAR **pwptr, ULONG *plen, BOOL protected, BOOL autoInheritReq, BOOL autoInherited)
+/* Which entries of an ACL are printed: the SACL holds audit entries and the mandatory label, and Windows prints the
+ * label for LABEL_SECURITY_INFORMATION and the others for SACL_SECURITY_INFORMATION (both: all) */
+#define DUMP_ACES_ALL        0
+#define DUMP_ACES_NO_LABEL   1
+#define DUMP_ACES_ONLY_LABEL 2
+
+static BOOL DumpAcl(PACL pacl, WCHAR **pwptr, ULONG *plen, BOOL protected, BOOL autoInheritReq, BOOL autoInherited, int aceFilter)
 {
     WORD count;
     int i;
@@ -3822,6 +3844,13 @@ static BOOL DumpAcl(PACL pacl, WCHAR **pwptr, ULONG *plen, BOOL protected, BOOL 
         LPVOID ace;
         if (!GetAce(pacl, i, &ace))
             return FALSE;
+        if (aceFilter != DUMP_ACES_ALL)
+        {
+            BOOL isLabel = ((PACE_HEADER)ace)->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+
+            if (isLabel == (aceFilter == DUMP_ACES_NO_LABEL))
+                continue;
+        }
         if (!DumpAce(ace, pwptr, plen))
             return FALSE;
     }
@@ -3883,18 +3912,19 @@ static BOOL DumpDacl(PSECURITY_DESCRIPTOR SecurityDescriptor, WCHAR **pwptr, ULO
         return TRUE;
 
     DumpString(dacl, 2, pwptr, plen);
-    if (!DumpAcl(pacl, pwptr, plen, control & SE_DACL_PROTECTED, control & SE_DACL_AUTO_INHERIT_REQ, control & SE_DACL_AUTO_INHERITED))
+    if (!DumpAcl(pacl, pwptr, plen, control & SE_DACL_PROTECTED, control & SE_DACL_AUTO_INHERIT_REQ, control & SE_DACL_AUTO_INHERITED, DUMP_ACES_ALL))
         return FALSE;
     return TRUE;
 }
 
-static BOOL DumpSacl(PSECURITY_DESCRIPTOR SecurityDescriptor, WCHAR **pwptr, ULONG *plen)
+static BOOL DumpSacl(PSECURITY_DESCRIPTOR SecurityDescriptor, SECURITY_INFORMATION RequestedInformation, WCHAR **pwptr, ULONG *plen)
 {
     static const WCHAR sacl[] = {'S',':',0};
     SECURITY_DESCRIPTOR_CONTROL control;
     BOOL present, defaulted;
     DWORD revision;
     PACL pacl;
+    int aceFilter = DUMP_ACES_ALL;
 
     if (!GetSecurityDescriptorSacl(SecurityDescriptor, &present, &pacl, &defaulted))
         return FALSE;
@@ -3905,8 +3935,14 @@ static BOOL DumpSacl(PSECURITY_DESCRIPTOR SecurityDescriptor, WCHAR **pwptr, ULO
     if (!present)
         return TRUE;
 
+    /* as Windows: the label alone for LABEL_SECURITY_INFORMATION, the other entries alone for SACL_SECURITY_INFORMATION */
+    if ((RequestedInformation & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) == LABEL_SECURITY_INFORMATION)
+        aceFilter = DUMP_ACES_ONLY_LABEL;
+    else if ((RequestedInformation & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) == SACL_SECURITY_INFORMATION)
+        aceFilter = DUMP_ACES_NO_LABEL;
+
     DumpString(sacl, 2, pwptr, plen);
-    if (!DumpAcl(pacl, pwptr, plen, control & SE_SACL_PROTECTED, control & SE_SACL_AUTO_INHERIT_REQ, control & SE_SACL_AUTO_INHERITED))
+    if (!DumpAcl(pacl, pwptr, plen, control & SE_SACL_PROTECTED, control & SE_SACL_AUTO_INHERIT_REQ, control & SE_SACL_AUTO_INHERITED, aceFilter))
         return FALSE;
     return TRUE;
 }
@@ -3937,7 +3973,7 @@ BOOL WINAPI ConvertSecurityDescriptorToStringSecurityDescriptorW(PSECURITY_DESCR
         if (!DumpDacl(SecurityDescriptor, NULL, &len))
             return FALSE;
     if (RequestedInformation & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION))
-        if (!DumpSacl(SecurityDescriptor, NULL, &len))
+        if (!DumpSacl(SecurityDescriptor, RequestedInformation, NULL, &len))
             return FALSE;
 
     wstr = wptr = LocalAlloc(0, (len + 1)*sizeof(WCHAR));
@@ -3962,7 +3998,7 @@ BOOL WINAPI ConvertSecurityDescriptorToStringSecurityDescriptorW(PSECURITY_DESCR
             return FALSE;
         }
     if (RequestedInformation & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION))
-        if (!DumpSacl(SecurityDescriptor, &wptr, NULL)) {
+        if (!DumpSacl(SecurityDescriptor, RequestedInformation, &wptr, NULL)) {
             LocalFree (wstr);
             return FALSE;
         }
