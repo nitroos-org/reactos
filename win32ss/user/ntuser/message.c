@@ -2408,6 +2408,11 @@ UserSendNotifyMessage( HWND hWnd,
 
         if (List != NULL)
         {
+            USER_HELD_POOL_ENTRY HeldList;
+
+            /* A window of this thread gets the message at once (a callback): the list goes with the thread
+               if it ends there */
+            UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
             UserSendNotifyMessage(UserHMGetHandle(DesktopWindow), Msg, wParam, lParam);
             for (i = 0; List[i]; i++)
             {
@@ -2420,7 +2425,7 @@ UserSendNotifyMessage( HWND hWnd,
 
                Ret = UserSendNotifyMessage(List[i], Msg, wParam, lParam);
             }
-            ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+            UserFreePoolCo(&HeldList);
         }
     }
     else
@@ -3066,6 +3071,7 @@ NtUserMessageCall( HWND hWnd,
                PWND pwnd, pwndDesk;
                ULONG i, cVisited = 0;
                UINT fuFlags;
+               USER_HELD_POOL_ENTRY HeldList;
 
                /* The USER lock is released while the windows of a desktop get the message, and a desktop
                   can leave the list and be freed meanwhile (IntDesktopObjectDelete, also one whose last
@@ -3104,6 +3110,10 @@ NtUserMessageCall( HWND hWnd,
                       continue;
                   hwndDesk = UserHMGetHandle(pwndDesk);
                   List = IntWinListChildren(pwndDesk);
+                  /* Each window is sent the message (a callback): the list goes with the thread if it ends
+                     there (every branch below frees it with UserFreePoolCo) */
+                  if (List)
+                     UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
 
                   if (parm.flags & BSF_QUERY)
                   {
@@ -3164,7 +3174,7 @@ NtUserMessageCall( HWND hWnd,
                               Ret = FALSE;
                            }
                         }
-                        ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+                        UserFreePoolCo(&HeldList);
                         _SEH2_TRY
                         {
                            retparam = (PBROADCASTPARM) ResultInfo;
@@ -3201,7 +3211,7 @@ NtUserMessageCall( HWND hWnd,
                            }
                            UserPostMessage(List[i], Msg, wParam, lParam);
                         }
-                        ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+                        UserFreePoolCo(&HeldList);
                      }
                      Ret = TRUE;
                   }
@@ -3227,7 +3237,7 @@ NtUserMessageCall( HWND hWnd,
                            }
                            UserSendNotifyMessage(List[i], Msg, wParam, lParam);
                         }
-                        ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+                        UserFreePoolCo(&HeldList);
                      }
                      if (lParam && !wParam && _wcsicmp((WCHAR*)lParam, L"Environment") == 0)
                      {
@@ -3246,9 +3256,13 @@ NtUserMessageCall( HWND hWnd,
                PWND pwnd, pwndDesk;
                ULONG i;
                UINT fuFlags;
+               USER_HELD_POOL_ENTRY HeldList;
 
                pwndDesk = UserGetThreadDesktopWindow();
                List = IntWinListChildren(pwndDesk);
+               /* As for every desktop above */
+               if (List)
+                  UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
 
                if (parm.flags & BSF_QUERY)
                {
@@ -3308,7 +3322,7 @@ NtUserMessageCall( HWND hWnd,
                            Ret = FALSE;
                         }
                      }
-                     ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+                     UserFreePoolCo(&HeldList);
                      _SEH2_TRY
                      {
                         retparam = (PBROADCASTPARM) ResultInfo;
@@ -3344,7 +3358,7 @@ NtUserMessageCall( HWND hWnd,
                         }
                         UserPostMessage(List[i], Msg, wParam, lParam);
                      }
-                     ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+                     UserFreePoolCo(&HeldList);
                   }
                   Ret = TRUE;
                }
@@ -3370,7 +3384,7 @@ NtUserMessageCall( HWND hWnd,
                         }
                         UserSendNotifyMessage(List[i], Msg, wParam, lParam);
                      }
-                     ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+                     UserFreePoolCo(&HeldList);
                   }
                   Ret = TRUE;
                }
