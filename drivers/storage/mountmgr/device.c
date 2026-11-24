@@ -1370,6 +1370,12 @@ MountMgrQueryVolumePaths(IN PDEVICE_EXTENSION DeviceExtension,
                     ++InnerStrings;
                 }
             }
+
+            /* The list ends with one more null character than it has strings */
+            if (InnerStrings != 0)
+            {
+                --InnerStrings;
+            }
         }
 
         /* Multiply String.Length by the number of found paths, we always add it after a path.
