@@ -3813,7 +3813,8 @@ WSPGetSockOpt(IN SOCKET Handle,
             if (lpErrno) *lpErrno = WSAEFAULT;
             return SOCKET_ERROR;
         }
-        *(BOOLEAN *)OptionValue = TRUE;
+        /* the value that was set (before the bind), TRUE by default */
+        *(BOOLEAN *)OptionValue = Socket->SharedData->Ipv4V6OnlyOff ? FALSE : TRUE;
         *OptionLength = sizeof(BOOLEAN);
         return NO_ERROR;
     }
@@ -4197,6 +4198,27 @@ WSPSetSockOpt(
             Socket->SharedData->Ipv6PktInfo = (*(DWORD *)optval != 0) ? 1 : 0;
         else
             Socket->SharedData->Ipv6HopLimit = (*(DWORD *)optval != 0) ? 1 : 0;
+        return NO_ERROR;
+    }
+
+    /* IPV6_V6ONLY on an IPv4 socket (see WSPGetSockOpt): the value is kept with the socket and reads back,
+     * and it can only be set before the socket is bound (WSAEINVAL after: measured on Windows Server 2022,
+     * sock.c rows 6595-6629). It changes nothing for an IPv4 socket. */
+    if (level == IPPROTO_IPV6 && optname == IPV6_V6ONLY &&
+        Socket->SharedData->AddressFamily == AF_INET)
+    {
+        if (optlen < (INT)sizeof(BOOLEAN))
+        {
+            if (lpErrno) *lpErrno = WSAEFAULT;
+            return SOCKET_ERROR;
+        }
+        if (Socket->SharedData->State != SocketOpen)
+        {
+            if (lpErrno) *lpErrno = WSAEINVAL;
+            return SOCKET_ERROR;
+        }
+        Socket->SharedData->Ipv4V6OnlyOff =
+            ((optlen >= (INT)sizeof(DWORD)) ? (*(DWORD *)optval == 0) : (*(BOOLEAN *)optval == 0)) ? 1 : 0;
         return NO_ERROR;
     }
 

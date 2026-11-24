@@ -492,6 +492,7 @@ typedef struct _SOCK_SHARED_INFO {
 		BOOLEAN					Ipv6HopLimit:1; /* flag word's second byte: layout unchanged) */
 		BOOLEAN					KeepAlive:1; /* SO_KEEPALIVE and SO_DONTROUTE as set, for getsockopt and for the socket accept() makes: */
 		BOOLEAN					DontRoute:1; /* the first bits of a third byte, in the padding before CreateFlags: layout unchanged */
+		BOOLEAN					Ipv4V6OnlyOff:1; /* IPV6_V6ONLY set to 0 on an AF_INET socket (the default is 1), for getsockopt */
     }; // Flags
     DWORD						CreateFlags;
     DWORD						ServiceFlags1;
