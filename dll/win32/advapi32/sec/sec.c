@@ -569,14 +569,19 @@ BuildSecurityDescriptorW(IN PTRUSTEE_W pOwner  OPTIONAL,
     if (pNewSD == NULL || pSizeNewSD == NULL)
         return ERROR_INVALID_PARAMETER;
 
+    /* The old descriptor must be a valid self-relative one (an absolute descriptor is refused, as on
+     * Windows Server 2022); the outputs are not touched when it is refused */
+    if (pOldSD != NULL &&
+        (!IsValidSecurityDescriptor(pOldSD) ||
+         !(((PISECURITY_DESCRIPTOR)pOldSD)->Control & SE_SELF_RELATIVE)))
+        return ERROR_INVALID_SECURITY_DESCR;
+
     *pNewSD = NULL;
     *pSizeNewSD = 0;
 
     /* Start from the old descriptor's owner, group, DACL and SACL if given */
     if (pOldSD != NULL)
     {
-        if (!IsValidSecurityDescriptor(pOldSD))
-            return ERROR_INVALID_SECURITY_DESCR;
 
         GetSecurityDescriptorOwner(pOldSD, &Owner, &Defaulted);
         GetSecurityDescriptorGroup(pOldSD, &Group, &Defaulted);
