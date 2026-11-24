@@ -2437,8 +2437,11 @@ RegpGetValueCommon(HKEY hKey,
     if (is_string(dwType))
     {
         DWORD cbWhole = cbData - cbData % sizeof(WCHAR);
+        DWORD cbStored;
+        BOOL bExpandType = (dwType == REG_EXPAND_SZ);
 
         cbOut = RegpTerminatedSize(dwType, pRaw, cbData);
+        cbStored = cbOut;
         ZeroMemory(pRaw + cbWhole, cbOut - cbWhole);
 
         if (dwType == REG_EXPAND_SZ && !(dwFlags & RRF_NOEXPAND))
@@ -2450,25 +2453,65 @@ RegpGetValueCommon(HKEY hKey,
             dwType = REG_SZ;
         }
 
+        /*
+         * Measured on Windows Server 2022: the stored string is read into the caller's buffer before it is
+         * expanded, so the size is never below the stored size (a shorter expansion reports the stored size, and
+         * a buffer smaller than it gives ERROR_MORE_DATA), and a REG_EXPAND_SZ value that is not expanded
+         * reports one character more when no data is returned.
+         */
         if (bAnsi)
         {
-            DWORD cbAnsi;
+            DWORD cbAnsi, cbAnsiStored = 0, cbNeeded;
 
             /* The terminators convert to zero bytes */
             RtlUnicodeToMultiByteSize(&cbAnsi, pOut, cbOut);
-            if (pvData && cbAnsi <= cbBuffer)
+            cbNeeded = cbAnsi;
+            if (pszExpanded)
+            {
+                RtlUnicodeToMultiByteSize(&cbAnsiStored, (PWCH)pRaw, cbStored);
+                if (cbAnsiStored > cbNeeded)
+                    cbNeeded = cbAnsiStored;
+            }
+
+            if (pvData && cbNeeded <= cbBuffer)
                 RtlUnicodeToMultiByteN(pvData, cbBuffer, NULL, pOut, cbOut);
             else if (pvData)
                 ret = ERROR_MORE_DATA;
 
-            /* Windows asks one byte more for an expanded ANSI string, as
-             * ExpandEnvironmentStringsA does */
-            if (pszExpanded && (!pvData || ret == ERROR_MORE_DATA))
-                cbAnsi++;
+            if (!pvData || ret == ERROR_MORE_DATA)
+            {
+                /* Windows asks one byte more for an expanded ANSI string, as
+                 * ExpandEnvironmentStringsA does */
+                if (pszExpanded)
+                {
+                    if (cbAnsi + 1 > cbNeeded)
+                        cbNeeded = cbAnsi + 1;
+                }
+                else if (bExpandType)
+                    cbNeeded++;
+            }
 
-            cbData = cbAnsi;
+            cbData = cbNeeded;
             goto Quit;
         }
+
+        if (pvData)
+        {
+            DWORD cbNeeded = (pszExpanded && cbStored > cbOut) ? cbStored : cbOut;
+
+            if (cbNeeded > cbBuffer)
+                ret = ERROR_MORE_DATA;
+            else
+                CopyMemory(pvData, pOut, cbOut);
+            cbData = cbNeeded;
+        }
+        else
+        {
+            cbData = (pszExpanded && cbStored > cbOut) ? cbStored : cbOut;
+        }
+        if (bExpandType && !pszExpanded && (!pvData || ret == ERROR_MORE_DATA))
+            cbData += sizeof(WCHAR);
+        goto Quit;
     }
 
     if (pvData)
