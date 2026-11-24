@@ -2067,6 +2067,36 @@ AccpIsInvalidHandleObjectType(SE_OBJECT_TYPE ObjectType)
 }
 
 
+/*
+ * The handle of a registry key query must be a key: a handle of another object type is ERROR_INVALID_HANDLE
+ * (RegGetKeySecurity itself does not look at the type), and HKEY_DYN_DATA is not implemented.
+ */
+static DWORD
+AccpCheckRegistryKeyHandle(IN HANDLE Handle)
+{
+    union
+    {
+        OBJECT_TYPE_INFORMATION Info;
+        BYTE Raw[sizeof(OBJECT_TYPE_INFORMATION) + 64 * sizeof(WCHAR)];
+    } Type;
+    NTSTATUS Status;
+
+    /* the predefined keys are checked by the registry functions */
+    if (((ULONG_PTR)Handle & 0xF0000000) == 0x80000000)
+        return (HKEY)Handle == HKEY_DYN_DATA ? ERROR_CALL_NOT_IMPLEMENTED : ERROR_SUCCESS;
+
+    Status = NtQueryObject(Handle, ObjectTypeInformation, &Type, sizeof(Type), NULL);
+    if (!NT_SUCCESS(Status))
+        return ERROR_INVALID_HANDLE;
+
+    if (Type.Info.TypeName.Length != 3 * sizeof(WCHAR) ||
+        _wcsnicmp(Type.Info.TypeName.Buffer, L"Key", 3) != 0)
+        return ERROR_INVALID_HANDLE;
+
+    return ERROR_SUCCESS;
+}
+
+
 /**********************************************************************
  * AccRewriteGetHandleRights				EXPORTED
  *
@@ -2125,6 +2155,10 @@ AccRewriteGetHandleRights(HANDLE handle,
         {
             case SE_REGISTRY_KEY:
             {
+                Ret = AccpCheckRegistryKeyHandle(handle);
+                if (Ret != ERROR_SUCCESS)
+                    break;
+
                 Ret = (DWORD)RegGetKeySecurity((HKEY)handle,
                                                SecurityInfo,
                                                pSD,
@@ -3899,8 +3933,10 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
             LocalFree((HLOCAL)pSid1);
     }
 
-    /* Succeed, if no ACL needs to be allocated */
-    if (SizeInformation.AclBytesInUse == 0)
+    /* Succeed, if no ACL needs to be allocated: with no entries and no old
+       ACL Windows returns no ACL at all (a NULL result, not an empty ACL) */
+    if (SizeInformation.AclBytesInUse == 0 ||
+        (cCountOfExplicitEntries == 0 && OldAcl == NULL))
         goto Cleanup;
 
     /* OK, now create the new ACL */

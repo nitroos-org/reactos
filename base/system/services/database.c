@@ -3703,7 +3703,8 @@ ScmControlService(
  */
 static BOOL
 ScmIsControlPipeClientValid(
-    _In_ PSERVICE_IMAGE pImage)
+    _In_ PSERVICE_IMAGE pImage,
+    _Out_opt_ PULONG pulClientPid)
 {
     static const LUID SystemLuid = SYSTEM_LUID;
     TOKEN_STATISTICS ClientStats, ServiceStats;
@@ -3730,6 +3731,9 @@ ScmIsControlPipeClientValid(
         DPRINT1("Cannot query the control pipe client (Status 0x%08lx)\n", Status);
         return FALSE;
     }
+
+    if (pulClientPid != NULL)
+        *pulClientPid = ulClientPid;
 
     if (ulClientPid == pImage->dwProcessId)
         return TRUE;
@@ -3848,12 +3852,24 @@ reconnect:
 
     /* Not the service's process: drop it and wait for the service again */
     if (ScmIsSecurityService(Service->lpImage) == FALSE &&
-        !ScmIsControlPipeClientValid(Service->lpImage))
+        !ScmIsControlPipeClientValid(Service->lpImage, NULL))
     {
         DisconnectNamedPipe(Service->lpImage->hControlPipe);
         if (++dwRefused < 4)
             goto reconnect;
         return ERROR_SERVICE_REQUEST_TIMEOUT;
+    }
+
+    /* The security service runs in a process that this controller did not start (lsass is started by
+     * winlogon): its process id is the one of the process that connected, from the pipe and only if it
+     * runs in the logon session of the service account (SYSTEM); the status of the service reports it */
+    if (ScmIsSecurityService(Service->lpImage) != FALSE &&
+        Service->lpImage->dwProcessId == 0)
+    {
+        ULONG ulClientPid = 0;
+
+        if (ScmIsControlPipeClientValid(Service->lpImage, &ulClientPid) && ulClientPid != 0)
+            Service->lpImage->dwProcessId = ulClientPid;
     }
 
     Overlapped.hEvent = NULL;

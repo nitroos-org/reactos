@@ -4131,8 +4131,150 @@ LsarGetUserName(
     PRPC_UNICODE_STRING *UserName,
     PRPC_UNICODE_STRING *DomainName)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    BYTE UserBuffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    LSAPR_SID_INFORMATION SidInfo;
+    LSAPR_SID_ENUM_BUFFER SidEnumBuffer;
+    PLSAPR_REFERENCED_DOMAIN_LIST Domains = NULL;
+    LSAPR_TRANSLATED_NAMES_EX Names;
+    PRPC_UNICODE_STRING User = NULL, Domain = NULL;
+    PRPC_UNICODE_STRING Source;
+    HANDLE Token = NULL;
+    RPC_STATUS RpcStatus;
+    NTSTATUS Status;
+    DWORD Mapped = 0;
+    ULONG Length, i;
+
+    TRACE("LsarGetUserName(%S %p %p)\n", SystemName, UserName, DomainName);
+
+    if (UserName == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    /* The caller is the user of the token of the RPC client; never the identity of this process */
+    RpcStatus = RpcImpersonateClient(NULL);
+    if (RpcStatus != RPC_S_OK)
+        return STATUS_ACCESS_DENIED;
+
+    Status = NtOpenThreadToken(NtCurrentThread(), TOKEN_QUERY, TRUE, &Token);
+
+    if (RpcRevertToSelf() != RPC_S_OK)
+    {
+        HANDLE NullToken = NULL;
+
+        NtSetInformationThread(NtCurrentThread(),
+                               ThreadImpersonationToken,
+                               &NullToken,
+                               sizeof(NullToken));
+    }
+
+    if (!NT_SUCCESS(Status))
+        return STATUS_ACCESS_DENIED;
+
+    Status = NtQueryInformationToken(Token, TokenUser, UserBuffer, sizeof(UserBuffer), &Length);
+    NtClose(Token);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    SidInfo.Sid = ((PTOKEN_USER)UserBuffer)->User.Sid;
+    SidEnumBuffer.Entries = 1;
+    SidEnumBuffer.SidInfo = &SidInfo;
+    Names.Entries = 1;
+    Names.Names = NULL;
+
+    Status = LsapLookupSids(&SidEnumBuffer, &Domains, &Names, LsapLookupWksta, &Mapped, 0, 1);
+
+    /* A SID that does not map has no name to return */
+    if (NT_SUCCESS(Status) && (Mapped != 1 || Names.Names == NULL))
+        Status = STATUS_NONE_MAPPED;
+    if (Status == STATUS_SOME_NOT_MAPPED)
+        Status = STATUS_NONE_MAPPED;
+
+    if (NT_SUCCESS(Status))
+    {
+        /* Each result is its own block, a structure and then the characters: the stub frees them after the reply */
+        for (i = 0; i < 2 && NT_SUCCESS(Status); i++)
+        {
+            PRPC_UNICODE_STRING *Out = (i == 0) ? &User : &Domain;
+
+            if (i == 1 && DomainName == NULL)
+                break;
+
+            if (i == 0)
+                Source = &Names.Names[0].Name;
+            else if (Names.Names[0].DomainIndex >= 0 &&
+                     (ULONG)Names.Names[0].DomainIndex < Domains->Entries)
+                Source = &Domains->Domains[Names.Names[0].DomainIndex].Name;
+            else
+                Source = NULL;
+
+            *Out = MIDL_user_allocate(sizeof(RPC_UNICODE_STRING));
+            if (*Out == NULL)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
+            RtlZeroMemory(*Out, sizeof(RPC_UNICODE_STRING));
+
+            if (Source != NULL && Source->Length != 0)
+            {
+                (*Out)->Buffer = MIDL_user_allocate(Source->Length + sizeof(WCHAR));
+                if ((*Out)->Buffer == NULL)
+                {
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                    break;
+                }
+                RtlCopyMemory((*Out)->Buffer, Source->Buffer, Source->Length);
+                (*Out)->Buffer[Source->Length / sizeof(WCHAR)] = UNICODE_NULL;
+                (*Out)->Length = Source->Length;
+                (*Out)->MaximumLength = Source->Length + sizeof(WCHAR);
+            }
+        }
+    }
+
+    /* The lookup results are ours to free */
+    if (Names.Names != NULL)
+    {
+        if (Names.Names[0].Name.Buffer != NULL)
+            MIDL_user_free(Names.Names[0].Name.Buffer);
+        MIDL_user_free(Names.Names);
+    }
+    if (Domains != NULL)
+    {
+        if (Domains->Domains != NULL)
+        {
+            for (i = 0; i < Domains->Entries; i++)
+            {
+                if (Domains->Domains[i].Name.Buffer != NULL)
+                    MIDL_user_free(Domains->Domains[i].Name.Buffer);
+                if (Domains->Domains[i].Sid != NULL)
+                    MIDL_user_free(Domains->Domains[i].Sid);
+            }
+            MIDL_user_free(Domains->Domains);
+        }
+        MIDL_user_free(Domains);
+    }
+
+    if (!NT_SUCCESS(Status))
+    {
+        if (User != NULL)
+        {
+            if (User->Buffer != NULL)
+                MIDL_user_free(User->Buffer);
+            MIDL_user_free(User);
+        }
+        if (Domain != NULL)
+        {
+            if (Domain->Buffer != NULL)
+                MIDL_user_free(Domain->Buffer);
+            MIDL_user_free(Domain);
+        }
+        return Status;
+    }
+
+    *UserName = User;
+    if (DomainName != NULL)
+        *DomainName = Domain;
+
+    return STATUS_SUCCESS;
 }
 
 

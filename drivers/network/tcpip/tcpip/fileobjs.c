@@ -411,6 +411,26 @@ static NTSTATUS AddrBindConflictLocked(
             if (!NT_SUCCESS(Status))
                 return Status;
         }
+
+        /*
+         * An IPv6 wildcard that is dual stack holds the IPv4 wildcard of its port too, but only when it asked
+         * for exclusive use: without SO_EXCLUSIVEADDRUSE the two sockets coexist (see above). The Wine test
+         * on Windows Server 2022: an IPv4 socket that reuses the address next to an exclusive dual stack
+         * socket is access denied.
+         */
+        if (Old->Address.Type != New->Address.Type)
+        {
+            PADDRESS_FILE Dual = (Old->Address.Type == IP_ADDRESS_V6) ? Old : New;
+            PADDRESS_FILE Single = (Dual == Old) ? New : Old;
+
+            if (Single->Address.Type == IP_ADDRESS_V4 && Dual->DualStack &&
+                Dual->ShareMode == ADDR_SHARE_EXCLUSIVE && AddrIsUnspecified(&Dual->Address))
+            {
+                Status = AddrBindConflictOfType(Old, New, IP_ADDRESS_V4);
+                if (!NT_SUCCESS(Status))
+                    return Status;
+            }
+        }
     }
 
     return STATUS_SUCCESS;

@@ -562,6 +562,7 @@ BuildSecurityDescriptorW(IN PTRUSTEE_W pOwner  OPTIONAL,
     PSID OwnerAlloc = NULL, GroupAlloc = NULL;
     PACL Dacl = NULL, Sacl = NULL;
     PACL NewDacl = NULL, NewSacl = NULL;
+    ACL EmptyDacl, EmptySacl;
     BOOL DaclPresent = FALSE, SaclPresent = FALSE, Defaulted;
     DWORD Ret = ERROR_SUCCESS;
     ULONG Length;
@@ -620,7 +621,16 @@ BuildSecurityDescriptorW(IN PTRUSTEE_W pOwner  OPTIONAL,
         if (Ret != ERROR_SUCCESS)
             goto Cleanup;
 
-        Dacl = NewDacl;
+        /* With no entries and no old DACL SetEntriesInAcl returns no ACL. A
+         * NULL DACL would grant everyone full access: the result of
+         * an empty list stays an empty DACL, as before. */
+        if (NewDacl == NULL)
+        {
+            InitializeAcl(&EmptyDacl, sizeof(EmptyDacl), ACL_REVISION);
+            Dacl = &EmptyDacl;
+        }
+        else
+            Dacl = NewDacl;
         DaclPresent = TRUE;
     }
 
@@ -634,7 +644,13 @@ BuildSecurityDescriptorW(IN PTRUSTEE_W pOwner  OPTIONAL,
         if (Ret != ERROR_SUCCESS)
             goto Cleanup;
 
-        Sacl = NewSacl;
+        if (NewSacl == NULL)
+        {
+            InitializeAcl(&EmptySacl, sizeof(EmptySacl), ACL_REVISION);
+            Sacl = &EmptySacl;
+        }
+        else
+            Sacl = NewSacl;
         SaclPresent = TRUE;
     }
 

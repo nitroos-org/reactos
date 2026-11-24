@@ -172,6 +172,8 @@ DWORD TCPSendIoctl(HANDLE hDevice, DWORD dwIoControlCode, LPVOID lpInBuffer, PUL
 ULONG64 makeInterfaceLuid(DWORD Index, ULONG Type);
 BOOL getInterfaceLuidByIndex(DWORD Index, PULONG Type, PULONG64 Luid);
 BOOL getInterfaceIndexByLuid(ULONG64 Luid, PDWORD Index);
+/* The description and the name (\DEVICE\TCPIP_{guid}) of a row of the legacy interface table, as Windows gives them */
+VOID setLegacyIfRowNames(PMIB_IFROW Row);
 
 /* The IPv6 state of the stack (ipv6state.c): what tcpip.sys reports while IPv6 is on. Off: every IPv6 answer of this
    DLL stays what it is without an IPv6 stack. */
