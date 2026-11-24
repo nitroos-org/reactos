@@ -4410,6 +4410,110 @@ GetCallerDesktopName(
 /*
  * @unimplemented
  */
+
+/*
+ * The secondary logon service started the process suspended in the caller's session, which it cannot
+ * reach: give the new logon (LogonSid) access to the window station and desktop it runs on, from here.
+ * The rights are those the service gives in its own session. Only a desktop of the caller's window
+ * station is reachable from the caller; another one is left as it is.
+ */
+#define SECL_CLIENT_WINSTA_RIGHTS  (0x037F | STANDARD_RIGHTS_REQUIRED)   /* WINSTA_ALL_ACCESS but none undefined */
+#define SECL_CLIENT_DESKTOP_RIGHTS (0x01FF | STANDARD_RIGHTS_REQUIRED)   /* DESKTOP_* rights */
+
+static
+BOOL
+SeclClientGrantObject(HANDLE hObject, PSID LogonSid, DWORD Rights)
+{
+    PACL OldDacl = NULL, NewDacl = NULL;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    EXPLICIT_ACCESSW Ea;
+    DWORD dwError;
+
+    dwError = GetSecurityInfo(hObject, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &OldDacl, NULL, &Sd);
+    if (dwError == ERROR_SUCCESS)
+    {
+        ZeroMemory(&Ea, sizeof(Ea));
+        Ea.grfAccessPermissions = Rights;
+        Ea.grfAccessMode = GRANT_ACCESS;
+        Ea.grfInheritance = NO_INHERITANCE;
+        Ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        Ea.Trustee.TrusteeType = TRUSTEE_IS_GROUP;
+        Ea.Trustee.ptstrName = (LPWSTR)LogonSid;
+        dwError = SetEntriesInAclW(1, &Ea, OldDacl, &NewDacl);
+        if (dwError == ERROR_SUCCESS)
+            dwError = SetSecurityInfo(hObject, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, NewDacl, NULL);
+    }
+    if (NewDacl) LocalFree(NewDacl);
+    if (Sd) LocalFree(Sd);
+    if (dwError != ERROR_SUCCESS) WARN("Cannot give the new logon access, error %lu\n", dwError);
+    return (dwError == ERROR_SUCCESS);
+}
+
+static
+VOID
+SeclClientGrantDesktop(PSID LogonSid, LPCWSTR lpDesktop)
+{
+    typedef HANDLE (WINAPI *PGETPROCESSWINSTA)(VOID);
+    typedef HANDLE (WINAPI *POPENDESKTOPW)(LPCWSTR, DWORD, BOOL, ACCESS_MASK);
+    typedef BOOL (WINAPI *PCLOSEDESKTOP)(HANDLE);
+    typedef BOOL (WINAPI *PGETUSEROBJECTINFOW)(HANDLE, int, PVOID, DWORD, LPDWORD);
+    WCHAR WinStaName[64] = L"WinSta0", DeskName[64] = L"Default", OwnName[64];
+    PGETPROCESSWINSTA pGetProcessWindowStation;
+    POPENDESKTOPW pOpenDesktopW;
+    PCLOSEDESKTOP pCloseDesktop;
+    PGETUSEROBJECTINFOW pGetUserObjectInformationW;
+    HMODULE hUser32;
+    HANDLE hWinSta, hDesk;
+    const WCHAR *Sep;
+    DWORD Length;
+
+    if (lpDesktop && *lpDesktop)
+    {
+        Sep = wcschr(lpDesktop, L'\\');
+        if (Sep)
+        {
+            lstrcpynW(WinStaName, lpDesktop, min((int)(Sep - lpDesktop) + 1, (int)ARRAYSIZE(WinStaName)));
+            lstrcpynW(DeskName, Sep + 1, ARRAYSIZE(DeskName));
+        }
+        else
+        {
+            lstrcpynW(DeskName, lpDesktop, ARRAYSIZE(DeskName));
+        }
+    }
+
+    hUser32 = LoadLibraryW(L"user32.dll");
+    if (!hUser32) return;
+    pGetProcessWindowStation = (PGETPROCESSWINSTA)GetProcAddress(hUser32, "GetProcessWindowStation");
+    pOpenDesktopW = (POPENDESKTOPW)GetProcAddress(hUser32, "OpenDesktopW");
+    pCloseDesktop = (PCLOSEDESKTOP)GetProcAddress(hUser32, "CloseDesktop");
+    pGetUserObjectInformationW = (PGETUSEROBJECTINFOW)GetProcAddress(hUser32, "GetUserObjectInformationW");
+    if (pGetProcessWindowStation && pOpenDesktopW && pCloseDesktop && pGetUserObjectInformationW)
+    {
+        hWinSta = pGetProcessWindowStation();
+        /* UOI_NAME = 2 */
+        if (hWinSta && pGetUserObjectInformationW(hWinSta, 2, OwnName, sizeof(OwnName), &Length) &&
+            !lstrcmpiW(OwnName, WinStaName))
+        {
+            SeclClientGrantObject(hWinSta, LogonSid, SECL_CLIENT_WINSTA_RIGHTS);
+            hDesk = pOpenDesktopW(DeskName, 0, FALSE, READ_CONTROL | WRITE_DAC);
+            if (hDesk)
+            {
+                SeclClientGrantObject(hDesk, LogonSid, SECL_CLIENT_DESKTOP_RIGHTS);
+                pCloseDesktop(hDesk);
+            }
+            else
+            {
+                WARN("Cannot open desktop %S, error %lu\n", DeskName, GetLastError());
+            }
+        }
+        else
+        {
+            WARN("Window station %S is not the caller's: no access given\n", WinStaName);
+        }
+    }
+    FreeLibrary(hUser32);
+}
+
 BOOL
 WINAPI
 CreateProcessWithLogonW(
@@ -4495,6 +4599,8 @@ CreateProcessWithLogonW(
     Response.dwProcessId = 0;
     Response.dwThreadId = 0;
     Response.dwError = ERROR_SUCCESS;
+    Response.dwFlags = 0;
+    Response.dwLogonSidLength = 0;
 
     RpcTryExcept
     {
@@ -4526,6 +4632,22 @@ CreateProcessWithLogonW(
     TRACE("Response.dwProcessId %lu\n", Response.dwProcessId);
     TRACE("Response.dwThreadId %lu\n", Response.dwThreadId);
     TRACE("Response.dwError %lu\n", Response.dwError);
+    if (Response.dwError == ERROR_SUCCESS && (Response.dwFlags & SECL_RESPONSE_GRANT_DESKTOP))
+    {
+        HANDLE hThread = (HANDLE)(LONG_PTR)(LONG)Response.hThread;
+
+        /* Created suspended in this session: the new logon gets the desktop, then the process runs */
+        if (Response.dwLogonSidLength >= sizeof(SID) - sizeof(DWORD) &&
+            Response.dwLogonSidLength <= sizeof(Response.LogonSid) &&
+            IsValidSid((PSID)Response.LogonSid) &&
+            GetLengthSid((PSID)Response.LogonSid) == Response.dwLogonSidLength)
+        {
+            SeclClientGrantDesktop((PSID)Response.LogonSid, Request.Desktop);
+        }
+        if (!(dwCreationFlags & CREATE_SUSPENDED))
+            ResumeThread(hThread);
+    }
+
     if (Response.dwError != ERROR_SUCCESS)
     {
         SetLastError(Response.dwError);
