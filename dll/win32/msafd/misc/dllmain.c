@@ -5131,6 +5131,7 @@ SetSocketInformation(PSOCKET_INFORMATION Socket,
     NTSTATUS                Status;
     PMSAFD_INFO_APC_CONTEXT APCContext;
     PIO_APC_ROUTINE         APCFunction;
+    LPWSAOVERLAPPED         DirectContext = NULL;
     HANDLE                  Event = NULL;
     HANDLE                  SockEvent;
 
@@ -5186,21 +5187,33 @@ SetSocketInformation(PSOCKET_INFORMATION Socket,
             return MsafdReturnWithErrno(STATUS_SUCCESS, NULL, 0, NULL);
         }
 
-        APCContext = HeapAlloc(GlobalHeap, 0, sizeof(*APCContext));
-        if (!APCContext)
-        {
-            ERR("Not enough memory for APC Context\n");
-            NtClose(SockEvent);
-            HeapFree(GlobalHeap, 0, InfoData);
-            return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, NULL, 0, NULL);
-        }
-        APCContext->lpCompletionRoutine = CompletionRoutine;
-        APCContext->lpOverlapped = Overlapped;
-        APCContext->lpInfoData = InfoData;
-        APCFunction = &MsafdInfoAPC;
-
         if (!CompletionRoutine)
+        {
+            /*
+             * The overlapped is the request: AFD takes the information and completes before it returns, so the
+             * completion port of the socket, if it has one, gets the overlapped itself (not a context of ours, as on
+             * Windows) and the event is signalled
+             */
+            APCContext = NULL;
+            APCFunction = NULL;
             Event = Overlapped->hEvent;
+            DirectContext = ((ULONG_PTR)Event & 1) ? NULL : Overlapped;
+        }
+        else
+        {
+            APCContext = HeapAlloc(GlobalHeap, 0, sizeof(*APCContext));
+            if (!APCContext)
+            {
+                ERR("Not enough memory for APC Context\n");
+                NtClose(SockEvent);
+                HeapFree(GlobalHeap, 0, InfoData);
+                return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, NULL, 0, NULL);
+            }
+            APCContext->lpCompletionRoutine = CompletionRoutine;
+            APCContext->lpOverlapped = Overlapped;
+            APCContext->lpInfoData = InfoData;
+            APCFunction = &MsafdInfoAPC;
+        }
 
         IOSB = (PIO_STATUS_BLOCK)&Overlapped->Internal;
     }
@@ -5211,7 +5224,7 @@ SetSocketInformation(PSOCKET_INFORMATION Socket,
     Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
                                    Event,
                                    APCFunction,
-                                   APCContext,
+                                   DirectContext ? (PVOID)DirectContext : (PVOID)APCContext,
                                    IOSB,
                                    IOCTL_AFD_SET_INFO,
                                    InfoData,
