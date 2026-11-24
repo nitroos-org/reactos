@@ -28,6 +28,15 @@ UpdateFreeLoaderIni(
     IN PCWSTR IniPath,
     IN PCWSTR ArcPath);
 
+/* The same on a GPT disk: PartitionGuid is the GUID of the partition of ArcPath. A boot entry that has this
+ * path but names another partition by its GUID belongs to another installation (the position in its path is
+ * out of date, and now equals ours): it is left alone and an entry of our own is added. */
+NTSTATUS
+UpdateFreeLoaderIniForPartition(
+    IN PCWSTR IniPath,
+    IN PCWSTR ArcPath,
+    IN PCWSTR PartitionGuid OPTIONAL);
+
 /* UEFI: TRUE if the last install found another system's loader at \EFI\BOOT and left it there */
 BOOLEAN
 WasEfiFallbackLoaderKept(VOID);

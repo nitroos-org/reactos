@@ -138,7 +138,8 @@ FindBootStore( // By handle
  * the entry of this installation even if the position in its SystemPath is out of date: its SystemPath
  * takes the partition position of ArcPath (the rest of the path is kept).
  * FreeLdrMarkEntriesWithIdentity: every boot entry whose SystemPath is ArcPath gets (or is changed to)
- * the three keys. Entries of other installations are not touched.
+ * the three keys, unless it already names another partition by its GUID (the entry of another installation whose
+ * position in the table is out of date). Entries of other installations are not touched.
  */
 NTSTATUS
 FreeLdrRebaseEntriesInCache(
@@ -155,6 +156,21 @@ FreeLdrMarkEntriesInCache(
     _In_ PCWSTR PartitionGuid,
     _In_ PCWSTR DiskGuid,
     _In_ PCWSTR Range);
+
+/*
+ * The SystemPathPartitionGuid of the boot entry (section) SectionName, or NULL if it has none: such an entry
+ * names its partition by that GUID, whatever position its SystemPath holds. The string stays valid while the
+ * store is open.
+ */
+PCWSTR
+FreeLdrGetEntryPartitionGuidInCache(
+    _In_ PINICACHE IniCache,
+    _In_ PCWSTR SectionName);
+
+PCWSTR
+FreeLdrGetEntryPartitionGuid(
+    _In_ PVOID Handle,
+    _In_ PCWSTR SectionName);
 
 NTSTATUS
 FreeLdrRebaseEntriesByPartitionGuid(

@@ -1541,9 +1541,20 @@ FreeLdrMarkEntriesInCache(
         PINI_SECTION OsIniSection = IniGetSection(IniCache, SectionName);
         PCWSTR OldPath;
 
+        PCWSTR OldGuid;
+
         if (!OsIniSection || !IniGetKey(OsIniSection, L"SystemPath", &OldPath) || !OldPath ||
             !SystemPathsEqual(OldPath, ArcPath))
             continue;
+
+        /* An entry that names another partition by its GUID belongs to another installation whose position
+         * in the table is out of date: its keys stay as they are */
+        if (IniGetKey(OsIniSection, L"SystemPathPartitionGuid", &OldGuid) && OldGuid && *OldGuid &&
+            _wcsicmp(OldGuid, PartitionGuid) != 0)
+        {
+            DPRINT1("Boot entry '%S' names another partition (GUID %S), not touched\n", SectionName, OldGuid);
+            continue;
+        }
 
         DPRINT1("Boot entry '%S' names its system partition by GUID %S\n", SectionName, PartitionGuid);
         SetUniqueKey(OsIniSection, L"SystemPathPartitionGuid", PartitionGuid);
@@ -1553,6 +1564,34 @@ FreeLdrMarkEntriesInCache(
     IniFindClose(Iterator);
 
     return STATUS_SUCCESS;
+}
+
+PCWSTR
+FreeLdrGetEntryPartitionGuidInCache(
+    _In_ PINICACHE IniCache,
+    _In_ PCWSTR SectionName)
+{
+    PINI_SECTION OsIniSection;
+    PCWSTR Guid;
+
+    if (!IniCache || !SectionName)
+        return NULL;
+    OsIniSection = IniGetSection(IniCache, SectionName);
+    if (!OsIniSection || !IniGetKey(OsIniSection, L"SystemPathPartitionGuid", &Guid) || !Guid || !*Guid)
+        return NULL;
+    return Guid;
+}
+
+PCWSTR
+FreeLdrGetEntryPartitionGuid(
+    _In_ PVOID Handle,
+    _In_ PCWSTR SectionName)
+{
+    PBOOT_STORE_INI_CONTEXT BootStore = (PBOOT_STORE_INI_CONTEXT)Handle;
+
+    if (!BootStore || BootStore->Header.Type != FreeLdr)
+        return NULL;
+    return FreeLdrGetEntryPartitionGuidInCache(BootStore->IniCache, SectionName);
 }
 
 NTSTATUS

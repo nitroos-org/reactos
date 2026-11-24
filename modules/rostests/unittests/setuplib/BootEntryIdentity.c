@@ -170,12 +170,12 @@ test_mark(void)
     for (pass = 0; pass < 2; pass++)
     {
         Status = FreeLdrMarkEntriesInCache(Cache, Os, L"multi(0)disk(0)rdisk(0)partition(3)\\ReactOS",
-                                           PART_B, DISK_A, L"100-200");
+                                           PART_A, DISK_A, L"100-200");
         ok(NT_SUCCESS(Status), "mark returned 0x%08lx\n", Status);
     }
 
     Value = Get(Cache, L"ReactOS", L"SystemPathPartitionGuid");
-    ok(Value && !wcscmp(Value, PART_B), "GUID of the first entry: '%S'\n", Value);
+    ok(Value && !wcscmp(Value, PART_A), "GUID of the first entry: '%S'\n", Value);
     ok(Count(Cache, L"ReactOS", L"SystemPathPartitionGuid") == 1, "GUID key repeated\n");
     ok(Count(Cache, L"ReactOS", L"SystemPathDiskGuid") == 1, "disk GUID key repeated\n");
     ok(Count(Cache, L"ReactOS", L"SystemPathPartitionRange") == 1, "range key repeated\n");
@@ -184,7 +184,28 @@ test_mark(void)
     Value = Get(Cache, L"ReactOS_Debug", L"SystemPathDiskGuid");
     ok(Value && !wcscmp(Value, DISK_A), "second entry with the path: '%S'\n", Value);
     Value = Get(Cache, L"Plain", L"SystemPathPartitionGuid");
-    ok(Value && !wcscmp(Value, PART_B), "third entry with the path: '%S'\n", Value);
+    ok(Value && !wcscmp(Value, PART_A), "third entry with the path: '%S'\n", Value);
+
+    /* An entry that names another partition by its GUID is another installation's (its position is out of date
+     * and equals the path of this one): a mark for a different partition leaves its keys as they are */
+    Status = FreeLdrMarkEntriesInCache(Cache, Os, L"multi(0)disk(0)rdisk(0)partition(3)\\ReactOS",
+                                       PART_B, DISK_A, L"300-400");
+    ok(NT_SUCCESS(Status), "mark for another partition returned 0x%08lx\n", Status);
+    Value = Get(Cache, L"ReactOS", L"SystemPathPartitionGuid");
+    ok(Value && !wcscmp(Value, PART_A), "GUID of the other installation's entry: '%S'\n", Value);
+    Value = Get(Cache, L"ReactOS", L"SystemPathPartitionRange");
+    ok(Value && !wcscmp(Value, L"100-200"), "range of the other installation's entry: '%S'\n", Value);
+    Value = Get(Cache, L"ReactOS_Debug", L"SystemPathPartitionGuid");
+    ok(Value && !wcscmp(Value, PART_A), "GUID of the other installation's second entry: '%S'\n", Value);
+    Value = Get(Cache, L"Plain", L"SystemPathPartitionGuid");
+    ok(Value && !wcscmp(Value, PART_A), "GUID of the other installation's third entry: '%S'\n", Value);
+    ok(Count(Cache, L"ReactOS", L"SystemPathPartitionGuid") == 1, "GUID key repeated after the foreign mark\n");
+
+    /* The accessor */
+    Value = FreeLdrGetEntryPartitionGuidInCache(Cache, L"ReactOS_1");
+    ok(Value && !wcscmp(Value, PART_B), "GUID accessor: '%S'\n", Value);
+    ok(FreeLdrGetEntryPartitionGuidInCache(Cache, L"Ram") == NULL, "GUID accessor on an entry without one\n");
+    ok(FreeLdrGetEntryPartitionGuidInCache(Cache, L"NoSuchSection") == NULL, "GUID accessor on no section\n");
 
     /* Other paths: nothing */
     ok(Get(Cache, L"Ram", L"SystemPathPartitionGuid") == NULL, "RAM disk entry got a key\n");
