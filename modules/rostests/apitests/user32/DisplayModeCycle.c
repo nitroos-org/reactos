@@ -262,6 +262,10 @@ START_TEST(DisplayModeCycle)
         Devices++;
     }
 
+    /* Let the drawing thread draw at least once, also when no display had modes to cycle */
+    for (iDev = 0; g_DrawCount == 0 && iDev < 100; iDev++)
+        Sleep(100);
+
     InterlockedExchange(&g_StopDrawing, TRUE);
     if (hThread)
     {
