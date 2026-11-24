@@ -11,6 +11,10 @@
 
 #include "precomp.h"
 #include <imm.h>
+#include <immdev.h>
+
+/* imm32 export (sdk/include/reactos/imm32_undoc.h) */
+BOOL WINAPI ImmSetActiveContext(HWND hwnd, HIMC hIMC, BOOL fFlag);
 
 #define LS_CLASS L"LsLifeClass"
 
@@ -443,6 +447,117 @@ START_TEST(LifetimeBeingActivatedExit)
         LsPump();
     }
     ok(Fails == 0, "%d of 3 rounds left w1 not activatable\n", Fails);
+}
+
+/*
+ * ImcOtherThreadEnds: a thread of the process uses the input context of another thread of it (ImmGetContext
+ * of that thread's window, ImmLockIMC, ImmGetOpenStatus, ImmSetActiveContext) while that thread ends and its
+ * cleanup frees the client data of the context. imm32 used client data that was freed meanwhile, or read
+ * through a freed input context object. A child process runs 300 such threads; it must end normally.
+ */
+static volatile HWND gIoeWnd;
+static volatile LONG gIoeStop;
+
+static DWORD WINAPI IoeOwnerThread(LPVOID Param)
+{
+    HWND hwnd = CreateWindowExW(0, LS_CLASS, L"ioe", WS_OVERLAPPEDWINDOW, 0, 0, 50, 50, NULL, NULL, ghLsInst, NULL);
+    HIMC hIMC = ImmGetContext(hwnd);
+
+    UNREFERENCED_PARAMETER(Param);
+    if (hIMC)
+    {
+        ImmSetOpenStatus(hIMC, TRUE);
+        ImmReleaseContext(hwnd, hIMC);
+    }
+    gIoeWnd = hwnd;
+    LsPump();
+    Sleep(GetTickCount() % 3);
+    /* Ends with its window and its input context */
+    return 0;
+}
+
+static DWORD WINAPI IoeUserThread(LPVOID Param)
+{
+    UNREFERENCED_PARAMETER(Param);
+    while (!gIoeStop)
+    {
+        HWND hwnd = gIoeWnd;
+        HIMC hIMC;
+        LPINPUTCONTEXT pIC;
+
+        if (!hwnd)
+        {
+            SwitchToThread();
+            continue;
+        }
+        hIMC = ImmGetContext(hwnd);
+        if (!hIMC)
+            continue;
+        pIC = ImmLockIMC(hIMC);
+        if (pIC)
+            ImmUnlockIMC(hIMC);
+        ImmGetOpenStatus(hIMC);
+        ImmSetActiveContext(hwnd, hIMC, FALSE);
+        ImmReleaseContext(hwnd, hIMC);
+    }
+    return 0;
+}
+
+static void IoeChild(void)
+{
+    HANDLE hUsers[2], hOwner;
+    int i;
+
+    LsRegister();
+    hUsers[0] = CreateThread(NULL, 0, IoeUserThread, NULL, 0, NULL);
+    hUsers[1] = CreateThread(NULL, 0, IoeUserThread, NULL, 0, NULL);
+    for (i = 0; i < 300; i++)
+    {
+        hOwner = CreateThread(NULL, 0, IoeOwnerThread, NULL, 0, NULL);
+        WaitForSingleObject(hOwner, 10000);
+        CloseHandle(hOwner);
+        gIoeWnd = NULL;
+    }
+    gIoeStop = 1;
+    WaitForMultipleObjects(2, hUsers, TRUE, 10000);
+    CloseHandle(hUsers[0]);
+    CloseHandle(hUsers[1]);
+}
+
+START_TEST(LifetimeImcOtherThreadEnds)
+{
+    char **argv;
+    char CmdLine[MAX_PATH * 2];
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi = { 0 };
+    DWORD ExitCode = 0, Wait;
+    int argc, Run;
+
+    argc = winetest_get_mainargs(&argv);
+    if (argc >= 3 && !lstrcmpA(argv[2], "child"))
+    {
+        IoeChild();
+        return;
+    }
+
+    sprintf(CmdLine, "\"%s\" LifetimeImcOtherThreadEnds child", argv[0]);
+    for (Run = 0; Run < 3; Run++)
+    {
+        ok(CreateProcessA(NULL, CmdLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi), "CreateProcessA failed %lu\n",
+           GetLastError());
+        if (!pi.hProcess)
+            return;
+        Wait = WaitForSingleObject(pi.hProcess, 60000);
+        ok(Wait == WAIT_OBJECT_0, "run %d: the child did not end (it faulted and is held, or it hangs)\n", Run);
+        if (Wait != WAIT_OBJECT_0)
+            TerminateProcess(pi.hProcess, 0xdead);
+        WaitForSingleObject(pi.hProcess, 10000);
+        GetExitCodeProcess(pi.hProcess, &ExitCode);
+        ok(ExitCode == 0, "run %d: the child ended with 0x%lx\n", Run, ExitCode);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        pi.hProcess = NULL;
+    }
 }
 
 /*
