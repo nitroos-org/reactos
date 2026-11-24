@@ -325,6 +325,9 @@ DWORD WINAPI AllocateAndGetTcpExTableFromStack(PVOID *ppTcpTable,
    ppTcpTable, (DWORD)bOrder, heap, flags, family);
   if (!ppTcpTable)
     ret = ERROR_INVALID_PARAMETER;
+  else if (family == AF_INET6)
+    /* this function never had an IPv6 table; GetExtendedTcpTable has (Windows Server 2022) */
+    ret = ERROR_NOT_SUPPORTED;
   else {
     DWORD dwSize = 0;
 
