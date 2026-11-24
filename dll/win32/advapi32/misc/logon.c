@@ -1750,6 +1750,7 @@ LogonUserExExW(
     if (pTokenGroups != NULL)
     {
         ULONG i;
+        BOOLEAN GivenLogonSid = FALSE;
 
         for (i = 0; i < pTokenGroups->GroupCount; i++)
         {
@@ -1757,6 +1758,16 @@ LogonUserExExW(
             {
                 Status = STATUS_INVALID_PARAMETER;
                 goto done;
+            }
+            /* A logon SID of the caller (a service controller makes its own, with the attributes of a service
+             * token) takes the place of the one made here: a token has one. A caller without SeTcbPrivilege
+             * gets the LSA's own check of it (the value is replaced, other attributes are refused). */
+            if (!GivenLogonSid && (pTokenGroups->Groups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
+            {
+                GivenLogonSid = TRUE;
+                TokenGroups->Groups[0].Sid = pTokenGroups->Groups[i].Sid;
+                TokenGroups->Groups[0].Attributes = pTokenGroups->Groups[i].Attributes;
+                continue;
             }
             TokenGroups->Groups[TokenGroups->GroupCount].Sid = pTokenGroups->Groups[i].Sid;
             TokenGroups->Groups[TokenGroups->GroupCount].Attributes = pTokenGroups->Groups[i].Attributes;

@@ -15,6 +15,7 @@
 #include <ntlsa.h>
 
 extern LUID SeAnonymousAuthenticationId;
+extern LUID SeSystemAuthenticationId;
 
 /* INFORMATION CLASSES ********************************************************/
 
@@ -1293,9 +1294,12 @@ NtQueryInformationToken(
                                                       Token->AuthenticationId :
                                                       Token->OriginatingLogonSession;
 
-                        /* The anonymous logon has no origin: 0:0 (measured on Windows Server 2022) */
+                        /* The anonymous logon and the system token (the token of the service controller, which a
+                           LocalSystem service without a service SID runs with) have no origin: 0:0 (measured on
+                           Windows Server 2022); a token the controller makes has the origin set */
                         if (RtlIsZeroLuid(&Token->OriginatingLogonSession) &&
-                            RtlEqualLuid(&Token->AuthenticationId, &SeAnonymousAuthenticationId))
+                            (RtlEqualLuid(&Token->AuthenticationId, &SeAnonymousAuthenticationId) ||
+                             RtlEqualLuid(&Token->AuthenticationId, &SeSystemAuthenticationId)))
                         {
                             to->OriginatingLogonSession.LowPart = 0;
                             to->OriginatingLogonSession.HighPart = 0;

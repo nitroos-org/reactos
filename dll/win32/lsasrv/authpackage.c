@@ -2645,6 +2645,28 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
             ERR("NtCreateToken failed (Status 0x%08lx)\n", Status);
             goto done;
         }
+
+        /* The origin of the token of a service logon is the logon session of the caller, the service controller
+           (Windows Server 2022, measured for LocalService and NetworkService: 0:3e7). Other logon types are not
+           measured: they keep the origin they have. */
+        if (LogonType == Service)
+        {
+            HANDLE CallerToken;
+            TOKEN_STATISTICS CallerStatistics;
+            TOKEN_ORIGIN CallerOrigin;
+            ULONG CallerLength;
+
+            if (NT_SUCCESS(NtOpenProcessToken(LogonContext->ClientProcessHandle, TOKEN_QUERY, &CallerToken)))
+            {
+                if (NT_SUCCESS(NtQueryInformationToken(CallerToken, TokenStatistics, &CallerStatistics,
+                                                       sizeof(CallerStatistics), &CallerLength)))
+                {
+                    CallerOrigin.OriginatingLogonSession = CallerStatistics.AuthenticationId;
+                    NtSetInformationToken(TokenHandle, TokenOrigin, &CallerOrigin, sizeof(CallerOrigin));
+                }
+                NtClose(CallerToken);
+            }
+        }
     }
     else
     {
