@@ -197,11 +197,13 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (Length == 0)
         return STATUS_SUCCESS;
 
+    /* A byte-range lock stops the read before the end of the file is looked at, also for a range beyond the end
+       (Windows Server 2022, NTFS: ERROR_LOCK_VIOLATION, not ERROR_HANDLE_EOF) */
+    if (!Paging && !FsRtlCheckLockForReadAccess(&Fcb->FileLock, Irp))
+        return STATUS_FILE_LOCK_CONFLICT;
     FileSize = Fcb->Header.FileSize.QuadPart;
     if (Offset.QuadPart >= FileSize)
         return STATUS_END_OF_FILE;
-    if (!Paging && !FsRtlCheckLockForReadAccess(&Fcb->FileLock, Irp))
-        return STATUS_FILE_LOCK_CONFLICT;
     if (!Paging && Offset.QuadPart + Length > FileSize)
         Length = (ULONG)(FileSize - Offset.QuadPart);
     /* Before any mapping of Mm's MDL: the paging file's pages go straight to its clusters. */
