@@ -669,6 +669,61 @@ SHChangeNotifyTransmit(LONG lEvent, UINT uFlags, LPCITEMIDLIST pidl1, LPCITEMIDL
     SHChangeNotifyReceiveEx(lEvent, uFlags, pidl1, pidl2, dwTick);
 }
 
+/*
+ * The item of a path on a share (\\server\share\...), for a notification of a change there. The network
+ * folder parses only an existing directory of a share (into one item for the whole path, the parent of the
+ * items an Explorer window on that directory lists): a file, or an item that is gone, did not parse, so a
+ * window on a share never heard of its changes. Such a path is the item of its parent directory's folder
+ * (parsed with file system bind data, as SHSimpleIDListFromPathW does: it need not exist), the parent
+ * found the same way when it is gone too.
+ */
+static LPITEMIDLIST
+SHELL32_SimpleIDListFromSharePath(LPCWSTR pszPath, UINT nDepth)
+{
+    WCHAR szPath[MAX_PATH], szName[MAX_PATH];
+    LPITEMIDLIST pidlParent, pidlChild = NULL, pidl = NULL;
+    CComPtr<IShellFolder> psfDesktop, psf;
+    CComPtr<IBindCtx> pbc;
+    WIN32_FIND_DATAW data;
+
+    if (nDepth > 32 || !PathIsUNCW(pszPath) || FAILED(StringCchCopyW(szPath, _countof(szPath), pszPath)))
+        return NULL;
+    PathRemoveBackslashW(szPath);
+    if (FAILED(StringCchCopyW(szName, _countof(szName), PathFindFileNameW(szPath))) || !szName[0])
+        return NULL;
+    /* Nothing to split off at the share or the server itself */
+    if (!PathRemoveFileSpecW(szPath) || PathIsUNCServerW(szPath) || !PathIsUNCW(szPath))
+        return NULL;
+    pidlParent = SHSimpleIDListFromPathW(szPath);
+    if (!pidlParent)
+        pidlParent = SHELL32_SimpleIDListFromSharePath(szPath, nDepth + 1);
+    if (!pidlParent)
+        return NULL;
+
+    ZeroMemory(&data, sizeof(data));
+    if (SUCCEEDED(SHGetDesktopFolder(&psfDesktop)) &&
+        SUCCEEDED(psfDesktop->BindToObject(pidlParent, NULL, IID_PPV_ARG(IShellFolder, &psf))) &&
+        SUCCEEDED(IFileSystemBindData_Constructor(&data, &pbc)) &&
+        SUCCEEDED(psf->ParseDisplayName(NULL, pbc, szName, NULL, &pidlChild, NULL)))
+    {
+        pidl = ILCombine(pidlParent, pidlChild);
+    }
+    ILFree(pidlChild);
+    ILFree(pidlParent);
+    return pidl;
+}
+
+/* SHSimpleIDListFromPathW, also for the items of a share (SHELL32_SimpleIDListFromSharePath) */
+static LPITEMIDLIST
+SHELL32_SimpleIDListForNotify(LPCWSTR pszPath)
+{
+    LPITEMIDLIST pidl = SHSimpleIDListFromPathW(pszPath);
+
+    if (!pidl && PathIsUNCW(pszPath))
+        pidl = SHELL32_SimpleIDListFromSharePath(pszPath, 0);
+    return pidl;
+}
+
 /*************************************************************************
  * SHChangeNotify               [SHELL32.@]
  */
@@ -759,9 +814,9 @@ Retry:
             }
 
             if (dwItem1)
-                pidl1 = SHSimpleIDListFromPathW((LPCWSTR)dwItem1);
+                pidl1 = SHELL32_SimpleIDListForNotify((LPCWSTR)dwItem1);
             if (dwItem2)
-                pidl2 = SHSimpleIDListFromPathW((LPCWSTR)dwItem2);
+                pidl2 = SHELL32_SimpleIDListForNotify((LPCWSTR)dwItem2);
             break;
         }
         case SHCNF_PRINTERW:
