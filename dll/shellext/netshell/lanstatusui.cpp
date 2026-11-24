@@ -1015,7 +1015,10 @@ LANStatusDlg(
             SetWindowLongPtr(hwndDlg, DWLP_USER, (LONG_PTR)lParam);
             pContext->hwndStatusDlg = hwndDlg;
             PostMessage(hwndDlg, WM_CONFIGURETRAYICON, WPARAM_MAGIC, 0); // Delay timer until after NIM_ADD
-            return TRUE;
+            /* This hidden dialog is only the owner of a tray icon: it has no control to focus. TRUE would make the
+               dialog manager set the focus to the dialog itself, which activates it and takes the keyboard away from the
+               window the user is typing in (explorer creates it again when a network adapter comes up) */
+            return FALSE;
 
         case WM_DESTROY:
             pContext = (LANSTATUSUI_CONTEXT*)GetWindowLongPtr(hwndDlg, DWLP_USER);
