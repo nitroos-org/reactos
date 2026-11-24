@@ -778,6 +778,23 @@ DWORD WINAPI GetAdaptersInfo(PIP_ADAPTER_INFO pAdapterInfo, PULONG pOutBufLen)
               strncpy(ptr->AdapterName,ifname,sizeof(ptr->AdapterName));
               consumeInterfaceName(ifname);
               ptr->AdapterName[MAX_ADAPTER_NAME_LENGTH] = '\0';
+              {
+                /* the guid is in upper case; the description is the one of the row of the interface table */
+                char *c;
+                MIB_IFROW descrRow;
+
+                for (c = ptr->AdapterName; *c; c++)
+                  if (*c >= 'a' && *c <= 'f')
+                    *c = *c - 'a' + 'A';
+                memset(&descrRow, 0, sizeof(descrRow));
+                descrRow.dwIndex = table->indexes[ndx];
+                if (GetIfEntry(&descrRow) == NO_ERROR) {
+                  DWORD n = min(descrRow.dwDescrLen, (DWORD)MAX_ADAPTER_DESCRIPTION_LENGTH);
+
+                  memcpy(ptr->Description, descrRow.bDescr, n);
+                  ptr->Description[n] = '\0';
+                }
+              }
               getInterfacePhysicalByIndex(table->indexes[ndx], &addrLen,
                ptr->Address, &type);
               /* MS defines address length and type as UINT in some places and
@@ -806,8 +823,14 @@ DWORD WINAPI GetAdaptersInfo(PIP_ADAPTER_INFO pAdapterInfo, PULONG pOutBufLen)
                   prev = cur;
                 }
               }
-              toIPAddressString(getInterfaceGatewayByIndex(table->indexes[ndx]),
-               ptr->GatewayList.IpAddress.String);
+              {
+                unsigned int gateway = getInterfaceGatewayByIndex(table->indexes[ndx]);
+
+                toIPAddressString(gateway, ptr->GatewayList.IpAddress.String);
+                /* the gateway is a host route: its mask is all ones */
+                if (gateway)
+                  strcpy(ptr->GatewayList.IpMask.String, "255.255.255.255");
+              }
               getDhcpInfoForAdapter(table->indexes[ndx], ptr);
               if (winsEnabled) {
                 ptr->HaveWins = TRUE;
@@ -1897,7 +1920,8 @@ DWORD WINAPI GetInterfaceInfo(PIP_INTERFACE_INFO pIfTable, PULONG dwOutBufLen)
              walker && *walker &&
              assigner - pIfTable->Adapter[ndx].Name < MAX_ADAPTER_NAME - 1 - 14;
              walker++, assigner++)
-              *assigner = *walker;
+              /* the guid is in upper case, as in the name of the interface table's row */
+              *assigner = (*walker >= 'a' && *walker <= 'f') ? *walker - 'a' + 'A' : *walker;
             *assigner = 0;
             consumeInterfaceName(name);
             pIfTable->NumAdapters++;

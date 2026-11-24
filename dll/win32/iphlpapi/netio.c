@@ -76,6 +76,19 @@ static BOOL parse_guid(const BYTE *Text, DWORD Length, GUID *Guid)
   return NT_SUCCESS(RtlGUIDFromString(&String, Guid));
 }
 
+/* The name of a row of GetIfTable is \DEVICE\TCPIP_{guid} (bDescr is the adapter's description) */
+static const WCHAR NamePrefix[] = L"\\DEVICE\\TCPIP_";
+
+static BOOL parse_row_guid(const WCHAR *Name, GUID *Guid)
+{
+  UNICODE_STRING String;
+
+  if (_wcsnicmp(Name, NamePrefix, ARRAYSIZE(NamePrefix) - 1) != 0)
+    return FALSE;
+  RtlInitUnicodeString(&String, Name + ARRAYSIZE(NamePrefix) - 1);
+  return NT_SUCCESS(RtlGUIDFromString(&String, Guid));
+}
+
 static void read_dhcp_state(NETIO_IF *If)
 {
   WCHAR Key[160];
@@ -84,7 +97,7 @@ static void read_dhcp_state(NETIO_IF *If)
   int i;
 
   for (i = 0; i < 38; i++)
-    Key[i] = If->Row.bDescr[i];
+    Key[i] = If->Row.wszName[ARRAYSIZE(NamePrefix) - 1 + i];
   Key[38] = 0;
 
   {
@@ -195,9 +208,10 @@ static DWORD collect_interfaces(NETIO_IF **Out, ULONG *Count)
     }
     else
     {
-      if (!parse_guid(If->Row.bDescr, If->Row.dwDescrLen, &If->Guid))
+      if (parse_row_guid(If->Row.wszName, &If->Guid))
+        read_dhcp_state(If);
+      else
         If->Guid.Data1 = If->Index;
-      read_dhcp_state(If);
     }
   }
   *Count = Table->dwNumEntries;
@@ -1088,7 +1102,12 @@ DWORD WINAPI ConvertInterfaceLuidToNameA(const NET_LUID *Luid, PSTR Name, SIZE_T
 {
   char Text[64];
 
-  if (!Luid || !Name)
+  if (!Luid)
+    return ERROR_INVALID_PARAMETER;
+  /* the ANSI variant asks for more room when there is no buffer and no length (the wide one reports a bad parameter) */
+  if (!Name && !Length)
+    return ERROR_NOT_ENOUGH_MEMORY;
+  if (!Name)
     return ERROR_INVALID_PARAMETER;
   luid_to_name(Luid->Value, Text, sizeof(Text));
   if (Length < strlen(Text) + 1)
@@ -1118,7 +1137,10 @@ DWORD WINAPI ConvertInterfaceNameToLuidA(const char *Name, PNET_LUID Luid)
   ULONG64 Value;
   DWORD Index;
 
-  if (!Name || !Luid)
+  /* the ANSI variant calls a missing name a bad name, and leaves the luid alone */
+  if (!Name)
+    return ERROR_INVALID_NAME;
+  if (!Luid)
     return ERROR_INVALID_PARAMETER;
   Luid->Value = 0;
   if (!name_to_luid(Name, &Value))
@@ -1134,8 +1156,14 @@ DWORD WINAPI ConvertInterfaceNameToLuidW(const WCHAR *Name, PNET_LUID Luid)
   char Text[64];
   size_t i;
 
-  if (!Name || !Luid)
+  if (!Luid)
     return ERROR_INVALID_PARAMETER;
+  /* the wide variant calls a missing name a bad name, and clears the luid */
+  if (!Name)
+  {
+    Luid->Value = 0;
+    return ERROR_INVALID_NAME;
+  }
   for (i = 0; Name[i]; i++)
   {
     if (i >= sizeof(Text) - 1 || Name[i] > 0x7f)
@@ -1245,6 +1273,73 @@ DWORD WINAPI ConvertInterfaceGuidToLuid(const GUID *Guid, PNET_LUID Luid)
   return Result;
 }
 
+/*
+ * guid <-> {XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}. Windows Server 2022: a buffer below 39 characters is
+ * ERROR_INSUFFICIENT_BUFFER (and gets as much of the text as fits, with a terminator), a missing argument and a text that
+ * is not a guid in braces are ERROR_INVALID_PARAMETER, the digits of a text may be in either case.
+ */
+static void guid_text(const GUID *Guid, WCHAR *Text)
+{
+  StringCchPrintfW(Text, 39, L"{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+                   Guid->Data1, Guid->Data2, Guid->Data3, Guid->Data4[0], Guid->Data4[1], Guid->Data4[2],
+                   Guid->Data4[3], Guid->Data4[4], Guid->Data4[5], Guid->Data4[6], Guid->Data4[7]);
+}
+
+DWORD WINAPI ConvertGuidToStringW(const GUID *Guid, PWSTR Buffer, DWORD Length)
+{
+  WCHAR Text[39];
+
+  if (!Guid || !Buffer)
+    return ERROR_INVALID_PARAMETER;
+  guid_text(Guid, Text);
+  if (Length < ARRAYSIZE(Text))
+  {
+    if (Length)
+    {
+      memcpy(Buffer, Text, (Length - 1) * sizeof(WCHAR));
+      Buffer[Length - 1] = 0;
+    }
+    return ERROR_INSUFFICIENT_BUFFER;
+  }
+  memcpy(Buffer, Text, sizeof(Text));
+  return NO_ERROR;
+}
+
+DWORD WINAPI ConvertGuidToStringA(const GUID *Guid, PSTR Buffer, DWORD Length)
+{
+  WCHAR Text[39];
+  DWORD i;
+
+  if (!Guid || !Buffer)
+    return ERROR_INVALID_PARAMETER;
+  guid_text(Guid, Text);
+  if (Length < ARRAYSIZE(Text))
+  {
+    for (i = 0; i + 1 < Length; i++)
+      Buffer[i] = (CHAR)Text[i];
+    if (Length)
+      Buffer[Length - 1] = 0;
+    return ERROR_INSUFFICIENT_BUFFER;
+  }
+  for (i = 0; i < ARRAYSIZE(Text); i++)
+    Buffer[i] = (CHAR)Text[i];
+  return NO_ERROR;
+}
+
+DWORD WINAPI ConvertStringToGuidW(PCWSTR String, GUID *Guid)
+{
+  UNICODE_STRING Text;
+  GUID Parsed;
+
+  if (!String || !Guid)
+    return ERROR_INVALID_PARAMETER;
+  RtlInitUnicodeString(&Text, String);
+  if (!NT_SUCCESS(RtlGUIDFromString(&Text, &Parsed)))
+    return ERROR_INVALID_PARAMETER;
+  *Guid = Parsed;
+  return NO_ERROR;
+}
+
 PCHAR WINAPI if_indextoname(NET_IFINDEX Index, PCHAR Name)
 {
   ULONG Type;
@@ -1267,13 +1362,58 @@ NET_IFINDEX WINAPI if_nametoindex(PCSTR Name)
 }
 
 /*
+ * The description of an adapter, the DeviceDesc of its device in the Enum tree (the value GetAdaptersAddresses
+ * reports). The device is found through the PnpInstanceID of the adapter's connection.
+ */
+static BOOL read_adapter_description(const GUID *Guid, WCHAR *Out, DWORD OutCch)
+{
+  WCHAR Path[256], Instance[128];
+  HKEY Key;
+  DWORD Size, Type;
+  BOOL Found = FALSE;
+
+  StringCchPrintfW(Path, ARRAYSIZE(Path),
+                   L"SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\"
+                   L"{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}\\Connection",
+                   Guid->Data1, Guid->Data2, Guid->Data3, Guid->Data4[0], Guid->Data4[1], Guid->Data4[2],
+                   Guid->Data4[3], Guid->Data4[4], Guid->Data4[5], Guid->Data4[6], Guid->Data4[7]);
+  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_READ, &Key) != ERROR_SUCCESS)
+    return FALSE;
+  Size = sizeof(Instance) - sizeof(WCHAR);
+  Instance[0] = 0;
+  if (RegQueryValueExW(Key, L"PnpInstanceID", NULL, &Type, (LPBYTE)Instance, &Size) != ERROR_SUCCESS || Type != REG_SZ)
+    Instance[0] = 0;
+  else
+    Instance[Size / sizeof(WCHAR)] = 0;
+  RegCloseKey(Key);
+  if (!Instance[0])
+    return FALSE;
+
+  StringCchPrintfW(Path, ARRAYSIZE(Path), L"SYSTEM\\CurrentControlSet\\Enum\\%s", Instance);
+  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_READ, &Key) != ERROR_SUCCESS)
+    return FALSE;
+  Size = (OutCch - 1) * sizeof(WCHAR);
+  if (RegQueryValueExW(Key, L"DeviceDesc", NULL, &Type, (LPBYTE)Out, &Size) == ERROR_SUCCESS && Type == REG_SZ &&
+      Size >= sizeof(WCHAR))
+  {
+    Out[Size / sizeof(WCHAR)] = 0;
+    Found = Out[0] != 0;
+  }
+  RegCloseKey(Key);
+  return Found;
+}
+
+/*
  * The legacy interface table: the loopback interface is called "Software Loopback Interface 1" and every row has
- * the name \DEVICE\TCPIP_{guid} (upper case), the same guid GetIfEntry2 reports (Windows Server 2022).
+ * the name \DEVICE\TCPIP_{guid} (upper case), the same guid GetIfEntry2 reports, and the description of the adapter
+ * in bDescr (Windows Server 2022). The stack gives the guid as the description: it is used for the name, and
+ * stays in bDescr only for an adapter that has no description in the registry.
  */
 VOID setLegacyIfRowNames(PMIB_IFROW Row)
 {
   GUID Guid;
   BOOL Known = FALSE;
+  BOOL Adapter = FALSE;
 
   if (Row->dwType == IF_TYPE_SOFTWARE_LOOPBACK)
   {
@@ -1287,6 +1427,7 @@ VOID setLegacyIfRowNames(PMIB_IFROW Row)
   else if (parse_guid(Row->bDescr, Row->dwDescrLen, &Guid))
   {
     Known = TRUE;
+    Adapter = TRUE;
   }
 
   if (Known)
@@ -1294,6 +1435,24 @@ VOID setLegacyIfRowNames(PMIB_IFROW Row)
                      L"\\DEVICE\\TCPIP_{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
                      Guid.Data1, Guid.Data2, Guid.Data3, Guid.Data4[0], Guid.Data4[1], Guid.Data4[2],
                      Guid.Data4[3], Guid.Data4[4], Guid.Data4[5], Guid.Data4[6], Guid.Data4[7]);
+
+  if (Adapter)
+  {
+    WCHAR Description[IF_MAX_STRING_SIZE + 1];
+    CHAR Ansi[4 * (IF_MAX_STRING_SIZE + 1)];
+    int Length;
+
+    if (read_adapter_description(&Guid, Description, ARRAYSIZE(Description)) &&
+        (Length = WideCharToMultiByte(CP_ACP, 0, Description, -1, Ansi, sizeof(Ansi), NULL, NULL)) > 1)
+    {
+      Length--;
+      if (Length > MAXLEN_IFDESCR - 1)
+        Length = MAXLEN_IFDESCR - 1;
+      memset(Row->bDescr, 0, sizeof(Row->bDescr));
+      memcpy(Row->bDescr, Ansi, Length);
+      Row->dwDescrLen = Length;
+    }
+  }
 }
 
 /* The index of the interface that \DEVICE\TCPIP_{guid} names (the name of a row of GetIfTable) */
