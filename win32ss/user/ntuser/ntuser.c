@@ -19,6 +19,8 @@ BOOL g_AlwaysDisplayVersion = FALSE;
 /* The documented defaults (Windows: 10000 each) and ranges (GDI 256..65536, USER 200..18000) */
 ULONG gGdiProcessHandleQuota = 10000;
 ULONG gUserProcessHandleQuota = 10000;
+/* Posted messages one thread may hold (Windows: USERPostMessageLimit, default 10000, documented minimum 4000) */
+ULONG gUserPostMessageLimit = USER_POST_MESSAGE_LIMIT;
 ERESOURCE UserLock;
 ATOM AtomMessage;       // Window Message atom.
 ATOM AtomWndObj;        // Window Object atom.
@@ -124,6 +126,10 @@ InitUserImpl(VOID)
         dwValue = 0;
         if (RegReadDWORD(hKey, L"USERProcessHandleQuota", &dwValue))
             gUserProcessHandleQuota = min(max(dwValue, 200), 18000);
+        /* The documentation names a minimum (4000) and no maximum */
+        dwValue = 0;
+        if (RegReadDWORD(hKey, L"USERPostMessageLimit", &dwValue))
+            gUserPostMessageLimit = max(dwValue, USER_POST_MESSAGE_LIMIT_MIN);
         ZwClose(hKey);
     }
 

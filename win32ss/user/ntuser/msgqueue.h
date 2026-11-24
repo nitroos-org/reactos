@@ -20,6 +20,8 @@ typedef struct _USER_MESSAGE
 
 /* Messages that can wait in the posted queue of one thread (Windows: USERPostMessageLimit, default 10000) */
 #define USER_POST_MESSAGE_LIMIT 10000
+#define USER_POST_MESSAGE_LIMIT_MIN 4000
+extern ULONG gUserPostMessageLimit;
 
 struct _USER_MESSAGE_QUEUE;
 

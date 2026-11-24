@@ -12,8 +12,29 @@
  */
 
 #include "precomp.h"
+#include <winreg.h>
 
-#define POST_LIMIT 10000
+/* The limit is read once at start from USERPostMessageLimit (default 10000, documented minimum 4000): the rows
+   below expect what the registry holds now, so a run after a restart with another value tests the reading. */
+static LONG GetPostLimit(void)
+{
+    HKEY hKey;
+    DWORD Value = 0, Size = sizeof(Value), Type;
+    LONG Limit = 10000;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows",
+                      0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS)
+    {
+        if (RegQueryValueExW(hKey, L"USERPostMessageLimit", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
+            Type == REG_DWORD)
+        {
+            Limit = (Value < 4000) ? 4000 : (LONG)Value;
+        }
+        RegCloseKey(hKey);
+    }
+    return Limit;
+}
+
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -34,7 +55,7 @@ START_TEST(PostMessageLimit)
 {
     WNDCLASSW Class = { 0 };
     HWND hWnd;
-    LONG Posted = 0, Drained;
+    LONG Posted = 0, Drained, Limit = GetPostLimit();
     DWORD Error;
     MSG Msg;
 
@@ -52,10 +73,10 @@ START_TEST(PostMessageLimit)
         ;
 
     SetLastError(0);
-    while (Posted < POST_LIMIT + 100 && PostThreadMessageW(GetCurrentThreadId(), WM_USER + 1, 0, 0))
+    while (Posted < Limit + 100 && PostThreadMessageW(GetCurrentThreadId(), WM_USER + 1, 0, 0))
         Posted++;
     Error = GetLastError();
-    ok(Posted == POST_LIMIT, "%ld messages could be posted to the thread, expected %d\n", Posted, POST_LIMIT);
+    ok(Posted == Limit, "%ld messages could be posted to the thread, expected %ld\n", Posted, Limit);
     ok(Error == ERROR_NOT_ENOUGH_QUOTA, "PostThreadMessage failed with %lu, expected %d\n", Error, ERROR_NOT_ENOUGH_QUOTA);
 
     SetLastError(0);
@@ -64,7 +85,7 @@ START_TEST(PostMessageLimit)
     ok(Error == ERROR_NOT_ENOUGH_QUOTA, "PostMessage failed with %lu, expected %d\n", Error, ERROR_NOT_ENOUGH_QUOTA);
 
     Drained = Drain(WM_USER + 1, WM_USER + 1);
-    ok(Drained == POST_LIMIT, "%ld messages were read back, expected %d\n", Drained, POST_LIMIT);
+    ok(Drained == Limit, "%ld messages were read back, expected %ld\n", Drained, Limit);
     ok(Drain(WM_USER + 2, WM_USER + 2) == 0, "the refused message is in the queue\n");
 
     /* the queue takes messages again */
