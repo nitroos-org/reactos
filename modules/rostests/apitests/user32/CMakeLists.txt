@@ -35,6 +35,7 @@ list(APPEND SOURCE
     ClipboardMedBatch.c
     ClipboardSynthBitmap.c
     ConsoleClipText.c
+    DisplayModeCycle.c
     EmptyClipboard.c
     EndTask.c
     EnumDisplayDevices.c

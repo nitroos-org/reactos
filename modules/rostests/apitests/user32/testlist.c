@@ -34,6 +34,7 @@ extern void func_ClipboardSetData(void);
 extern void func_ClipboardMedBatch(void);
 extern void func_ClipboardSynthBitmap(void);
 extern void func_ConsoleClipText(void);
+extern void func_DisplayModeCycle(void);
 extern void func_EmptyClipboard(void);
 extern void func_EnumDisplayDevices(void);
 extern void func_EnumDisplaySettings(void);
@@ -220,6 +221,7 @@ const struct test winetest_testlist[] =
     { "ClipboardMedBatch", func_ClipboardMedBatch },
     { "ClipboardSynthBitmap", func_ClipboardSynthBitmap },
     { "ConsoleClipText", func_ConsoleClipText },
+    { "DisplayModeCycle", func_DisplayModeCycle },
     { "EmptyClipboard", func_EmptyClipboard },
     { "EnumDisplayDevices", func_EnumDisplayDevices },
     { "EnumDisplaySettings", func_EnumDisplaySettings },
