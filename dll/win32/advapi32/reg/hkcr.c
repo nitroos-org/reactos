@@ -379,6 +379,11 @@ OpenHKCRKey(
 
     ASSERT(IsHKCRKey(hKey));
 
+    /* A subkey of HKEY_CLASSES_ROOT may start with a backslash (measured on Windows Server 2022:
+     * advapi32_winetest registry test_reg_open_key opens "\clsid") */
+    if (lpSubKey != NULL && lpSubKey[0] == L'\\')
+        lpSubKey++;
+
     /* Remove the HKCR flag while we're working */
     hKey = (HKEY)(((ULONG_PTR)hKey) & ~0x2);
 
