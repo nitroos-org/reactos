@@ -1,16 +1,15 @@
 #!/bin/bash
-# Produce the hosted files of the lavapipe-pack feature (Mesa lavapipe + llvmpipe, amd64), ~129 MB.
+# Produce the hosted files of the lavapipe-pack feature (Mesa lavapipe + llvmpipe, amd64), ~134 MB.
 #   stage-lavapipe-payload.sh <outdir>
-# NOTE: the catalog still pins the OLD pack (26.3.0-beed97f8, no shader disk cache). It is NOT what images are built
-# with now (26.3.0-dc2, dll/3rdparty/mesa3d/stage-amd64-llvm.sh). featmgr skips the pack on a system whose DLLs are as
-# new as the catalog's PackFileTime. Do not publish these files as "the current pack"; stage the dc2 files and bump the
-# catalog ([Source] Path, hashes, PackFileTime) first.
+# The catalog pins the 26.3.0-dc2 pack (with the shader disk cache), the one images are built with
+# (dll/3rdparty/mesa3d/stage-amd64-llvm.sh). featmgr skips the pack on a system whose DLLs are as new as the catalog's
+# PackFileTime. When a newer pack replaces it, bump the catalog ([Source] Path, hashes, PackFileTime) first.
 # <outdir> gets the six files listed in [Download] of catalog/lavapipe-pack.ini, each checked against the SHA-256
 # pinned there, plus SHA256SUMS. The catalog is the single source of truth (file names, hashes, sizes, Path).
 #
 # Use:
 #  - hosting: upload the six files (SHA256SUMS too, for people who check by hand) to
-#      <PayloadBaseUrl>/<[Source] Path>/        e.g. https://<domain>/featmgr/lavapipe-pack/26.3.0-beed97f8/
+#      <PayloadBaseUrl>/<[Source] Path>/        e.g. https://<domain>/featmgr/lavapipe-pack/26.3.0-dc2/
 #    featmgr fetches <base>/<Path>/<file> over https when the pack is turned on.
 #  - offline target: copy them to %SystemRoot%\Featmgr\Payload\lavapipe-pack\ ; featmgr then verifies and uses
 #    them without a download.
