@@ -303,3 +303,115 @@ START_TEST(LifetimeLayoutSenderEnds)
     ActivateKeyboardLayout(hklOld, KLF_SETFORPROCESS);
     ok(Kept == 0, "%d of %d ended threads were kept\n", Kept, Done);
 }
+
+static struct
+{
+    HDESK hDesk;
+    HWND hwndDesktop, hwndMessageRoot;
+    volatile LONG Stop, SendStop;
+} gHdd;
+
+/* On the new desktop: its desktop window and the root of its message windows */
+static DWORD WINAPI HbDeskThread(LPVOID Param)
+{
+    HWND hMsg;
+
+    UNREFERENCED_PARAMETER(Param);
+    if (!SetThreadDesktop(gHdd.hDesk))
+        return 1;
+    gHdd.hwndDesktop = GetDesktopWindow();
+    hMsg = CreateWindowExW(0, L"Message", NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, NULL, NULL);
+    if (hMsg)
+    {
+        gHdd.hwndMessageRoot = GetAncestor(hMsg, GA_PARENT);
+        DestroyWindow(hMsg);
+    }
+    return 0;
+}
+
+/* Keeps a message to the desktop window of the new desktop in flight while that desktop goes */
+static DWORD WINAPI HbDeskSendThread(LPVOID Param)
+{
+    HWND hwnd = (HWND)Param;
+    DWORD_PTR Result;
+
+    while (!gHdd.SendStop)
+        SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_BLOCK, 1000, &Result);
+    return 0;
+}
+
+/* Keeps the desktop thread (which serves the desktop windows of all desktops) busy */
+static DWORD WINAPI HbDeskFloodThread(LPVOID Param)
+{
+    HWND hwnd = GetDesktopWindow();
+    DWORD_PTR Result;
+
+    UNREFERENCED_PARAMETER(Param);
+    while (!gHdd.Stop)
+        SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_BLOCK, 1000, &Result);
+    return 0;
+}
+
+/*
+ * Desktops are created and closed while another thread keeps sending to their desktop window from the
+ * desktop of the test. A desktop window still held by such a sender when its desktop is deleted is freed
+ * when that sender lets it go; the message window of the desktop is freed with the desktop all the same.
+ * Before the fix it was left as a live window (IsWindow found it) naming the freed desktop object.
+ */
+START_TEST(LifetimeDesktopHeldDelete)
+{
+    HWND Roots[400];
+    HANDLE hFlood[3], hThread, hSend;
+    DWORD Start;
+    int i, Count = 0, Left = 0;
+
+    for (i = 0; i < 3; i++)
+        hFlood[i] = CreateThread(NULL, 0, HbDeskFloodThread, NULL, 0, NULL);
+
+    Start = GetTickCount();
+    while (GetTickCount() - Start < 15000 && Count < (int)ARRAYSIZE(Roots))
+    {
+        WCHAR Name[32];
+
+        wsprintfW(Name, L"HeldDesk%d", Count % 8);
+        gHdd.hDesk = CreateDesktopW(Name, NULL, NULL, 0, DESKTOP_ALL_ACCESS, NULL);
+        ok(gHdd.hDesk != NULL, "CreateDesktopW failed %lu\n", GetLastError());
+        if (!gHdd.hDesk)
+            break;
+        gHdd.hwndDesktop = gHdd.hwndMessageRoot = NULL;
+        hThread = CreateThread(NULL, 0, HbDeskThread, NULL, 0, NULL);
+        if (hThread)
+        {
+            WaitForSingleObject(hThread, 10000);
+            CloseHandle(hThread);
+        }
+        hSend = NULL;
+        gHdd.SendStop = 0;
+        if (gHdd.hwndDesktop)
+            hSend = CreateThread(NULL, 0, HbDeskSendThread, gHdd.hwndDesktop, 0, NULL);
+        Sleep(Count % 3);
+        CloseDesktop(gHdd.hDesk);
+        gHdd.SendStop = 1;
+        if (hSend)
+        {
+            WaitForSingleObject(hSend, 10000);
+            CloseHandle(hSend);
+        }
+        Roots[Count++] = gHdd.hwndMessageRoot;
+    }
+
+    gHdd.Stop = 1;
+    WaitForMultipleObjects(3, hFlood, TRUE, 10000);
+    for (i = 0; i < 3; i++)
+        CloseHandle(hFlood[i]);
+    Sleep(500);
+
+    for (i = 0; i < Count; i++)
+    {
+        if (Roots[i] && IsWindow(Roots[i]))
+            Left++;
+    }
+    trace("%d desktops\n", Count);
+    ok(Count > 0, "no desktop\n");
+    ok(Left == 0, "the message window of %d of %d deleted desktops is still a window\n", Left, Count);
+}
