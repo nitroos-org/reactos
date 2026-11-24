@@ -903,8 +903,11 @@ int wmain(int argc, WCHAR **argv)
         CloseHandle(CreateThread(NULL, 0, worker, (LPVOID)0, 0, NULL));
         Sleep(opt.seconds * 1000);
         summary();
-        CloseHandle(Dev);
-        return 0;
+        /* Not CloseHandle(Dev): the device is open for synchronous I/O, and the workers' GETs hold its file object
+         * lock while they wait, so the close would wait for them and they for the detach the close does (the tool
+         * hung for good). Exiting ends the workers first; the handle is closed after them. */
+        fflush(stdout);
+        ExitProcess(0);
     }
     worker(NULL);
     return 0;
