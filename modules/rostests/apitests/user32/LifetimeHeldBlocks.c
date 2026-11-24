@@ -222,6 +222,83 @@ START_TEST(LifetimeSentCopyExitLeak)
     VirtualFree(Buffer, 0, MEM_RELEASE);
 }
 
+/*
+ * The sender's side: 30 threads send WM_GETTEXT for 1 000 000 characters to a window whose thread does not
+ * answer, and are terminated while they wait. The sender's kernel copy of the buffer (2 MB of paged pool each)
+ * was kept across the wait and lost with them (15 000 pages); the paged pool must not grow by that.
+ */
+static struct
+{
+    HANDLE hReady, hGo;
+    HWND hwnd;
+    PWCHAR Buffer;
+} gHbs;
+
+static DWORD WINAPI HbSilentReceiverThread(LPVOID Param)
+{
+    MSG msg;
+
+    UNREFERENCED_PARAMETER(Param);
+    gHbs.hwnd = CreateWindowExW(0, L"Static", L"r", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL,
+                                GetModuleHandleW(NULL), NULL);
+    SetEvent(gHbs.hReady);
+    /* No message is answered until the senders are gone */
+    WaitForSingleObject(gHbs.hGo, 60000);
+    while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+        DispatchMessageW(&msg);
+    DestroyWindow(gHbs.hwnd);
+    return 0;
+}
+
+static DWORD WINAPI HbWaitingSenderThread(LPVOID Param)
+{
+    UNREFERENCED_PARAMETER(Param);
+    SendMessageW(gHbs.hwnd, WM_GETTEXT, 1000000, (LPARAM)gHbs.Buffer);
+    return 0;
+}
+
+START_TEST(LifetimeSenderCopyTerminated)
+{
+    HANDLE hReceiver, hSender;
+    ULONG Before, After;
+    int i;
+
+    gHbs.Buffer = VirtualAlloc(NULL, 1000000 * sizeof(WCHAR), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    gHbs.hReady = CreateEventW(NULL, FALSE, FALSE, NULL);
+    gHbs.hGo = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ok(gHbs.Buffer != NULL, "VirtualAlloc failed\n");
+    if (!gHbs.Buffer)
+        return;
+    hReceiver = CreateThread(NULL, 0, HbSilentReceiverThread, NULL, 0, NULL);
+    WaitForSingleObject(gHbs.hReady, 10000);
+    ok(gHbs.hwnd != NULL, "no receiver window\n");
+
+    Before = HbPagedPoolPages();
+    for (i = 0; i < 30 && gHbs.hwnd; i++)
+    {
+        hSender = CreateThread(NULL, 0, HbWaitingSenderThread, NULL, 0, NULL);
+        ok(hSender != NULL, "CreateThread failed %lu\n", GetLastError());
+        if (!hSender)
+            break;
+        /* It waits for the answer inside win32k */
+        ok(WaitForSingleObject(hSender, 200) == WAIT_TIMEOUT, "round %d: the sender came back\n", i);
+        TerminateThread(hSender, 9);
+        WaitForSingleObject(hSender, 10000);
+        CloseHandle(hSender);
+    }
+    SetEvent(gHbs.hGo);
+    ok(WaitForSingleObject(hReceiver, 20000) == WAIT_OBJECT_0, "the receiver did not end\n");
+    CloseHandle(hReceiver);
+    After = HbPagedPoolPages();
+
+    /* 30 copies of 2 MB are 15 000 pages */
+    ok(After < Before + 3000, "paged pool grew from %lu to %lu pages\n", Before, After);
+    trace("paged pool: %lu -> %lu pages\n", Before, After);
+    VirtualFree(gHbs.Buffer, 0, MEM_RELEASE);
+    CloseHandle(gHbs.hReady);
+    CloseHandle(gHbs.hGo);
+}
+
 static struct
 {
     HANDLE hReady, hQuit;

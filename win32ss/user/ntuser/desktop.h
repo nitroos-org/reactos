@@ -67,6 +67,8 @@ extern PTHREADINFO gptiDesktopThread;
 BOOLEAN IntIsDesktopOwnedWindow(_In_ PWND pwnd);
 VOID IntDesktopThreadProcessExit(_In_ PPROCESSINFO ppi);
 VOID IntDesktopHeapWindowGone(_In_ PVOID Object);
+VOID IntReferenceDesktopForObject(_In_ PDESKTOP pdesk);
+VOID IntDereferenceDesktopForObject(_In_ PDESKTOP pdesk, _In_ PVOID Object);
 extern PKEVENT gpDesktopThreadStartedEvent;
 extern PKEVENT gpDesktopSwitchEvent;
 extern HANDLE ghDesktopSwitchEvent;

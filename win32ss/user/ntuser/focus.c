@@ -1210,6 +1210,60 @@ co_IntSetForegroundAndFocusWindow(
    return FALSE;
 }
 
+/*
+ * WNDS_BEINGACTIVATED marks a window whose activation is in progress across the callbacks of
+ * co_IntSetActiveWindow. The window can belong to another thread of the same (attached) queue: a thread that
+ * ends inside one of those callbacks never comes back to clear the mark, and the window could never be
+ * activated again. Each activation records in a frame on the stack, listed in its thread, whether it set the
+ * mark; the exit cleanup of the thread clears the marks its frames left set (IntRundownActivations).
+ */
+typedef struct _USER_ACTIVATION_FRAME
+{
+   struct _USER_ACTIVATION_FRAME *Next;
+   PWND pwnd;      /* held by the caller with a Co reference (ASSERT_REFS_CO) */
+   BOOLEAN bMarked;
+} USER_ACTIVATION_FRAME, *PUSER_ACTIVATION_FRAME;
+
+static inline VOID
+IntMarkBeingActivated(_Inout_ PUSER_ACTIVATION_FRAME Frame)
+{
+   Frame->pwnd->state |= WNDS_BEINGACTIVATED;
+   Frame->bMarked = TRUE;
+}
+
+static inline VOID
+IntUnmarkBeingActivated(_Inout_ PUSER_ACTIVATION_FRAME Frame)
+{
+   Frame->pwnd->state &= ~WNDS_BEINGACTIVATED;
+   Frame->bMarked = FALSE;
+}
+
+/* Thread cleanup: activations the thread never came back to (it ended inside one of their callbacks).
+   Called before the Co references of the thread are given back: the windows of the frames are still held */
+VOID FASTCALL
+IntRundownActivations(PTHREADINFO pti)
+{
+   PUSER_ACTIVATION_FRAME Frame;
+
+   for (Frame = pti->pActivationFrames; Frame; Frame = Frame->Next)
+   {
+      if (Frame->bMarked)
+      {
+         TRACE("Thread %p ended in the activation of %p\n", pti, Frame->pwnd);
+         Frame->pwnd->state &= ~WNDS_BEINGACTIVATED;
+      }
+   }
+   pti->pActivationFrames = NULL;
+}
+
+static BOOL FASTCALL
+co_IntSetActiveWindowInFrame(
+   _In_ PWND Wnd,
+   _In_ BOOL bMouse,
+   _In_ BOOL bFocus,
+   _In_ BOOL Async,
+   _Inout_ PUSER_ACTIVATION_FRAME Frame);
+
 //
 // Set the Active Window.
 //
@@ -1219,6 +1273,31 @@ co_IntSetActiveWindow(
    _In_ BOOL bMouse,
    _In_ BOOL bFocus,
    _In_ BOOL Async )
+{
+   PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+   USER_ACTIVATION_FRAME Frame;
+   BOOL Ret;
+
+   Frame.pwnd = Wnd;
+   Frame.bMarked = FALSE;
+   Frame.Next = pti->pActivationFrames;
+   pti->pActivationFrames = &Frame;
+
+   Ret = co_IntSetActiveWindowInFrame(Wnd, bMouse, bFocus, Async, &Frame);
+
+   ASSERT(pti->pActivationFrames == &Frame);
+   ASSERT(!Frame.bMarked);
+   pti->pActivationFrames = Frame.Next;
+   return Ret;
+}
+
+static BOOL FASTCALL
+co_IntSetActiveWindowInFrame(
+   _In_ PWND Wnd,
+   _In_ BOOL bMouse,
+   _In_ BOOL bFocus,
+   _In_ BOOL Async,
+   _Inout_ PUSER_ACTIVATION_FRAME Frame)
 {
    PTHREADINFO pti;
    PUSER_MESSAGE_QUEUE ThreadQueue;
@@ -1274,14 +1353,14 @@ co_IntSetActiveWindow(
       hook (SetFocus on one of its children, a click on one of its buttons) does not call the hook again.
       It did, each time one level deeper on the kernel stack, until no callback fitted any more (and the
       number of HCBT_ACTIVATE calls was the number of levels that fitted). Wnd is held by the caller. */
-   Wnd->state |= WNDS_BEINGACTIVATED;
+   IntMarkBeingActivated(Frame);
 
    /* Call CBT hook chain */
    cbt.fMouse     = bMouse;
    /* Windows gives the hook the window that is being activated, not the one that was active */
    cbt.hWndActive = hWnd;
    Hooked = co_HOOK_CallHooks( WH_CBT, HCBT_ACTIVATE, (WPARAM)hWnd, (LPARAM)&cbt);
-   Wnd->state &= ~WNDS_BEINGACTIVATED;
+   IntUnmarkBeingActivated(Frame);
    if (Hooked)
    {
       ERR("SetActiveWindow: WH_CBT Call Hook return!\n");
@@ -1337,7 +1416,7 @@ co_IntSetActiveWindow(
    ThreadQueue->spwndActive = Wnd;
 
    // Set state flag to prevent recursions.
-   Wnd->state |= WNDS_BEINGACTIVATED;
+   IntMarkBeingActivated(Frame);
 
    IntNotifyWinEvent(EVENT_SYSTEM_FOREGROUND, Wnd, OBJID_WINDOW, CHILDID_SELF, WEF_SETBYWNDPTI);
 
@@ -1346,7 +1425,7 @@ co_IntSetActiveWindow(
    if (ThreadQueue != pti->MessageQueue || !VerifyWnd(Wnd))
    {
       ERR("SetActiveWindow: the queue or the window changed in the foreground event\n");
-      Wnd->state &= ~WNDS_BEINGACTIVATED;
+      IntUnmarkBeingActivated(Frame);
       return FALSE;
    }
 
@@ -1361,7 +1440,7 @@ co_IntSetActiveWindow(
    {
       ERR("SetActiveWindow: the queue of the thread changed in the activation messages\n");
       if (InAAPM) pti->TIF_flags &= ~TIF_INACTIVATEAPPMSG;
-      Wnd->state &= ~WNDS_BEINGACTIVATED;
+      IntUnmarkBeingActivated(Frame);
       return FALSE;
    }
 
@@ -1390,7 +1469,7 @@ co_IntSetActiveWindow(
       ThreadQueue->QF_flags |= QF_ACTIVATIONCHANGE;
 
    //ERR("co_IntSetActiveWindow Exit\n");
-   Wnd->state &= ~WNDS_BEINGACTIVATED;
+   IntUnmarkBeingActivated(Frame);
    return (pti->MessageQueue->spwndActive == Wnd);
 }
 
