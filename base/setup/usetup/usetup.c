@@ -1799,6 +1799,8 @@ SelectPartitionPage(PINPUT_RECORD Ir)
 
     if (IsUnattendedSetup) do
     {
+        LONG AutoDisk;
+
         /* If DestinationDiskNumber or DestinationPartitionNumber are invalid
          * (see below), don't select the partition and show the list instead */
         if (USetupData.DestinationDiskNumber == -1 ||
@@ -1806,6 +1808,9 @@ SelectPartitionPage(PINPUT_RECORD Ir)
         {
             break;
         }
+
+        /* The disk AutoPartition looks at when the partition named in the file does not exist */
+        AutoDisk = USetupData.DestinationDiskNumber;
 
         /* Determine the selected installation disk & partition */
         CurrentPartition = SelectPartition(PartitionList,
@@ -1842,11 +1847,30 @@ SelectPartitionPage(PINPUT_RECORD Ir)
                 goto CreateInstallPartition;
             }
             /* The first entry is a partition that exists (and holds somebody's data): AutoPartition only
-             * creates a partition in free space, it never picks an existing partition the file did not name */
-            if (CurrentPartition && CurrentPartition->IsPartitioned)
+             * creates a partition in free space, it never picks an existing partition the file did not name.
+             * It goes on to the first free space of the disk the file names (a disk that holds another
+             * system's partitions has its free space after them). */
+            if (!CurrentPartition || CurrentPartition->IsPartitioned)
+            {
+                PPARTENTRY Free;
+
                 SetupLogFormat("AutoPartition: the partition named in the file does not exist and the first entry of the"
-                               " disk list (disk %lu) is a partition in use: not used",
-                               CurrentPartition->DiskEntry->DiskNumber);
+                               " disk list is %s: not used", CurrentPartition ? "a partition in use" : "none");
+                for (Free = GetNextPartition(PartitionList, NULL); Free; Free = GetNextPartition(PartitionList, Free))
+                {
+                    if (Free->IsPartitioned || Free->LogicalPartition ||
+                        Free->DiskEntry->DiskNumber != (ULONG)AutoDisk ||
+                        Free->DiskEntry->MediaType != FixedMedia)
+                        continue;
+                    if (PartitionCreateChecks(Free, 0ULL, 0) != NOT_AN_ERROR)
+                        continue;
+                    SetupLogFormat("AutoPartition: using the free space of disk %lu (%lu MB)", Free->DiskEntry->DiskNumber,
+                                   (ULONG)(GetPartEntrySizeInBytes(Free) / MB));
+                    CurrentPartition = Free;
+                    goto CreateInstallPartition;
+                }
+                SetupLogFormat("AutoPartition: no free space on disk %ld that can hold a partition", AutoDisk);
+            }
         }
 
         /* Nothing to install to and nobody to ask: stop with a message
@@ -2077,6 +2101,22 @@ CreateInstallPartition:
             PopupError("The selected disk has sectors of other than 512 bytes.\n"
                        "The file system drivers cannot yet format such a disk, so\n"
                        "nothing has been written to it. Select another disk.\n"
+                       "Press ENTER to continue.",
+                       MUIGetString(STRING_CONTINUE),
+                       Ir, POPUP_WAIT_ENTER);
+            return SELECT_PARTITION_PAGE;
+
+        case UEFI_INSTALL_NO_VOLUME:
+            if (IsUnattendedSetup)
+            {
+                UnattendedFatal("the partition belongs to another system (no volume)",
+                                "Partitions are counted in table order: name a partition of this",
+                                "system, or use AutoPartition on a disk with free space.");
+                return QUIT_PAGE;
+            }
+            PopupError("The selected partition belongs to another system: Setup cannot\n"
+                       "format it or copy files to it, so nothing has been written.\n"
+                       "Select another partition or unpartitioned space.\n"
                        "Press ENTER to continue.",
                        MUIGetString(STRING_CONTINUE),
                        Ir, POPUP_WAIT_ENTER);
@@ -2606,6 +2646,15 @@ StartPartitionOperationsPage(PINPUT_RECORD Ir)
     //
     // FIXME?? If cannot use any system partition, install FreeLdr on floppy / removable media??
     //
+
+    /* Formatting and copying need a volume for both the system and the installation partition: when one has
+     * none (another system's partition) stop with the message of a missing system partition, not a crash */
+    if (!SystemVolume || !InstallVolume)
+    {
+        DPRINT1("No volume: system partition %p, installation partition %p\n", SystemVolume, InstallVolume);
+        FsVolCallback(&FsVolContext, FSVOLNOTIFY_PARTITIONERROR, ERROR_SYSTEM_PARTITION_NOT_FOUND, 0);
+        return FsVolContext.NextPageOnAbort;
+    }
 
     /* Set the AUTOCREATE flag if the system partition was automatically created */
     if (SystemPartition->New && SystemVolume)
