@@ -1959,6 +1959,12 @@ static void CRYPT_CheckSimpleChain(CertificateChainEngine *engine,
              (void *)chain->rgpElement[i]->pCertContext, 0, NULL))
                 chain->rgpElement[i - 1]->TrustStatus.dwErrorStatus |=
                  CERT_TRUST_IS_NOT_SIGNATURE_VALID;
+            else
+                /* Windows marks the issuer that was found and whose
+                 * signature verified as the preferred one (measured:
+                 * every element of a chain but a leaf without issuer). */
+                chain->rgpElement[i - 1]->TrustStatus.dwInfoStatus |=
+                 CERT_TRUST_HAS_PREFERRED_ISSUER;
             /* Once a path length constraint has been violated, every remaining
              * CA cert's basic constraints is considered invalid.
              */
@@ -2014,6 +2020,12 @@ static void CRYPT_CheckSimpleChain(CertificateChainEngine *engine,
     {
         rootElement->TrustStatus.dwInfoStatus |= status;
         CRYPT_CheckRootCert(engine->hRoot, rootElement);
+        /* A self-signed element is its own issuer: preferred when its
+         * signature verified. */
+        if (!(rootElement->TrustStatus.dwErrorStatus &
+         CERT_TRUST_IS_NOT_SIGNATURE_VALID))
+            rootElement->TrustStatus.dwInfoStatus |=
+             CERT_TRUST_HAS_PREFERRED_ISSUER;
     }
     CRYPT_CombineTrustStatus(&chain->TrustStatus, &rootElement->TrustStatus);
 }
