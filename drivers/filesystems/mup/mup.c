@@ -1881,6 +1881,98 @@ MupBuildIoControlRequest(PDEVICE_OBJECT TargetDevice,
     return Irp;
 }
 
+/*
+ * Cancel of a create that waits for the providers' answers (prefix resolution). The create IRP is
+ * pended here while the providers are asked, each with an IRP of MUP's own: a provider that takes
+ * long (a redirector connecting to a server that does not answer) only learns that the caller gave
+ * up (CancelSynchronousIo, the thread terminating) when those IRPs are cancelled. The cancel routine
+ * runs at DISPATCH_LEVEL with the cancel lock held, where the query list (an ERESOURCE) cannot be
+ * walked: it queues a work item that finds the search by its IRP and sequence number (the IRP may
+ * be completed and reused by then), cancels the outstanding query IRPs, and lets the last answer
+ * complete the create with STATUS_CANCELLED (MupDereferenceMasterQueryContext).
+ */
+typedef struct _MUP_CANCEL_WORK
+{
+    WORK_QUEUE_ITEM Item;
+    PIRP Irp;
+    ULONG Seq;
+} MUP_CANCEL_WORK, *PMUP_CANCEL_WORK;
+
+static volatile LONG MupCancelSeq;
+
+NTSTATUS
+MupDereferenceMasterQueryContext(PMUP_MQC MasterQueryContext);
+
+static
+VOID
+NTAPI
+MupCancelQueriesWorker(PVOID Context)
+{
+    PMUP_CANCEL_WORK Work = Context;
+    PMUP_MQC Found = NULL;
+    PLIST_ENTRY Entry, Next;
+
+    FsRtlEnterFileSystem();
+    ExAcquireResourceExclusiveLite(&MupGlobalLock, TRUE);
+    for (Entry = MupMasterQueryList.Flink; Entry != &MupMasterQueryList; Entry = Entry->Flink)
+    {
+        PMUP_MQC MasterQueryContext = CONTAINING_RECORD(Entry, MUP_MQC, MQCListEntry);
+
+        /* A search whose last reference is gone is being completed: not ours to revive */
+        if (MasterQueryContext->Irp == Work->Irp && MasterQueryContext->CancelSeq == Work->Seq &&
+            MasterQueryContext->NodeReferences > 0)
+        {
+            ++MasterQueryContext->NodeReferences;
+            Found = MasterQueryContext;
+            break;
+        }
+    }
+    ExReleaseResourceLite(&MupGlobalLock);
+
+    if (Found != NULL)
+    {
+        /* A provider may complete its IRP from its cancel routine: the completion routine takes this
+         * lock again in this thread (an ERESOURCE may be acquired recursively) and removes only the
+         * entry of that IRP; our reference keeps the search */
+        ExAcquireResourceExclusiveLite(&Found->QueryPathListLock, TRUE);
+        for (Entry = Found->QueryPathList.Flink; Entry != &Found->QueryPathList; Entry = Next)
+        {
+            Next = Entry->Flink;
+            IoCancelIrp(CONTAINING_RECORD(Entry, QUERY_PATH_CONTEXT, QueryPathListEntry)->Irp);
+        }
+        ExReleaseResourceLite(&Found->QueryPathListLock);
+        MupDereferenceMasterQueryContext(Found);
+    }
+    FsRtlExitFileSystem();
+
+    ExFreePoolWithTag(Work, TAG_MUP);
+}
+
+static
+VOID
+NTAPI
+MupCancelCreate(PDEVICE_OBJECT DeviceObject,
+                PIRP Irp)
+{
+    PMUP_CANCEL_WORK Work;
+    ULONG Seq = PtrToUlong(Irp->Tail.Overlay.DriverContext[0]);
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+
+    Work = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Work), TAG_MUP);
+    if (Work == NULL)
+    {
+        /* The providers answer in their own time: the create ends with their answers */
+        return;
+    }
+    Work->Irp = Irp;
+    Work->Seq = Seq;
+    ExInitializeWorkItem(&Work->Item, MupCancelQueriesWorker, Work);
+    ExQueueWorkItem(&Work->Item, DelayedWorkQueue);
+}
+
 VOID
 MupFreeMasterQueryContext(PMUP_MQC MasterQueryContext)
 {
@@ -1893,7 +1985,7 @@ MupDereferenceMasterQueryContext(PMUP_MQC MasterQueryContext)
 {
     LONG References;
     NTSTATUS Status;
-    BOOLEAN KeepExtraRef;
+    BOOLEAN KeepExtraRef, Cancelled;
     PDEVICE_OBJECT ProviderDevice;
 
     ExAcquireResourceExclusiveLite(&MupGlobalLock, TRUE);
@@ -1919,6 +2011,11 @@ MupDereferenceMasterQueryContext(PMUP_MQC MasterQueryContext)
     RemoveEntryList(&MasterQueryContext->MQCListEntry);
     ExReleaseResourceLite(&MupGlobalLock);
 
+    /* The create is ours to complete or hand on now: no cancel of it reaches the search any more (a
+     * work item that a cancel queued meanwhile no longer finds it) */
+    IoSetCancelRoutine(MasterQueryContext->Irp, NULL);
+    Cancelled = MasterQueryContext->Irp->Cancel;
+
     ExAcquireResourceExclusiveLite(&MupPrefixTableLock, TRUE);
     KeepExtraRef = MasterQueryContext->Prefix->KeepExtraRef;
     MupDereferenceKnownPrefix(MasterQueryContext->Prefix);
@@ -1936,6 +2033,14 @@ MupDereferenceMasterQueryContext(PMUP_MQC MasterQueryContext)
             }
 
             ExReleaseResourceLite(&MupPrefixTableLock);
+
+            /* The caller gave up meanwhile (CancelSynchronousIo, its thread ended): the prefix stays
+             * known, the open is not made (as an uncancelled reroute, without the rename) */
+            if (Cancelled)
+            {
+                Status = STATUS_CANCELLED;
+                goto Complete;
+            }
 
             ProviderDevice = MupReferenceProviderDevice(MasterQueryContext->LatestProvider);
             if (ProviderDevice != NULL)
@@ -1962,8 +2067,9 @@ MupDereferenceMasterQueryContext(PMUP_MQC MasterQueryContext)
     MupDereferenceKnownPrefix(MasterQueryContext->Prefix);
     ExReleaseResourceLite(&MupPrefixTableLock);
 
-    /* Return the highest failed status we had */
-    Status = MasterQueryContext->LatestStatus;
+    /* Return the highest failed status we had; a create the caller gave up ends as cancelled
+     * (Windows Server 2022 as a client: CancelSynchronousIo of a UNC open, error 995) */
+    Status = Cancelled ? STATUS_CANCELLED : MasterQueryContext->LatestStatus;
 
 Complete:
     /* In finally, complete the IRP for real! */
@@ -2463,6 +2569,16 @@ CreateRedirectedFile(PIRP Irp,
         ++Prefix->NodeReferences;
         ExReleaseResourceLite(&MupGlobalLock);
 
+        /* While the providers are asked, a cancel of the create cancels their queries (MupCancelCreate);
+         * one that came before is seen by Irp->Cancel below, for each query as it is made */
+        MasterQueryContext->CancelSeq = (ULONG)InterlockedIncrement(&MupCancelSeq);
+        Irp->Tail.Overlay.DriverContext[0] = ULongToPtr(MasterQueryContext->CancelSeq);
+        IoSetCancelRoutine(Irp, MupCancelCreate);
+        if (Irp->Cancel)
+        {
+            IoSetCancelRoutine(Irp, NULL);
+        }
+
         _SEH2_TRY
         {
             ExAcquireResourceExclusiveLite(&MupGlobalLock, TRUE);
@@ -2597,6 +2713,11 @@ CreateRedirectedFile(PIRP Irp,
                     /* Query the provider !*/
                     DPRINT("Requesting UNC provider: %wZ\n", &UncProvider->DeviceName);
                     DPRINT("Calling: %wZ\n", &QueryDevice->DriverObject->DriverName);
+                    /* The caller gave up already: the provider sees a cancelled query and answers at once */
+                    if (Irp->Cancel)
+                    {
+                        IoCancelIrp(QueryIrp);
+                    }
                     Status = IoCallDriver(QueryDevice, QueryIrp);
                 }
 

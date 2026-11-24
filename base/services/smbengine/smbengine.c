@@ -864,9 +864,6 @@ Dispatch(PUCHAR Buffer, DWORD Got, HANDLE Event)
         case SmbUpDisconnect:
             HandleDisconnect(Op, Event);
             return;
-        case SmbUpLock:
-            SmbEngAnswerOp(Op, STATUS_NOT_SUPPORTED, Event);
-            return;
         default:
             break;
     }

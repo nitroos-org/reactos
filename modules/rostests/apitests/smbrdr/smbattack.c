@@ -7,7 +7,8 @@
 
 /*
  * Defensive tests of our own driver, run in test VMs only:
- *   smbattack load DIR SECONDS THREADS     mixed file operations under DIR (\\server\share\dir), per-status counts,
+ *   smbattack load DIR SECONDS THREADS     mixed file operations under DIR (\\server\share\dir), byte-range locks
+ *                                          and change notifications (waiting ones cancelled or closed), per-status counts,
  *                                          "SLOW" for an operation that took longer than 150 s
  *   smbattack cancel DIR SECONDS THREADS   overlapped reads/writes cancelled with CancelIoEx, and threads with
  *                                          requests in flight terminated with TerminateThread
@@ -123,6 +124,145 @@ static NTSTATUS timed(NTSTATUS st, DWORD t0, const char *what)
     return st;
 }
 
+/*
+ * Byte-range locks of the load: a random range (often overlapping other threads' on the same 8 files),
+ * shared or exclusive; fail-immediately, or waiting (on an overlapped handle: then cancelled with
+ * CancelIoEx, ended by closing the handle, or waited for; on a synchronous handle: waited for). A
+ * thread waits for a lock only while it holds none, so threads cannot wait for each other in a cycle.
+ * Some handles are closed with their lock held (unlock at cleanup).
+ */
+static void load_locks(const WCHAR *path, ULONG *s)
+{
+    BOOL ovl = (rnd(s) & 1) != 0, excl = (rnd(s) & 1) != 0, wait = (rnd(s) % 3) == 0, ok;
+    HANDLE f = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_ALWAYS, ovl ? FILE_FLAG_OVERLAPPED : 0, NULL);
+    ULONGLONG off = (rnd(s) % 8) ? rnd(s) % 65536 : ((ULONGLONG)rnd(s) << 24);
+    DWORD len = (rnd(s) % 8) ? 1 + rnd(s) % 4096 : 0, t0 = GetTickCount(), n;
+    OVERLAPPED o;
+    UCHAR b[16];
+
+    if (f == INVALID_HANDLE_VALUE)
+    {
+        timed((NTSTATUS)(0xE0000000 | GetLastError()), t0, "lock-open");
+        return;
+    }
+    memset(&o, 0, sizeof(o));
+    o.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    o.Offset = (DWORD)off;
+    o.OffsetHigh = (DWORD)(off >> 32);
+    ok = LockFileEx(f, (excl ? LOCKFILE_EXCLUSIVE_LOCK : 0) | (wait ? 0 : LOCKFILE_FAIL_IMMEDIATELY), 0, len, 0, &o);
+    if (!ok && GetLastError() == ERROR_IO_PENDING)
+    {
+        /* Waiting: cancel it, close the handle under it, or wait a little for the grant */
+        ULONG how = rnd(s) % 3;
+        if (WaitForSingleObject(o.hEvent, rnd(s) % 100) != WAIT_OBJECT_0)
+        {
+            if (how == 0)
+                CancelIoEx(f, &o);
+            else if (how == 1)
+            {
+                CloseHandle(f);
+                f = INVALID_HANDLE_VALUE;
+            }
+            if (WaitForSingleObject(o.hEvent, 150000) != WAIT_OBJECT_0)
+                timed((NTSTATUS)0xE0000102, t0 - 151000, "lock-wait");    /* counts as SLOW */
+        }
+        ok = (f != INVALID_HANDLE_VALUE) ? GetOverlappedResult(f, &o, &n, FALSE) : (o.Internal == 0);
+        if (!ok && f == INVALID_HANDLE_VALUE)
+            SetLastError(RtlNtStatusToDosError((NTSTATUS)o.Internal));
+    }
+    timed(ok ? STATUS_SUCCESS : (NTSTATUS)(0xE0000000 | GetLastError()), t0, wait ? "lock-wait" : "lock");
+    if (ok && f != INVALID_HANDLE_VALUE)
+    {
+        /* Inside the range, then unlock (or leave it to the cleanup) */
+        OVERLAPPED io;
+        memset(&io, 0, sizeof(io));
+        io.hEvent = o.hEvent;
+        io.Offset = o.Offset;
+        io.OffsetHigh = o.OffsetHigh;
+        ResetEvent(io.hEvent);
+        if ((excl ? WriteFile(f, b, sizeof(b), NULL, &io) : ReadFile(f, b, sizeof(b), NULL, &io)) ||
+            GetLastError() == ERROR_IO_PENDING)
+            GetOverlappedResult(f, &io, &n, TRUE);
+        if (rnd(s) % 4)
+        {
+            t0 = GetTickCount();
+            ResetEvent(o.hEvent);
+            ok = UnlockFileEx(f, 0, len, 0, &o);
+            if (!ok && GetLastError() == ERROR_IO_PENDING)
+                ok = GetOverlappedResult(f, &o, &n, TRUE);
+            timed(ok ? STATUS_SUCCESS : (NTSTATUS)(0xE0000000 | GetLastError()), t0, "unlock");
+        }
+    }
+    if (f != INVALID_HANDLE_VALUE)
+        CloseHandle(f);
+    CloseHandle(o.hEvent);
+}
+
+/*
+ * Change notifications of the load: the load's own directory, a random filter, subtree or not, a random
+ * buffer (0, small, up to 64 KiB, more), then cancelled, ended by closing the handle, or waited for a
+ * little while the other threads change the directory; sometimes several on one handle.
+ */
+static void load_notify(const WCHAR *dir, ULONG *s, UCHAR *buf)
+{
+    WCHAR nt[700];
+    IO_STATUS_BLOCK iosb;
+    HANDLE h, ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ULONG k, rounds = 1 + rnd(s) % 3;
+    DWORD t0 = GetTickCount();
+    NTSTATUS st;
+
+    nt_name(dir, nt, ARRAYSIZE(nt));
+    {
+        /* An asynchronous handle (nt_open's are synchronous: a notification would block the thread) */
+        UNICODE_STRING name;
+        OBJECT_ATTRIBUTES oa;
+
+        RtlInitUnicodeString(&name, nt);
+        InitializeObjectAttributes(&oa, &name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        st = timed(NtCreateFile(&h, FILE_LIST_DIRECTORY | SYNCHRONIZE, &oa, &iosb, NULL, 0,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN, FILE_DIRECTORY_FILE,
+                                NULL, 0), t0, "notify-open");
+    }
+    if (!NT_SUCCESS(st))
+    {
+        CloseHandle(ev);
+        return;
+    }
+    for (k = 0; k < rounds; k++)
+    {
+        ULONG len = (rnd(s) % 8 == 0) ? 0 : (rnd(s) % 4 == 0) ? rnd(s) % 64 : 1 + rnd(s) % (80 * 1024);
+        ULONG how = rnd(s) % 3;
+
+        ResetEvent(ev);
+        t0 = GetTickCount();
+        st = NtNotifyChangeDirectoryFile(h, ev, NULL, NULL, &iosb, buf, len, 1 + rnd(s) % 0xFFF, (BOOLEAN)(rnd(s) & 1));
+        if (st == STATUS_PENDING)
+        {
+            if (WaitForSingleObject(ev, rnd(s) % 300) != WAIT_OBJECT_0)
+            {
+                if (how == 0)
+                    CancelIoEx(h, (LPOVERLAPPED)&iosb);     /* the request's I/O status block is what CancelIoEx matches */
+                else if (how == 1)
+                {
+                    NtClose(h);
+                    h = NULL;
+                }
+                if (WaitForSingleObject(ev, 150000) != WAIT_OBJECT_0)
+                    timed((NTSTATUS)0xE0000102, t0 - 151000, "notify-wait");    /* counts as SLOW */
+            }
+            st = iosb.Status;
+        }
+        timed(st, t0, "notify");
+        if (h == NULL)
+            break;
+    }
+    if (h != NULL)
+        NtClose(h);
+    CloseHandle(ev);
+}
+
 static DWORD WINAPI load_thread(LPVOID p)
 {
     ULONG s = (ULONG)(ULONG_PTR)p * 7919u + GetTickCount();
@@ -142,7 +282,7 @@ static DWORD WINAPI load_thread(LPVOID p)
 
     while (GetTickCount() < Load.until)
     {
-        ULONG op = rnd(&s) % 10, len = rnd(&s) % 64 ? (rnd(&s) % 70000) : (rnd(&s) % (2 * 1024 * 1024));
+        ULONG op = rnd(&s) % 12, len = rnd(&s) % 64 ? (rnd(&s) % 70000) : (rnd(&s) % (2 * 1024 * 1024));
         LARGE_INTEGER off;
 
         _snwprintf(path, ARRAYSIZE(path) - 1, L"%ls\\f%lu.bin", Load.dir, rnd(&s) % 8);
@@ -275,6 +415,12 @@ static DWORD WINAPI load_thread(LPVOID p)
                     NtClose(h);
                 break;
             }
+            case 9:
+                load_locks(path, &s);
+                break;
+            case 10:
+                load_notify(Load.dir, &s, buf);
+                break;
             default:
             {
                 WIN32_FIND_DATAW fd;

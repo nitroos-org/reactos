@@ -51,6 +51,8 @@
 #define SMBENG_BINDING_BUCKETS  256
 #define SMBENG_FILE_BUCKETS     256
 #define SMBENG_MAX_FILES_PER_CONN 16384
+/* Requests without a time limit (blocking LOCKs) a connection holds at the server at a time */
+#define SMBENG_MAX_LONG_PER_CONN 4096
 
 typedef struct _SMBENG_CONFIG
 {
@@ -77,6 +79,8 @@ typedef struct _SMBENG_OP
     USHORT Opcode;
     BOOLEAN Internal;           /* engine-made (a close of an orphaned handle): no reply */
     BOOLEAN Cancelled;          /* the driver gave up on it (CANCEL notification) */
+    BOOLEAN LongWait;           /* waits at the server without a time limit (a blocking LOCK): counted in
+                                   LongCount, not in InFlightCount */
     struct smb2_pdu *Pdu;       /* while the server has it */
     ULONG Win32Error;
     HANDLE Token;               /* CONNECT: the user's token handle, until the connection takes it */
@@ -161,7 +165,8 @@ typedef struct _SMBENG_CONN
     LIST_ENTRY Pending;         /* requests waiting for the session */
     LIST_ENTRY Backlog;         /* requests over the in-flight bound, in order */
     LIST_ENTRY InFlight;
-    ULONG InFlightCount;
+    ULONG InFlightCount;        /* requests at the server that end within the request time limit */
+    ULONG LongCount;            /* requests at the server without a time limit (LongWait), on InFlight too */
     PSMBENG_FILE Files[SMBENG_FILE_BUCKETS];
     ULONG FileCount;
     ULONG MaxRead, MaxWrite;
