@@ -315,12 +315,19 @@ static NTSTATUS NgOpenVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, PIO_STACK_LOC
     return STATUS_SUCCESS;
 }
 
-/* Splits "name[:stream[:$DATA]]"; returns FALSE for an attribute type other than $DATA. */
-static BOOLEAN NgSplitStream(PUNICODE_STRING Last, PUNICODE_STRING Stream)
+/*
+ * Splits "name[:stream[:$DATA]]"; returns FALSE for an attribute type other than $DATA.  The one other type
+ * accepted is "$R:$INDEX_ALLOCATION" (the name of the reparse point index, "$Extend\$Reparse:$R:$INDEX_ALLOCATION",
+ * which the mount manager opens): *IndexOpen is set and the stream is left empty; the caller checks that the
+ * file is $Extend\$Reparse.
+ */
+static BOOLEAN NgSplitStream(PUNICODE_STRING Last, PUNICODE_STRING Stream, PBOOLEAN IndexOpen)
 {
     UNICODE_STRING Type, Data = RTL_CONSTANT_STRING(L"$DATA");
+    UNICODE_STRING IndexType = RTL_CONSTANT_STRING(L"$INDEX_ALLOCATION"), IndexName = RTL_CONSTANT_STRING(L"$R");
     USHORT i, n = Last->Length / sizeof(WCHAR);
 
+    *IndexOpen = FALSE;
     RtlInitEmptyUnicodeString(Stream, NULL, 0);
     for (i = 0; i < n && Last->Buffer[i] != L':'; i++)
         ;
@@ -337,6 +344,15 @@ static BOOLEAN NgSplitStream(PUNICODE_STRING Last, PUNICODE_STRING Stream)
     {
         Type.Buffer = Stream->Buffer + i + 1;
         Type.Length = Type.MaximumLength = Stream->Length - (i + 1) * sizeof(WCHAR);
+        if (RtlEqualUnicodeString(&Type, &IndexType, TRUE))
+        {
+            Stream->Length = i * sizeof(WCHAR);
+            if (!RtlEqualUnicodeString(Stream, &IndexName, TRUE))
+                return FALSE;
+            *IndexOpen = TRUE;
+            RtlInitEmptyUnicodeString(Stream, NULL, 0);
+            return TRUE;
+        }
         if (!RtlEqualUnicodeString(&Type, &Data, TRUE))
             return FALSE;
         Stream->Length = i * sizeof(WCHAR);
@@ -1016,7 +1032,7 @@ static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp, PFILE_NETW
     PNG_CCB RelatedCcb = NULL, Ccb = NULL;
     ngc_node *Node = NULL, *Parent = NULL, *Next;
     BOOLEAN Trailing = FALSE, IsDir, Missing = FALSE, TargetExists = FALSE, Created = FALSE, Shared = FALSE, Opening = FALSE;
-    BOOLEAN CreatedNode = FALSE, StreamChecked = FALSE, SetPaging = FALSE;
+    BOOLEAN CreatedNode = FALSE, StreamChecked = FALSE, SetPaging = FALSE, IndexOpen = FALSE;
     ACCESS_MASK Effective;
     BOOLEAN Exclusive = (Disposition == FILE_CREATE || Disposition == FILE_SUPERSEDE);
     NG_SHARED_HOLD Hold;
@@ -1229,7 +1245,7 @@ walk:
         if (LastComp)
         {
             Rest.Length = 0;
-            if (!NgSplitStream(&Comp, &Stream))
+            if (!NgSplitStream(&Comp, &Stream, &IndexOpen))
             {
                 Status = STATUS_OBJECT_NAME_INVALID;
                 break;
@@ -1395,6 +1411,21 @@ walk:
             ngc_put(Node);
             Node = Next;
         }
+    }
+    if (IndexOpen && NT_SUCCESS(Status))
+    {
+        /* "$Reparse:$R:$INDEX_ALLOCATION": only the reparse point index of this volume, never created, never a query open. */
+        UNICODE_STRING RpName = RTL_CONSTANT_STRING(L"$Reparse");
+        struct ngc_stat Ps;
+        Ps.mft_ref = 0;
+        if (Parent)
+            ngc_stat(Parent, &Ps);
+        if (Missing)
+            Status = STATUS_OBJECT_NAME_NOT_FOUND;
+        else if (Query)
+            Status = STATUS_NOT_SUPPORTED;
+        else if ((Ps.mft_ref & 0xffffffffffffULL) != 11 || !RtlEqualUnicodeString(&Comp, &RpName, TRUE))
+            Status = STATUS_OBJECT_NAME_INVALID;
     }
 walked:
     if (NT_SUCCESS(Status) && Missing && Parent)
@@ -1700,6 +1731,7 @@ walked:
     Ccb->DeleteOnClose = Ccb->OpenedDeleteOnClose = (Options & FILE_DELETE_ON_CLOSE) != 0;
     Ccb->AppendOnly = (Effective & FILE_APPEND_DATA) && !(Effective & FILE_WRITE_DATA);
     Ccb->Granted = Effective;
+    Ccb->ReparseIndex = IndexOpen;
     if (!Opening)
     {
         /* No FCB for the file when the walk looked: this one is the candidate (not shared until inserted). */

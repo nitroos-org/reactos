@@ -222,6 +222,9 @@ int ngc_is_reparse(ngc_node *n);
 int ngc_get_reparse(ngc_node *n, void **out, unsigned int *len);
 int ngc_set_reparse(ngc_vol *v, ngc_node *n, const void *data, unsigned int len);
 int ngc_delete_reparse(ngc_vol *v, ngc_node *n, unsigned int tag);
+/* The reparse point index in key order: the first entry at or after (tag, ref), after it when @after; -NGC_ENOENT when none. */
+int ngc_reparse_next(ngc_vol *v, unsigned int tag, unsigned long long ref, int after,
+                     unsigned int *otag, unsigned long long *oref);
 int ngc_short_name(ngc_node *n, unsigned long long parent_mref, unsigned short *out, unsigned int *len);
 int ngc_add_short_name(ngc_vol *v, ngc_node *dir, ngc_node *n, const unsigned short *lname, unsigned int llen,
 		const unsigned short *sname, unsigned int slen);

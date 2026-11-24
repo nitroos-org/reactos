@@ -1303,11 +1303,11 @@ QueryVolumeName(IN HANDLE RootDirectory,
     OBJECT_ATTRIBUTES ObjectAttributes;
     PFILE_NAME_INFORMATION FileNameInfo;
     PREPARSE_DATA_BUFFER ReparseDataBuffer;
+    /* The object name of the open below points at this: it lives until the function returns */
+    UNICODE_STRING Reference;
 
     if (!FileName)
     {
-        UNICODE_STRING Reference;
-
         Reference.Length = Reference.MaximumLength = sizeof(ReparsePointInformation->FileReference);
         Reference.Buffer = (PWSTR)&(ReparsePointInformation->FileReference);
         InitializeObjectAttributes(&ObjectAttributes,
