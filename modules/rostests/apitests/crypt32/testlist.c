@@ -9,6 +9,7 @@ extern void func_ChainCaEku(void);
 extern void func_ChainRootAdded(void);
 extern void func_ChainTrust(void);
 extern void func_RootStoreSeed(void);
+extern void func_UserRootStore(void);
 extern void func_CryptExportPublicKeyInfoFromBCryptKeyHandle(void);
 extern void func_CryptTimeStamp(void);
 extern void func_CryptStringToBinaryStrict(void);
@@ -22,6 +23,7 @@ const struct test winetest_testlist[] =
     { "ChainRootAdded", func_ChainRootAdded },
     { "ChainTrust", func_ChainTrust },
     { "RootStoreSeed", func_RootStoreSeed },
+    { "UserRootStore", func_UserRootStore },
     { "CryptExportPublicKeyInfoFromBCryptKeyHandle", func_CryptExportPublicKeyInfoFromBCryptKeyHandle },
     { "CryptTimeStamp", func_CryptTimeStamp },
     { "CryptStringToBinaryStrict", func_CryptStringToBinaryStrict },

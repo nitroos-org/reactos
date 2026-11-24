@@ -38,6 +38,9 @@ typedef struct _WINE_REGSTOREINFO
      * has no path and writes through key. */
     HKEY             root;
     LPWSTR           path;
+    /* The Root store of the current user: adding a certificate to it or
+     * removing one asks the user (CRYPT_RootPrompt) */
+    BOOL             promptUser;
     BOOL             dirty;
     DWORD            resyncThread;
     HANDLE           changeEvent;
@@ -64,6 +67,125 @@ static void CRYPT_RegCloseWriteKey(WINE_REGSTOREINFO *store, HKEY key)
 {
     if (store->path)
         RegCloseKey(key);
+}
+
+/* The Root store of the current user: a root certificate that is added there
+ * is trusted by every chain of the user, so Windows asks the user first (a
+ * dialog with the name and the fingerprint of the certificate, the answer No
+ * and a closed dialog refuse the call with ERROR_CANCELLED), and removing one
+ * asks as well; where no user can be asked (the process has no visible window
+ * station: a service, a remote shell) the call fails with ERROR_NOT_SUPPORTED.
+ * All measured on Windows Server 2022 with the same calls; the texts below are
+ * our own wording of the same questions. */
+static BOOL CRYPT_IsUserRootStore(HKEY root, LPCWSTR path)
+{
+    return root == HKEY_CURRENT_USER && path &&
+     !lstrcmpiW(path, L"Software\\Microsoft\\SystemCertificates\\Root");
+}
+
+static BOOL CRYPT_HasVisibleWindowStation(void)
+{
+    USEROBJECTFLAGS flags;
+    DWORD needed;
+    HWINSTA station = GetProcessWindowStation();
+
+    return station && GetUserObjectInformationW(station, UOI_FLAGS, &flags,
+     sizeof(flags), &needed) && (flags.dwFlags & WSF_VISIBLE);
+}
+
+/* "2C2E2CC7 FAF21A79 ..." : four bytes to a group */
+static void CRYPT_FormatFingerprint(PCCERT_CONTEXT cert, DWORD propId, WCHAR *out, DWORD outChars)
+{
+    static const WCHAR hex[] = L"0123456789ABCDEF";
+    BYTE hash[20];
+    DWORD size = sizeof(hash), i, n = 0;
+
+    out[0] = 0;
+    if (!CertGetCertificateContextProperty(cert, propId, hash, &size))
+        return;
+    for (i = 0; i < size && n + 4 < outChars; i++)
+    {
+        if (i && !(i % 4))
+            out[n++] = ' ';
+        out[n++] = hex[hash[i] >> 4];
+        out[n++] = hex[hash[i] & 15];
+    }
+    out[n] = 0;
+}
+
+static void CRYPT_FormatDate(const FILETIME *ft, WCHAR *out, DWORD outChars)
+{
+    SYSTEMTIME st;
+
+    out[0] = 0;
+    if (FileTimeToSystemTime(ft, &st))
+        GetDateFormatW(LOCALE_USER_DEFAULT, DATE_LONGDATE, &st, NULL, out, outChars);
+}
+
+/* Asks the user whether the certificate may be added to (del == FALSE) or
+ * removed from (del == TRUE) the Root store of the user. */
+static BOOL CRYPT_RootPrompt(PCCERT_CONTEXT cert, BOOL del)
+{
+    WCHAR subject[256], issuer[256], sha1[64], md5[64], from[128], to[128], serial[80], text[2048];
+    int answer;
+
+    if (!CRYPT_HasVisibleWindowStation())
+    {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return FALSE;
+    }
+
+    subject[0] = issuer[0] = 0;
+    CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, NULL, subject, ARRAY_SIZE(subject));
+    CRYPT_FormatFingerprint(cert, CERT_SHA1_HASH_PROP_ID, sha1, ARRAY_SIZE(sha1));
+
+    if (!del)
+    {
+        swprintf(text, ARRAY_SIZE(text),
+         L"You are about to add a certificate to the trusted root certificates of your user account. "
+         L"The certificate claims to be issued by:\n\n%s\n\n"
+         L"Its origin cannot be verified. Compare this fingerprint (SHA-1) with the one its issuer gave you:\n\n%s\n\n"
+         L"Warning: once this root certificate is installed, every certificate issued by it is trusted automatically "
+         L"for your account. Installing a certificate whose fingerprint you have not confirmed is a security risk.\n\n"
+         L"Do you want to install this certificate?", subject, sha1);
+        answer = MessageBoxW(NULL, text, L"Security Warning",
+         MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND);
+    }
+    else
+    {
+        DWORD i, n = 0;
+        static const WCHAR hex[] = L"0123456789ABCDEF";
+
+        if (CertCompareCertificateName(cert->dwCertEncodingType, &cert->pCertInfo->Subject, &cert->pCertInfo->Issuer))
+            lstrcpyW(issuer, L"Self issued");
+        else
+            CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, CERT_NAME_ISSUER_FLAG, NULL, issuer, ARRAY_SIZE(issuer));
+        CRYPT_FormatFingerprint(cert, CERT_MD5_HASH_PROP_ID, md5, ARRAY_SIZE(md5));
+        CRYPT_FormatDate(&cert->pCertInfo->NotBefore, from, ARRAY_SIZE(from));
+        CRYPT_FormatDate(&cert->pCertInfo->NotAfter, to, ARRAY_SIZE(to));
+        /* the serial number, most significant byte first */
+        for (i = cert->pCertInfo->SerialNumber.cbData; i && n + 3 < ARRAY_SIZE(serial); i--)
+        {
+            BYTE b = cert->pCertInfo->SerialNumber.pbData[i - 1];
+            serial[n++] = hex[b >> 4];
+            serial[n++] = hex[b & 15];
+        }
+        serial[n] = 0;
+        swprintf(text, ARRAY_SIZE(text),
+         L"Do you want to remove the following certificate from the trusted root certificates of your user account?\n\n"
+         L"Subject: %s\nIssuer: %s\nValid from %s until %s\nSerial number: %s\n"
+         L"Fingerprint (SHA-1): %s\nFingerprint (MD5): %s",
+         subject, issuer, from, to, serial, sha1, md5);
+        answer = MessageBoxW(NULL, text, L"Trusted Root Certificates",
+         MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND);
+    }
+
+    if (answer != IDYES)
+    {
+        SetLastError(ERROR_CANCELLED);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 static void CRYPT_HashToStr(const BYTE *hash, LPWSTR asciiHash)
@@ -551,6 +673,28 @@ static BOOL WINAPI CRYPT_RegWriteCert(HCERTSTORE hCertStore,
 
     TRACE("(%p, %p, %ld)\n", hCertStore, cert, dwFlags);
 
+    /* Before the lock: the question is a dialog that runs its own message
+     * loop. A certificate that is in the store already is replaced: the user
+     * is asked about removing the old one first, as on Windows. */
+    if (store->promptUser && (dwFlags & CERT_STORE_PROV_WRITE_ADD_FLAG) &&
+     store->resyncThread != GetCurrentThreadId() &&
+     !(store->dwOpenFlags & CERT_STORE_READONLY_FLAG))
+    {
+        PCCERT_CONTEXT existing = CertFindCertificateInStore(store->memStore,
+         cert->dwCertEncodingType, 0, CERT_FIND_EXISTING, cert, NULL);
+
+        if (existing)
+        {
+            BOOL ok = CRYPT_RootPrompt(existing, TRUE);
+
+            CertFreeCertificateContext(existing);
+            if (!ok)
+                return FALSE;
+        }
+        if (!CRYPT_RootPrompt(cert, FALSE))
+            return FALSE;
+    }
+
     return CRYPT_RegWriteContext(store, 0, cert, pCertInterface, dwFlags);
 }
 
@@ -560,6 +704,11 @@ static BOOL WINAPI CRYPT_RegDeleteCert(HCERTSTORE hCertStore,
     WINE_REGSTOREINFO *store = hCertStore;
 
     TRACE("(%p, %p, %08lx)\n", store, pCertContext, dwFlags);
+
+    if (store->promptUser && store->resyncThread != GetCurrentThreadId() &&
+     !(store->dwOpenFlags & CERT_STORE_READONLY_FLAG) &&
+     !CRYPT_RootPrompt(pCertContext, TRUE))
+        return FALSE;
 
     return CRYPT_RegDeleteContext(store, 0, pCertContext, pCertInterface);
 }
@@ -804,6 +953,7 @@ static WINECRYPT_CERTSTORE *CRYPT_RegOpenStoreAt(HCRYPTPROV hCryptProv,
                         lstrcpyW(regInfo->path, path);
                     else
                         regInfo->root = NULL;
+                    regInfo->promptUser = CRYPT_IsUserRootStore(regInfo->root, regInfo->path);
                     InitializeCriticalSectionEx(&regInfo->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
                     regInfo->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": PWINE_REGSTOREINFO->cs");
                     CRYPT_RegReadFromReg(regInfo->key, regInfo->memStore, CERT_STORE_ADD_ALWAYS);
