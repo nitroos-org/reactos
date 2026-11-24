@@ -118,6 +118,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/IoVolume.c
     ntos_kd/KdSystemDebugControl.c
     ntos_kd/KdSystemDebugControlInternal.c
+    ntos_kd/KdLoadSymbolsFrozen.c
     ntos_ke/KeProcessorGroups.c
     ntos_ke/KeApc.c
     ntos_ke/KeApcDelivery.c
