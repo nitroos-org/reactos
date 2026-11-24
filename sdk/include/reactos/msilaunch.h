@@ -13,6 +13,10 @@
 
 #pragma once
 
+/* documented (kernel32 since Vista, advapi32), not declared by our SDK headers */
+BOOL WINAPI GetNamedPipeServerProcessId(HANDLE Pipe, PULONG ServerProcessId);
+BOOL WINAPI IsTokenRestricted(HANDLE TokenHandle);
+
 #define MSI_LAUNCH_PIPE_NAME    L"\\\\.\\pipe\\NitroMsiLaunch"
 #define MSI_LAUNCH_MAGIC        0x4C41494D  /* "MIAL" */
 #define MSI_LAUNCH_MAX_STRING   32768       /* characters of each string */

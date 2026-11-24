@@ -626,22 +626,64 @@ static HANDLE get_admin_token(void)
 
 /* A deferred action marked "no impersonation" is run by the Installer service as LocalSystem on Windows, not as the
  * user who started the installation. msi.dll runs in the process of that user, so for an elevated administrator
- * the program is started through the Installer service (msiexec /V, LocalSystem; see msilaunch.h). Anyone else
- * (the service refuses them) keeps running the action under their own token, as before. */
+ * the program is started through the Installer service (msiexec /V, LocalSystem; see msilaunch.h). LocalSystem runs
+ * the action itself; anyone else (the service would refuse them) keeps running it under their own token, as before. */
 static BOOL custom_action_runs_as_system(INT type)
 {
     return (type & msidbCustomActionTypeInScript) && (type & msidbCustomActionTypeNoImpersonate);
 }
 
-static BOOL start_installer_service(void)
+enum system_caller
+{
+    SYSTEM_CALLER_OTHER,    /* runs the action under its own token */
+    SYSTEM_CALLER_ADMIN,    /* an elevated administrator: through the Installer service, or not at all */
+    SYSTEM_CALLER_SYSTEM,   /* LocalSystem already */
+};
+
+/* Who is asking, by the same rules the Installer service applies (MsiLaunchCheckToken in msiexec's service.c) */
+static enum system_caller get_system_caller(void)
+{
+    HANDLE token;
+    enum system_caller ret = SYSTEM_CALLER_OTHER;
+    union { TOKEN_USER user; TOKEN_MANDATORY_LABEL label; BYTE buffer[128]; } info;
+    TOKEN_ELEVATION elevation;
+    DWORD size, appcontainer = 0, rid;
+    PSID sid;
+    BOOL member = FALSE;
+    SID_IDENTIFIER_AUTHORITY nt = { SECURITY_NT_AUTHORITY };
+
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token) &&
+        !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        return SYSTEM_CALLER_OTHER;
+
+    if (GetTokenInformation(token, TokenUser, &info, sizeof(info), &size) && IsWellKnownSid(info.user.User.Sid, WinLocalSystemSid))
+        ret = SYSTEM_CALLER_SYSTEM;
+    else if (GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size) && elevation.TokenIsElevated &&
+             GetTokenInformation(token, TokenIntegrityLevel, &info, sizeof(info), &size) &&
+             *GetSidSubAuthorityCount(info.label.Label.Sid) &&
+             (rid = *GetSidSubAuthority(info.label.Label.Sid, *GetSidSubAuthorityCount(info.label.Label.Sid) - 1)) >= SECURITY_MANDATORY_HIGH_RID &&
+             !IsTokenRestricted(token) &&
+             (!GetTokenInformation(token, 29 /* TokenIsAppContainer */, &appcontainer, sizeof(appcontainer), &size) || !appcontainer) &&
+             AllocateAndInitializeSid(&nt, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &sid))
+    {
+        if (CheckTokenMembership(NULL, sid, &member) && member)
+            ret = SYSTEM_CALLER_ADMIN;
+        FreeSid(sid);
+    }
+    CloseHandle(token);
+    TRACE("caller %d\n", ret);
+    return ret;
+}
+
+/* Starts the Installer service if needed; returns its process id, 0 when it does not run */
+static DWORD start_installer_service(void)
 {
     SC_HANDLE scm, service;
     SERVICE_STATUS_PROCESS status;
-    DWORD size, i;
-    BOOL ret = FALSE;
+    DWORD size, i, pid = 0;
 
     if (!(scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT)))
-        return FALSE;
+        return 0;
     if ((service = OpenServiceW(scm, L"MSIServer", SERVICE_START | SERVICE_QUERY_STATUS)))
     {
         if (StartServiceW(service, 0, NULL) || GetLastError() == ERROR_SERVICE_ALREADY_RUNNING)
@@ -652,36 +694,41 @@ static BOOL start_installer_service(void)
                     break;
                 if (status.dwCurrentState == SERVICE_RUNNING)
                 {
-                    ret = TRUE;
+                    pid = status.dwProcessId;
                     break;
                 }
                 if (status.dwCurrentState == SERVICE_STOPPED)
+                {
+                    ERR("the Installer service stopped (exit code %lu)\n", status.dwWin32ExitCode);
                     break;
+                }
                 Sleep(100);
             }
         }
+        else
+            ERR("the Installer service cannot be started: %lu\n", GetLastError());
         CloseServiceHandle(service);
     }
     CloseServiceHandle(scm);
-    return ret;
+    return pid;
 }
 
-/* Starts a program through the Installer service. On success *process is a handle to it (all access). */
-static BOOL launch_through_installer_service(DWORD kind, DWORD arch, const WCHAR *app, const WCHAR *cmd,
-                                              const WCHAR *dir, HANDLE *process)
+/* Starts a program through the Installer service. On success (0) *process is a handle to it (all access). */
+static DWORD launch_through_installer_service(DWORD kind, DWORD arch, const WCHAR *app, const WCHAR *cmd,
+                                               const WCHAR *dir, HANDLE *process, DWORD *process_id)
 {
     MSI_LAUNCH_REQUEST *req;
     MSI_LAUNCH_REPLY reply;
     DWORD a = app ? lstrlenW(app) + 1 : 0, c = cmd ? lstrlenW(cmd) + 1 : 0, d = dir ? lstrlenW(dir) + 1 : 0;
-    DWORD size, mode = PIPE_READMODE_MESSAGE, i, err = ERROR_SUCCESS;
-    HANDLE pipe = INVALID_HANDLE_VALUE;
+    DWORD size, mode = PIPE_READMODE_MESSAGE, i, err = ERROR_SERVICE_NOT_ACTIVE, service_pid, server_pid = 0;
+    HANDLE pipe = INVALID_HANDLE_VALUE, handle;
+
     WCHAR *strings;
-    BOOL ret = FALSE;
 
     if (a > MSI_LAUNCH_MAX_STRING || c > MSI_LAUNCH_MAX_STRING || d > MSI_LAUNCH_MAX_STRING)
-        return FALSE;
+        return ERROR_INVALID_PARAMETER;
     if (!(req = calloc(1, sizeof(*req) + (a + c + d) * sizeof(WCHAR))))
-        return FALSE;
+        return ERROR_OUTOFMEMORY;
     req->Magic = MSI_LAUNCH_MAGIC;
     req->Kind = kind;
     req->ClientPid = GetCurrentProcessId();
@@ -694,23 +741,34 @@ static BOOL launch_through_installer_service(DWORD kind, DWORD arch, const WCHAR
     if (c) memcpy(strings + a, cmd, c * sizeof(WCHAR));
     if (d) memcpy(strings + a + c, dir, d * sizeof(WCHAR));
 
-    if (!start_installer_service())
+    if (!(service_pid = start_installer_service()))
         goto done;
 
-    /* the service creates its pipe a moment after it reports running */
+    /* The service creates its pipe a moment after it reports running. Identification is all the service needs: it
+     * only queries the token (measured: msi_apitest NoImpersonateAction passes with it). */
     for (i = 0; i < 50; i++)
     {
         pipe = CreateFileW(MSI_LAUNCH_PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-                           SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION, NULL);
+                           SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL);
         if (pipe != INVALID_HANDLE_VALUE) break;
         err = GetLastError();
         if (err == ERROR_PIPE_BUSY) WaitNamedPipeW(MSI_LAUNCH_PIPE_NAME, 2000);
         else if (err == ERROR_FILE_NOT_FOUND) Sleep(100);
-        else break; /* ERROR_ACCESS_DENIED: not an elevated administrator */
+        else break;
     }
     if (pipe == INVALID_HANDLE_VALUE)
     {
-        TRACE("the Installer service cannot be reached: %lu\n", err);
+        ERR("the Installer service cannot be reached: %lu\n", err);
+        goto done;
+    }
+
+    /* Whoever made the name first serves it: talk only to the Installer service (the process the service manager
+     * started), checked again after the connection in case the service restarted meanwhile */
+    if (!GetNamedPipeServerProcessId(pipe, &server_pid) || server_pid != service_pid ||
+        start_installer_service() != service_pid)
+    {
+        ERR("the launch pipe is served by process %lu, not by the Installer service (%lu)\n", server_pid, service_pid);
+        err = ERROR_ACCESS_DENIED;
         goto done;
     }
 
@@ -719,22 +777,35 @@ static BOOL launch_through_installer_service(DWORD kind, DWORD arch, const WCHAR
         !ReadFile(pipe, &reply, sizeof(reply), &size, NULL) || size != sizeof(reply) ||
         reply.Magic != MSI_LAUNCH_MAGIC)
     {
-        ERR("the Installer service did not answer: %lu\n", GetLastError());
+        err = GetLastError();
+        ERR("the Installer service did not answer: %lu\n", err);
+        if (!err) err = ERROR_INVALID_DATA;
         goto done;
     }
     if (reply.Error)
     {
-        WARN("the Installer service refused or failed the request: %lu\n", reply.Error);
-        SetLastError(reply.Error);
+        err = reply.Error;
+        ERR("the Installer service refused or failed the request: %lu\n", err);
         goto done;
     }
-    *process = (HANDLE)(ULONG_PTR)reply.ProcessHandle;
-    ret = TRUE;
+
+    /* the reply's handle: a process handle of this process, for the process the reply names. Anything else is not
+     * used, and not closed either (the value may be a handle of ours that something else owns). */
+    handle = (HANDLE)(ULONG_PTR)reply.ProcessHandle;
+    if (!reply.ProcessId || (ULONG64)(ULONG_PTR)handle != reply.ProcessHandle || GetProcessId(handle) != reply.ProcessId)
+    {
+        ERR("the reply of the Installer service names process %lu and a handle that is not it\n", reply.ProcessId);
+        err = ERROR_INVALID_DATA;
+        goto done;
+    }
+    *process = handle;
+    if (process_id) *process_id = reply.ProcessId;
+    err = ERROR_SUCCESS;
 
 done:
     if (pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe);
     free(req);
-    return ret;
+    return err;
 }
 
 #endif /* __REACTOS__ */
@@ -807,19 +878,20 @@ static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch, BOOL system)
 #endif
 
 #ifdef __REACTOS__
-    /* The server of "no impersonation" actions: the Installer service starts it as LocalSystem. When the service
-     * will not (the caller is not an elevated administrator), the server runs under the caller's token as before. */
+    /* The server of "no impersonation" actions of an elevated administrator: the Installer service starts it as
+     * LocalSystem. When it cannot, the action fails (it does not run as the administrator instead). */
     if (system)
     {
-        started = launch_through_installer_service(MSI_LAUNCH_CA_SERVER, arch == SCS_32BIT_BINARY ? 32 : 64,
-                                                   NULL, NULL, NULL, &pi.hProcess);
-        if (!started)
+        DWORD err = launch_through_installer_service(MSI_LAUNCH_CA_SERVER, arch == SCS_32BIT_BINARY ? 32 : 64,
+                                                     NULL, NULL, NULL, &pi.hProcess, &pi.dwProcessId);
+        if (err)
         {
-            /* the caller decides what to do (run the actions under its own token) */
-            DWORD err = GetLastError();
+            ERR("the Installer service did not start the %d-bit custom action server: %lu\n",
+                arch == SCS_32BIT_BINARY ? 32 : 64, err);
             if (pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe);
-            return err ? err : ERROR_ACCESS_DENIED;
+            return err;
         }
+        started = TRUE;
     }
     else
 #endif
@@ -1049,12 +1121,14 @@ static custom_action_info *do_msidbCustomActionTypeDll(
     }
 
 #ifdef __REACTOS__
-    info->system = custom_action_runs_as_system( type );
+    /* an elevated administrator's "no impersonation" action runs in the LocalSystem server or not at all; LocalSystem
+     * and everyone else use the server of their own token */
+    info->system = custom_action_runs_as_system( type ) && get_system_caller() == SYSTEM_CALLER_ADMIN;
     if (info->system && custom_start_server(package, info->arch, TRUE) != ERROR_SUCCESS)
     {
-        /* not an elevated administrator, or no Installer service: under the caller's token, as before */
-        WARN("action %s: no LocalSystem custom action server, running it under the caller's token\n", debugstr_w(action));
-        info->system = FALSE;
+        ERR("action %s: no LocalSystem custom action server, the action fails\n", debugstr_w(action));
+        free_custom_action_data( info );
+        return NULL;
     }
     if (!info->system && custom_start_server(package, info->arch, FALSE) != ERROR_SUCCESS)
     {
@@ -1262,17 +1336,21 @@ static HANDLE execute_command( const WCHAR *app, WCHAR *arg, const WCHAR *dir, I
         }
     }
 #ifdef __REACTOS__
-    /* deferred and "no impersonation": the program runs as LocalSystem, as the Installer service does it on Windows
-     * (not possible for a caller that is not an elevated administrator: then under its own token, as before) */
-    if (custom_action_runs_as_system( type ))
+    /* deferred and "no impersonation": the program runs as LocalSystem, as the Installer service does it on Windows.
+     * An elevated administrator's goes through the Installer service or does not run; LocalSystem starts it itself;
+     * anyone else (the service would refuse them) runs it under their own token, as before. */
+    if (custom_action_runs_as_system( type ) && get_system_caller() == SYSTEM_CALLER_ADMIN)
     {
-        if (launch_through_installer_service( MSI_LAUNCH_PROGRAM, 0, exe, exe ? cmd : arg, dir, &system_process ))
+        DWORD err = launch_through_installer_service( MSI_LAUNCH_PROGRAM, 0, exe, exe ? cmd : arg, dir,
+                                                      &system_process, NULL );
+        free( cmd );
+        free( exe );
+        if (err)
         {
-            free( cmd );
-            free( exe );
-            return system_process;
+            ERR("the Installer service did not start the program of the action: %lu\n", err);
+            return INVALID_HANDLE_VALUE;
         }
-        WARN("no LocalSystem process for %s, running it under the caller's token\n", debugstr_w( exe ? exe : arg ));
+        return system_process;
     }
 #endif
     memset( &si, 0, sizeof(STARTUPINFOW) );

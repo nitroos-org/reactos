@@ -32,6 +32,9 @@ static SERVICE_STATUS_HANDLE hstatus;
 
 static HANDLE thread;
 static HANDLE kill_event;
+#ifdef __REACTOS__
+static DWORD service_exit_code; /* the reason the service stopped on its own (SERVICE_STATUS.dwWin32ExitCode) */
+#endif
 
 static void KillService(void)
 {
@@ -112,6 +115,25 @@ static void WINAPI ServiceCtrlHandler(DWORD code)
 
 #include <sddl.h>
 #include <reactos/msilaunch.h>
+
+/* A failure that stops the service: in the debug log, in the Application event log, and as the service's exit code
+ * (a service has no desktop to show a message on) */
+static void ReportServiceError(const WCHAR *text, DWORD error)
+{
+    HANDLE source;
+    WCHAR buffer[400];
+    const WCHAR *strings[1];
+
+    ERR("%s: %lu\n", wine_dbgstr_w(text), error);
+    swprintf(buffer, ARRAY_SIZE(buffer), L"%s: error %lu.", text, error);
+    strings[0] = buffer;
+    if ((source = RegisterEventSourceW(NULL, L"MsiInstaller")))
+    {
+        ReportEventW(source, EVENTLOG_ERROR_TYPE, 0, 0, NULL, 1, 0, strings, NULL);
+        DeregisterEventSource(source);
+    }
+    service_exit_code = error ? error : ERROR_GEN_FAILURE;
+}
 
 static BOOL IsElevatedAdministrator(HANDLE pipe)
 {
@@ -278,64 +300,90 @@ static DWORD WINAPI ServiceExecutionThread(LPVOID param)
 {
     SECURITY_ATTRIBUTES sa;
     OVERLAPPED ov;
-    HANDLE pipe, wait[2];
-    BOOL first = TRUE;
+    HANDLE pipe, next, wait[2];
+    DWORD err;
 
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = FALSE;
     sa.lpSecurityDescriptor = NULL;
-    /* LocalSystem and the Administrators group only */
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)", SDDL_REVISION_1,
+    /* LocalSystem, and the Administrators group as clients only: not FILE_CREATE_PIPE_INSTANCE (= FILE_APPEND_DATA),
+     * so that every instance of the name is this service's */
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;0x12019b;;;BA)", SDDL_REVISION_1,
                                                               &sa.lpSecurityDescriptor, NULL))
     {
-        report_error("Failed to build the security descriptor of the launch pipe\n");
-        WaitForSingleObject(kill_event, INFINITE);
+        ReportServiceError(L"The Installer service could not build the security descriptor of its launch pipe",
+                           GetLastError());
         return 0;
     }
 
     memset(&ov, 0, sizeof(ov));
     ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!ov.hEvent)
+    {
+        ReportServiceError(L"The Installer service could not create an event", GetLastError());
+        LocalFree(sa.lpSecurityDescriptor);
+        return 0;
+    }
     wait[0] = kill_event;
     wait[1] = ov.hEvent;
 
+    /* The first instance must be new: when the name exists, someone else made it, and the clients would talk to them.
+     * msi.dll checks that the pipe's server is this service and fails the installation when the service stopped. */
+    pipe = CreateNamedPipeW(MSI_LAUNCH_PIPE_NAME, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, 2, 4096, 4096, 0, &sa);
+    if (pipe == INVALID_HANDLE_VALUE)
+    {
+        err = GetLastError();
+        ReportServiceError(L"The Installer service could not create its launch pipe " MSI_LAUNCH_PIPE_NAME
+                           L" (the name may be in use by another program)", err);
+        CloseHandle(ov.hEvent);
+        LocalFree(sa.lpSecurityDescriptor);
+        return 0;
+    }
+
     for (;;)
     {
-        pipe = CreateNamedPipeW(MSI_LAUNCH_PIPE_NAME,
-                                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
-                                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-                                PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, &sa);
-        if (pipe == INVALID_HANDLE_VALUE)
-        {
-            report_error("Failed to create the launch pipe\n");
-            break;
-        }
-        first = FALSE;
-
         ResetEvent(ov.hEvent);
         if (!ConnectNamedPipe(pipe, &ov))
         {
-            DWORD err = GetLastError();
+            err = GetLastError();
             if (err == ERROR_IO_PENDING)
             {
-                if (WaitForMultipleObjects(2, wait, FALSE, INFINITE) == WAIT_OBJECT_0)
+                if (WaitForMultipleObjects(2, wait, FALSE, INFINITE) != WAIT_OBJECT_0 + 1)
                 {
                     CancelIo(pipe);
-                    CloseHandle(pipe);
+                    GetOverlappedResult(pipe, &ov, &err, TRUE);
                     break;
                 }
             }
             else if (err != ERROR_PIPE_CONNECTED)
             {
-                CloseHandle(pipe);
+                DisconnectNamedPipe(pipe);
                 continue;
             }
+        }
+
+        /* The next instance exists before this one is closed: the name never disappears while the service runs, so
+         * nobody else can take it between two clients. At most two instances: this one and the next. */
+        next = CreateNamedPipeW(MSI_LAUNCH_PIPE_NAME, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, 2, 4096, 4096, 0, &sa);
+        if (next == INVALID_HANDLE_VALUE)
+        {
+            err = GetLastError();
+            HandleLaunchClient(pipe);
+            DisconnectNamedPipe(pipe);
+            /* keep the instance we have (the name stays ours) and try again with the next client */
+            WARN("could not create the next instance of the launch pipe: %lu\n", err);
+            continue;
         }
 
         HandleLaunchClient(pipe);
         DisconnectNamedPipe(pipe);
         CloseHandle(pipe);
+        pipe = next;
     }
 
+    CloseHandle(pipe);
     CloseHandle(ov.hEvent);
     LocalFree(sa.lpSecurityDescriptor);
     return 0;
@@ -395,7 +443,11 @@ static void WINAPI ServiceMain(DWORD argc, LPSTR *argv)
 
     UpdateSCMStatus(SERVICE_RUNNING, NO_ERROR, 0);
     WaitForSingleObject(thread, INFINITE);
+#ifdef __REACTOS__
+    UpdateSCMStatus(SERVICE_STOPPED, service_exit_code, 0);
+#else
     UpdateSCMStatus(SERVICE_STOPPED, NO_ERROR, 0);
+#endif
 }
 
 DWORD DoService(void)
