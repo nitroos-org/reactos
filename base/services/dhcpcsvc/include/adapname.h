@@ -39,6 +39,50 @@ DhcpAdapterNameCopy(char *Dest, size_t DestCch, const unsigned char *Src, size_t
 }
 
 /*
+ * The interface table names an adapter in wszName, "\DEVICE\TCPIP_{guid}" (the guid in upper case); bDescr is the
+ * adapter's description. If Src starts with that prefix (any case, SrcCch wide characters at most), the guid part is
+ * stored in Dest (at most DHCP_ADAPTER_NAME_MAX characters, always zero-terminated, only characters below 0x80)
+ * and 1 is returned; otherwise 0 is returned (Dest then holds nothing useful).
+ */
+static __inline int
+DhcpAdapterNameFromWszName(char *Dest, size_t DestCch, const wchar_t *Src, size_t SrcCch)
+{
+    static const char Prefix[] = "\\DEVICE\\TCPIP_";
+    const size_t PrefixCch = sizeof(Prefix) - 1;
+    size_t Max = DestCch ? DestCch - 1 : 0;
+    size_t n;
+
+    if (!DestCch)
+        return 0;
+    if (Max > DHCP_ADAPTER_NAME_MAX)
+        Max = DHCP_ADAPTER_NAME_MAX;
+    if (SrcCch <= PrefixCch)
+        return 0;
+    for (n = 0; n < PrefixCch; n++)
+    {
+        wchar_t c = Src[n];
+
+        if (c >= L'a' && c <= L'z')
+            c = (wchar_t)(c - L'a' + L'A');
+        if (c != (wchar_t)Prefix[n])
+            return 0;
+    }
+    if (!Src[PrefixCch])
+        return 0;
+    for (n = 0; n < Max && PrefixCch + n < SrcCch && Src[PrefixCch + n]; n++)
+    {
+        if (Src[PrefixCch + n] >= 0x80)
+        {
+            Dest[0] = '\0';
+            return 0;
+        }
+        Dest[n] = (char)Src[PrefixCch + n];
+    }
+    Dest[n] = '\0';
+    return 1;
+}
+
+/*
  * Converts the whole adapter name to wide characters for a comparison. Out holds DHCP_ADAPTER_NAME_WIDE_CCH
  * characters, never more are written; an unconvertible name gives an empty string (it matches nothing).
  */
