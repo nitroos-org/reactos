@@ -198,6 +198,17 @@ static VOID ParseAddr4(const FWR *raw, PCWSTR key, PCWSTR key2, DIM *d)
    service must send the rules' IPv6 addresses (LA6/RA6) exactly when the kernel can see an IPv6 packet, or an Allow
    rule whose only scope is an IPv6 address is pushed without any address condition and matches everything. An
    older driver, or a failed query, means no IPv6: the addresses are not sent, as before IPv6 existed. */
+/* Does the filter match the service condition "*" (services only; NITROFW_FEATURE_SERVICE_ANY)? Asked once per push. */
+static BOOL g_SvcAny;
+
+static BOOL KernelHasServiceAny(HANDLE h)
+{
+    NITROFW_VERSION_INFO vi; DWORD ret = 0;
+    memset(&vi, 0, sizeof(vi));
+    if (!DeviceIoControl(h, IOCTL_NITROFW_GET_VERSION, NULL, 0, &vi, sizeof(vi), &ret, NULL) || ret < sizeof(vi)) return FALSE;
+    return (vi.Features & NITROFW_FEATURE_SERVICE_ANY) != 0;
+}
+
 static BOOL KernelHasIpv6(HANDLE h)
 {
     NITROFW_VERSION_INFO vi; DWORD ret = 0;
@@ -676,6 +687,7 @@ static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULO
     if (r->Icmp && (r->Protocol == 1 || r->Protocol == 58)) ParseIcmp(&r->Raw, icKey, &ic);
     else DimInit(&ic, sizeof(NITROFW_ICMP_ENTRY));
     if (r->Svc && *r->Svc && wcscmp(r->Svc, L"*")) svc = r->Svc;     /* an empty name would make the kernel reject the policy */
+    else if (r->Svc && !wcscmp(r->Svc, L"*") && g_SvcAny && !block) svc = r->Svc;   /* "*" on an Allow rule: the filter matches services only; a Block rule keeps blocking every program (see nitrofw.c) */
     /* values the kernel would reject the whole policy for (or silently turn into another protocol through the USHORT
        cast): the rule is rejected on its own */
     if (r->Protocol < 0 || r->Protocol > NITROFW_PROTO_ANY) ok = FALSE;
@@ -685,7 +697,7 @@ static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULO
        clear; Svc=* = services only) is not carried. An Allow rule without it would let in traffic the rule does not
        allow, so the Allow rule is rejected (reported). A Block rule is pushed without it: it blocks more than written
        (a key that is not known: reported as not fully enforced, it may add to the rule). */
-    cond = UnmatchableCondition(r, svc != NULL || (r->Svc && !wcscmp(r->Svc, L"*")));
+    cond = UnmatchableCondition(r, (svc != NULL && wcscmp(svc, L"*")) || (r->Svc && !wcscmp(r->Svc, L"*") && !(g_SvcAny && !block)));
     if (plat == PLAT_BAD && cond == COND_NONE) cond = COND_NARROWING;   /* a Platform list that cannot be evaluated narrows the rule */
     if (cond != COND_NONE && !block) ok = FALSE;
     if (r->App && *r->App)
@@ -778,6 +790,7 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
     if (h == INVALID_HANDLE_VALUE) return GetLastError();
     if (pPresent) *pPresent = TRUE;
     v6on = KernelHasIpv6(h);
+    g_SvcAny = KernelHasServiceAny(h);
     QueryOsVersion();
     err = FwStoreLoad(&rs);
     if (err) { CloseHandle(h); return err; }

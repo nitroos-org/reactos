@@ -77,6 +77,7 @@ typedef struct _FW_IMAGE
 {
     LONG RefCount;
     USHORT Length;              /* in WCHARs, no terminator */
+    BOOLEAN Service;            /* the process runs with a service logon token (see FwProcessIsService) */
     WCHAR Path[ANYSIZE_ARRAY];  /* upcased NT path, or "SYSTEM" for the System process */
 } FW_IMAGE, *PFW_IMAGE;
 
@@ -541,6 +542,9 @@ static NTSTATUS FwCompilePolicy(PFW_POLICY Policy)
                 for (; *s; s++)
                     *s = RtlUpcaseUnicodeChar(*s);
             }
+            /* an Allow rule for services only needs the program of the owner too (its token is read when it is resolved) */
+            if (Rule->ServiceNameOffset && Rule->Action == NITROFW_ACTION_ALLOW)
+                Policy->HasAppRules = TRUE;
         }
         Cursor += Rule->Size;
     }
@@ -655,7 +659,7 @@ static NTSTATUS FwDeviceControl(PIRP Irp, PIO_STACK_LOCATION IrpSp)
                 return STATUS_BUFFER_TOO_SMALL;
             RtlZeroMemory(Info, sizeof(*Info));
             Info->AbiVersion = NITROFW_ABI_VERSION;
-            Info->Features = NITROFW_FEATURE_INBOUND | (TCPIpv6Enabled ? NITROFW_FEATURE_IPV6 : 0);
+            Info->Features = NITROFW_FEATURE_INBOUND | NITROFW_FEATURE_SERVICE_ANY | (TCPIpv6Enabled ? NITROFW_FEATURE_IPV6 : 0);
             Info->MaxRules = NITROFW_MAX_RULES;
             Irp->IoStatus.Information = sizeof(*Info);
             return STATUS_SUCCESS;
@@ -923,8 +927,49 @@ static PFW_IMAGE FwMakeSystemImage(VOID)
         return NULL;
     RtlCopyMemory(Image->Path, System, Chars * sizeof(WCHAR));
     Image->Length = (USHORT)Chars;
+    Image->Service = FALSE;
     Image->RefCount = 1;
     return Image;
+}
+
+/* Whether the process runs with a service logon token: NT AUTHORITY\SERVICE (S-1-5-6) is among the groups of its
+   token and enabled. Measured on Windows Server 2022: the processes of services of every account carry it (SYSTEM,
+   LocalService, NetworkService, a service of an administrator), and so does a SYSTEM scheduled task; the token of a
+   batch logon does not. Process is a handle with PROCESS_QUERY_INFORMATION; PASSIVE_LEVEL. FALSE when unknown. */
+static BOOLEAN FwProcessIsService(HANDLE Process)
+{
+    static const SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    HANDLE Token;
+    PTOKEN_GROUPS Groups;
+    ULONG Len = 0, i;
+    BOOLEAN Found = FALSE;
+
+    if (!NT_SUCCESS(ZwOpenProcessTokenEx(Process, TOKEN_QUERY, OBJ_KERNEL_HANDLE, &Token)))
+        return FALSE;
+    if (ZwQueryInformationToken(Token, TokenGroups, NULL, 0, &Len) == STATUS_BUFFER_TOO_SMALL &&
+        Len >= sizeof(TOKEN_GROUPS) && Len <= 0x10000)
+    {
+        Groups = ExAllocatePoolWithTag(PagedPool, Len, NITROFW_IMG_TAG);
+        if (Groups)
+        {
+            if (NT_SUCCESS(ZwQueryInformationToken(Token, TokenGroups, Groups, Len, &Len)))
+            {
+                for (i = 0; i < Groups->GroupCount && !Found; i++)
+                {
+                    PSID Sid = Groups->Groups[i].Sid;
+
+                    if ((Groups->Groups[i].Attributes & SE_GROUP_ENABLED) &&
+                        RtlSubAuthorityCountSid(Sid) && *RtlSubAuthorityCountSid(Sid) == 1 &&
+                        *RtlSubAuthoritySid(Sid, 0) == SECURITY_SERVICE_RID &&
+                        RtlCompareMemory(&((PISID)Sid)->IdentifierAuthority, &NtAuthority, sizeof(NtAuthority)) == sizeof(NtAuthority))
+                        Found = TRUE;
+                }
+            }
+            ExFreePoolWithTag(Groups, NITROFW_IMG_TAG);
+        }
+    }
+    ZwClose(Token);
+    return Found;
 }
 
 /* Image path of the process behind Process (a handle with PROCESS_QUERY_INFORMATION), upcased NT path */
@@ -952,6 +997,7 @@ static PFW_IMAGE FwImageFromHandle(HANDLE Process)
             for (i = 0; i < Chars; i++)
                 Image->Path[i] = RtlUpcaseUnicodeChar(Name->Buffer[i]);
             Image->Length = (USHORT)Chars;
+            Image->Service = FwProcessIsService(Process);
             Image->RefCount = 1;
         }
     }
@@ -1784,7 +1830,32 @@ static BOOLEAN FwRuleMatches(PNITROFW_RULE Rule, PFW_PKT Pkt)
             return FALSE;
     }
 
-    /* ServiceNameOffset: advisory, not resolved (NITROFW_FEATURE_SERVICE_MATCH clear) */
+    /* ServiceNameOffset "*" on an Allow rule: the rule is for services only (NITROFW_FEATURE_SERVICE_ANY): the owner
+       of the endpoint must run with a service logon token; an owner that is not known (no port, IPv6, no endpoint)
+       lets nothing in on a guess. The rule service sends the condition for Allow rules only: a Block rule stays
+       as it was (it blocks every program): the LocalSystem services that run with the controller's own token have
+       no NT AUTHORITY\SERVICE group (as on Windows, where the filter tells them by another means), so "not a
+       service" cannot be told from "a service" by the token and a Block rule that skipped the programs without
+       the group would block less than the rule says. For the same reason an Allow rule for services lets in
+       fewer programs than on Windows (those LocalSystem services stay out): narrower, never wider. A service name
+       is not resolved: the condition is ignored (NITROFW_FEATURE_SERVICE_MATCH clear). */
+    if (Rule->ServiceNameOffset && Rule->Action == NITROFW_ACTION_ALLOW)
+    {
+        PWCHAR Svc = (PWCHAR)(R + Rule->ServiceNameOffset);
+
+        if (Svc[0] == L'*' && Svc[1] == 0)
+        {
+            if (!Pkt->HasPorts)
+                return FALSE;
+            if (!Pkt->OwnerLooked)
+            {
+                Pkt->Owner = FwFindOwner(Pkt->Protocol, Pkt->LocalPortN, Pkt->Dst);
+                Pkt->OwnerLooked = TRUE;
+            }
+            if (!Pkt->Owner || !Pkt->Owner->Service)
+                return FALSE;
+        }
+    }
     return TRUE;
 }
 
