@@ -1291,6 +1291,10 @@ RegCreateKeyExW(
 
     TRACE("RegCreateKeyExW() called\n");
 
+    /* no pointer for the new key (measured on Windows Server 2022) */
+    if (phkResult == NULL)
+        return ERROR_BADKEY;
+
     /* get the real parent key */
     Status = MapDefaultKey(&ParentKey,
                            hKey);
@@ -1358,6 +1362,9 @@ RegCreateKeyA(HKEY hKey,
               LPCSTR lpSubKey,
               PHKEY phkResult)
 {
+    if (phkResult == NULL)
+        return ERROR_INVALID_PARAMETER;
+
     return RegCreateKeyExA(hKey,
                            lpSubKey,
                            0,
@@ -1380,6 +1387,9 @@ RegCreateKeyW(HKEY hKey,
               LPCWSTR lpSubKey,
               PHKEY phkResult)
 {
+    if (phkResult == NULL)
+        return ERROR_INVALID_PARAMETER;
+
     return RegCreateKeyExW(hKey,
                            lpSubKey,
                            0,
