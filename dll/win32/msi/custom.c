@@ -28,6 +28,7 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winerror.h"
+#include "winsvc.h"
 #include "msidefs.h"
 #include "winuser.h"
 #include "objbase.h"
@@ -44,6 +45,7 @@
 #include <psdk/ntstatus.h>
 #include <ndk/mmfuncs.h>
 #include "resource.h"
+#include <reactos/msilaunch.h>
 #endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(msi);
@@ -391,6 +393,7 @@ typedef struct
     INT type;
     GUID guid;
     DWORD arch;
+    BOOL system;    /* served by the custom action server that the Installer service started as LocalSystem */
 } custom_action_info;
 
 static void free_custom_action_data( custom_action_info *info )
@@ -619,7 +622,124 @@ static HANDLE get_admin_token(void)
     return linked.LinkedToken;
 }
 
-static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch)
+#ifdef __REACTOS__
+
+/* A deferred action marked "no impersonation" is run by the Installer service as LocalSystem on Windows, not as the
+ * user who started the installation. msi.dll runs in the process of that user, so for an elevated administrator
+ * the program is started through the Installer service (msiexec /V, LocalSystem; see msilaunch.h). Anyone else
+ * (the service refuses them) keeps running the action under their own token, as before. */
+static BOOL custom_action_runs_as_system(INT type)
+{
+    return (type & msidbCustomActionTypeInScript) && (type & msidbCustomActionTypeNoImpersonate);
+}
+
+static BOOL start_installer_service(void)
+{
+    SC_HANDLE scm, service;
+    SERVICE_STATUS_PROCESS status;
+    DWORD size, i;
+    BOOL ret = FALSE;
+
+    if (!(scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT)))
+        return FALSE;
+    if ((service = OpenServiceW(scm, L"MSIServer", SERVICE_START | SERVICE_QUERY_STATUS)))
+    {
+        if (StartServiceW(service, 0, NULL) || GetLastError() == ERROR_SERVICE_ALREADY_RUNNING)
+        {
+            for (i = 0; i < 100; i++)
+            {
+                if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, (BYTE *)&status, sizeof(status), &size))
+                    break;
+                if (status.dwCurrentState == SERVICE_RUNNING)
+                {
+                    ret = TRUE;
+                    break;
+                }
+                if (status.dwCurrentState == SERVICE_STOPPED)
+                    break;
+                Sleep(100);
+            }
+        }
+        CloseServiceHandle(service);
+    }
+    CloseServiceHandle(scm);
+    return ret;
+}
+
+/* Starts a program through the Installer service. On success *process is a handle to it (all access). */
+static BOOL launch_through_installer_service(DWORD kind, DWORD arch, const WCHAR *app, const WCHAR *cmd,
+                                              const WCHAR *dir, HANDLE *process)
+{
+    MSI_LAUNCH_REQUEST *req;
+    MSI_LAUNCH_REPLY reply;
+    DWORD a = app ? lstrlenW(app) + 1 : 0, c = cmd ? lstrlenW(cmd) + 1 : 0, d = dir ? lstrlenW(dir) + 1 : 0;
+    DWORD size, mode = PIPE_READMODE_MESSAGE, i, err = ERROR_SUCCESS;
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    WCHAR *strings;
+    BOOL ret = FALSE;
+
+    if (a > MSI_LAUNCH_MAX_STRING || c > MSI_LAUNCH_MAX_STRING || d > MSI_LAUNCH_MAX_STRING)
+        return FALSE;
+    if (!(req = calloc(1, sizeof(*req) + (a + c + d) * sizeof(WCHAR))))
+        return FALSE;
+    req->Magic = MSI_LAUNCH_MAGIC;
+    req->Kind = kind;
+    req->ClientPid = GetCurrentProcessId();
+    req->Arch = arch;
+    req->ApplicationChars = a;
+    req->CommandLineChars = c;
+    req->DirectoryChars = d;
+    strings = (WCHAR *)(req + 1);
+    if (a) memcpy(strings, app, a * sizeof(WCHAR));
+    if (c) memcpy(strings + a, cmd, c * sizeof(WCHAR));
+    if (d) memcpy(strings + a + c, dir, d * sizeof(WCHAR));
+
+    if (!start_installer_service())
+        goto done;
+
+    /* the service creates its pipe a moment after it reports running */
+    for (i = 0; i < 50; i++)
+    {
+        pipe = CreateFileW(MSI_LAUNCH_PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                           SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION, NULL);
+        if (pipe != INVALID_HANDLE_VALUE) break;
+        err = GetLastError();
+        if (err == ERROR_PIPE_BUSY) WaitNamedPipeW(MSI_LAUNCH_PIPE_NAME, 2000);
+        else if (err == ERROR_FILE_NOT_FOUND) Sleep(100);
+        else break; /* ERROR_ACCESS_DENIED: not an elevated administrator */
+    }
+    if (pipe == INVALID_HANDLE_VALUE)
+    {
+        TRACE("the Installer service cannot be reached: %lu\n", err);
+        goto done;
+    }
+
+    if (!SetNamedPipeHandleState(pipe, &mode, NULL, NULL) ||
+        !WriteFile(pipe, req, sizeof(*req) + (a + c + d) * sizeof(WCHAR), &size, NULL) ||
+        !ReadFile(pipe, &reply, sizeof(reply), &size, NULL) || size != sizeof(reply) ||
+        reply.Magic != MSI_LAUNCH_MAGIC)
+    {
+        ERR("the Installer service did not answer: %lu\n", GetLastError());
+        goto done;
+    }
+    if (reply.Error)
+    {
+        WARN("the Installer service refused or failed the request: %lu\n", reply.Error);
+        SetLastError(reply.Error);
+        goto done;
+    }
+    *process = (HANDLE)(ULONG_PTR)reply.ProcessHandle;
+    ret = TRUE;
+
+done:
+    if (pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe);
+    free(req);
+    return ret;
+}
+
+#endif /* __REACTOS__ */
+
+static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch, BOOL system)
 {
     WCHAR path[MAX_PATH], cmdline[MAX_PATH + 23];
 #ifdef __REACTOS__
@@ -629,18 +749,39 @@ static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch)
 #endif
     PROCESS_INFORMATION pi = {0};
     STARTUPINFOW si = {0};
+#ifdef __REACTOS__
+    WCHAR buffer[40];
+#else
     WCHAR buffer[24];
+#endif
     HANDLE token;
     void *cookie;
     HANDLE pipe;
-    BOOL started;
+    BOOL started = FALSE;
+    HANDLE *server_process, *server_pipe;
 
-    if ((arch == SCS_32BIT_BINARY && package->custom_server_32_process) ||
-        (arch == SCS_64BIT_BINARY && package->custom_server_64_process))
+#ifdef __REACTOS__
+    if (system)
+    {
+        server_process = (arch == SCS_32BIT_BINARY) ? &package->custom_server_32_system_process : &package->custom_server_64_system_process;
+        server_pipe = (arch == SCS_32BIT_BINARY) ? &package->custom_server_32_system_pipe : &package->custom_server_64_system_pipe;
+    }
+    else
+#endif
+    {
+        server_process = (arch == SCS_32BIT_BINARY) ? &package->custom_server_32_process : &package->custom_server_64_process;
+        server_pipe = (arch == SCS_32BIT_BINARY) ? &package->custom_server_32_pipe : &package->custom_server_64_pipe;
+    }
+    if (*server_process)
         return ERROR_SUCCESS;
 
+#ifdef __REACTOS__
+    swprintf(buffer, ARRAY_SIZE(buffer), L"\\\\.\\pipe\\msica_%x_%d%s",
+             GetCurrentProcessId(), arch == SCS_32BIT_BINARY ? 32 : 64, system ? L"_s" : L"");
+#else
     swprintf(buffer, ARRAY_SIZE(buffer), L"\\\\.\\pipe\\msica_%x_%d",
              GetCurrentProcessId(), arch == SCS_32BIT_BINARY ? 32 : 64);
+#endif
     pipe = CreateNamedPipeW(buffer, PIPE_ACCESS_DUPLEX, 0, 1, sizeof(DWORD64),
         sizeof(GUID), 0, NULL);
     if (pipe == INVALID_HANDLE_VALUE)
@@ -651,7 +792,11 @@ static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch)
     else
         GetSystemDirectoryW(path, MAX_PATH - ARRAY_SIZE(L"\\msiexec.exe"));
     lstrcatW(path, L"\\msiexec.exe");
+#ifdef __REACTOS__
+    swprintf(cmdline, ARRAY_SIZE(cmdline), L"%s -Embedding %d%s", path, GetCurrentProcessId(), system ? L"s" : L"");
+#else
     swprintf(cmdline, ARRAY_SIZE(cmdline), L"%s -Embedding %d", path, GetCurrentProcessId());
+#endif
 
 #ifdef __REACTOS__
     /* The custom action server runs from the system directory. That is the directory the Installer service starts
@@ -661,18 +806,37 @@ static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch)
     GetSystemDirectoryW(cur_dir, ARRAY_SIZE(cur_dir));
 #endif
 
-    token = get_admin_token();
-
-    if (is_wow64 && arch == SCS_64BIT_BINARY)
+#ifdef __REACTOS__
+    /* The server of "no impersonation" actions: the Installer service starts it as LocalSystem. When the service
+     * will not (the caller is not an elevated administrator), the server runs under the caller's token as before. */
+    if (system)
     {
-        Wow64DisableWow64FsRedirection(&cookie);
-        started = CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, cur_dir, &si, &pi);
-        Wow64RevertWow64FsRedirection(cookie);
+        started = launch_through_installer_service(MSI_LAUNCH_CA_SERVER, arch == SCS_32BIT_BINARY ? 32 : 64,
+                                                   NULL, NULL, NULL, &pi.hProcess);
+        if (!started)
+        {
+            /* the caller decides what to do (run the actions under its own token) */
+            DWORD err = GetLastError();
+            if (pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe);
+            return err ? err : ERROR_ACCESS_DENIED;
+        }
     }
     else
-        started = CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, cur_dir, &si, &pi);
+#endif
+    {
+        token = get_admin_token();
 
-    if (token) CloseHandle(token);
+        if (is_wow64 && arch == SCS_64BIT_BINARY)
+        {
+            Wow64DisableWow64FsRedirection(&cookie);
+            started = CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, cur_dir, &si, &pi);
+            Wow64RevertWow64FsRedirection(cookie);
+        }
+        else
+            started = CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, cur_dir, &si, &pi);
+
+        if (token) CloseHandle(token);
+    }
 
 #ifdef __REACTOS__
     if (!started)
@@ -685,18 +849,10 @@ static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch)
     }
 #endif
 
-    CloseHandle(pi.hThread);
+    if (pi.hThread) CloseHandle(pi.hThread);
 
-    if (arch == SCS_32BIT_BINARY)
-    {
-        package->custom_server_32_process = pi.hProcess;
-        package->custom_server_32_pipe = pipe;
-    }
-    else
-    {
-        package->custom_server_64_process = pi.hProcess;
-        package->custom_server_64_pipe = pipe;
-    }
+    *server_process = pi.hProcess;
+    *server_pipe = pipe;
 
     if (!ConnectNamedPipe(pipe, NULL))
     {
@@ -729,6 +885,22 @@ static DWORD WINAPI custom_client_thread(void *arg)
 
     CoInitializeEx(NULL, COINIT_MULTITHREADED); /* needed to marshal streams */
 
+#ifdef __REACTOS__
+    if (info->system)
+    {
+        if (info->arch == SCS_32BIT_BINARY)
+        {
+            process = info->package->custom_server_32_system_process;
+            pipe = info->package->custom_server_32_system_pipe;
+        }
+        else
+        {
+            process = info->package->custom_server_64_system_process;
+            pipe = info->package->custom_server_64_system_pipe;
+        }
+    }
+    else
+#endif
     if (info->arch == SCS_32BIT_BINARY)
     {
         process = info->package->custom_server_32_process;
@@ -834,6 +1006,7 @@ static custom_action_info *do_msidbCustomActionTypeDll(
     info->target = wcsdup( target );
     info->source = wcsdup( source );
     info->action = wcsdup( action );
+    info->system = FALSE;
     CoCreateGuid( &info->guid );
 
     EnterCriticalSection( &custom_action_cs );
@@ -876,13 +1049,20 @@ static custom_action_info *do_msidbCustomActionTypeDll(
     }
 
 #ifdef __REACTOS__
-    if (custom_start_server(package, info->arch) != ERROR_SUCCESS)
+    info->system = custom_action_runs_as_system( type );
+    if (info->system && custom_start_server(package, info->arch, TRUE) != ERROR_SUCCESS)
+    {
+        /* not an elevated administrator, or no Installer service: under the caller's token, as before */
+        WARN("action %s: no LocalSystem custom action server, running it under the caller's token\n", debugstr_w(action));
+        info->system = FALSE;
+    }
+    if (!info->system && custom_start_server(package, info->arch, FALSE) != ERROR_SUCCESS)
     {
         free_custom_action_data( info );
         return NULL;
     }
 #else
-    custom_start_server(package, info->arch);
+    custom_start_server(package, info->arch, FALSE);
 #endif
 
     info->handle = CreateThread(NULL, 0, custom_client_thread, info, 0, NULL);
@@ -1024,12 +1204,15 @@ static UINT HANDLE_CustomType1( MSIPACKAGE *package, const WCHAR *source, const 
     return wait_thread_handle( info );
 }
 
-static HANDLE execute_command( const WCHAR *app, WCHAR *arg, const WCHAR *dir )
+static HANDLE execute_command( const WCHAR *app, WCHAR *arg, const WCHAR *dir, INT type )
 {
     STARTUPINFOW si;
     PROCESS_INFORMATION info;
     WCHAR *exe = NULL, *cmd = NULL, *p;
     BOOL ret;
+#ifdef __REACTOS__
+    HANDLE system_process;
+#endif
 
     if (app)
     {
@@ -1078,6 +1261,20 @@ static HANDLE execute_command( const WCHAR *app, WCHAR *arg, const WCHAR *dir )
             p[len_arg] = 0;
         }
     }
+#ifdef __REACTOS__
+    /* deferred and "no impersonation": the program runs as LocalSystem, as the Installer service does it on Windows
+     * (not possible for a caller that is not an elevated administrator: then under its own token, as before) */
+    if (custom_action_runs_as_system( type ))
+    {
+        if (launch_through_installer_service( MSI_LAUNCH_PROGRAM, 0, exe, exe ? cmd : arg, dir, &system_process ))
+        {
+            free( cmd );
+            free( exe );
+            return system_process;
+        }
+        WARN("no LocalSystem process for %s, running it under the caller's token\n", debugstr_w( exe ? exe : arg ));
+    }
+#endif
     memset( &si, 0, sizeof(STARTUPINFOW) );
     ret = CreateProcessW( exe, exe ? cmd : arg, NULL, NULL, FALSE, 0, NULL, dir, &si, &info );
     free( cmd );
@@ -1118,7 +1315,7 @@ static UINT HANDLE_CustomType2( MSIPACKAGE *package, const WCHAR *source, const 
     deformat_string( package, target, &arg );
     TRACE("exe %s arg %s\n", debugstr_w(binary->tmpfile), debugstr_w(arg));
 
-    handle = execute_command( binary->tmpfile, arg, L"C:\\" );
+    handle = execute_command( binary->tmpfile, arg, L"C:\\", type );
     free( arg );
     if (handle == INVALID_HANDLE_VALUE) return exe_launch_failed( type, action );
     return wait_process_handle( package, type, handle, action );
@@ -1161,7 +1358,7 @@ static UINT HANDLE_CustomType18( MSIPACKAGE *package, const WCHAR *source, const
     deformat_string( package, target, &arg );
     TRACE("exe %s arg %s\n", debugstr_w(file->TargetPath), debugstr_w(arg));
 
-    handle = execute_command( file->TargetPath, arg, L"C:\\" );
+    handle = execute_command( file->TargetPath, arg, L"C:\\", type );
     free( arg );
     if (handle == INVALID_HANDLE_VALUE) return exe_launch_failed( type, action );
     return wait_process_handle( package, type, handle, action );
@@ -1243,7 +1440,7 @@ static UINT HANDLE_CustomType23( MSIPACKAGE *package, const WCHAR *source, const
 
     TRACE("installing %s concurrently\n", debugstr_w(source));
 
-    handle = execute_command( L"msiexec", args, dir );
+    handle = execute_command( L"msiexec", args, dir, type );
     free( dir );
     free( filename );
     free( args );
@@ -1313,7 +1510,7 @@ static UINT HANDLE_CustomType7( MSIPACKAGE *package, const WCHAR *source, const 
 
     TRACE("installing %s concurrently\n", debugstr_w(source));
 
-    handle = execute_command( L"msiexec", args, L"C:\\" );
+    handle = execute_command( L"msiexec", args, L"C:\\", type );
     free( args );
     if (handle == INVALID_HANDLE_VALUE) return ERROR_SUCCESS;
     return wait_process_handle( package, type, handle, action );
@@ -1335,7 +1532,7 @@ static UINT HANDLE_CustomType50( MSIPACKAGE *package, const WCHAR *source, const
     deformat_string( package, target, &arg );
     TRACE("exe %s arg %s\n", debugstr_w(exe), debugstr_w(arg));
 
-    handle = execute_command( exe, arg, L"C:\\" );
+    handle = execute_command( exe, arg, L"C:\\", type );
     free( exe );
     free( arg );
     if (handle == INVALID_HANDLE_VALUE) return exe_launch_failed( type, action );
@@ -1359,7 +1556,7 @@ static UINT HANDLE_CustomType34( MSIPACKAGE *package, const WCHAR *source, const
 
     TRACE("cmd %s dir %s\n", debugstr_w(cmd), debugstr_w(workingdir));
 
-    handle = execute_command( NULL, cmd, workingdir );
+    handle = execute_command( NULL, cmd, workingdir, type );
     free( cmd );
     if (handle == INVALID_HANDLE_VALUE) return exe_launch_failed( type, action );
     return wait_process_handle( package, type, handle, action );

@@ -447,22 +447,35 @@ static int custom_action_server(const WCHAR *arg)
 {
     GUID guid, *thread_guid;
     DWORD64 thread64;
+#ifdef __REACTOS__
+    WCHAR buffer[40];
+    WCHAR *end;
+#else
     WCHAR buffer[24];
+#endif
     HANDLE thread;
     HANDLE pipe;
     DWORD size;
 
     TRACE("%s\n", debugstr_w(arg));
 
+#ifdef __REACTOS__
+    /* "<pid>s": the server of the deferred "no impersonation" actions (LocalSystem), with a pipe of its own */
+    if (!(client_pid = wcstol(arg, &end, 10)))
+    {
+        ERR("Invalid parameter %s\n", debugstr_w(arg));
+        return 1;
+    }
+    swprintf(buffer, ARRAY_SIZE(buffer), L"\\\\.\\pipe\\msica_%x_%d%s", client_pid, (int)(sizeof(void *) * 8),
+             (*end == L's') ? L"_s" : L"");
+#else
     if (!(client_pid = wcstol(arg, NULL, 10)))
     {
         ERR("Invalid parameter %s\n", debugstr_w(arg));
         return 1;
     }
 
-#ifdef __REACTOS__
-    swprintf(buffer, ARRAY_SIZE(buffer), L"\\\\.\\pipe\\msica_%x_%d", client_pid, (int)(sizeof(void *) * 8));
-#else
+
     swprintf(buffer, ARRAY_SIZE(buffer), L"\\\\.\\pipe\\msica_%x_%d", client_pid, sizeof(void *) * 8);
 #endif
     pipe = CreateFileW(buffer, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);

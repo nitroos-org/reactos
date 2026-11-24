@@ -6,9 +6,43 @@
  */
 
 #include <windows.h>
+#include <sddl.h>
 #include <msi.h>
 #include <msiquery.h>
 #include <stdio.h>
+
+/*
+ * Deferred custom action of the NoImpersonateAction test: writes the SID of the user of its process token to the file
+ * named by CustomActionData ("S-1-5-18" when the action runs as LocalSystem).
+ */
+UINT WINAPI ReportIdentity(MSIHANDLE hInstall)
+{
+    WCHAR szFile[MAX_PATH], szSid[128];
+    DWORD cch = ARRAYSIZE(szFile), cb, cbWritten;
+    BYTE buf[256];
+    HANDLE hToken, hFile;
+    LPWSTR pszSid = NULL;
+
+    szFile[0] = UNICODE_NULL;
+    MsiGetPropertyW(hInstall, L"CustomActionData", szFile, &cch);
+    szSid[0] = UNICODE_NULL;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
+    {
+        if (GetTokenInformation(hToken, TokenUser, buf, sizeof(buf), &cb) &&
+            ConvertSidToStringSidW(((PTOKEN_USER)buf)->User.Sid, &pszSid))
+        {
+            lstrcpynW(szSid, pszSid, ARRAYSIZE(szSid));
+            LocalFree(pszSid);
+        }
+        CloseHandle(hToken);
+    }
+    hFile = CreateFileW(szFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return ERROR_INSTALL_FAILURE;
+    WriteFile(hFile, szSid, lstrlenW(szSid) * sizeof(WCHAR), &cbWritten, NULL);
+    CloseHandle(hFile);
+    return ERROR_SUCCESS;
+}
 
 UINT WINAPI CheckDir(MSIHANDLE hInstall)
 {
