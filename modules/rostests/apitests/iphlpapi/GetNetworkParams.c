@@ -251,7 +251,62 @@ test_GetNetworkParams(VOID)
     HeapFree(GetProcessHeap(), 0, FixedInfo);
 }
 
+/*
+ * The Interfaces key keeps a subkey for every adapter the system has ever had. The name servers of a
+ * subkey that no adapter has (a removed or replaced NIC) are not the ones of the computer: nslookup asked
+ * such a server first.
+ */
+#define STALE_INTERFACE_KEY "System\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\{0BADC0DE-0000-4000-8000-000000000042}"
+#define STALE_NAME_SERVER "192.0.2.42"
+
+static
+VOID
+test_GetNetworkParamsStaleInterface(VOID)
+{
+    HKEY Key;
+    LONG Error;
+    DWORD Len = 0, Dhcp = 0, Count = 0;
+    DWORD ApiReturn;
+    PFIXED_INFO FixedInfo;
+    PIP_ADDR_STRING Server;
+
+    Error = RegCreateKeyExA(HKEY_LOCAL_MACHINE, STALE_INTERFACE_KEY, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Key, NULL);
+    if (Error != ERROR_SUCCESS)
+    {
+        skip("Cannot create the interface key (%ld)\n", Error);
+        return;
+    }
+    RegSetValueExA(Key, "NameServer", 0, REG_SZ, (const BYTE *)STALE_NAME_SERVER, sizeof(STALE_NAME_SERVER));
+    RegSetValueExA(Key, "EnableDHCP", 0, REG_DWORD, (const BYTE *)&Dhcp, sizeof(Dhcp));
+    RegCloseKey(Key);
+
+    ApiReturn = GetNetworkParams(NULL, &Len);
+    ok(ApiReturn == ERROR_BUFFER_OVERFLOW, "GetNetworkParams returned %lu\n", ApiReturn);
+    FixedInfo = HeapAlloc(GetProcessHeap(), 0, Len);
+    if (FixedInfo && ApiReturn == ERROR_BUFFER_OVERFLOW)
+    {
+        ApiReturn = GetNetworkParams(FixedInfo, &Len);
+        ok(ApiReturn == NO_ERROR, "GetNetworkParams returned %lu\n", ApiReturn);
+        if (ApiReturn == NO_ERROR)
+        {
+            for (Server = &FixedInfo->DnsServerList; Server; Server = Server->Next)
+            {
+                ok(strcmp(Server->IpAddress.String, STALE_NAME_SERVER) != 0,
+                   "GetNetworkParams lists the name server of an interface that no adapter has\n");
+                if (Server->IpAddress.String[0] != '\0')
+                    Count++;
+            }
+            trace("%lu name servers of the adapters\n", Count);
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, FixedInfo);
+
+    Error = RegDeleteKeyA(HKEY_LOCAL_MACHINE, STALE_INTERFACE_KEY);
+    ok(Error == ERROR_SUCCESS, "Failed to delete the interface key: %ld\n", Error);
+}
+
 START_TEST(GetNetworkParams)
 {
     test_GetNetworkParams();
+    test_GetNetworkParamsStaleInterface();
 }
