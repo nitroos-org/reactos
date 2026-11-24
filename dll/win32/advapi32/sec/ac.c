@@ -486,6 +486,14 @@ InternalExplicitAccessAToW(IN ULONG cCountOfExplicitEntries,
                         lpStr = GetTrusteeNameA(&pListOfExplicitEntriesA[i].Trustee);
                         if (lpStr != NULL)
                         {
+                            /* copy over the parts of the TRUSTEE structure that don't need to be
+                               touched (the multiple trustee, its operation, the form and the type:
+                               the heap block is not zeroed) */
+                            RtlCopyMemory(&peaw[i].Trustee,
+                                          &pListOfExplicitEntriesA[i].Trustee,
+                                          FIELD_OFFSET(TRUSTEE_A,
+                                                       ptstrName));
+
                             /* convert the trustee name */
                             BufferSize = strlen(lpStr) + 1;
 
