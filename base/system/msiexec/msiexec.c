@@ -32,6 +32,9 @@
 
 #include "wine/debug.h"
 #include "msiexec_internal.h"
+#ifdef __REACTOS__
+#include <reactos/msilaunch.h>
+#endif
 
 #include "initguid.h"
 DEFINE_GUID(GUID_NULL,0,0,0,0,0,0,0,0,0,0,0);
@@ -478,12 +481,35 @@ static int custom_action_server(const WCHAR *arg)
 
     swprintf(buffer, ARRAY_SIZE(buffer), L"\\\\.\\pipe\\msica_%x_%d", client_pid, sizeof(void *) * 8);
 #endif
+#ifdef __REACTOS__
+    /* The pipe's name is predictable. Talk only to the process the server was started for (whoever made the name
+     * first is its server), and give it no token: the client only writes GUIDs and reads thread handles. */
+    pipe = CreateFileW(buffer, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                       SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS, NULL);
+    if (pipe == INVALID_HANDLE_VALUE)
+    {
+        ERR("Failed to create custom action server pipe: %lu\n", GetLastError());
+        return GetLastError();
+    }
+    {
+        ULONG server_pid = 0;
+
+        if (!GetNamedPipeServerProcessId(pipe, &server_pid) || server_pid != client_pid)
+        {
+            ERR("The custom action server pipe %s is served by process %lu, not by %lu\n", debugstr_w(buffer),
+                server_pid, client_pid);
+            CloseHandle(pipe);
+            return ERROR_ACCESS_DENIED;
+        }
+    }
+#else
     pipe = CreateFileW(buffer, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (pipe == INVALID_HANDLE_VALUE)
     {
         ERR("Failed to create custom action server pipe: %lu\n", GetLastError());
         return GetLastError();
     }
+#endif
 
     /* We need this to unmarshal streams, and some apps expect it to be present. */
     CoInitializeEx(NULL, COINIT_MULTITHREADED);

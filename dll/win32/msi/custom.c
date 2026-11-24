@@ -45,6 +45,7 @@
 #include <psdk/ntstatus.h>
 #include <ndk/mmfuncs.h>
 #include "resource.h"
+#include "sddl.h"
 #include <reactos/msilaunch.h>
 #endif
 
@@ -808,6 +809,52 @@ done:
     return err;
 }
 
+/* The descriptor of a custom action server pipe: LocalSystem and the user of this process may open it (the server
+ * runs as one of them), with the rights of a client only (no FILE_CREATE_PIPE_INSTANCE = FILE_APPEND_DATA) */
+static DWORD custom_server_pipe_descriptor(PSECURITY_DESCRIPTOR *sd)
+{
+    union { TOKEN_USER user; BYTE buffer[128]; } info;
+    WCHAR *sid = NULL, sddl[160];
+    HANDLE token;
+    DWORD size, err = ERROR_SUCCESS;
+
+    *sd = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        return GetLastError();
+    if (!GetTokenInformation(token, TokenUser, &info, sizeof(info), &size) || !ConvertSidToStringSidW(info.user.User.Sid, &sid))
+        err = GetLastError();
+    CloseHandle(token);
+    if (err) return err;
+    swprintf(sddl, ARRAY_SIZE(sddl), L"D:P(A;;0x12019b;;;SY)(A;;0x12019b;;;%s)", sid);
+    LocalFree(sid);
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, sd, NULL))
+        return GetLastError();
+    return ERROR_SUCCESS;
+}
+
+struct connect_guard
+{
+    HANDLE process;     /* the server */
+    HANDLE done;        /* set when ConnectNamedPipe() returned */
+    const WCHAR *name;
+};
+
+/* When the server ends without connecting (or does not connect within five minutes), connect to the pipe from here
+ * so that ConnectNamedPipe() returns; the client process id check then refuses the connection */
+static DWORD WINAPI custom_connect_guard(void *arg)
+{
+    struct connect_guard *guard = arg;
+    HANDLE wait[2] = { guard->done, guard->process }, client;
+
+    if (WaitForMultipleObjects(2, wait, FALSE, 300000) != WAIT_OBJECT_0)
+    {
+        client = CreateFileW(guard->name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                             SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS, NULL);
+        if (client != INVALID_HANDLE_VALUE) CloseHandle(client);
+    }
+    return 0;
+}
+
 #endif /* __REACTOS__ */
 
 static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch, BOOL system)
@@ -849,14 +896,35 @@ static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch, BOOL system)
 #ifdef __REACTOS__
     swprintf(buffer, ARRAY_SIZE(buffer), L"\\\\.\\pipe\\msica_%x_%d%s",
              GetCurrentProcessId(), arch == SCS_32BIT_BINARY ? 32 : 64, system ? L"_s" : L"");
+    /* The name is predictable: the pipe must be new (whoever made it first would receive the server, LocalSystem for
+     * the "_s" one), and only LocalSystem and this user may open it; nobody may add an instance */
+    {
+        SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, FALSE };
+        DWORD err;
+
+        if ((err = custom_server_pipe_descriptor(&sa.lpSecurityDescriptor)))
+        {
+            ERR("no descriptor for the custom action server pipe: %lu\n", err);
+            return err;
+        }
+        pipe = CreateNamedPipeW(buffer, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, 0, 1, sizeof(DWORD64),
+            sizeof(GUID), 0, &sa);
+        err = GetLastError();
+        LocalFree(sa.lpSecurityDescriptor);
+        if (pipe == INVALID_HANDLE_VALUE)
+        {
+            ERR("failed to create custom action client pipe %s: %lu\n", debugstr_w(buffer), err);
+            return err;
+        }
+    }
 #else
     swprintf(buffer, ARRAY_SIZE(buffer), L"\\\\.\\pipe\\msica_%x_%d",
              GetCurrentProcessId(), arch == SCS_32BIT_BINARY ? 32 : 64);
-#endif
     pipe = CreateNamedPipeW(buffer, PIPE_ACCESS_DUPLEX, 0, 1, sizeof(DWORD64),
         sizeof(GUID), 0, NULL);
     if (pipe == INVALID_HANDLE_VALUE)
         ERR("failed to create custom action client pipe: %lu\n", GetLastError());
+#endif
 
     if ((sizeof(void *) == 8 || is_wow64) && arch == SCS_32BIT_BINARY)
         GetSystemWow64DirectoryW(path, MAX_PATH - ARRAY_SIZE(L"\\msiexec.exe"));
@@ -923,6 +991,49 @@ static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch, BOOL system)
 
     if (pi.hThread) CloseHandle(pi.hThread);
 
+#ifdef __REACTOS__
+    /* Only the server just started may be the client: anyone else allowed to open the pipe would be handed the
+     * actions. A server that ends before it connects does not leave ConnectNamedPipe() waiting forever. */
+    {
+        struct connect_guard guard;
+        HANDLE guard_thread;
+        DWORD client_pid = 0, err = ERROR_SUCCESS;
+        BOOL connected;
+
+        guard.process = pi.hProcess;
+        guard.name = buffer;
+        guard.done = CreateEventW(NULL, TRUE, FALSE, NULL);
+        guard_thread = guard.done ? CreateThread(NULL, 0, custom_connect_guard, &guard, 0, NULL) : NULL;
+        if (!guard_thread)
+            err = GetLastError();
+        else
+        {
+            connected = ConnectNamedPipe(pipe, NULL) || GetLastError() == ERROR_PIPE_CONNECTED;
+            if (!connected) err = GetLastError();
+            SetEvent(guard.done);
+            WaitForSingleObject(guard_thread, INFINITE);
+            CloseHandle(guard_thread);
+            if (connected && (!GetNamedPipeClientProcessId(pipe, &client_pid) || client_pid != pi.dwProcessId))
+            {
+                ERR("the custom action server pipe was opened by process %lu, not by the server %lu\n",
+                    client_pid, pi.dwProcessId);
+                err = ERROR_ACCESS_DENIED;
+            }
+        }
+        if (guard.done) CloseHandle(guard.done);
+        if (err)
+        {
+            ERR("failed to connect to custom action server: %lu\n", err);
+            TerminateProcess(pi.hProcess, err);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pipe);
+            return err;
+        }
+    }
+
+    *server_process = pi.hProcess;
+    *server_pipe = pipe;
+#else
     *server_process = pi.hProcess;
     *server_pipe = pipe;
 
@@ -931,6 +1042,7 @@ static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch, BOOL system)
         ERR("failed to connect to custom action server: %lu\n", GetLastError());
         return GetLastError();
     }
+#endif
 
     return ERROR_SUCCESS;
 }
