@@ -882,6 +882,70 @@ static WCHAR *resolve_command_application( const WCHAR *cmdline )
     return NULL;
 }
 
+/*
+ * Who may call this process's IWineMsiRemote interface (the endpoint msi<pid>, whose pipe everyone may open): only its
+ * own custom action servers, while they run. Without this check any local program could drive the installation of
+ * the user who runs it (read and set properties, run actions) through the handles the servers use.
+ */
+static HANDLE custom_servers[32];
+static CRITICAL_SECTION custom_servers_cs;
+static CRITICAL_SECTION_DEBUG custom_servers_cs_debug =
+{
+    0, 0, &custom_servers_cs,
+    { &custom_servers_cs_debug.ProcessLocksList, &custom_servers_cs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": custom_servers_cs") }
+};
+static CRITICAL_SECTION custom_servers_cs = { &custom_servers_cs_debug, -1, 0, 0, 0, 0 };
+
+static BOOL custom_server_remember(HANDLE process)
+{
+    BOOL ret = FALSE;
+    DWORD i;
+
+    EnterCriticalSection(&custom_servers_cs);
+    for (i = 0; i < ARRAY_SIZE(custom_servers) && !ret; i++)
+    {
+        if (!custom_servers[i])
+        {
+            custom_servers[i] = process;
+            ret = TRUE;
+        }
+    }
+    LeaveCriticalSection(&custom_servers_cs);
+    return ret;
+}
+
+static void custom_server_forget(HANDLE process)
+{
+    DWORD i;
+
+    EnterCriticalSection(&custom_servers_cs);
+    for (i = 0; i < ARRAY_SIZE(custom_servers); i++)
+        if (custom_servers[i] == process) custom_servers[i] = NULL;
+    LeaveCriticalSection(&custom_servers_cs);
+}
+
+/* The interface security callback: the caller's process must be one of the running servers (a process id of a
+ * server that has ended may be another process's by now) */
+static RPC_STATUS CALLBACK custom_remote_callback(RPC_IF_HANDLE iface, void *context)
+{
+    ULONG pid = 0;
+    BOOL allowed = FALSE;
+    DWORD i;
+
+    if (I_RpcBindingInqLocalClientPID(context, &pid) != RPC_S_OK || !pid)
+        return RPC_S_ACCESS_DENIED;
+    EnterCriticalSection(&custom_servers_cs);
+    for (i = 0; i < ARRAY_SIZE(custom_servers) && !allowed; i++)
+    {
+        allowed = custom_servers[i] && GetProcessId(custom_servers[i]) == pid &&
+                  WaitForSingleObject(custom_servers[i], 0) == WAIT_TIMEOUT;
+    }
+    LeaveCriticalSection(&custom_servers_cs);
+    if (!allowed) WARN("refused a call of process %lu, not a custom action server of this process\n", pid);
+    return allowed ? RPC_S_OK : RPC_S_ACCESS_DENIED;
+}
+
 struct connect_guard
 {
     HANDLE process;     /* the server */
@@ -1081,6 +1145,14 @@ static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch, BOOL system)
         }
     }
 
+    if (!custom_server_remember(pi.hProcess))
+    {
+        ERR("too many custom action servers\n");
+        TerminateProcess(pi.hProcess, ERROR_NOT_ENOUGH_MEMORY);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pipe);
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
     *server_process = pi.hProcess;
     *server_pipe = pipe;
 #else
@@ -1101,6 +1173,9 @@ void custom_stop_server(HANDLE process, HANDLE pipe)
 {
     DWORD size;
 
+#ifdef __REACTOS__
+    custom_server_forget(process);
+#endif
     WriteFile(pipe, &GUID_NULL, sizeof(GUID_NULL), &size, NULL);
     WaitForSingleObject(process, INFINITE);
     CloseHandle(process);
@@ -1260,8 +1335,14 @@ static custom_action_info *do_msidbCustomActionTypeDll(
             return NULL;
         }
 
+#ifdef __REACTOS__
+        /* only the custom action servers of this process may call it (custom_remote_callback) */
+        status = RpcServerRegisterIfEx(s_IWineMsiRemote_v0_0_s_ifspec, NULL, NULL,
+            RPC_IF_AUTOLISTEN, RPC_C_LISTEN_MAX_CALLS_DEFAULT, custom_remote_callback);
+#else
         status = RpcServerRegisterIfEx(s_IWineMsiRemote_v0_0_s_ifspec, NULL, NULL,
             RPC_IF_AUTOLISTEN, RPC_C_LISTEN_MAX_CALLS_DEFAULT, NULL);
+#endif
         if (status != RPC_S_OK)
         {
             ERR("RpcServerRegisterIfEx failed: %#lx\n", status);
