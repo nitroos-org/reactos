@@ -78,6 +78,31 @@ KdbpSymSearchModuleList(
  * \retval TRUE    Module was found, \a pLdrEntry was filled.
  * \retval FALSE   No module was found.
  */
+/*
+ * The debugger runs with the other processors frozen. Any of them, or the
+ * code this processor interrupted, can hold the loaded module lock at that
+ * moment (RtlPcToFileHeader takes it for every frame of a stack capture), and
+ * waiting for it then never ends: the holder only runs again when the
+ * debugger has finished. So the debugger never waits for the lock: it walks
+ * the list without it when the lock is taken. That is safe there: a frozen
+ * holder does not move, inserting or removing an entry keeps every forward
+ * link valid at each step, and an entry is freed only after its remover has
+ * released the lock. Outside the debugger the lock is taken as before.
+ */
+static
+BOOLEAN
+KdbpAcquireLoadedModuleLock(VOID)
+{
+    if (KeTryToAcquireSpinLockAtDpcLevel(&PsLoadedModuleSpinLock))
+        return TRUE;
+
+    if (KiFreezeOwner == KeGetCurrentPrcb())
+        return FALSE;
+
+    KeAcquireSpinLockAtDpcLevel(&PsLoadedModuleSpinLock);
+    return TRUE;
+}
+
 BOOLEAN
 KdbpSymFindModule(
     IN PVOID Address  OPTIONAL,
@@ -86,20 +111,20 @@ KdbpSymFindModule(
 {
     LONG Count = 0;
     PEPROCESS CurrentProcess;
+    BOOLEAN Locked, Found;
 
     /* First try to look up the module in the kernel module list. */
-    KeAcquireSpinLockAtDpcLevel(&PsLoadedModuleSpinLock);
-    if(KdbpSymSearchModuleList(PsLoadedModuleList.Flink,
-                               &PsLoadedModuleList,
-                               &Count,
-                               Address,
-                               Index,
-                               pLdrEntry))
-    {
+    Locked = KdbpAcquireLoadedModuleLock();
+    Found = KdbpSymSearchModuleList(PsLoadedModuleList.Flink,
+                                    &PsLoadedModuleList,
+                                    &Count,
+                                    Address,
+                                    Index,
+                                    pLdrEntry);
+    if (Locked)
         KeReleaseSpinLockFromDpcLevel(&PsLoadedModuleSpinLock);
+    if (Found)
         return TRUE;
-    }
-    KeReleaseSpinLockFromDpcLevel(&PsLoadedModuleSpinLock);
 
     /* That didn't succeed. Try the module list of the current process now. */
     CurrentProcess = PsGetCurrentProcess();
