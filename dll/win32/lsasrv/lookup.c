@@ -1323,8 +1323,10 @@ LsapLookupIsolatedNames(DWORD Count,
             continue;
         }
 
-        /* Look-up the account domain */
-        if (RtlEqualUnicodeString((PUNICODE_STRING)&AccountNames[i], &AccountDomainName, TRUE))
+        /* Look-up the account domain: an empty name (LookupAccountName with a NULL name) names the
+         * domain of the local accounts, as measured on Windows Server 2022 (SidTypeDomain) */
+        if (AccountNames[i].Length == 0 ||
+            RtlEqualUnicodeString((PUNICODE_STRING)&AccountNames[i], &AccountDomainName, TRUE))
         {
             SidsBuffer[i].Use = SidTypeDomain;
             SidsBuffer[i].Sid = LsapCopySid(AccountDomainSid);

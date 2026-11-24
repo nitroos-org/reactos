@@ -71,6 +71,10 @@ START_TEST(eventlog_supp)
                 LastError = ERROR_SUCCESS;
 
             ok( ( (Success == Tests[i].Result[0].Success) && (LastError == Tests[i].Result[0].LastError) ) ||
+                /* More than the 0x3FFFF bytes of the RPC interface: the bound is refused by the RPC runtime before
+                 * the service is called, as the second column (Vista and later, which is what is reported) has it */
+                ( (Tests[i].MaxDataSize > 0x3FFFF) && (Success == Tests[i].Result[1].Success) &&
+                  (LastError == Tests[i].Result[1].LastError) ) ||
                 broken( (Success == FALSE) && (LastError == ERROR_INVALID_PARAMETER) /* For Win2k3, see above */) // ||
                 // broken( (Success == Tests[i].Result[1].Success) && (LastError == Tests[i].Result[1].LastError) /* For Vista+ */)
                 ,

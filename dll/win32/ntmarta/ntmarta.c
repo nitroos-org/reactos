@@ -597,6 +597,15 @@ AccpGetTrusteeSid(IN PTRUSTEE_W Trustee,
             /* fall through */
 
         case TRUSTEE_IS_NAME:
+            /* The operation is ignored for a SID trustee, but a name trustee that asks to impersonate is
+             * refused (measured on Windows Server 2022: advapi32_winetest security test_SetEntriesInAclW) */
+            if (Trustee->TrusteeForm == TRUSTEE_IS_NAME &&
+                Trustee->MultipleTrusteeOperation == TRUSTEE_IS_IMPERSONATE)
+            {
+                Ret = ERROR_INVALID_PARAMETER;
+                break;
+            }
+
             TrusteeName = AccpGetTrusteeName(Trustee);
             if (!wcscmp(TrusteeName, L"CURRENT_USER"))
             {
@@ -2037,6 +2046,26 @@ AccpSetFileSecurity(IN HANDLE File,
     return ERROR_SUCCESS;
 }
 
+/* The object types that Get/SetSecurityInfo refuse with ERROR_INVALID_PARAMETER, whatever the handle is
+ * (measured on Windows Server 2022: advapi32_winetest security test_GetSecurityInfo) */
+static BOOL
+AccpIsInvalidHandleObjectType(SE_OBJECT_TYPE ObjectType)
+{
+    switch (ObjectType)
+    {
+        case SE_UNKNOWN_OBJECT_TYPE:
+        case SE_DS_OBJECT:
+        case SE_DS_OBJECT_ALL:
+        case SE_PROVIDER_DEFINED_OBJECT:
+        case SE_REGISTRY_WOW64_32KEY:
+        case SE_REGISTRY_WOW64_64KEY:
+            return TRUE;
+
+        default:
+            return (ULONG)ObjectType > (ULONG)SE_REGISTRY_WOW64_64KEY;
+    }
+}
+
 
 /**********************************************************************
  * AccRewriteGetHandleRights				EXPORTED
@@ -2106,6 +2135,7 @@ AccRewriteGetHandleRights(HANDLE handle,
             case SE_FILE_OBJECT:
                 /* FIXME - handle console handles? */
             case SE_KERNEL_OBJECT:
+            case SE_WMIGUID_OBJECT:
             {
                 Status = NtQuerySecurityObject(handle,
                                                SecurityInfo,
@@ -2147,6 +2177,12 @@ AccRewriteGetHandleRights(HANDLE handle,
 
             default:
             {
+                if (AccpIsInvalidHandleObjectType(ObjectType))
+                {
+                    Ret = ERROR_INVALID_PARAMETER;
+                    break;
+                }
+
                 UNIMPLEMENTED;
                 Ret = ERROR_CALL_NOT_IMPLEMENTED;
                 break;
@@ -2539,6 +2575,7 @@ AccRewriteSetHandleRights(HANDLE handle,
         }
 
         case SE_KERNEL_OBJECT:
+        case SE_WMIGUID_OBJECT:
         {
             Status = NtSetSecurityObject(handle,
                                          SecurityInfo,
@@ -2574,6 +2611,12 @@ AccRewriteSetHandleRights(HANDLE handle,
 
         default:
         {
+            if (AccpIsInvalidHandleObjectType(ObjectType))
+            {
+                Ret = ERROR_INVALID_PARAMETER;
+                break;
+            }
+
             UNIMPLEMENTED;
             Ret = ERROR_CALL_NOT_IMPLEMENTED;
             break;

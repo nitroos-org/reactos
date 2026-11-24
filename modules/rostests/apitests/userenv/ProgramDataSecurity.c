@@ -392,6 +392,18 @@ CheckWindowsAndConfig(void)
             if (!wcscmp(Find.cFileName, L".") || !wcscmp(Find.cFileName, L".."))
                 continue;
             StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%s\\%s", szConfig, Find.cFileName);
+            if (!_wcsicmp(Find.cFileName, L"LsaKey") || !_wcsicmp(Find.cFileName, L"LsaKey.new"))
+            {
+                /* The key of the secret values has a descriptor that grants SYSTEM alone (b0c7635ff97, 72a78dcebc1):
+                 * even an administrator cannot read it, so there is no DACL to look at: the open is refused */
+                HANDLE hKeyFile = CreateFileW(szFile, READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                              NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+                dwError = (hKeyFile == INVALID_HANDLE_VALUE) ? GetLastError() : 0;
+                if (hKeyFile != INVALID_HANDLE_VALUE)
+                    CloseHandle(hKeyFile);
+                ok(dwError == ERROR_ACCESS_DENIED, "%ls: opened by the administrator, error %lu\n", szFile, dwError);
+                continue;
+            }
             CheckNoUserAccess(szFile);
         } while (FindNextFileW(hFind, &Find));
         FindClose(hFind);

@@ -41,7 +41,9 @@ UpdateServiceStatus(DWORD dwState)
 {
     ServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     ServiceStatus.dwCurrentState = dwState;
-    ServiceStatus.dwControlsAccepted = 0;
+    /* The shutdown control is handled below (the log is closed with a stop event); a running log service
+     * reports it, as the event log of Windows does */
+    ServiceStatus.dwControlsAccepted = (dwState == SERVICE_RUNNING) ? SERVICE_ACCEPT_SHUTDOWN : 0;
     ServiceStatus.dwWin32ExitCode = 0;
     ServiceStatus.dwServiceSpecificExitCode = 0;
     ServiceStatus.dwCheckPoint = 0;

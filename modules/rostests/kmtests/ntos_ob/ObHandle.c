@@ -9,6 +9,16 @@
 #define NDEBUG
 #include <debug.h>
 
+/* Windows 8 and later report the PointerCount of an object with the references cached by its handle table (65537,
+ * 32769, ...). ReactOS counts exactly (2, 3), whatever version it reports, so the expectations of Windows 8 are not
+ * the ones for it (ObQueryObject reports ObjectHeader->PointerCount, ntoskrnl/ob/oblife.c) */
+static
+BOOLEAN
+HasFastRefCounts(VOID)
+{
+    return GetNTVersion() >= _WIN32_WINNT_WIN8 && !is_reactos();
+}
+
 #define CheckObject(Handle, Pointers, Handles, Attrib, Access) do   \
 {                                                                   \
     PUBLIC_OBJECT_BASIC_INFORMATION ObjectInfo;                     \
@@ -61,7 +71,7 @@ TestDuplicate(
           DIRECTORY_ALL_ACCESS, 0 },
     };
 
-    if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+    if (HasFastRefCounts())
     {
 #ifdef _M_IX86
         PtrCnt1 = 65UL;
@@ -100,16 +110,16 @@ TestDuplicate(
         {
             ok(IsUserHandle(NewHandle), "New handle = %p\n", NewHandle);
             CheckObject(NewHandle, PtrCnt1, 2UL, Tests[i].ExpectedAttributes, Tests[i].GrantedAccess);
-            if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+            if (HasFastRefCounts())
                 PtrCnt1--;
             CheckObject(Handle, PtrCnt1, 2UL, 0UL, DIRECTORY_ALL_ACCESS);
-            if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+            if (HasFastRefCounts())
                 PtrCnt1--;
 
             Status = ObCloseHandle(NewHandle, UserMode);
             ok_eq_hex(Status, STATUS_SUCCESS);
             CheckObject(Handle, PtrCnt2, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
-            if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+            if (HasFastRefCounts())
                 PtrCnt2 -= 2;
         }
     }
@@ -127,15 +137,15 @@ TestDuplicate(
     {
         ok(IsKernelHandle(NewHandle), "New handle = %p\n", NewHandle);
         CheckObject(NewHandle, PtrCnt1, 2UL, 0, DIRECTORY_ALL_ACCESS);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
                 PtrCnt1--;
         CheckObject(Handle, PtrCnt1, 2UL, 0UL, DIRECTORY_ALL_ACCESS);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             PtrCnt1--;
         Status = ObCloseHandle(NewHandle, UserMode);
         ok_eq_hex(Status, STATUS_INVALID_HANDLE);
         CheckObject(NewHandle, PtrCnt1, 2UL, 0, DIRECTORY_ALL_ACCESS);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             PtrCnt1--;
         CheckObject(Handle, PtrCnt1, 2UL, 0UL, DIRECTORY_ALL_ACCESS);
 
@@ -143,7 +153,7 @@ TestDuplicate(
         {
             Status = ObCloseHandle(NewHandle, KernelMode);
             ok_eq_hex(Status, STATUS_SUCCESS);
-            if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+            if (HasFastRefCounts())
                 PtrCnt2--;
             CheckObject(Handle, PtrCnt2, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
         }
@@ -182,7 +192,7 @@ START_TEST(ObHandle)
     if (!skip(NT_SUCCESS(Status), "No directory handle\n"))
     {
         ok(IsUserHandle(UserDirectoryHandle), "User handle = %p\n", UserDirectoryHandle);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
 #ifdef _M_IX86
             CheckObject(UserDirectoryHandle, 33UL, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
 #else
@@ -209,7 +219,7 @@ START_TEST(ObHandle)
     if (!skip(NT_SUCCESS(Status), "No directory handle\n"))
     {
         ok(IsKernelHandle(KernelDirectoryHandle), "Kernel handle = %p\n", KernelDirectoryHandle);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
 #ifdef _M_IX86
             CheckObject(KernelDirectoryHandle, 33UL, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
 #else
@@ -222,7 +232,7 @@ START_TEST(ObHandle)
 
         Status = ObCloseHandle(KernelDirectoryHandle, UserMode);
         ok_eq_hex(Status, STATUS_INVALID_HANDLE);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
 #ifdef _M_IX86
             CheckObject(KernelDirectoryHandle, 17UL, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
 #else

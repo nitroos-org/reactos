@@ -2999,8 +2999,14 @@ SeTokenCanImpersonate(
      * label only refuses the write rights, and TOKEN_DUPLICATE is not one of
      * them: the level is compared here, and the caller (PsImpersonateClient)
      * then gets an identification-level copy of the token instead.
+     *
+     * A process that holds SeImpersonatePrivilege (enabled: a token below Medium cannot enable
+     * it) is not subject to this: measured on Windows Server 2022, a High integrity
+     * administrator impersonates the SYSTEM token of winlogon.exe at the impersonation level
+     * and opens HKLM\SECURITY\Policy under it.
      */
-    if (TokenToImpersonate->IntegrityLevel > ProcessToken->IntegrityLevel)
+    if ((ProcessToken->TokenFlags & TOKEN_HAS_IMPERSONATE_PRIVILEGE) == 0 &&
+        TokenToImpersonate->IntegrityLevel > ProcessToken->IntegrityLevel)
     {
         DPRINT1("Cannot impersonate a token of a higher integrity level (0x%lx > 0x%lx)\n",
                 TokenToImpersonate->IntegrityLevel, ProcessToken->IntegrityLevel);

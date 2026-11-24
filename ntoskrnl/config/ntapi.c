@@ -339,6 +339,9 @@ NtCreateKey(OUT PHANDLE KeyHandle,
                          sizeof(OBJECT_ATTRIBUTES),
                          sizeof(ULONG));
 
+            /* The probe does not touch the memory: a NULL pointer must fault (STATUS_ACCESS_VIOLATION on Windows) */
+            (VOID)*(volatile ULONG *)ObjectAttributes;
+
             if (Disposition)
                 ProbeForWriteUlong(Disposition);
         }
@@ -446,13 +449,13 @@ CmpOpenKeyInternal(OUT PHANDLE KeyHandle,
     DesiredAccess &= ~KEY_WOW64_RES;
 
     /*
-     * Carry the open-link request to the parse routine (CmpParseKey), which
-     * folds it into the open's object attributes. This is the OpenOptions
-     * equivalent of the OBJ_OPENLINK object attribute. CmpParseKey only
-     * consults it on the open path, so NtCreateKey semantics are unaffected.
+     * REG_OPTION_OPEN_LINK is legal but does nothing here: Windows opens the target of a symbolic link
+     * unless the OBJ_OPENLINK object attribute is set (measured on Windows Server 2022: ntdll_winetest
+     * reg test_symlinks, NtOpenKeyEx with REG_OPTION_OPEN_LINK and no OBJ_OPENLINK). The advapi32
+     * RegOpenKeyEx turns the option into OBJ_OPENLINK itself.
      * REG_OPTION_BACKUP_RESTORE rides along for the registry ACL audit only.
      */
-    ParseContext.CreateOptions = OpenOptions & (REG_OPTION_OPEN_LINK | REG_OPTION_BACKUP_RESTORE);
+    ParseContext.CreateOptions = OpenOptions & REG_OPTION_BACKUP_RESTORE;
 
     /* Check for user-mode caller */
     if (PreviousMode != KernelMode)
@@ -468,6 +471,9 @@ CmpOpenKeyInternal(OUT PHANDLE KeyHandle,
             ProbeForRead(ObjectAttributes,
                          sizeof(OBJECT_ATTRIBUTES),
                          sizeof(ULONG));
+
+            /* The probe does not touch the memory: a NULL pointer must fault (STATUS_ACCESS_VIOLATION on Windows) */
+            (VOID)*(volatile ULONG *)ObjectAttributes;
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {

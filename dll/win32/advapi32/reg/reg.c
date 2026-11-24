@@ -1291,6 +1291,10 @@ RegCreateKeyExW(
 
     TRACE("RegCreateKeyExW() called\n");
 
+    /* no pointer for the new key (measured on Windows Server 2022) */
+    if (phkResult == NULL)
+        return ERROR_BADKEY;
+
     /* get the real parent key */
     Status = MapDefaultKey(&ParentKey,
                            hKey);
@@ -1358,6 +1362,9 @@ RegCreateKeyA(HKEY hKey,
               LPCSTR lpSubKey,
               PHKEY phkResult)
 {
+    if (phkResult == NULL)
+        return ERROR_INVALID_PARAMETER;
+
     return RegCreateKeyExA(hKey,
                            lpSubKey,
                            0,
@@ -1380,6 +1387,9 @@ RegCreateKeyW(HKEY hKey,
               LPCWSTR lpSubKey,
               PHKEY phkResult)
 {
+    if (phkResult == NULL)
+        return ERROR_INVALID_PARAMETER;
+
     return RegCreateKeyExW(hKey,
                            lpSubKey,
                            0,
@@ -2644,25 +2654,18 @@ RegSetKeyValueW(IN HKEY hKey,
 
     if (lpSubKey != NULL)
     {
-        OBJECT_ATTRIBUTES ObjectAttributes;
-        UNICODE_STRING SubKeyName;
-
-        RtlInitUnicodeString(&SubKeyName, lpSubKey);
-
-        InitializeObjectAttributes(&ObjectAttributes,
-                                   &SubKeyName,
-                                   OBJ_CASE_INSENSITIVE,
-                                   KeyHandle,
-                                   NULL);
-
-        Status = NtOpenKey(&SubKeyHandle,
-                           KEY_SET_VALUE,
-                           &ObjectAttributes);
-        if (!NT_SUCCESS(Status))
-        {
-            Ret = RtlNtStatusToDosError(Status);
+        /* the subkey is created when it does not exist (measured on Windows Server 2022) */
+        Ret = RegCreateKeyExW((HKEY)KeyHandle,
+                              lpSubKey,
+                              0,
+                              NULL,
+                              REG_OPTION_NON_VOLATILE,
+                              KEY_SET_VALUE,
+                              NULL,
+                              (PHKEY)&SubKeyHandle,
+                              NULL);
+        if (Ret != ERROR_SUCCESS)
             goto Cleanup;
-        }
 
         CurKey = SubKeyHandle;
     }
@@ -2718,32 +2721,18 @@ RegSetKeyValueA(IN HKEY hKey,
 
     if (lpSubKey != NULL)
     {
-        OBJECT_ATTRIBUTES ObjectAttributes;
-        UNICODE_STRING SubKeyName;
-
-        if (!RtlCreateUnicodeStringFromAsciiz(&SubKeyName, lpSubKey))
-        {
-            Ret = ERROR_NOT_ENOUGH_MEMORY;
+        /* the subkey is created when it does not exist (measured on Windows Server 2022) */
+        Ret = RegCreateKeyExA((HKEY)KeyHandle,
+                              lpSubKey,
+                              0,
+                              NULL,
+                              REG_OPTION_NON_VOLATILE,
+                              KEY_SET_VALUE,
+                              NULL,
+                              (PHKEY)&SubKeyHandle,
+                              NULL);
+        if (Ret != ERROR_SUCCESS)
             goto Cleanup;
-        }
-
-        InitializeObjectAttributes(&ObjectAttributes,
-                                   &SubKeyName,
-                                   OBJ_CASE_INSENSITIVE,
-                                   KeyHandle,
-                                   NULL);
-
-        Status = NtOpenKey(&SubKeyHandle,
-                           KEY_SET_VALUE,
-                           &ObjectAttributes);
-
-        RtlFreeUnicodeString(&SubKeyName);
-
-        if (!NT_SUCCESS(Status))
-        {
-            Ret = RtlNtStatusToDosError(Status);
-            goto Cleanup;
-        }
 
         CurKey = SubKeyHandle;
     }
@@ -3805,6 +3794,12 @@ RegLoadKeyW(HKEY hKey,
         return ERROR_INVALID_HANDLE;
     }
 
+    /* an empty file name is an invalid parameter, not a bad path name (measured on Windows Server 2022) */
+    if (lpFile != NULL && *lpFile == UNICODE_NULL)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+
     Status = MapDefaultKey(&KeyHandle,
                            hKey);
     if (!NT_SUCCESS(Status))
@@ -4023,6 +4018,10 @@ RegOpenKeyExA(
     TRACE("RegOpenKeyExA hKey 0x%x lpSubKey %s ulOptions 0x%x samDesired 0x%x phkResult %p\n",
           hKey, lpSubKey, ulOptions, samDesired, phkResult);
 
+    /* refused before the wide version, which clears the result, is called: the ANSI version leaves it alone */
+    if (!hKey && lpSubKey && phkResult)
+        return ERROR_INVALID_HANDLE;
+
     if (lpSubKey)
     {
         if (!RtlCreateUnicodeStringFromAsciiz(&SubKeyString, lpSubKey))
@@ -4068,6 +4067,8 @@ RegOpenKeyExW(HKEY hKey,
 
     if (!hKey && lpSubKey && phkResult)
     {
+        /* the wide version clears the result, the ANSI version leaves it alone (measured on Windows Server 2022) */
+        *phkResult = NULL;
         return ERROR_INVALID_HANDLE;
     }
 
