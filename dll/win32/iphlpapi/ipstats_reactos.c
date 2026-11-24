@@ -696,7 +696,8 @@ PMIB_IPNETTABLE getArpTable(void)
                 &returnSize);
 
             if (status == STATUS_SUCCESS) {
-                for (TmpIdx = 0; TmpIdx < returnSize; TmpIdx++, CurrIdx++)
+                /* the stack's tables can grow between the count and this call: take no more than were counted */
+                for (TmpIdx = 0; TmpIdx < returnSize && CurrIdx < totalNumber; TmpIdx++, CurrIdx++)
                     IpArpTable->table[CurrIdx] = AdapterArpTable[TmpIdx];
                 tdiFreeThingSet(AdapterArpTable);
             }

@@ -11,6 +11,7 @@
 #include "precomp.h"
 
 #include <ipifcons.h>
+#include <igmp.h>
 
 /* See iptypes.h */
 #define MAX_ADAPTER_DESCRIPTION_LENGTH 128
@@ -202,33 +203,105 @@ TDI_STATUS InfoTdiQueryGetInterfaceMIB(TDIEntityID ID,
     return Status;
 }
 
+/* Appends a static row for Addr unless the table has one: a multicast address maps to its link address (01-00-5e and the
+   low 23 bits), any other address is a broadcast address (all ones) */
+static ULONG ArpAddStatic(PIPARP_ENTRY Table, ULONG Count, ULONG Capacity, ULONG Index, ULONG Addr)
+{
+    PUCHAR Bytes = (PUCHAR)&Addr;
+    PIPARP_ENTRY Entry;
+    ULONG i;
+
+    for (i = 0; i < Count; i++)
+        if (Table[i].LogAddr == Addr)
+            return Count;
+    if (Count >= Capacity)
+        return Count;
+
+    Entry = &Table[Count];
+    RtlZeroMemory(Entry, sizeof(*Entry));
+    Entry->Index = Index;
+    Entry->AddrSize = 6;
+    Entry->LogAddr = Addr;
+    Entry->Type = ARP_ENTRY_STATIC;
+    if (IPV4_IS_MULTICAST(Addr))
+    {
+        Entry->PhysAddr[0] = 0x01;
+        Entry->PhysAddr[1] = 0x00;
+        Entry->PhysAddr[2] = 0x5e;
+        Entry->PhysAddr[3] = Bytes[1] & 0x7f;
+        Entry->PhysAddr[4] = Bytes[2];
+        Entry->PhysAddr[5] = Bytes[3];
+    }
+    else
+    {
+        RtlFillMemory(Entry->PhysAddr, 6, 0xff);
+    }
+    return Count + 1;
+}
+
+/* The table of an interface: the neighbors, and, once it has an IPv4 address, the static rows Windows lists next to them
+   (measured on Windows Server 2022): the subnet broadcast address and 255.255.255.255 with the all-ones link address,
+   224.0.0.22 (where the IGMPv3 reports go) and every IPv4 group the interface is a member of. */
 TDI_STATUS InfoTdiQueryGetArptableMIB(TDIEntityID ID,
 				      PIP_INTERFACE Interface,
 				      PNDIS_BUFFER Buffer,
 				      PUINT BufferSize) {
     NTSTATUS Status;
     ULONG NumNeighbors = NBCopyNeighbors( Interface, NULL, 0 );
-    ULONG MemSize;
+    ULONG Unicast = (Interface->Unicast.Type == IP_ADDRESS_V4) ? Interface->Unicast.Address.IPv4Address : 0;
+    ULONG NumGroups = 0, Capacity, Count, i;
+    PULONG Groups = NULL;
     PIPARP_ENTRY ArpEntries;
 
-    if (NumNeighbors != 0)
+    if (Unicast != 0)
+        NumGroups = IGMPCopyGroups(Interface->Index, NULL, 0);
+
+    /* the neighbors, the two broadcast addresses, 224.0.0.22 and the groups */
+    if (NumNeighbors > 0x10000 || NumGroups > 0x10000)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    Capacity = NumNeighbors + (Unicast != 0 ? 3 + NumGroups : 0);
+
+    if (Capacity != 0)
     {
         ULONG Seen;
 
-        if (NumNeighbors > MAXULONG / sizeof(IPARP_ENTRY))
-            return STATUS_INSUFFICIENT_RESOURCES;
-        MemSize = NumNeighbors * sizeof(IPARP_ENTRY);
-
-        ArpEntries = ExAllocatePoolWithTag( NonPagedPool, MemSize, ARP_ENTRY_TAG );
+        ArpEntries = ExAllocatePoolWithTag( NonPagedPool, Capacity * sizeof(IPARP_ENTRY), ARP_ENTRY_TAG );
         if( !ArpEntries ) return STATUS_NO_MEMORY;
 
         /* The cache can change between the count and the copy: the copy is
            capacity-bounded and the reply is clamped to what was copied */
-        Seen = NBCopyNeighbors( Interface, ArpEntries, NumNeighbors );
-        if (Seen < NumNeighbors)
-            MemSize = Seen * sizeof(IPARP_ENTRY);
+        Seen = NumNeighbors ? NBCopyNeighbors( Interface, ArpEntries, NumNeighbors ) : 0;
+        Count = min(Seen, NumNeighbors);
 
-        Status = InfoCopyOut( (PVOID)ArpEntries, MemSize, Buffer, BufferSize );
+        if (Unicast != 0 && Interface == Loopback)
+        {
+            /* the loopback interface has the one row, without a link address (measured) */
+            ULONG Before = Count;
+
+            Count = ArpAddStatic(ArpEntries, Count, Capacity, Interface->Index, DH2N(0xE0000016));
+            if (Count > Before)
+            {
+                ArpEntries[Before].AddrSize = 0;
+                RtlZeroMemory(ArpEntries[Before].PhysAddr, sizeof(ArpEntries[Before].PhysAddr));
+            }
+        }
+        else if (Unicast != 0)
+        {
+            if (NumGroups != 0)
+                Groups = ExAllocatePoolWithTag( NonPagedPool, NumGroups * sizeof(ULONG), ARP_ENTRY_TAG );
+            Seen = Groups ? IGMPCopyGroups(Interface->Index, Groups, NumGroups) : 0;
+
+            if (Interface->Broadcast.Address.IPv4Address != 0)
+                Count = ArpAddStatic(ArpEntries, Count, Capacity, Interface->Index, Interface->Broadcast.Address.IPv4Address);
+            Count = ArpAddStatic(ArpEntries, Count, Capacity, Interface->Index, 0xFFFFFFFF);
+            Count = ArpAddStatic(ArpEntries, Count, Capacity, Interface->Index, DH2N(0xE0000016));
+            for (i = 0; i < min(Seen, NumGroups); i++)
+                Count = ArpAddStatic(ArpEntries, Count, Capacity, Interface->Index, Groups[i]);
+            if (Groups)
+                ExFreePoolWithTag( Groups, ARP_ENTRY_TAG );
+        }
+
+        Status = InfoCopyOut( (PVOID)ArpEntries, Count * sizeof(IPARP_ENTRY), Buffer, BufferSize );
 
         ExFreePoolWithTag( ArpEntries, ARP_ENTRY_TAG );
     }

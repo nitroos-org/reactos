@@ -21,6 +21,10 @@ VOID IGMPShutdown(VOID);
    IGMP_MAX_SOURCES); INCLUDE with none leaves the group. Callable at IRQL <= DISPATCH_LEVEL */
 VOID IGMPSetGroupState(ULONG IfIndex, ULONG Group, UCHAR Mode, const ULONG *Sources, ULONG NumSources);
 
+/* The IPv4 groups the interface is a member of (network order): copies at most Capacity of them into Groups (may be NULL) and
+   returns how many there are. Callable at IRQL <= DISPATCH_LEVEL */
+ULONG IGMPCopyGroups(ULONG IfIndex, PULONG Groups, ULONG Capacity);
+
 /* The interface got an IPv4 address or came up: its groups are reported again (state change reports) */
 VOID IGMPInterfaceRefresh(ULONG IfIndex);
 

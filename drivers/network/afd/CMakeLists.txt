@@ -5,6 +5,7 @@ include_directories(
     ${REACTOS_SOURCE_DIR}/sdk/include/reactos/drivers)
 
 list(APPEND SOURCE
+    afd/addrchg.c
     afd/bind.c
     afd/connect.c
     afd/context.c

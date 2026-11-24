@@ -125,6 +125,67 @@ IcmpSetReplyOptions(
     Reply->Options.OptionsData = UserOptions;
 }
 
+/* The data and the options of a reply moved Delta bytes towards the start of the buffer: so do the pointers to them */
+static
+VOID
+IcmpMoveReplyPointers(
+    _In_ BOOLEAN Wow64,
+    _In_ PICMP_ECHO_REPLY Reply,
+    _In_ UINT32 Delta)
+{
+#ifdef ICMP_SUPPORT_WOW64
+    if (Wow64)
+    {
+        PICMP_ECHO_REPLY_GUEST Reply32 = (PICMP_ECHO_REPLY_GUEST)Reply;
+
+        if (Reply32->DataSize > 0)
+            Reply32->Data -= Delta;
+        if (Reply32->Options.OptionsSize > 0)
+            Reply32->Options.OptionsData -= Delta;
+        else if (Reply32->DataSize > 0)
+            Reply32->Options.OptionsData = Reply32->Data + Reply32->DataSize;   /* no options: right behind the data */
+        return;
+    }
+#endif
+    UNREFERENCED_PARAMETER(Wow64);
+    if (Reply->DataSize > 0)
+        Reply->Data = (PUCHAR)Reply->Data - Delta;
+    if (Reply->Options.OptionsSize > 0)
+        Reply->Options.OptionsData = (PUCHAR)Reply->Options.OptionsData - Delta;
+    else if (Reply->DataSize > 0)
+        Reply->Options.OptionsData = (PUCHAR)Reply->Data + Reply->DataSize;     /* no options: right behind the data */
+}
+
+/*
+ * The replies are the first thing in the buffer, then the data and the options that came with them, and nothing after that
+ * (measured on Windows Server 2022: ICMP_ECHO_REPLY, directly behind it the data, IoStatus.Information is the size of both).
+ * While the replies arrive their data and options are collected at the end of the buffer, because the number of replies is not
+ * known: here they move up to the end of the last reply, and the size that is returned is what is used.
+ */
+static
+ULONG_PTR
+IcmpPackReplies(
+    _In_ PICMP_PACKET_CONTEXT Context,
+    _In_ PUCHAR Buffer,
+    _In_ UINT32 BufferLength)
+{
+    UINT32 ReplySize = IcmpReplySize(Context->Wow64);
+    UINT32 Used = (UINT32)(Context->CurrentReply - Buffer);     /* the replies */
+    UINT32 Delta = Context->RemainingSize;                      /* the room between them and their data */
+    UINT32 Tail = BufferLength - Used - Delta;                  /* the data and the options */
+    LONG i;
+
+    if (Tail != 0)
+    {
+        if (Delta != 0)
+            RtlMoveMemory(Buffer + Used, Buffer + Used + Delta, Tail);
+        for (i = 0; i < Context->nReplies; i++)
+            IcmpMoveReplyPointers(Context->Wow64, (PICMP_ECHO_REPLY)(Buffer + i * ReplySize), Delta);
+    }
+
+    return Used + Tail;
+}
+
 static volatile INT16 IcmpSequence = 0;
 
 static
@@ -274,9 +335,10 @@ EndRequestHandler(
 
     if (Context->nReplies > 0)
     {
+        Irp->IoStatus.Information = IcmpPackReplies(Context, Irp->AssociatedIrp.SystemBuffer,
+                                                    CurrentStack->Parameters.DeviceIoControl.OutputBufferLength);
         ((PICMP_ECHO_REPLY)Irp->AssociatedIrp.SystemBuffer)->Reserved = Context->nReplies;
         Irp->IoStatus.Status = STATUS_SUCCESS;
-        Irp->IoStatus.Information = CurrentStack->Parameters.DeviceIoControl.OutputBufferLength;
     }
     else
     {
@@ -384,34 +446,30 @@ ReceiveDatagram(
     IcmpSetReplyData(Context->Wow64, CurrentReply, CurrentUserBuffer, 0);
     IcmpSetReplyOptions(Context->Wow64, CurrentReply, IpHeader, CurrentUserBuffer, 0);
 
-    /* Only an echo reply returns data; an error message quotes the request header, which Windows does not return. */
-    if (IcmpHeader->Type == ICMP_TYPE_ECHO_REPLY && DataSize > 0 && Context->RemainingSize > 0)
+    /* The data and the options of the reply are written at the end of the space that is left, the options above the data (the
+     * data is the more important of the two and takes its room first): EndRequestHandler moves them behind the replies. */
     {
-        UINT32 _DataSize = min(Context->RemainingSize, DataSize);
+        UINT32 _DataSize = 0, _OptSize = 0;
 
-        memcpy(Context->CurrentReply + Context->RemainingSize - _DataSize, DataBuffer, _DataSize);
-        IcmpSetReplyData(Context->Wow64, CurrentReply, CurrentUserBuffer + Context->RemainingSize - _DataSize, (UINT16)_DataSize);
+        /* Only an echo reply returns data; an error message quotes the request header, which Windows does not return. */
+        if (IcmpHeader->Type == ICMP_TYPE_ECHO_REPLY && DataSize > 0)
+            _DataSize = min(Context->RemainingSize, (UINT32)DataSize);
+        if (OptionsLength > 0)
+            _OptSize = min(Context->RemainingSize - _DataSize, (UINT32)OptionsLength);
 
-        Context->RemainingSize -= _DataSize;
-    }
-    else
-    {
-        TI_DbgPrint(DEBUG_ICMP, ("RemainingSize: %u, DataSize: %d\n", Context->RemainingSize, DataSize));
-    }
-
-    if (OptionsLength > 0 && Context->RemainingSize > 0)
-    {
-        UINT32 _OptSize = min(Context->RemainingSize, OptionsLength);
-
-        memcpy(Context->CurrentReply + Context->RemainingSize - _OptSize, Options, _OptSize);
-        IcmpSetReplyOptions(Context->Wow64, CurrentReply, IpHeader,
-                            CurrentUserBuffer + Context->RemainingSize - _OptSize, (UINT8)_OptSize);
-
-        Context->RemainingSize -= _OptSize;
-    }
-    else
-    {
-        TI_DbgPrint(DEBUG_ICMP, ("RemainingSize: %u, OptSize: %d\n", Context->RemainingSize, OptionsLength));
+        if (_OptSize > 0)
+        {
+            memcpy(Context->CurrentReply + Context->RemainingSize - _OptSize, Options, _OptSize);
+            IcmpSetReplyOptions(Context->Wow64, CurrentReply, IpHeader,
+                                CurrentUserBuffer + Context->RemainingSize - _OptSize, (UINT8)_OptSize);
+            Context->RemainingSize -= _OptSize;
+        }
+        if (_DataSize > 0)
+        {
+            memcpy(Context->CurrentReply + Context->RemainingSize - _DataSize, DataBuffer, _DataSize);
+            IcmpSetReplyData(Context->Wow64, CurrentReply, CurrentUserBuffer + Context->RemainingSize - _DataSize, (UINT16)_DataSize);
+            Context->RemainingSize -= _DataSize;
+        }
     }
 
     Context->nReplies++;

@@ -359,6 +359,8 @@ typedef struct _AFD_TDI_HANDLE_DATA
 #define AFD_GET_PENDING_CONNECT_DATA	41
 #define AFD_VALIDATE_GROUP		42
 #define AFD_SUPER_CONNECT 49
+#define AFD_ADDRCHANGE_WAIT             90
+#define AFD_ADDRCHANGE_COMPLETE         91
 
 /* AFD IOCTLs */
 
@@ -438,6 +440,13 @@ typedef struct _AFD_TDI_HANDLE_DATA
   _AFD_CONTROL_CODE(AFD_VALIDATE_GROUP, METHOD_NEITHER)
 #define IOCTL_AFD_SUPER_CONNECT \
   _AFD_CONTROL_CODE(AFD_SUPER_CONNECT, METHOD_NEITHER)
+/* msafd and AFD only (no Windows counterpart): a request for the next change of the address list that stays pending in the
+ * driver, so that the completion goes through the completion port of the socket, and the completion of such requests
+ * (input: the NTSTATUS they complete with, none means STATUS_SUCCESS) */
+#define IOCTL_AFD_ADDRCHANGE_WAIT \
+  _AFD_CONTROL_CODE(AFD_ADDRCHANGE_WAIT, METHOD_BUFFERED)
+#define IOCTL_AFD_ADDRCHANGE_COMPLETE \
+  _AFD_CONTROL_CODE(AFD_ADDRCHANGE_COMPLETE, METHOD_BUFFERED)
 
 typedef struct _AFD_SOCKET_INFORMATION {
     BOOL CommandChannel;

@@ -46,6 +46,8 @@ typedef struct _ADDR_WAITER
     ULONG Families;                                 /* the changes it waits for: TCP_CHANGE_FAMILY_* of its socket */
     NTSTATUS Result;
     BOOLEAN Done;
+    BOOLEAN AfdPending;                             /* the overlapped form waits in AFD, which completes it through the port */
+    BOOLEAN Closing;                                /* the socket is being closed: AFD cancels the request itself */
 } ADDR_WAITER, *PADDR_WAITER;
 
 typedef struct _ADDR_APC
@@ -139,6 +141,21 @@ CompleteWaiter(PADDR_WAITER Waiter, NTSTATUS Status)
         Waiter->Result = Status;
         Waiter->Done = TRUE;
         SetEvent(Waiter->BlockEvent);
+        return;
+    }
+
+    if (Waiter->AfdPending)
+    {
+        /* The request is in AFD: it completes with the status given, through the event and the completion port of the
+         * socket. A closing socket needs nothing: the cleanup of the handle cancels the request. */
+        if (!Waiter->Closing)
+        {
+            IO_STATUS_BLOCK Iosb;
+
+            NtDeviceIoControlFile((HANDLE)Waiter->Handle, NULL, NULL, NULL, &Iosb,
+                                  IOCTL_AFD_ADDRCHANGE_COMPLETE, &Status, sizeof(Status), NULL, 0);
+        }
+        HeapFree(GlobalHeap, 0, Waiter);
         return;
     }
 
@@ -426,6 +443,10 @@ MsafdAddressListChange(
             return WSAENOBUFS;
         }
 
+        /* No routine on a socket that has overlapped I/O: the request waits in AFD, which completes it the way it completes
+         * every overlapped request (the event, the completion port of the socket) */
+        Waiter->AfdPending = !lpCompletionRoutine && !(Socket->SharedData->CreateFlags & SO_SYNCHRONOUS_NONALERT);
+
         EnterCriticalSection(&AddrChangeLock);
         lpOverlapped->Internal = STATUS_PENDING;
         lpOverlapped->InternalHigh = 0;
@@ -436,6 +457,26 @@ MsafdAddressListChange(
                 CloseHandle(Waiter->Thread);
             HeapFree(GlobalHeap, 0, Waiter);
             return WSAENOBUFS;
+        }
+        if (Waiter->AfdPending)
+        {
+            /* With the lock held: a change that is reported meanwhile finds the request in AFD */
+            NTSTATUS Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
+                                                    lpOverlapped->hEvent,
+                                                    NULL,
+                                                    ((ULONG_PTR)lpOverlapped->hEvent & 1) ? NULL : lpOverlapped,
+                                                    (PIO_STATUS_BLOCK)&lpOverlapped->Internal,
+                                                    IOCTL_AFD_ADDRCHANGE_WAIT,
+                                                    NULL, 0, NULL, 0);
+            if (Status != STATUS_PENDING)
+            {
+                RemoveEntryList(&Waiter->Link);
+                AddrWaiterCount--;
+                CancelDriverRequestIfIdle();
+                LeaveCriticalSection(&AddrChangeLock);
+                HeapFree(GlobalHeap, 0, Waiter);
+                return NT_SUCCESS(Status) ? WSAEINVAL : TranslateNtStatusError(Status);
+            }
         }
         LeaveCriticalSection(&AddrChangeLock);
         return WSA_IO_PENDING;
@@ -521,6 +562,7 @@ MsafdAddrChangeSocketClosing(
 
         RemoveEntryList(&Waiter->Link);
         AddrWaiterCount--;
+        Waiter->Closing = TRUE;
         CompleteWaiter(Waiter, STATUS_CANCELLED);
     }
     CancelDriverRequestIfIdle();

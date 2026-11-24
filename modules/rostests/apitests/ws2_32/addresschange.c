@@ -482,6 +482,95 @@ TestOverlapped(void)
     closesocket(Socket);
 }
 
+/* The request of a socket that has a completion port completes through the port, with the OVERLAPPED: on a change
+ * (success, no bytes) and when the socket is closed (aborted). Measured on Windows Server 2022 */
+static
+void
+TestCompletionPort(void)
+{
+    SOCKET Socket = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    WSAOVERLAPPED Overlapped;
+    HANDLE Port, Thread;
+    DWORD Returned = 0xCAFE, Bytes, Flags;
+    ULONG_PTR Key;
+    LPOVERLAPPED Completed;
+    BOOL Ret;
+    int Result;
+
+    ok(Socket != INVALID_SOCKET, "WSASocket failed: %d\n", WSAGetLastError());
+    Port = CreateIoCompletionPort((HANDLE)Socket, NULL, 7, 0);
+    ok(Port != NULL, "CreateIoCompletionPort failed: %lu\n", GetLastError());
+
+    /* a change completes the request on the port, once */
+    ZeroMemory(&Overlapped, sizeof(Overlapped));
+    Overlapped.hEvent = WSACreateEvent();
+    Result = WSAIoctl(Socket, SIO_ADDRESS_LIST_CHANGE, NULL, 0, NULL, 0, &Returned, &Overlapped, NULL);
+    ok(Result == SOCKET_ERROR && WSAGetLastError() == WSA_IO_PENDING, "Result = %d, error %d\n", Result, WSAGetLastError());
+
+    Completed = (LPOVERLAPPED)0xDEADBEEF;
+    Ret = GetQueuedCompletionStatus(Port, &Bytes, &Key, &Completed, 0);
+    ok(!Ret && GetLastError() == WAIT_TIMEOUT, "Ret = %d, error %lu\n", Ret, GetLastError());
+    ok(Completed == NULL, "Completed = %p\n", Completed);
+
+    Thread = StartChange(300);
+    Bytes = 0xCAFE;
+    Key = 0;
+    Completed = NULL;
+    Ret = GetQueuedCompletionStatus(Port, &Bytes, &Key, &Completed, WAIT_CHANGE);
+    ok(Ret == TRUE, "Ret = %d, error %lu\n", Ret, GetLastError());
+    ok(Completed == &Overlapped, "Completed = %p, expected %p\n", Completed, &Overlapped);
+    ok(Bytes == 0, "Bytes = %lu\n", Bytes);
+    ok(Key == 7, "Key = %Iu\n", Key);
+    ok(WaitForSingleObject(Overlapped.hEvent, 0) == WAIT_OBJECT_0, "the event is not signalled\n");
+    Returned = 0xCAFE;
+    Result = WSAGetOverlappedResult(Socket, &Overlapped, &Returned, FALSE, &Flags);
+    ok(Result == TRUE, "Result = %d, error %d\n", Result, WSAGetLastError());
+    ok(Returned == 0, "Returned = %lu\n", Returned);
+    FinishChange(Thread);
+
+    Completed = (LPOVERLAPPED)0xDEADBEEF;
+    Ret = GetQueuedCompletionStatus(Port, &Bytes, &Key, &Completed, 500);
+    ok(!Ret && GetLastError() == WAIT_TIMEOUT, "Ret = %d, error %lu: the request completed twice\n", Ret, GetLastError());
+    WSACloseEvent(Overlapped.hEvent);
+
+    /* closing the socket aborts the request that is waiting: the port gets it */
+    ZeroMemory(&Overlapped, sizeof(Overlapped));
+    Result = WSAIoctl(Socket, SIO_ADDRESS_LIST_CHANGE, NULL, 0, NULL, 0, &Returned, &Overlapped, NULL);
+    ok(Result == SOCKET_ERROR && WSAGetLastError() == WSA_IO_PENDING, "Result = %d, error %d\n", Result, WSAGetLastError());
+    closesocket(Socket);
+    Completed = NULL;
+    Ret = GetQueuedCompletionStatus(Port, &Bytes, &Key, &Completed, 5000);
+    ok(!Ret && GetLastError() == ERROR_OPERATION_ABORTED, "Ret = %d, error %lu\n", Ret, GetLastError());
+    ok(Completed == &Overlapped, "Completed = %p, expected %p\n", Completed, &Overlapped);
+    CloseHandle(Port);
+}
+
+/* The same without a change: closing the socket is all there is to see */
+static
+void
+TestCompletionPortClose(void)
+{
+    SOCKET Socket = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    WSAOVERLAPPED Overlapped;
+    HANDLE Port;
+    DWORD Returned = 0xCAFE, Bytes;
+    ULONG_PTR Key;
+    LPOVERLAPPED Completed = NULL;
+    BOOL Ret;
+    int Result;
+
+    Port = CreateIoCompletionPort((HANDLE)Socket, NULL, 0, 0);
+    ok(Port != NULL, "CreateIoCompletionPort failed: %lu\n", GetLastError());
+    ZeroMemory(&Overlapped, sizeof(Overlapped));
+    Result = WSAIoctl(Socket, SIO_ADDRESS_LIST_CHANGE, NULL, 0, NULL, 0, &Returned, &Overlapped, NULL);
+    ok(Result == SOCKET_ERROR && WSAGetLastError() == WSA_IO_PENDING, "Result = %d, error %d\n", Result, WSAGetLastError());
+    closesocket(Socket);
+    Ret = GetQueuedCompletionStatus(Port, &Bytes, &Key, &Completed, 5000);
+    ok(!Ret && GetLastError() == ERROR_OPERATION_ABORTED, "Ret = %d, error %lu\n", Ret, GetLastError());
+    ok(Completed == &Overlapped, "Completed = %p, expected %p\n", Completed, &Overlapped);
+    CloseHandle(Port);
+}
+
 START_TEST(addresschange)
 {
     WSADATA WsaData;
@@ -495,6 +584,7 @@ START_TEST(addresschange)
 
     TestQuery();
     TestNoChange();
+    TestCompletionPortClose();
 
     for (Error = 0; Error < 30 && !FindInterface(); Error++)
         Sleep(1000);
@@ -518,6 +608,7 @@ START_TEST(addresschange)
     TestEventSelect();
     TestAsyncSelect();
     TestOverlapped();
+    TestCompletionPort();
 
     WSACleanup();
 }

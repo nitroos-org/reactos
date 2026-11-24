@@ -150,7 +150,10 @@ else()
     add_custom_command(TARGET uefildr
                     POST_BUILD
                     COMMAND ${CMAKE_STRIP} --remove-section=.rossym $<TARGET_FILE:uefildr>
-                    COMMAND ${CMAKE_STRIP} --strip-all $<TARGET_FILE:uefildr>)
+                    COMMAND ${CMAKE_STRIP} --strip-all $<TARGET_FILE:uefildr>
+                    # strip writes the current time into the image header: no time, as for every image
+                    COMMAND native-pefixup --timestamp=0 $<TARGET_FILE:uefildr>)
+    set_property(TARGET uefildr APPEND PROPERTY LINK_DEPENDS $<TARGET_PROPERTY:native-pefixup,IMPORTED_LOCATION>)
 endif()
 
 if(MSVC)
