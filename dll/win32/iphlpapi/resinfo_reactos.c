@@ -76,7 +76,7 @@ QueryNameServer(
     {
         /* failed to retrieve ns */
         HeapFree(GetProcessHeap(), 0, NameServer);
-        return Status;
+        return (Status != ERROR_SUCCESS) ? Status : ERROR_INVALID_DATA;
     }
 
     /* null terminate it */
@@ -104,6 +104,12 @@ EnumNameServers(
 
     /* query static assigned name server */
     Status = QueryNameServer(hInterface, L"NameServer", &NameServer);
+    if (Status == ERROR_SUCCESS && NameServer[0] == L'\0')
+    {
+        /* an empty static value is no static server: the adapter uses the DHCP ones */
+        HeapFree(GetProcessHeap(), 0, NameServer);
+        Status = ERROR_FILE_NOT_FOUND;
+    }
     if (Status != ERROR_SUCCESS)
     {
         /* query dynamic assigned name server */
@@ -114,6 +120,13 @@ EnumNameServers(
             /* failed to retrieve name servers */
             return Status;
         }
+    }
+
+    if (NameServer[0] == L'\0')
+    {
+        /* no server at all: an empty value is not a server with an empty address */
+        HeapFree(GetProcessHeap(), 0, NameServer);
+        return ERROR_SUCCESS;
     }
 
     /* enumerate all name servers, terminated by comma */
@@ -167,8 +180,8 @@ EnumInterfaces(
 {
     HKEY hKey, hInterface;
     LSTATUS Status;
-    DWORD NumInterfaces, InterfaceNameLen, Index, Length;
-    LPWSTR InterfaceName;
+    InterfaceIndexTable *Table;
+    DWORD Index;
 
     /* first open interface key */
     Status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces", 0, KEY_READ, &hKey);
@@ -180,62 +193,47 @@ EnumInterfaces(
         return Status;
     }
 
-    /* now get maximum interface name length and number of interfaces */
-    Status = RegQueryInfoKeyW(hKey, NULL, NULL, NULL, &NumInterfaces, &InterfaceNameLen, NULL, NULL, NULL, NULL, NULL, NULL);
-    if (Status != ERROR_SUCCESS)
+    /* The Interfaces key keeps one subkey for every adapter the system has ever had (an adapter
+       that was removed or replaced leaves its servers behind). Only the adapters that exist now
+       count, the same ones GetAdaptersAddresses lists. */
+    Table = getInterfaceIndexTable();
+    if (!Table)
     {
-        /* failed to get key info */
+        /* the TCP/IP driver lists no interfaces: no servers */
         RegCloseKey(hKey);
-        return Status;
+        return ERROR_SUCCESS;
     }
 
-    /* RegQueryInfoKey does not include terminating null */
-    InterfaceNameLen++;
-
-    /* allocate interface name */
-    InterfaceName = (LPWSTR) HeapAlloc(GetProcessHeap(), 0, InterfaceNameLen * sizeof(WCHAR));
-
-    if (!InterfaceName)
+    for (Index = 0; Index < Table->numIndexes; Index++)
     {
-        /* no memory */
-        RegCloseKey(hKey);
-        return ERROR_OUTOFMEMORY;
-    }
+        const char *AnsiName = getInterfaceNameByIndex(Table->indexes[Index]);
+        WCHAR InterfaceName[MAX_ADAPTER_NAME_LENGTH + 4];
 
-    /* no enumerate all interfaces */
-    for(Index = 0; Index < NumInterfaces; Index++)
-    {
-        /* query interface name */
-        Length = InterfaceNameLen;
-        Status = RegEnumKeyExW(hKey, Index, InterfaceName, &Length, NULL, NULL, NULL, NULL);
+        if (!AnsiName)
+            continue;
 
-        if (Status == ERROR_SUCCESS)
+        /* the name of an adapter is the name of its subkey; a name that does not fit is not an adapter key */
+        if (MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, AnsiName, -1,
+                                InterfaceName, ARRAYSIZE(InterfaceName)) &&
+            RegOpenKeyExW(hKey, InterfaceName, 0, KEY_READ, &hInterface) == ERROR_SUCCESS)
         {
-            /* make sure it is null terminated */
-            InterfaceName[Length] = L'\0';
+            /* perform enumeration callback */
+            CallbackRoutine(hInterface, InterfaceName, InterfaceCallbackContext);
 
-            /* now open child key */
-            Status = RegOpenKeyExW(hKey, InterfaceName, 0, KEY_READ, &hInterface);
-
-            if (Status == ERROR_SUCCESS)
-            {
-                /* perform enumeration callback */
-                CallbackRoutine(hInterface, InterfaceName, InterfaceCallbackContext);
-
-                /* close interface key */
-                RegCloseKey(hInterface);
-            }
+            /* close interface key */
+            RegCloseKey(hInterface);
         }
+
+        consumeInterfaceName(AnsiName);
     }
 
-    /* free interface name */
-    HeapFree(GetProcessHeap(), 0, InterfaceName);
+    free(Table);
 
     /* close root interface key */
     RegCloseKey(hKey);
 
     /* done */
-    return Status;
+    return ERROR_SUCCESS;
 }
 
 VOID

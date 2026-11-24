@@ -30,8 +30,61 @@ _RpcAbortPrinter(WINSPOOL_PRINTER_HANDLE hPrinter)
 DWORD
 _RpcAddPrinter(WINSPOOL_HANDLE pName, WINSPOOL_PRINTER_CONTAINER* pPrinterContainer, WINSPOOL_DEVMODE_CONTAINER* pDevModeContainer, WINSPOOL_SECURITY_CONTAINER* pSecurityContainer, WINSPOOL_PRINTER_HANDLE* pHandle)
 {
-    UNIMPLEMENTED;
-    return ERROR_INVALID_FUNCTION;
+    DWORD dwErrorCode;
+    HANDLE hPrinter;
+    PRINTER_INFO_2W Info;
+    WINSPOOL_PRINTER_INFO_2* pInfo2;
+
+    // Only level 2 describes a printer to add.
+    if (!pPrinterContainer || !pHandle)
+        return ERROR_INVALID_PARAMETER;
+    if (pPrinterContainer->Level != 2)
+        return ERROR_INVALID_LEVEL;
+    pInfo2 = pPrinterContainer->PrinterInfo.pPrinterInfo2;
+    if (!pInfo2)
+        return ERROR_INVALID_PARAMETER;
+
+    // The pointers in the info of the client are not valid here: take the strings that RPC marshalled and the DevMode of its container.
+    ZeroMemory(&Info, sizeof(Info));
+    Info.pServerName = (PWSTR)pInfo2->pServerName;
+    Info.pPrinterName = (PWSTR)pInfo2->pPrinterName;
+    Info.pShareName = (PWSTR)pInfo2->pShareName;
+    Info.pPortName = (PWSTR)pInfo2->pPortName;
+    Info.pDriverName = (PWSTR)pInfo2->pDriverName;
+    Info.pComment = (PWSTR)pInfo2->pComment;
+    Info.pLocation = (PWSTR)pInfo2->pLocation;
+    Info.pSepFile = (PWSTR)pInfo2->pSepFile;
+    Info.pPrintProcessor = (PWSTR)pInfo2->pPrintProcessor;
+    Info.pDatatype = (PWSTR)pInfo2->pDatatype;
+    Info.pParameters = (PWSTR)pInfo2->pParameters;
+    Info.Attributes = pInfo2->Attributes;
+    Info.Priority = pInfo2->Priority;
+    Info.DefaultPriority = pInfo2->DefaultPriority;
+    Info.StartTime = pInfo2->StartTime;
+    Info.UntilTime = pInfo2->UntilTime;
+
+    if (pDevModeContainer && pDevModeContainer->pDevMode &&
+        pDevModeContainer->cbBuf >= sizeof(DEVMODEW) &&
+        ((PDEVMODEW)pDevModeContainer->pDevMode)->dmSize + ((PDEVMODEW)pDevModeContainer->pDevMode)->dmDriverExtra <= pDevModeContainer->cbBuf)
+    {
+        Info.pDevMode = (PDEVMODEW)pDevModeContainer->pDevMode;
+    }
+
+    dwErrorCode = RpcImpersonateClient(NULL);
+    if (dwErrorCode != ERROR_SUCCESS)
+    {
+        ERR("RpcImpersonateClient failed with error %lu!\n", dwErrorCode);
+        return dwErrorCode;
+    }
+
+    hPrinter = AddPrinterW((PWSTR)pName, 2, (PBYTE)&Info);
+    if (hPrinter)
+        *pHandle = hPrinter;
+    else
+        dwErrorCode = GetLastError();
+
+    RpcRevertToSelf();
+    return dwErrorCode;
 }
 
 DWORD

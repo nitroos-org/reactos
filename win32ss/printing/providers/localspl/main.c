@@ -7,6 +7,9 @@
 
 #include "precomp.h"
 
+#include <aclapi.h>
+#include <sddl.h>
+
 // Global Variables
 HKEY hPrintKey = NULL;
 HKEY hPrintersKey = NULL;
@@ -36,7 +39,7 @@ static const PRINTPROVIDOR _PrintProviderFunctions = {
     LocalSetJob,                                // fpSetJob
     LocalGetJob,                                // fpGetJob
     LocalEnumJobs,                              // fpEnumJobs
-    NULL,                                       // fpAddPrinter
+    LocalAddPrinter,                            // fpAddPrinter
     LocalDeletePrinter,                         // fpDeletePrinter
     NULL,                                       // fpSetPrinter
     LocalGetPrinter,                            // fpGetPrinter
@@ -120,6 +123,54 @@ static const PRINTPROVIDOR _PrintProviderFunctions = {
     NULL,                                       // fpAddDriverCatalog
 };
 
+/**
+ * Gives the default job directory (spool\PRINTERS) the descriptor it has on Windows (measured on Windows Server 2022):
+ * system, administrators and the creator of a file may do everything but execute, and the users may create files and
+ * folders there and read their attributes (so that a standard user can spool a job and cannot read the jobs of others).
+ * Without that the directory only inherits the read access of the users from spool\ and a standard user cannot print.
+ * The descriptor is applied once: only to a directory whose DACL is not protected yet (the one the installation made).
+ */
+static void
+_SecureDefaultJobDirectory(void)
+{
+    static const WCHAR wszPrintersPath[] = L"\\PRINTERS";
+    static const WCHAR wszDescriptor[] = L"D:P(A;OICIIO;0x1f01df;;;CO)(A;OICI;0x1f01df;;;SY)(A;OICI;0x1f01df;;;BA)(A;CI;0x10008e;;;BU)";
+    WCHAR wszDefaultDirectory[MAX_PATH];
+    PSECURITY_DESCRIPTOR pCurrentSD = NULL;
+    PSECURITY_DESCRIPTOR pNewSD = NULL;
+    SECURITY_DESCRIPTOR_CONTROL Control;
+    DWORD dwRevision;
+    PACL pAcl;
+    BOOL bPresent, bDefaulted;
+
+    // Only the default directory: a directory the administrator chose keeps what the administrator set.
+    if (cchSpoolDirectory + _countof(wszPrintersPath) > _countof(wszDefaultDirectory))
+        return;
+    CopyMemory(wszDefaultDirectory, wszSpoolDirectory, cchSpoolDirectory * sizeof(WCHAR));
+    CopyMemory(&wszDefaultDirectory[cchSpoolDirectory], wszPrintersPath, sizeof(wszPrintersPath));
+    if (_wcsicmp(wszDefaultDirectory, wszJobDirectory) != 0)
+        return;
+
+    if (GetNamedSecurityInfoW(wszJobDirectory, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, &pCurrentSD) != ERROR_SUCCESS)
+        return;
+
+    if (GetSecurityDescriptorControl(pCurrentSD, &Control, &dwRevision) && !(Control & SE_DACL_PROTECTED) &&
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(wszDescriptor, SDDL_REVISION_1, &pNewSD, NULL))
+    {
+        if (GetSecurityDescriptorDacl(pNewSD, &bPresent, &pAcl, &bDefaulted) && bPresent)
+        {
+            DWORD dwErrorCode = SetNamedSecurityInfoW(wszJobDirectory, SE_FILE_OBJECT,
+                                                      DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                                      NULL, NULL, pAcl, NULL);
+            if (dwErrorCode != ERROR_SUCCESS)
+                ERR("SetNamedSecurityInfoW failed for the job directory with error %lu!\n", dwErrorCode);
+        }
+        LocalFree(pNewSD);
+    }
+
+    LocalFree(pCurrentSD);
+}
+
 static BOOL
 _InitializeLocalSpooler(void)
 {
@@ -201,6 +252,8 @@ _InitializeLocalSpooler(void)
         ERR("RegQueryValueExW failed for \"%S\" with error %lu!\n", SPLREG_DEFAULT_SPOOL_DIRECTORY, dwErrorCode);
         goto Cleanup;
     }
+
+    _SecureDefaultJobDirectory();
 
     // Initialize all lists.
     if (!InitializePrintMonitorList())

@@ -64,8 +64,16 @@ static SPLREADPRINTER fpSplReadPrinter;
 static STARTDOCDLGW fpStartDocDlgW;
 static STARTDOCPRINTERW fpStartDocPrinterW;
 static STARTPAGEPRINTER fpStartPagePrinter;
+static WRITEPRINTER fpWritePrinter;
 
 /* PRIVATE FUNCTIONS *********************************************************/
+
+static PLDC FASTCALL PrnDcFromHdc(HDC hdc);
+static int FASTCALL PrnDcStartDoc(HDC hdc, PLDC pldc, const DOCINFOW *pdi);
+static int FASTCALL PrnDcEndDoc(HDC hdc, PLDC pldc);
+static int FASTCALL PrnDcAbortDoc(HDC hdc, PLDC pldc);
+static int FASTCALL PrnDcStartPage(HDC hdc, PLDC pldc);
+static int FASTCALL PrnDcEndPage(HDC hdc, PLDC pldc);
 
 static
 int
@@ -78,6 +86,10 @@ IntEndPage(
     PLDC pldc;
     int Ret = SP_ERROR;
     ULONG hType = GDI_HANDLE_GET_TYPE(hdc);
+
+    pldc = PrnDcFromHdc(hdc);
+    if (pldc)
+        return PrnDcEndPage(hdc, pldc);
 
     if (hType == GDILoObjType_LO_DC_TYPE || hType == GDILoObjType_LO_METADC16_TYPE)
     {
@@ -222,6 +234,7 @@ LoadTheSpoolerDrv(VOID)
             fpStartDocDlgW = (PVOID)GetProcAddress(hModWinSpoolDrv, "StartDocDlgW");
             fpStartDocPrinterW = (PVOID)GetProcAddress(hModWinSpoolDrv, "StartDocPrinterW");
             fpStartPagePrinter = (PVOID)GetProcAddress(hModWinSpoolDrv, "StartPagePrinter");
+            fpWritePrinter = (PVOID)GetProcAddress(hModWinSpoolDrv, "WritePrinter");
 
             if ( !fpAbortPrinter ||
                     !fpClosePrinter ||
@@ -246,7 +259,8 @@ LoadTheSpoolerDrv(VOID)
                     !fpSplReadPrinter ||
                     !fpStartDocDlgW ||
                     !fpStartDocPrinterW ||
-                    !fpStartPagePrinter )
+                    !fpStartPagePrinter ||
+                    !fpWritePrinter )
             {
                 FreeLibrary(hModWinSpoolDrv);
                 hModWinSpoolDrv = NULL;
@@ -313,6 +327,10 @@ AbortDoc(
     int Ret = SP_ERROR;
     ULONG hType = GDI_HANDLE_GET_TYPE(hdc);
 
+    pldc = PrnDcFromHdc(hdc);
+    if (pldc)
+        return PrnDcAbortDoc(hdc, pldc);
+
     if (hType == GDILoObjType_LO_DC_TYPE || hType == GDILoObjType_LO_METADC16_TYPE)
     {
         SetLastError(ERROR_INVALID_HANDLE);
@@ -363,6 +381,10 @@ EndDoc(
     PLDC pldc;
     int Ret = SP_ERROR;
     ULONG hType = GDI_HANDLE_GET_TYPE(hdc);
+
+    pldc = PrnDcFromHdc(hdc);
+    if (pldc)
+        return PrnDcEndDoc(hdc, pldc);
 
     if (hType == GDILoObjType_LO_DC_TYPE || hType == GDILoObjType_LO_METADC16_TYPE)
     {
@@ -483,6 +505,10 @@ StartDocW(
     BOOL Banding;
     int PrnJobNo, Ret = SP_ERROR;
     ULONG hType = GDI_HANDLE_GET_TYPE(hdc);
+
+    pldc = PrnDcFromHdc(hdc);
+    if (pldc)
+        return PrnDcStartDoc(hdc, pldc, lpdi);
 
     if (hType == GDILoObjType_LO_DC_TYPE || hType == GDILoObjType_LO_METADC16_TYPE)
         return SP_ERROR;
@@ -649,6 +675,10 @@ StartPage(
     PLDC pldc;
     ULONG hType = GDI_HANDLE_GET_TYPE(hdc);
 
+    pldc = PrnDcFromHdc(hdc);
+    if (pldc)
+        return PrnDcStartPage(hdc, pldc);
+
     if (hType == GDILoObjType_LO_DC_TYPE || hType == GDILoObjType_LO_METADC16_TYPE)
     {
         SetLastError(ERROR_INVALID_HANDLE);
@@ -713,6 +743,13 @@ SetAbortProc(
 {
     PLDC pldc;
     ULONG hType = GDI_HANDLE_GET_TYPE(hdc);
+
+    pldc = PrnDcFromHdc(hdc);
+    if (pldc)
+    {
+        pldc->pAbortProc = lpAbortProc;
+        return 1;
+    }
 
     if (hType == GDILoObjType_LO_DC_TYPE || hType == GDILoObjType_LO_METADC16_TYPE)
         return SP_ERROR;
@@ -941,4 +978,641 @@ GdiArtificialDecrementDriver(LPWSTR pDriverName,BOOL unknown)
     UNIMPLEMENTED;
     SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     return 0;
+}
+
+/* SOFTWARE PAGE PRINTER DC **************************************************
+ *
+ * ReactOS has no raster printer driver (and no UMPD host), so a printer DC
+ * cannot be created by Win32k. A printer DC made by CreateDC/CreateIC is a
+ * memory DC that owns one page-sized 24 bpp DIB section. GetDeviceCaps reports
+ * the page (size, resolution, DT_RASPRINTER). StartDoc/StartPage/EndPage/EndDoc
+ * run a spooler job on the printer: every EndPage writes the page as a Windows
+ * bitmap (BITMAPFILEHEADER, BITMAPINFOHEADER, bottom-up 24 bpp rows) with
+ * WritePrinter. A single page document is therefore a valid .bmp file.
+ *
+ * The printer, its port, the datatype, the output file ("FILE:" asks for a file
+ * name) and the job queue are those of the spooler (winspool, spoolsv, localspl).
+ */
+
+/* The page of a LDC_PAGEDC printer DC; LDC.pvEMFSpoolData points to it (such a DC has no EMF spool data) */
+typedef struct _PRNDC_PAGE
+{
+    HBITMAP hbm;
+    HGDIOBJ hbmOld;
+    PVOID pvBits;
+    ULONG cx;
+    ULONG cy;
+    ULONG cbStride;
+} PRNDC_PAGE, *PPRNDC_PAGE;
+
+#define PRNDC_PAGE_OF(pldc) ((PPRNDC_PAGE)(pldc)->pvEMFSpoolData)
+
+#define PRNDC_DEFAULT_DPI   150
+#define PRNDC_MIN_DPI       72
+#define PRNDC_MAX_DPI       600
+#define PRNDC_MAX_PAGE_SIZE (96 * 1024 * 1024)
+#define PRNDC_WRITE_CHUNK   0x10000
+
+static const WCHAR wszFilePort[] = L"FILE:";
+
+static
+PLDC
+FASTCALL
+PrnDcFromHdc(HDC hdc)
+{
+    PLDC pldc;
+
+    if (GDI_HANDLE_GET_TYPE(hdc) != GDILoObjType_LO_DC_TYPE)
+        return NULL;
+
+    pldc = GdiGetLDC(hdc);
+    if (!pldc || !(pldc->Flags & LDC_PAGEDC))
+        return NULL;
+
+    return pldc;
+}
+
+/* Page size in tenths of a millimetre of a DEVMODE.dmPaperSize value */
+static
+BOOL
+PrnDcPaperSize(SHORT sPaper, ULONG *pulWidth, ULONG *pulHeight)
+{
+    switch (sPaper)
+    {
+        case DMPAPER_LETTER:    *pulWidth = 2159; *pulHeight = 2794; return TRUE;
+        case DMPAPER_TABLOID:   *pulWidth = 2794; *pulHeight = 4318; return TRUE;
+        case DMPAPER_LEGAL:     *pulWidth = 2159; *pulHeight = 3556; return TRUE;
+        case DMPAPER_EXECUTIVE: *pulWidth = 1842; *pulHeight = 2667; return TRUE;
+        case DMPAPER_A3:        *pulWidth = 2970; *pulHeight = 4200; return TRUE;
+        case DMPAPER_A4:        *pulWidth = 2100; *pulHeight = 2970; return TRUE;
+        case DMPAPER_A5:        *pulWidth = 1480; *pulHeight = 2100; return TRUE;
+        case DMPAPER_B5:        *pulWidth = 1820; *pulHeight = 2570; return TRUE;
+    }
+    return FALSE;
+}
+
+static
+BOOL
+PrnDcFillCaps(
+    const DEVMODEW *pdm,
+    PDEVCAPS pCaps,
+    PULONG pcx,
+    PULONG pcy)
+{
+    ULONG ulWidth = 2159, ulHeight = 2794; /* Letter, in tenths of a millimetre */
+    ULONG ulDpiX = PRNDC_DEFAULT_DPI, ulDpiY = PRNDC_DEFAULT_DPI;
+    ULONG cx, cy, ulTmp;
+
+    if (pdm && pdm->dmSize >= FIELD_OFFSET(DEVMODEW, dmTTOption))
+    {
+        if (pdm->dmFields & DM_PAPERSIZE)
+            PrnDcPaperSize(pdm->dmPaperSize, &ulWidth, &ulHeight);
+
+        if ((pdm->dmFields & DM_PAPERWIDTH) && (pdm->dmFields & DM_PAPERLENGTH) &&
+            pdm->dmPaperWidth > 0 && pdm->dmPaperLength > 0 &&
+            (!(pdm->dmFields & DM_PAPERSIZE) || pdm->dmPaperSize == 0 || pdm->dmPaperSize == DMPAPER_USER))
+        {
+            ulWidth = pdm->dmPaperWidth;
+            ulHeight = pdm->dmPaperLength;
+        }
+
+        if ((pdm->dmFields & DM_ORIENTATION) && pdm->dmOrientation == DMORIENT_LANDSCAPE)
+        {
+            ulTmp = ulWidth;
+            ulWidth = ulHeight;
+            ulHeight = ulTmp;
+        }
+
+        /* A positive print quality is a resolution in dpi, a negative one is a DMRES_ constant */
+        if ((pdm->dmFields & DM_PRINTQUALITY) && pdm->dmPrintQuality > 0)
+        {
+            ulDpiX = pdm->dmPrintQuality;
+            ulDpiY = ulDpiX;
+        }
+        if ((pdm->dmFields & DM_YRESOLUTION) && pdm->dmYResolution > 0)
+            ulDpiY = pdm->dmYResolution;
+    }
+
+    ulDpiX = min(max(ulDpiX, PRNDC_MIN_DPI), PRNDC_MAX_DPI);
+    ulDpiY = min(max(ulDpiY, PRNDC_MIN_DPI), PRNDC_MAX_DPI);
+
+    if (ulWidth == 0 || ulHeight == 0 || ulWidth > 20000 || ulHeight > 20000)
+        return FALSE;
+
+    cx = (ulWidth * ulDpiX) / 254;
+    cy = (ulHeight * ulDpiY) / 254;
+    if (cx == 0 || cy == 0 || (ULONGLONG)cx * cy * 3 > PRNDC_MAX_PAGE_SIZE)
+        return FALSE;
+
+    RtlZeroMemory(pCaps, sizeof(*pCaps));
+    pCaps->ulVersion = 0x0400;
+    pCaps->ulTechnology = DT_RASPRINTER;
+    pCaps->ulHorzSizeM = ulWidth / 10;
+    pCaps->ulVertSizeM = ulHeight / 10;
+    pCaps->ulHorzSize = pCaps->ulHorzSizeM;
+    pCaps->ulVertSize = pCaps->ulVertSizeM;
+    pCaps->ulHorzRes = cx;
+    pCaps->ulVertRes = cy;
+    pCaps->ulBitsPixel = 24;
+    pCaps->ulPlanes = 1;
+    pCaps->ulNumPens = (ULONG)-1;
+    pCaps->ulNumFonts = 0;
+    pCaps->ulNumColors = (ULONG)-1;
+    pCaps->ulRasterCaps = RC_BITBLT | RC_BITMAP64 | RC_DI_BITMAP | RC_DIBTODEV |
+                          RC_STRETCHBLT | RC_STRETCHDIB;
+    pCaps->ulAspectX = ulDpiX;
+    pCaps->ulAspectY = ulDpiY;
+    pCaps->ulAspectXY = (ulDpiX * 1414) / 1000;
+    pCaps->ulLogPixelsX = ulDpiX;
+    pCaps->ulLogPixelsY = ulDpiY;
+    pCaps->ulSizePalette = 0;
+    pCaps->ulColorRes = 24;
+    pCaps->ulPhysicalWidth = cx;
+    pCaps->ulPhysicalHeight = cy;
+    pCaps->ulPhysicalOffsetX = 0;
+    pCaps->ulPhysicalOffsetY = 0;
+    pCaps->ulTextCaps = TC_OP_CHARACTER | TC_OP_STROKE | TC_CP_STROKE |
+                        TC_RA_ABLE | TC_UA_ABLE | TC_SO_ABLE;
+    pCaps->ulDesktopHorzRes = cx;
+    pCaps->ulDesktopVertRes = cy;
+
+    *pcx = cx;
+    *pcy = cy;
+    return TRUE;
+}
+
+static
+LPWSTR
+PrnDcDupString(LPCWSTR pwsz)
+{
+    SIZE_T cb = (wcslen(pwsz) + 1) * sizeof(WCHAR);
+    LPWSTR pwszCopy = LocalAlloc(LMEM_FIXED, cb);
+
+    if (pwszCopy)
+        RtlCopyMemory(pwszCopy, pwsz, cb);
+    return pwszCopy;
+}
+
+/* The port of the printer, from PRINTER_INFO_5 */
+static
+LPWSTR
+PrnDcQueryPort(HANDLE hPrinter)
+{
+    DWORD cbNeeded = 0;
+    PPRINTER_INFO_5W ppi;
+    LPWSTR pwszPort = NULL;
+
+    fpGetPrinterW(hPrinter, 5, NULL, 0, &cbNeeded);
+    if (cbNeeded == 0)
+        return NULL;
+
+    ppi = LocalAlloc(LMEM_FIXED, cbNeeded);
+    if (!ppi)
+        return NULL;
+
+    if (fpGetPrinterW(hPrinter, 5, (LPBYTE)ppi, cbNeeded, &cbNeeded) && ppi->pPortName)
+        pwszPort = PrnDcDupString(ppi->pPortName);
+
+    LocalFree(ppi);
+    return pwszPort;
+}
+
+/*
+ * pwszDriver is "WINSPOOL" or a driver name, pwszDevice the printer name,
+ * pwszOutput the port or output file of the DC (NULL: the port of the printer).
+ */
+HDC
+FASTCALL
+PrnDcCreate(
+    LPCWSTR pwszDriver,
+    LPCWSTR pwszDevice,
+    LPCWSTR pwszOutput,
+    const DEVMODEW *pdmInit,
+    BOOL bInfo)
+{
+    LPCWSTR pwszName;
+    HANDLE hPrinter = NULL;
+    PDEVMODEW pdm = NULL;
+    PLDC pldc = NULL;
+    PPRNDC_PAGE page = NULL;
+    HDC hdc = NULL;
+    HBITMAP hbm = NULL;
+    PVOID pvBits = NULL;
+    DEVCAPS caps;
+    ULONG cx, cy, cbStride;
+    LONG cbDevMode;
+    DWORD dwError;
+    BITMAPINFO bmi;
+
+    if (pwszDevice && *pwszDevice)
+        pwszName = pwszDevice;
+    else if (pwszDriver && *pwszDriver && _wcsicmp(pwszDriver, L"WINSPOOL") != 0)
+        pwszName = pwszDriver;
+    else
+    {
+        SetLastError(ERROR_INVALID_PRINTER_NAME);
+        return NULL;
+    }
+
+    if (!ghSpooler)
+    {
+        SetLastError(ERROR_INVALID_FUNCTION);
+        return NULL;
+    }
+
+#ifndef _WIN64
+    /*
+     * FIXME: The spooler marshals its structures (PRINTER_INFO, DRIVER_INFO, DOC_INFO) with the
+     * pointer size of the spooler, which does not match a 32-bit client of a 64-bit spooler.
+     * Do not print from such a process until the layouts are converted.
+     */
+    {
+        BOOL bWow64 = FALSE;
+
+        if (IsWow64Process(GetCurrentProcess(), &bWow64) && bWow64)
+        {
+            SetLastError(ERROR_NOT_SUPPORTED);
+            return NULL;
+        }
+    }
+#endif
+
+    if (!fpOpenPrinterW((LPWSTR)pwszName, &hPrinter, NULL))
+        return NULL;
+
+    /* The DEVMODE of the printer, with the changes of the caller */
+    cbDevMode = fpDocumentPropertiesW(NULL, hPrinter, (LPWSTR)pwszName, NULL, NULL, 0);
+    if (cbDevMode > 0)
+    {
+        pdm = LocalAlloc(LMEM_ZEROINIT, cbDevMode);
+        if (pdm)
+        {
+            DWORD dwMode = DM_OUT_BUFFER;
+
+            if (pdmInit)
+                dwMode |= DM_IN_BUFFER;
+            if (fpDocumentPropertiesW(NULL, hPrinter, (LPWSTR)pwszName, pdm,
+                                      (PDEVMODEW)pdmInit, dwMode) != IDOK)
+            {
+                LocalFree(pdm);
+                pdm = NULL;
+            }
+        }
+    }
+
+    if (!PrnDcFillCaps(pdm ? pdm : pdmInit, &caps, &cx, &cy))
+    {
+        dwError = ERROR_INVALID_PARAMETER;
+        goto Fail;
+    }
+
+    pldc = LocalAlloc(LMEM_ZEROINIT, sizeof(LDC));
+    page = LocalAlloc(LMEM_ZEROINIT, sizeof(PRNDC_PAGE));
+    if (!pldc || !page)
+    {
+        dwError = ERROR_NOT_ENOUGH_MEMORY;
+        goto Fail;
+    }
+    pldc->pvEMFSpoolData = page;
+
+    hdc = CreateCompatibleDC(NULL);
+    if (!hdc)
+    {
+        dwError = GetLastError();
+        goto Fail;
+    }
+
+    cbStride = (cx * 3 + 3) & ~3;
+    if (!bInfo)
+    {
+        RtlZeroMemory(&bmi, sizeof(bmi));
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = cx;
+        bmi.bmiHeader.biHeight = cy; /* bottom-up, as a .bmp file */
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 24;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        bmi.bmiHeader.biSizeImage = cbStride * cy;
+        hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &pvBits, NULL, 0);
+        if (!hbm)
+        {
+            dwError = GetLastError();
+            if (dwError == ERROR_SUCCESS)
+                dwError = ERROR_NOT_ENOUGH_MEMORY;
+            goto Fail;
+        }
+        page->hbmOld = SelectObject(hdc, hbm);
+        PatBlt(hdc, 0, 0, cx, cy, WHITENESS);
+    }
+
+    pldc->hDC = hdc;
+    pldc->iType = LDC_LDC;
+    pldc->Flags = LDC_LDC | LDC_PAGEDC | (bInfo ? LDC_INFODC : 0);
+    pldc->hPrinter = hPrinter;
+    pldc->pdm = pdm;
+    pldc->DevCaps = caps;
+    page->hbm = hbm;
+    page->pvBits = pvBits;
+    page->cx = cx;
+    page->cy = cy;
+    page->cbStride = cbStride;
+
+    if (pwszOutput && *pwszOutput)
+        pldc->pwszPort = PrnDcDupString(pwszOutput);
+    else
+        pldc->pwszPort = PrnDcQueryPort(hPrinter);
+
+    if (!GdiSetLDC(hdc, pldc))
+    {
+        dwError = ERROR_INVALID_HANDLE;
+        goto Fail;
+    }
+
+    return hdc;
+
+Fail:
+    if (hdc)
+    {
+        if (page && page->hbmOld)
+            SelectObject(hdc, page->hbmOld);
+        NtGdiDeleteObjectApp(hdc);
+    }
+    if (hbm)
+        DeleteObject(hbm);
+    if (pldc)
+    {
+        if (pldc->pwszPort)
+            LocalFree(pldc->pwszPort);
+        LocalFree(pldc);
+    }
+    if (page)
+        LocalFree(page);
+    if (pdm)
+        LocalFree(pdm);
+    if (hPrinter)
+        fpClosePrinter(hPrinter);
+    SetLastError(dwError);
+    return NULL;
+}
+
+BOOL
+FASTCALL
+PrnDcDelete(
+    HDC hdc,
+    PBOOL pbHandled)
+{
+    PLDC pldc = PrnDcFromHdc(hdc);
+    BOOL bResult;
+    HBITMAP hbm;
+
+    *pbHandled = (pldc != NULL);
+    if (!pldc)
+        return FALSE;
+
+    /* A document that is still open is thrown away, as Windows does */
+    if (pldc->Flags & LDC_INIT_DOCUMENT)
+        fpAbortPrinter(pldc->hPrinter);
+
+    GdiSetLDC(hdc, NULL);
+    if (PRNDC_PAGE_OF(pldc)->hbmOld)
+        SelectObject(hdc, PRNDC_PAGE_OF(pldc)->hbmOld);
+
+    bResult = NtGdiDeleteObjectApp(hdc);
+
+    hbm = PRNDC_PAGE_OF(pldc)->hbm;
+    if (hbm)
+        DeleteObject(hbm);
+    LocalFree(pldc->pvEMFSpoolData);
+    if (pldc->hPrinter)
+        fpClosePrinter(pldc->hPrinter);
+    if (pldc->pwszPort)
+        LocalFree(pldc->pwszPort);
+    if (pldc->pdm)
+        LocalFree(pldc->pdm);
+    LocalFree(pldc);
+    return bResult;
+}
+
+static
+BOOL
+PrnDcWrite(HANDLE hPrinter, PVOID pvData, DWORD cbData)
+{
+    PBYTE pb = pvData;
+    DWORD cbChunk, cbWritten;
+
+    while (cbData)
+    {
+        cbChunk = min(cbData, PRNDC_WRITE_CHUNK);
+        cbWritten = 0;
+        if (!fpWritePrinter(hPrinter, pb, cbChunk, &cbWritten) || cbWritten != cbChunk)
+        {
+            if (GetLastError() == ERROR_SUCCESS)
+                SetLastError(ERROR_WRITE_FAULT);
+            return FALSE;
+        }
+        pb += cbChunk;
+        cbData -= cbChunk;
+    }
+    return TRUE;
+}
+
+/* BITMAPFILEHEADER and BITMAPINFOHEADER of a .bmp file, without padding */
+#include <pshpack1.h>
+typedef struct _PRNDC_BMPHEADER
+{
+    WORD bfType;
+    DWORD bfSize;
+    WORD bfReserved1;
+    WORD bfReserved2;
+    DWORD bfOffBits;
+    BITMAPINFOHEADER bi;
+} PRNDC_BMPHEADER;
+#include <poppack.h>
+
+/* The page as a .bmp file */
+static
+BOOL
+PrnDcWritePage(PLDC pldc)
+{
+    PRNDC_BMPHEADER hdr;
+    ULONG cbBits = PRNDC_PAGE_OF(pldc)->cbStride * PRNDC_PAGE_OF(pldc)->cy;
+
+    GdiFlush();
+
+    RtlZeroMemory(&hdr, sizeof(hdr));
+    hdr.bfType = 0x4D42; /* BM */
+    hdr.bfSize = sizeof(hdr) + cbBits;
+    hdr.bfOffBits = sizeof(hdr);
+    hdr.bi.biSize = sizeof(BITMAPINFOHEADER);
+    hdr.bi.biWidth = PRNDC_PAGE_OF(pldc)->cx;
+    hdr.bi.biHeight = PRNDC_PAGE_OF(pldc)->cy;
+    hdr.bi.biPlanes = 1;
+    hdr.bi.biBitCount = 24;
+    hdr.bi.biCompression = BI_RGB;
+    hdr.bi.biSizeImage = cbBits;
+    hdr.bi.biXPelsPerMeter = (pldc->DevCaps.ulLogPixelsX * 10000) / 254;
+    hdr.bi.biYPelsPerMeter = (pldc->DevCaps.ulLogPixelsY * 10000) / 254;
+
+    return PrnDcWrite(pldc->hPrinter, &hdr, sizeof(hdr)) &&
+           PrnDcWrite(pldc->hPrinter, PRNDC_PAGE_OF(pldc)->pvBits, cbBits);
+}
+
+static
+int
+FASTCALL
+PrnDcAbortDoc(HDC hdc, PLDC pldc)
+{
+    UNREFERENCED_PARAMETER(hdc);
+
+    if (!(pldc->Flags & LDC_INIT_DOCUMENT))
+        return 1;
+
+    pldc->Flags &= ~(LDC_INIT_PAGE | LDC_INIT_DOCUMENT | LDC_SAPCALLBACK | LDC_KILL_DOCUMENT);
+    return fpAbortPrinter(pldc->hPrinter) ? 1 : SP_ERROR;
+}
+
+static
+int
+FASTCALL
+PrnDcStartDoc(HDC hdc, PLDC pldc, const DOCINFOW *pdi)
+{
+    DOCINFOW di;
+    DOC_INFO_1W di1;
+    LPWSTR pwszDlg;
+    DWORD dwJob;
+
+    UNREFERENCED_PARAMETER(hdc);
+
+    if ((pldc->Flags & LDC_INFODC) || (pldc->Flags & LDC_INIT_DOCUMENT))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return SP_ERROR;
+    }
+
+    if (pdi)
+        di = *pdi;
+    else
+        RtlZeroMemory(&di, sizeof(di));
+    di.cbSize = sizeof(di);
+
+    /* No output file: a document of a FILE: printer or DC goes to a file chosen by the user */
+    if (!di.lpszOutput && pldc->pwszPort && !_wcsicmp(pldc->pwszPort, wszFilePort))
+        di.lpszOutput = wszFilePort;
+
+    pwszDlg = fpStartDocDlgW(pldc->hPrinter, &di);
+    if (pwszDlg == (LPWSTR)SP_APPABORT)
+    {
+        pldc->Flags |= LDC_KILL_DOCUMENT;
+        return SP_ERROR;
+    }
+    if (pwszDlg == (LPWSTR)SP_ERROR)
+        return SP_ERROR;
+    if (pwszDlg)
+        di.lpszOutput = pwszDlg;
+
+    di1.pDocName = (LPWSTR)di.lpszDocName;
+    di1.pOutputFile = (LPWSTR)di.lpszOutput;
+    di1.pDatatype = (LPWSTR)di.lpszDatatype;
+
+    dwJob = fpStartDocPrinterW(pldc->hPrinter, 1, (LPBYTE)&di1);
+    if (pwszDlg)
+        HeapFree(GetProcessHeap(), 0, pwszDlg);
+    if (dwJob == 0)
+        return SP_ERROR;
+
+    pldc->Flags &= ~LDC_KILL_DOCUMENT;
+    pldc->Flags |= LDC_INIT_DOCUMENT;
+    return (int)dwJob;
+}
+
+static
+int
+FASTCALL
+PrnDcStartPage(HDC hdc, PLDC pldc)
+{
+    if (!(pldc->Flags & LDC_INIT_DOCUMENT) || (pldc->Flags & LDC_INFODC))
+    {
+        SetLastError(ERROR_SPL_NO_STARTDOC);
+        return SP_ERROR;
+    }
+
+    if (pldc->Flags & LDC_INIT_PAGE)
+        return 1;
+
+    /* A new page is white */
+    SetViewportOrgEx(hdc, 0, 0, NULL);
+    SelectClipRgn(hdc, NULL);
+    PatBlt(hdc, 0, 0, PRNDC_PAGE_OF(pldc)->cx, PRNDC_PAGE_OF(pldc)->cy, WHITENESS);
+
+    pldc->Flags |= LDC_INIT_PAGE;
+    return 1;
+}
+
+static
+int
+FASTCALL
+PrnDcEndPage(HDC hdc, PLDC pldc)
+{
+    BOOL bGood;
+
+    if (!(pldc->Flags & LDC_INIT_DOCUMENT) || !(pldc->Flags & LDC_INIT_PAGE))
+    {
+        SetLastError(ERROR_SPL_NO_STARTDOC);
+        return SP_ERROR;
+    }
+
+    pldc->Flags &= ~LDC_INIT_PAGE;
+
+    /* An abort procedure that returns FALSE cancels the document */
+    if (pldc->pAbortProc && !pldc->pAbortProc(hdc, 0))
+    {
+        PrnDcAbortDoc(hdc, pldc);
+        SetLastError(ERROR_CANCELLED);
+        return SP_ERROR;
+    }
+
+    bGood = fpStartPagePrinter(pldc->hPrinter) &&
+            PrnDcWritePage(pldc);
+    if (bGood)
+    {
+        bGood = fpEndPagePrinter(pldc->hPrinter);
+    }
+    else
+    {
+        DWORD dwError = GetLastError();
+        fpEndPagePrinter(pldc->hPrinter);
+        SetLastError(dwError);
+    }
+
+    if (!bGood)
+    {
+        DWORD dwError = GetLastError();
+        PrnDcAbortDoc(hdc, pldc);
+        SetLastError(dwError);
+        return SP_ERROR;
+    }
+
+    return 1;
+}
+
+static
+int
+FASTCALL
+PrnDcEndDoc(HDC hdc, PLDC pldc)
+{
+    BOOL bGood;
+
+    if (!(pldc->Flags & LDC_INIT_DOCUMENT))
+    {
+        SetLastError(ERROR_SPL_NO_STARTDOC);
+        return SP_ERROR;
+    }
+
+    /* A page that was started but not ended is part of the document */
+    if ((pldc->Flags & LDC_INIT_PAGE) && PrnDcEndPage(hdc, pldc) == SP_ERROR)
+        return SP_ERROR;
+
+    pldc->Flags &= ~(LDC_INIT_PAGE | LDC_INIT_DOCUMENT | LDC_SAPCALLBACK | LDC_KILL_DOCUMENT);
+    bGood = fpEndDocPrinter(pldc->hPrinter);
+    return bGood ? 1 : SP_ERROR;
 }
