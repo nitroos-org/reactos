@@ -128,7 +128,7 @@ HKEY FindAdapterKey( PDHCP_ADAPTER Adapter ) {
             ( EnumKey, EnumKeysLinkage[i], "RootDevice" );
 
         if( RootDevice &&
-            !strcmp( RootDevice, Adapter->DhclientInfo.name ) ) {
+            !_stricmp( RootDevice, Adapter->DhclientInfo.name ) ) {
             TargetKeyName =
                 (CHAR*) malloc( strlen( TargetKeyNameStart ) +
                         strlen( RootDevice ) + 1);
@@ -246,14 +246,42 @@ done:
     return dwError;
 }
 
+/*
+ * The name the DHCP client uses for an adapter: the guid of the row's "\DEVICE\TCPIP_{guid}" (wszName); a row with
+ * another name has no guid there, and its bDescr is taken as before. (bDescr is the adapter's description.)
+ */
+static void
+DhcpRowAdapterName(const MIB_IFROW *Row, char *Dest, size_t DestCch)
+{
+    if (!DhcpAdapterNameFromWszName(Dest, DestCch, Row->wszName, MAX_INTERFACE_NAME_LEN))
+        DhcpAdapterNameCopy(Dest, DestCch, Row->bDescr, sizeof(Row->bDescr));
+}
+
+static void
+DhcpRowAdapterNameWide(const MIB_IFROW *Row, WCHAR *Out)
+{
+    char Name[DHCP_ADAPTER_NAME_MAX + 1];
+    size_t n;
+
+    if (DhcpAdapterNameFromWszName(Name, sizeof(Name), Row->wszName, MAX_INTERFACE_NAME_LEN))
+    {
+        for (n = 0; Name[n]; n++)
+            Out[n] = (unsigned char)Name[n];
+        Out[n] = L'\0';
+    }
+    else
+    {
+        DhcpAdapterNameToWide(Out, Row->bDescr, sizeof(Row->bDescr));
+    }
+}
+
 BOOL PrepareAdapterForService( PDHCP_ADAPTER Adapter ) {
     HKEY AdapterKey;
     DWORD Error = ERROR_SUCCESS, DhcpEnabled, Length = sizeof(DWORD);
 
     Adapter->DhclientState.config = &Adapter->DhclientConfig;
     /* cut and zero-terminated: the registry paths in dhclient.c append this name to fixed buffers */
-    DhcpAdapterNameCopy(Adapter->DhclientInfo.name, sizeof(Adapter->DhclientInfo.name),
-                        Adapter->IfMib.bDescr, sizeof(Adapter->IfMib.bDescr));
+    DhcpRowAdapterName(&Adapter->IfMib, Adapter->DhclientInfo.name, sizeof(Adapter->DhclientInfo.name));
 
     AdapterKey = FindAdapterKey( Adapter );
     if( AdapterKey )
@@ -672,7 +700,7 @@ PDHCP_ADAPTER AdapterFindName( const WCHAR *name ) {
          ListEntry != &AdapterList;
          ListEntry = ListEntry->Flink ) {
         Adapter = CONTAINING_RECORD( ListEntry, DHCP_ADAPTER, ListEntry );
-        DhcpAdapterNameToWide(UnicodeName, Adapter->IfMib.bDescr, sizeof(Adapter->IfMib.bDescr));
+        DhcpRowAdapterNameWide(&Adapter->IfMib, UnicodeName);
         if( !wcsicmp(UnicodeName, name ) ) return Adapter;
     }
 
