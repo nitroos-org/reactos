@@ -1576,10 +1576,10 @@ static VOID ParentRowsV3Types(void)
             {
                 const GENERIC_MAPPING *M = &Info->GenericMapping;
                 /*
-                 * Known differences, not label rules (tickets): Thread GenericExecute without THREAD_RESUME,
-                 * Job GenericAll/valid without 0x20, SymbolicLink valid mask
+                 * Known differences, not label rules (tickets): Job GenericAll/valid without 0x20,
+                 * SymbolicLink valid mask
                  */
-                BOOL KnownMapping = !wcscmp(Types[t].Name, L"Thread") || !wcscmp(Types[t].Name, L"Job");
+                BOOL KnownMapping = !wcscmp(Types[t].Name, L"Job");
                 BOOL KnownValid = !wcscmp(Types[t].Name, L"Job") || !wcscmp(Types[t].Name, L"SymbolicLink");
 
                 Found[t] = TRUE;
