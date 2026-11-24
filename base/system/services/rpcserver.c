@@ -5367,6 +5367,7 @@ REnumServiceGroupW(
     PSERVICE CurrentService;
     DWORD dwState;
     DWORD dwRequiredSize;
+    DWORD dwRemainingSize = 0;
     DWORD dwServiceCount;
     DWORD dwSize;
     DWORD dwLastResumeCount = 0;
@@ -5526,20 +5527,21 @@ REnumServiceGroupW(
             }
         }
 
-        dwRequiredSize += (sizeof(ENUM_SERVICE_STATUSW) +
-                           (DWORD)((wcslen(CurrentService->lpServiceName) + 1) * sizeof(WCHAR)) +
-                           (DWORD)((wcslen(CurrentService->lpDisplayName) + 1) * sizeof(WCHAR)));
+        dwRemainingSize += (sizeof(ENUM_SERVICE_STATUSW) +
+                            (DWORD)((wcslen(CurrentService->lpServiceName) + 1) * sizeof(WCHAR)) +
+                            (DWORD)((wcslen(CurrentService->lpDisplayName) + 1) * sizeof(WCHAR)));
 
         dwError = ERROR_MORE_DATA;
     }
 
-    DPRINT("*pcbBytesNeeded: %lu\n", dwRequiredSize);
+    DPRINT("*pcbBytesNeeded: %lu\n", dwRemainingSize);
 
     if (lpResumeIndex)
         *lpResumeIndex = dwLastResumeCount;
 
+    /* the bytes needed are those of the services that did not fit, not of the whole list (Windows Server 2022) */
     *lpServicesReturned = dwServiceCount;
-    *pcbBytesNeeded = dwRequiredSize;
+    *pcbBytesNeeded = dwRemainingSize;
 
     lpStatusPtr = (LPENUM_SERVICE_STATUSW)lpBuffer;
     lpStringPtr = (LPWSTR)((ULONG_PTR)lpBuffer +
@@ -7640,6 +7642,7 @@ REnumServicesStatusExW(
     PSERVICE CurrentService;
     DWORD dwState;
     DWORD dwRequiredSize;
+    DWORD dwRemainingSize = 0;
     DWORD dwServiceCount;
     DWORD dwSize;
     DWORD dwLastResumeCount = 0;
@@ -7805,20 +7808,21 @@ REnumServicesStatusExW(
             }
         }
 
-        dwRequiredSize += (sizeof(ENUM_SERVICE_STATUS_PROCESSW) +
-                           (DWORD)((wcslen(CurrentService->lpServiceName) + 1) * sizeof(WCHAR)) +
-                           (DWORD)((wcslen(CurrentService->lpDisplayName) + 1) * sizeof(WCHAR)));
+        dwRemainingSize += (sizeof(ENUM_SERVICE_STATUS_PROCESSW) +
+                            (DWORD)((wcslen(CurrentService->lpServiceName) + 1) * sizeof(WCHAR)) +
+                            (DWORD)((wcslen(CurrentService->lpDisplayName) + 1) * sizeof(WCHAR)));
 
         dwError = ERROR_MORE_DATA;
     }
 
-    DPRINT("*pcbBytesNeeded: %lu\n", dwRequiredSize);
+    DPRINT("*pcbBytesNeeded: %lu\n", dwRemainingSize);
 
     if (lpResumeIndex)
         *lpResumeIndex = dwLastResumeCount;
 
+    /* the bytes needed are those of the services that did not fit, not of the whole list (Windows Server 2022) */
     *lpServicesReturned = dwServiceCount;
-    *pcbBytesNeeded = dwRequiredSize;
+    *pcbBytesNeeded = dwRemainingSize;
 
     /* If there was no services that matched */
     if ((!dwServiceCount) && (dwError != ERROR_MORE_DATA))
