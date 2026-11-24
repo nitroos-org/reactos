@@ -74,8 +74,8 @@ WSACleanup(VOID)
         /* Decrement process reference count and check if it's zero */
         if (!(RefCount = InterlockedDecrement(&Process->RefCount)))
         {
-            /* It's zero, destroy the process structure */
-            WsProcDelete(Process);
+            /* It's zero, destroy the process structure and the sockets */
+            WsProcDeleteAndCloseSockets(Process);
         }
         else if (RefCount == 1 && WsAsyncThreadInitialized)
         {
