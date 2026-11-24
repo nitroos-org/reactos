@@ -875,6 +875,18 @@ IsWellKnownSid(IN PSID pSid,
     unsigned int i;
     TRACE("(%s, %d)\n", debugstr_sid(pSid), WellKnownSidType);
 
+    /* The logon SID S-1-5-5-X-Y has two variable sub authorities: it is not in the table of fixed SIDs */
+    if (WellKnownSidType == WinLogonIdsSid)
+    {
+        static const SID_IDENTIFIER_AUTHORITY NtAuthority = { SECURITY_NT_AUTHORITY };
+        PISID Sid = pSid;
+
+        return Sid != NULL && RtlValidSid(pSid) &&
+               Sid->SubAuthorityCount == SECURITY_LOGON_IDS_RID_COUNT &&
+               !memcmp(&Sid->IdentifierAuthority, &NtAuthority, sizeof(NtAuthority)) &&
+               Sid->SubAuthority[0] == SECURITY_LOGON_IDS_RID;
+    }
+
     for (i = 0; i < sizeof(WellKnownSids) / sizeof(WellKnownSids[0]); i++)
     {
         if (WellKnownSids[i].Type == WellKnownSidType)
