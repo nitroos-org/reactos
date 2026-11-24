@@ -53,10 +53,10 @@ the original replaces it at the next boot (a reboot-delete is never queued for t
 - Downgrade guard: `[Source] PackFileTime` + `GuardFiles` + `GuardMinSize` (all three, else no guard). Turning the pack on is
   refused with "already newer, skipped" (log and UI message, exit code 0, nothing changed) when one of the `GuardFiles` in
   System32 or SysWOW64 is at least `GuardMinSize` bytes and its last-write time is not older than `PackFileTime`. The Mesa
-  DLLs have no version resource, so a pack is identified by the time of its files. `lavapipe-pack` still pins the OLD
-  26.3.0-beed97f8 files (no shader disk cache); images are built with 26.3.0-dc2, so on them the pack is skipped.
-- The hosted files of `lavapipe-pack` (the old 26.3.0-beed97f8 build, not the current dc2 packs; not yet re-hosted) are produced by `tools/stage-lavapipe-payload.sh <dir>` (the six files of
-  `[Download]` plus `SHA256SUMS`); the catalog expects them at `https://repo.nitroos.org/featmgr/lavapipe-pack/26.3.0-beed97f8/`. Copying them into the payload
+  DLLs have no version resource, so a pack is identified by the time of its files. `lavapipe-pack` pins the 26.3.0-dc2 files
+  (the shader disk cache pack that images are built with), so on an image that has them the pack is skipped.
+- The hosted files of `lavapipe-pack` (the 26.3.0-dc2 pack) are produced by `tools/stage-lavapipe-payload.sh <dir>` (the six files of
+  `[Download]` plus `SHA256SUMS`); the catalog expects them at `https://repo.nitroos.org/featmgr/lavapipe-pack/26.3.0-dc2/`. Copying them into the payload
   folder instead makes the pack installable offline (they are still verified). Offline tests: `tests\roundtrip.cmd` (H1-H29).
 
 ## AAC audio decoder (AAC-LC), opt-in add-on
