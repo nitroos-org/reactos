@@ -1847,8 +1847,8 @@ MmMapLockedPagesWithReservedMapping(
         Mdl->MdlFlags |= MDL_PARTIAL_HAS_BEEN_MAPPED;
     }
 
-    // Return the mapped address
-    return (PVOID)((ULONG_PTR)MappingAddress + Mdl->ByteOffset);
+    // Return the mapped address; Windows 8 and later align the base of the mapping down to 16 bytes
+    return (PVOID)((ULONG_PTR)ALIGN_DOWN_BY(MappingAddress, 16) + Mdl->ByteOffset);
 }
 
 /*
