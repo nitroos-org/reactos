@@ -80,7 +80,10 @@ SepIsOwnerRightsSid(
  * AclSize; it stops at the first ACE that does not fit.
  *
  * @return
- * TRUE if the DACL has such an ACE, FALSE otherwise.
+ * TRUE if the DACL has such an ACE, or if the walk met an ACE that does
+ * not lie within the ACL before AceCount ACEs (the scan fails closed: a
+ * malformed DACL never leaves the owner more than a well-formed one);
+ * FALSE otherwise.
  *
  * @remarks
  * Runs on every access check by the owner that asks for READ_CONTROL,
@@ -108,7 +111,10 @@ SepDaclHasOwnerRightsAce(
             Ace->AceSize < sizeof(ACE_HEADER) ||
             (PUCHAR)Ace + Ace->AceSize > AclEnd)
         {
-            break;
+            /* The ACEs from here on cannot be read, and one of them could be an OWNER RIGHTS ACE: an OWNER
+               RIGHTS ACE only takes rights away from the owner, so the DACL is taken as having one (the owner
+               gets no implicit rights) rather than as having none */
+            return TRUE;
         }
 
         if (!(Ace->AceFlags & INHERIT_ONLY_ACE))
@@ -168,12 +174,15 @@ SepDaclHasOwnerRightsAce(
  * @remarks
  * The object opens (SeAccessCheck) pass descriptors that were not captured
  * here: a file system's descriptor read from the disk is not validated again.
- * The DACL walks stop at the first ACE that does not lie within the ACL, as
- * the label walk (SepMandatoryAllowedAccess) and the OWNER RIGHTS scan do:
- * the ACEs before it count, it and the ACEs after it do not. Stopping early
+ * The DACL walks stop at the first ACE that does not lie within the ACL: the
+ * ACEs before it count, it and the ACEs after it do not. Stopping early
  * never grants more than walking on (a later allow ACE can only grant, a
- * later deny ACE can only refuse what was not granted yet). Captured
- * descriptors (every user-mode caller: RtlValidAcl at capture) always pass.
+ * later deny ACE can only refuse what was not granted yet). The label walk
+ * (SepMandatoryAllowedAccess) and the OWNER RIGHTS scan stop there too, but
+ * for them a later entry would restrict: cut short, they answer as for the
+ * most restrictive entry (a System label with every policy, an OWNER RIGHTS
+ * ACE). Captured descriptors (every user-mode caller: RtlValidAcl at
+ * capture) always pass.
  */
 static
 BOOLEAN
@@ -392,39 +401,66 @@ SepMandatoryAllowedAccess(
     /*
      * The object opens (SeAccessCheck) pass descriptors that were not
      * captured here (file systems read theirs from the disk): every ACE must
-     * lie within the ACL; the walk stops at the first one that does not, and
-     * the label found so far (or the implicit one) counts. Most descriptors
+     * lie within the ACL; the walk stops at the first one that does not (see
+     * below for what counts then). Most descriptors
      * have no SACL (every object opens through here): the control bit says
      * so without the lookup.
      */
     if ((((PISECURITY_DESCRIPTOR)SecurityDescriptor)->Control & SE_SACL_PRESENT) &&
         NT_SUCCESS(RtlGetSaclSecurityDescriptor(SecurityDescriptor, &Present, &Sacl, &Defaulted)) &&
-        Present && Sacl != NULL && Sacl->AclSize >= sizeof(ACL))
+        Present && Sacl != NULL)
     {
-        AclEnd = (PUCHAR)Sacl + Sacl->AclSize;
-        Ace = (PACE_HEADER)(Sacl + 1);
-        for (AceIndex = 0; AceIndex < Sacl->AceCount; AceIndex++,
+        /*
+         * A walk cut short before a label was found fails closed: the ACEs that cannot be read could hold
+         * the label, and the implicit Medium label would let a token at Medium or above write to an object
+         * labelled higher. The object is taken as labelled System with every policy (no read, write or
+         * execute up); a label found before the malformed ACE counts as it is (the first label is the label).
+         * The same for a SACL whose size cannot even hold its header.
+         */
+        if (Sacl->AclSize < sizeof(ACL))
+        {
+            Level = SECURITY_MANDATORY_SYSTEM_RID;
+            Policy = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP |
+                     SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP;
+            AclEnd = NULL;
+            Ace = NULL;
+        }
+        else
+        {
+            AclEnd = (PUCHAR)Sacl + Sacl->AclSize;
+            Ace = (PACE_HEADER)(Sacl + 1);
+        }
+        for (AceIndex = 0; Ace != NULL && AceIndex < Sacl->AceCount; AceIndex++,
              Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize))
         {
             if ((ULONG_PTR)(AclEnd - (PUCHAR)Ace) < sizeof(ACE_HEADER) ||
                 Ace->AceSize < sizeof(ACE_HEADER) ||
                 (ULONG_PTR)(AclEnd - (PUCHAR)Ace) < Ace->AceSize)
             {
+                Level = SECURITY_MANDATORY_SYSTEM_RID;
+                Policy = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP |
+                         SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP;
                 break;
             }
 
             if (Ace->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE || (Ace->AceFlags & INHERIT_ONLY_ACE))
                 continue;
 
-            /* The ACE must hold a whole mandatory label SID; another one is passed over */
+            /* The ACE must hold a whole SID: a label ACE whose SID does not fit in it is malformed, and fails
+               closed as above (its level cannot be read). A whole SID that is not a mandatory label SID is
+               passed over */
             LabelSid = (PISID)&((PSYSTEM_MANDATORY_LABEL_ACE)Ace)->SidStart;
             if (Ace->AceSize < FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) + FIELD_OFFSET(SID, SubAuthority) ||
                 Ace->AceSize < FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) +
-                               RtlLengthRequiredSid(LabelSid->SubAuthorityCount) ||
-                !SepIsMandatoryLabelSid((PSID)LabelSid, &Rid))
+                               RtlLengthRequiredSid(LabelSid->SubAuthorityCount))
             {
-                continue;
+                Level = SECURITY_MANDATORY_SYSTEM_RID;
+                Policy = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP |
+                         SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP;
+                break;
             }
+            if (!SepIsMandatoryLabelSid((PSID)LabelSid, &Rid))
+                continue;
 
             Level = Rid;
             Policy = ((PSYSTEM_MANDATORY_LABEL_ACE)Ace)->Mask;
