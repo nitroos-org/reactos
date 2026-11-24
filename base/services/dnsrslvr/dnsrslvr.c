@@ -97,6 +97,19 @@ ServiceControlHandler(
     switch (dwControl)
     {
         case SERVICE_CONTROL_SHUTDOWN:
+            /*
+             * The machine goes down and this process with it: nothing is torn down, and above all the calls in
+             * flight are not waited for. A name query that waits for its servers (the time service asks for
+             * pool.ntp.org as soon as it runs) ends tens of seconds later, and the service manager waits for the
+             * service to report that it has stopped (up to WaitToKillServiceTimeout).
+             */
+            if (InterlockedExchange(&StopStarted, 1) == 0)
+            {
+                SvcStatus.dwControlsAccepted = 0;
+                UpdateServiceStatus(ServiceStatusHandle, SERVICE_STOPPED, 0);
+            }
+            break;
+
         case SERVICE_CONTROL_STOP:
             BeginStop();
             break;
