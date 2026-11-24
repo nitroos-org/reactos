@@ -1743,7 +1743,7 @@ CreateRemoteDatabaseWorker(IN PDEVICE_OBJECT DeviceObject,
                           NULL,
                           FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN,
                           0,
-                          FILE_CREATE,
+                          FILE_OPEN_IF,
                           FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_ALERT,
                           NULL,
                           0,
@@ -1841,7 +1841,7 @@ OpenRemoteDatabase(IN PDEVICE_INFORMATION DeviceInformation,
 {
     HANDLE Database;
     NTSTATUS Status;
-    BOOLEAN PreviousMode;
+    BOOLEAN PreviousMode, CreateIfMissing;
     IO_STATUS_BLOCK IoStatusBlock;
     OBJECT_ATTRIBUTES ObjectAttributes;
     UNICODE_STRING DeviceRemoteDatabase;
@@ -1873,6 +1873,7 @@ OpenRemoteDatabase(IN PDEVICE_INFORMATION DeviceInformation,
     /* Disable hard errors */
     PreviousMode = IoSetThreadHardErrorMode(FALSE);
 
+    CreateIfMissing = (!MigrateDatabase || DeviceInformation->Migrated == 0);
     Status = IoCreateFile(&Database,
                           SYNCHRONIZE | READ_CONTROL | FILE_WRITE_ATTRIBUTES |
                           FILE_READ_ATTRIBUTES | FILE_WRITE_EA | FILE_READ_EA |
@@ -1882,7 +1883,7 @@ OpenRemoteDatabase(IN PDEVICE_INFORMATION DeviceInformation,
                           NULL,
                           FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN,
                           0,
-                          (!MigrateDatabase || DeviceInformation->Migrated == 0) ? FILE_OPEN_IF : FILE_OPEN,
+                          CreateIfMissing ? FILE_OPEN_IF : FILE_OPEN,
                           FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_ALERT,
                           NULL,
                           0,
@@ -1894,10 +1895,24 @@ OpenRemoteDatabase(IN PDEVICE_INFORMATION DeviceInformation,
         DPRINT1("Attempt to exploit CVE-2015-1769. See CORE-10216\n");
     }
 
-    /* If base it to be migrated and was opened successfully, go ahead */
+    /* A volume that Windows did not format has no "System Volume Information" folder to keep the
+     * database in: when a mount point is being recorded (not when the volume arrives, which would make the
+     * folder on every volume at every start), make the folder (SYSTEM only, hidden) and the file */
+    if (MigrateDatabase && CreateIfMissing &&
+        (Status == STATUS_OBJECT_PATH_NOT_FOUND || Status == STATUS_OBJECT_NAME_NOT_FOUND))
+    {
+        Status = CreateRemoteDatabase(DeviceInformation, &Database);
+    }
+
+    /* The database is there: later calls open it as it is (this used to create the file a second time,
+     * which failed on every call and took the handle of the opened file away) */
     if (MigrateDatabase && NT_SUCCESS(Status))
     {
-        CreateRemoteDatabase(DeviceInformation, &Database);
+        DeviceInformation->Migrated = 1;
+    }
+    else if (!NT_SUCCESS(Status))
+    {
+        Database = 0;
     }
 
     IoSetThreadHardErrorMode(PreviousMode);
