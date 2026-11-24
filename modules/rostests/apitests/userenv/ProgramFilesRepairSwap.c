@@ -287,12 +287,19 @@ START_TEST(ProgramFilesRepairSwap)
     Thread = CreateThread(NULL, 0, Swapper, NULL, 0, NULL);
     ok(Thread != NULL, "CreateThread failed (%lu)\n", GetLastError());
 
-    for (Round = 0; Thread && Round < Rounds; Round++)
+    /* The race needs a swap during a repair: a fast repair can finish before the swapper thread gets to run (it
+     * sleeps in 1 ms steps, which is one timer tick), so the repair starts only when the swapper has left its pause,
+     * and the rounds go on (up to 2000) until the directory has been swapped at least once */
+    for (Round = 0; Thread && (Round < Rounds || (s_Swaps == 0 && Round < 2000)); Round++)
     {
+        ULONG Wait;
+
         PauseSwapper(TRUE);
         ok(MakeLegacy() == FILES + 2, "round %lu: the old DACL was not put back on every object\n", Round);
         DeleteFileW(Log);
         PauseSwapper(FALSE);
+        for (Wait = 0; s_Paused && Wait < 1000; Wait++)
+            Sleep(1);
         pSecureSystemDirectories();
         PauseSwapper(TRUE);
         if (CountRepaired() != 0)
@@ -334,7 +341,7 @@ START_TEST(ProgramFilesRepairSwap)
             LocalFree(Before[i]);
     }
     trace("%lu rounds, %ld swaps, scratch tree repaired in %lu rounds, %lu objects outside changed\n",
-          Rounds, s_Swaps, RoundsRepaired, Changed);
+          Round, s_Swaps, RoundsRepaired, Changed);
     ok(Changed == 0, "%lu objects outside the tree were changed by the repair\n", Changed);
     ok(RoundsRepaired > 0, "the scratch tree was never repaired: the repair did not run\n");
     ok(s_Swaps > 0, "the directory was never swapped\n");
