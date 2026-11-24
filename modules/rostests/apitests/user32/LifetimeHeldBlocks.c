@@ -430,3 +430,94 @@ START_TEST(LifetimeDesktopHeldDelete)
             CloseDesktop(hDesk);
     }
 }
+
+static struct
+{
+    HDESK hDesk;
+    HWND hwnd;
+    HANDLE hReady, hQuit;
+} gHod;
+
+/* A window on another desktop, kept until it is told to go */
+static DWORD WINAPI HbOtherDeskThread(LPVOID Param)
+{
+    MSG msg;
+
+    UNREFERENCED_PARAMETER(Param);
+    if (SetThreadDesktop(gHod.hDesk))
+        gHod.hwnd = CreateWindowExW(0, HB_CLASS, L"o", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL,
+                                    GetModuleHandleW(NULL), NULL);
+    SetEvent(gHod.hReady);
+    while (MsgWaitForMultipleObjects(1, &gHod.hQuit, FALSE, 10000, QS_ALLINPUT) == WAIT_OBJECT_0 + 1)
+    {
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+            DispatchMessageW(&msg);
+    }
+    if (gHod.hwnd)
+        DestroyWindow(gHod.hwnd);
+    return 0;
+}
+
+/*
+ * A window of the test's desktop cannot get a parent or an owner on another desktop (CreateWindowEx, and
+ * SetWindowLongPtr GWLP_HWNDPARENT): it would reference a window in the heap of that desktop, which is freed
+ * when that desktop goes. Before the fix both were accepted, and the owned window's destruction after the
+ * other desktop was closed read the freed heap.
+ */
+START_TEST(LifetimeOtherDesktopOwner)
+{
+    HANDLE hThread;
+    HWND hwnd, hwndOwn;
+
+    HbRegister();
+    gHod.hDesk = CreateDesktopW(L"HeldOtherDesk", NULL, NULL, 0, DESKTOP_ALL_ACCESS, NULL);
+    ok(gHod.hDesk != NULL, "CreateDesktopW failed %lu\n", GetLastError());
+    if (!gHod.hDesk)
+        return;
+    gHod.hReady = CreateEventW(NULL, FALSE, FALSE, NULL);
+    gHod.hQuit = CreateEventW(NULL, TRUE, FALSE, NULL);
+    hThread = CreateThread(NULL, 0, HbOtherDeskThread, NULL, 0, NULL);
+    ok(hThread != NULL, "CreateThread failed %lu\n", GetLastError());
+    WaitForSingleObject(gHod.hReady, 10000);
+    ok(gHod.hwnd != NULL, "no window on the other desktop\n");
+
+    if (gHod.hwnd)
+    {
+        SetLastError(0xdeadbeef);
+        hwnd = CreateWindowExW(0, HB_CLASS, L"owned", WS_POPUP, 0, 0, 50, 50, gHod.hwnd, NULL,
+                               GetModuleHandleW(NULL), NULL);
+        ok(hwnd == NULL, "a window with an owner on another desktop was created\n");
+        ok(GetLastError() == ERROR_INVALID_PARAMETER, "error %lu\n", GetLastError());
+        if (hwnd)
+            DestroyWindow(hwnd);
+
+        SetLastError(0xdeadbeef);
+        hwnd = CreateWindowExW(0, HB_CLASS, L"child", WS_CHILD, 0, 0, 50, 50, gHod.hwnd, NULL,
+                               GetModuleHandleW(NULL), NULL);
+        ok(hwnd == NULL, "a child of a window on another desktop was created\n");
+        ok(GetLastError() == ERROR_INVALID_PARAMETER, "error %lu\n", GetLastError());
+        if (hwnd)
+            DestroyWindow(hwnd);
+
+        hwndOwn = CreateWindowExW(0, HB_CLASS, L"own", WS_POPUP, 0, 0, 50, 50, NULL, NULL,
+                                  GetModuleHandleW(NULL), NULL);
+        ok(hwndOwn != NULL, "CreateWindowExW failed %lu\n", GetLastError());
+        if (hwndOwn)
+        {
+            SetWindowLongPtrW(hwndOwn, GWLP_HWNDPARENT, (LONG_PTR)gHod.hwnd);
+            ok(GetWindow(hwndOwn, GW_OWNER) == NULL, "the window got an owner on another desktop\n");
+            DestroyWindow(hwndOwn);
+        }
+    }
+
+    /* The window of the other desktop goes before that desktop */
+    SetEvent(gHod.hQuit);
+    if (hThread)
+    {
+        ok(WaitForSingleObject(hThread, 10000) == WAIT_OBJECT_0, "the thread did not end\n");
+        CloseHandle(hThread);
+    }
+    CloseDesktop(gHod.hDesk);
+    CloseHandle(gHod.hReady);
+    CloseHandle(gHod.hQuit);
+}
