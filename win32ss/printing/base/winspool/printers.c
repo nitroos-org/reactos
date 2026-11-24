@@ -1380,6 +1380,14 @@ DocumentPropertiesW(HWND hWnd, HANDLE hPrinter, LPWSTR pDeviceName, PDEVMODEW pD
     {
         FIXME("DPW : CallDocumentPropertySheets\n");
         Result = DocumentPropertySheets( NULL, (LPARAM)&docprophdr );
+
+        /*
+         * With an output buffer the result is IDOK (measured on Windows Server 2022, 64- and 32-bit client: the call
+         * without a buffer returns the size, the call with DM_OUT_BUFFER returns 1); DocumentPropertySheets gives
+         * the size back in both cases.
+         */
+        if ( pDevModeOutput && Result > 0 )
+            Result = IDOK;
     }
 
     if ( Result != ERR_CPSUI_GETLASTERROR || Result != ERR_CPSUI_ALLOCMEM_FAILED )

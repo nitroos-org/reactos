@@ -210,7 +210,7 @@ static void TestPrinter(LPWSTR pwszPrinter)
     {
         DEVMODEW *pDevMode = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, lSize);
         LONG lResult = DocumentPropertiesW(NULL, hPrinter, pwszPrinter, pDevMode, NULL, DM_OUT_BUFFER);
-        ok(lResult > 0, "DocumentPropertiesW(DM_OUT_BUFFER) returned %ld (error %lu)\n", lResult, GetLastError());
+        ok(lResult == IDOK, "DocumentPropertiesW(DM_OUT_BUFFER) returned %ld (error %lu)\n", lResult, GetLastError());
         ok(pDevMode->dmSize >= FIELD_OFFSET(DEVMODEW, dmFields) && pDevMode->dmSize + pDevMode->dmDriverExtra <= lSize,
            "DEVMODE of %u + %u bytes in a buffer of %ld\n", pDevMode->dmSize, pDevMode->dmDriverExtra, lSize);
         HeapFree(GetProcessHeap(), 0, pDevMode);
