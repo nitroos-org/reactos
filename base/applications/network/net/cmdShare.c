@@ -610,6 +610,21 @@ MakeShareDescriptor(
     if (dwError != ERROR_SUCCESS)
         return dwError;
 
+    /* No grants give no ACL at all, which would be a NULL DACL (full access
+     * for everyone): a share without grants gets an empty DACL */
+    if (*ppAcl == NULL)
+    {
+        *ppAcl = LocalAlloc(LPTR, sizeof(ACL));
+        if (*ppAcl == NULL || !InitializeAcl(*ppAcl, sizeof(ACL), ACL_REVISION))
+        {
+            dwError = *ppAcl ? GetLastError() : ERROR_NOT_ENOUGH_MEMORY;
+            if (*ppAcl)
+                LocalFree(*ppAcl);
+            *ppAcl = NULL;
+            return dwError;
+        }
+    }
+
     pDescriptor = LocalAlloc(LPTR, SECURITY_DESCRIPTOR_MIN_LENGTH);
     if (pDescriptor == NULL ||
         !InitializeSecurityDescriptor(pDescriptor, SECURITY_DESCRIPTOR_REVISION) ||
