@@ -10,11 +10,13 @@ list(APPEND SOURCE
     AccessCheckMalformedAcl.c
     AccessCheckAppContainer.c
     AppContainerNamespace.c
+    AdjustTokenGroupsRows.c
     AccessCheckObjectTypeList.c
     AddMandatoryAce.c
     RegSaveKeyExFormat.c
     RegSaveKeyBigValue.c
     SddlLabelAce.c
+    SddlMandatoryLabel.c
     SddlNullAcl.c
     AuditCategories.c
     CveEventWrite.c
@@ -164,6 +166,7 @@ list(APPEND SOURCE
     ServiceProcess.c
     ServiceInheritOnlyGeneric.c
     ServiceSharedToken.c
+    ServiceTokenSd.c
     ServiceSidToken.c
     PerfCounterValues.c
     PerfProvider.c

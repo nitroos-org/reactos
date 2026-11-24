@@ -265,7 +265,8 @@ SepAdjustGroups(
     _Out_ PULONG ChangedGroups)
 {
     ULONG GroupsInToken, GroupsInList;
-    ULONG ChangeCount, GroupsCount, NewAttributes;
+    ULONG ChangeCount, GroupsCount, NewAttributes = 0;
+    BOOLEAN Found;
 
     PAGED_CODE();
 
@@ -280,6 +281,10 @@ SepAdjustGroups(
     /* Begin looping all the groups in the token */
     for (GroupsInToken = 0; GroupsInToken < Token->UserAndGroupCount; GroupsInToken++)
     {
+        /* Every group of the token has its new attributes, or is left as it is (the attributes below stay those it has) */
+        NewAttributes = Token->UserAndGroups[GroupsInToken].Attributes;
+        Found = FALSE;
+
         /* Does the caller want to reset groups to default states? */
         if (ResetToDefaultStates)
         {
@@ -287,14 +292,13 @@ SepAdjustGroups(
              * SE_GROUP_ENABLED_BY_DEFAULT is a special indicator that informs us
              * if a certain group has been enabled by default or not. In case
              * a group is enabled by default but it is not currently enabled then
-             * at that point we must enable it back by default. For now just
-             * assign the respective SE_GROUP_ENABLED attribute as we'll do the
-             * eventual work later.
+             * at that point we must enable it back by default (the token itself
+             * is changed below, only when the changes are applied).
              */
-            if ((Token->UserAndGroups[GroupsInToken].Attributes & SE_GROUP_ENABLED_BY_DEFAULT) &&
-                (Token->UserAndGroups[GroupsInToken].Attributes & SE_GROUP_ENABLED) == 0)
+            Found = TRUE;
+            if ((NewAttributes & SE_GROUP_ENABLED_BY_DEFAULT) && (NewAttributes & SE_GROUP_ENABLED) == 0)
             {
-                NewAttributes = Token->UserAndGroups[GroupsInToken].Attributes |= SE_GROUP_ENABLED;
+                NewAttributes |= SE_GROUP_ENABLED;
             }
 
             /*
@@ -302,10 +306,9 @@ SepAdjustGroups(
              * default but it's currently enabled then we must disable
              * it back.
              */
-            if ((Token->UserAndGroups[GroupsInToken].Attributes & SE_GROUP_ENABLED_BY_DEFAULT) == 0 &&
-                (Token->UserAndGroups[GroupsInToken].Attributes & SE_GROUP_ENABLED))
+            else if ((NewAttributes & SE_GROUP_ENABLED_BY_DEFAULT) == 0 && (NewAttributes & SE_GROUP_ENABLED))
             {
-                NewAttributes = Token->UserAndGroups[GroupsInToken].Attributes & ~SE_GROUP_ENABLED;
+                NewAttributes &= ~SE_GROUP_ENABLED;
             }
         }
         else
@@ -314,8 +317,8 @@ SepAdjustGroups(
             for (GroupsInList = 0; GroupsInList < NewStateCount; GroupsInList++)
             {
                 /* Does this group exist in the token? */
-                if (RtlEqualSid(&Token->UserAndGroups[GroupsInToken].Sid,
-                                &NewState[GroupsInList].Sid))
+                if (RtlEqualSid(Token->UserAndGroups[GroupsInToken].Sid,
+                                NewState[GroupsInList].Sid))
                 {
                     /*
                      * This is the group that we're looking for.
@@ -346,48 +349,43 @@ SepAdjustGroups(
                         return STATUS_CANT_ENABLE_DENY_ONLY;
                     }
 
-                    /* Copy the attributes and stop searching */
-                    NewAttributes = NewState[GroupsInList].Attributes;
-                    NewAttributes &= SE_GROUP_ENABLED;
-                    NewAttributes = Token->UserAndGroups[GroupsInToken].Attributes & ~SE_GROUP_ENABLED;
+                    /* Only the enabled state follows the caller: the other attributes stay, and stop searching */
+                    NewAttributes = (Token->UserAndGroups[GroupsInToken].Attributes & ~SE_GROUP_ENABLED) |
+                                    (NewState[GroupsInList].Attributes & SE_GROUP_ENABLED);
+                    Found = TRUE;
+                    GroupsCount++;
                     break;
                 }
-
-                /* Did we find the specific group we wanted? */
-                if (GroupsInList == NewStateCount)
-                {
-                    /* We didn't, continue with the next token's group */
-                    continue;
-                }
             }
+        }
 
-            /* Count the group that we found it */
-            GroupsCount++;
+        /* A group the caller did not name is not touched: its attributes are not changed by anything below */
+        if (!Found)
+            continue;
 
-            /* Does the token have the same attributes as the caller requested them? */
-            if (Token->UserAndGroups[GroupsInToken].Attributes != NewAttributes)
+        /* Does the token have the same attributes as the caller requested them? */
+        if (Token->UserAndGroups[GroupsInToken].Attributes != NewAttributes)
+        {
+            /*
+             * No, then it's time to make some adjustment to the
+             * token's groups. Does the caller want the previous states
+             * of groups?
+             */
+            if (PreviousGroupsState != NULL)
             {
-                /*
-                 * No, then it's time to make some adjustment to the
-                 * token's groups. Does the caller want the previous states
-                 * of groups?
-                 */
-                if (PreviousGroupsState != NULL)
-                {
-                    PreviousGroupsState->Groups[ChangeCount] = Token->UserAndGroups[GroupsInToken];
-                }
-
-                /* Time to apply the changes now? */
-                if (ApplyChanges)
-                {
-                    /* The caller gave us consent, apply and report that we made changes! */
-                    Token->UserAndGroups[GroupsInToken].Attributes = NewAttributes;
-                    *ChangesMade = TRUE;
-                }
-
-                /* Increment the count change */
-                ChangeCount++;
+                PreviousGroupsState->Groups[ChangeCount] = Token->UserAndGroups[GroupsInToken];
             }
+
+            /* Time to apply the changes now? */
+            if (ApplyChanges)
+            {
+                /* The caller gave us consent, apply and report that we made changes! */
+                Token->UserAndGroups[GroupsInToken].Attributes = NewAttributes;
+                *ChangesMade = TRUE;
+            }
+
+            /* Increment the count change */
+            ChangeCount++;
         }
     }
 

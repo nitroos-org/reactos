@@ -437,6 +437,210 @@ CheckWindowsAndConfig(void)
     CleanupUser(&User);
 }
 
+/*
+ * ProgramData\Microsoft (the all-users Start Menu with its Startup folder, Templates) and Public\Desktop, measured on a
+ * Windows Server 2022 reference (icacls and a standard user): protected, SYSTEM and Administrators full control, users read
+ * only. ProgramData's own entry (Users add files and folders) is not inherited there: a program a standard user puts into
+ * the all-users Startup folder would start at every user's logon.
+ */
+static const EXPECTED_ACE_EX s_ExpectedMicrosoft[] =
+{
+    { WinLocalSystemSid, NULL, OI_CI, FILE_ALL_ACCESS },
+    { WinBuiltinAdministratorsSid, NULL, OI_CI, FILE_ALL_ACCESS },
+    { WinBuiltinUsersSid, NULL, OI_CI, RX_MASK },
+    { WinWorldSid, NULL, OI_CI, RX_MASK },
+};
+
+static const EXPECTED_ACE_EX s_ExpectedRecycleRoot[] =
+{
+    { WinBuiltinAdministratorsSid, NULL, 0, FILE_ALL_ACCESS },
+    { WinBuiltinAdministratorsSid, NULL, OI_CI_IO, GENERIC_ALL },
+    { WinLocalSystemSid, NULL, 0, FILE_ALL_ACCESS },
+    { WinLocalSystemSid, NULL, OI_CI_IO, GENERIC_ALL },
+    { WinBuiltinUsersSid, NULL, 0, 0x001201ad },
+};
+
+static const EXPECTED_ACE_EX s_ExpectedPublicDesktop[] =
+{
+    { WinBuiltinAdministratorsSid, NULL, OI_CI, FILE_ALL_ACCESS },
+    { WinInteractiveSid, NULL, OI_CI, RX_MASK },
+    { WinLocalSystemSid, NULL, OI_CI, FILE_ALL_ACCESS },
+};
+
+#define USER_WRITE_RIGHTS (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER | \
+                           GENERIC_WRITE | GENERIC_ALL)
+static ULONG s_WritableObjects, s_CheckedObjects;
+
+/* No allow entry of the object lets a group of every user (Users, Authenticated Users, Everyone, INTERACTIVE) write, delete or re-secure it */
+static void
+CheckNoUserWrite(PCWSTR pszPath)
+{
+    static const WELL_KNOWN_SID_TYPE Types[] = { WinBuiltinUsersSid, WinAuthenticatedUserSid, WinWorldSid, WinInteractiveSid };
+    PSECURITY_DESCRIPTOR pSd;
+    PACL pAcl = NULL;
+    DWORD i, j;
+
+    s_CheckedObjects++;
+    pSd = GetObjectDacl(pszPath, &pAcl);
+    if (!pSd || !pAcl)
+    {
+        LocalFree(pSd);
+        return;
+    }
+    for (i = 0; i < pAcl->AceCount; i++)
+    {
+        PACCESS_ALLOWED_ACE pAce;
+        BYTE Buf[SECURITY_MAX_SID_SIZE];
+
+        if (!GetAce(pAcl, i, (PVOID *)&pAce) || pAce->Header.AceType != ACCESS_ALLOWED_ACE_TYPE ||
+            (pAce->Header.AceFlags & INHERIT_ONLY_ACE) || !(pAce->Mask & USER_WRITE_RIGHTS))
+            continue;
+        for (j = 0; j < ARRAYSIZE(Types); j++)
+        {
+            DWORD cb = sizeof(Buf);
+            if (CreateWellKnownSid(Types[j], NULL, Buf, &cb) && EqualSid((PSID)&pAce->SidStart, Buf))
+            {
+                if (s_WritableObjects++ < 10)
+                    ok(0, "%ls: entry %lu grants 0x%08lx to a group of every user (type %u)\n", pszPath, i, pAce->Mask, Types[j]);
+            }
+        }
+    }
+    LocalFree(pSd);
+}
+
+static void
+WalkNoUserWrite(PCWSTR pszDirectory, UINT uDepth)
+{
+    WCHAR szPattern[MAX_PATH], szPath[MAX_PATH];
+    WIN32_FIND_DATAW Find;
+    HANDLE hFind;
+
+    if (uDepth > 6 || FAILED(StringCchPrintfW(szPattern, ARRAYSIZE(szPattern), L"%s\\*", pszDirectory)))
+        return;
+    hFind = FindFirstFileW(szPattern, &Find);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return;
+    do
+    {
+        if (!wcscmp(Find.cFileName, L".") || !wcscmp(Find.cFileName, L"..") || (Find.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            continue;
+        if (FAILED(StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\%s", pszDirectory, Find.cFileName)))
+            continue;
+        CheckNoUserWrite(szPath);
+        if (Find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            WalkNoUserWrite(szPath, uDepth + 1);
+    } while (FindNextFileW(hFind, &Find));
+    FindClose(hFind);
+}
+
+static void
+CheckAllUsersFolders(PCWSTR pszProgramData)
+{
+    static const PCWSTR Below[] = { L"", L"\\Windows", L"\\Windows\\Start Menu", L"\\Windows\\Start Menu\\Programs",
+                                    L"\\Windows\\Start Menu\\Programs\\Startup", L"\\Windows\\Templates" };
+    WCHAR szMicrosoft[MAX_PATH], szPublic[MAX_PATH], szDesktop[MAX_PATH], szPath[MAX_PATH];
+    TESTUSER User;
+    UINT i;
+    DWORD dwError;
+
+    StringCchPrintfW(szMicrosoft, ARRAYSIZE(szMicrosoft), L"%s\\Microsoft", pszProgramData);
+    if (GetFileAttributesW(szMicrosoft) == INVALID_FILE_ATTRIBUTES)
+    {
+        skip("No %ls\n", szMicrosoft);
+        return;
+    }
+    CheckDaclEx(szMicrosoft, s_ExpectedMicrosoft, ARRAYSIZE(s_ExpectedMicrosoft));
+
+    s_WritableObjects = s_CheckedObjects = 0;
+    CheckNoUserWrite(szMicrosoft);
+    WalkNoUserWrite(szMicrosoft, 0);
+    ok(s_WritableObjects == 0, "%lu of %lu objects below %ls let a group of every user write, delete or re-secure them\n",
+       s_WritableObjects, s_CheckedObjects, szMicrosoft);
+
+    if (!GetEnvironmentVariableW(L"PUBLIC", szPublic, ARRAYSIZE(szPublic)))
+        szPublic[0] = UNICODE_NULL;
+    StringCchPrintfW(szDesktop, ARRAYSIZE(szDesktop), L"%s\\Desktop", szPublic);
+    if (szPublic[0] && GetFileAttributesW(szDesktop) != INVALID_FILE_ATTRIBUTES)
+    {
+        CheckDaclEx(szDesktop, s_ExpectedPublicDesktop, ARRAYSIZE(s_ExpectedPublicDesktop));
+        s_WritableObjects = s_CheckedObjects = 0;
+        CheckNoUserWrite(szDesktop);
+        WalkNoUserWrite(szDesktop, 0);
+        ok(s_WritableObjects == 0, "%lu of %lu objects below %ls let a group of every user write, delete or re-secure them\n",
+           s_WritableObjects, s_CheckedObjects, szDesktop);
+    }
+    else
+        szDesktop[0] = UNICODE_NULL;
+
+    if (!SetupUser(&User, L"pdsec4"))
+    {
+        skip("Cannot create and log on the test user (error %lu)\n", GetLastError());
+        CleanupUser(&User);
+        return;
+    }
+    for (i = 0; i < ARRAYSIZE(Below); i++)
+    {
+        StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s%s", szMicrosoft, Below[i]);
+        if (GetFileAttributesW(szPath) == INVALID_FILE_ATTRIBUTES)
+            continue;
+        dwError = CreateAs(User.hToken, szPath, L"pdsec-user.txt", FALSE);
+        ok(dwError == ERROR_ACCESS_DENIED, "creating a file in %ls as a user: error %lu, expected %u\n", szPath, dwError, ERROR_ACCESS_DENIED);
+        dwError = CreateAs(User.hToken, szPath, L"pdsec-user.dir", TRUE);
+        ok(dwError == ERROR_ACCESS_DENIED, "creating a directory in %ls as a user: error %lu, expected %u\n", szPath, dwError, ERROR_ACCESS_DENIED);
+    }
+    if (szDesktop[0])
+    {
+        dwError = CreateAs(User.hToken, szDesktop, L"pdsec-user.txt", FALSE);
+        ok(dwError == ERROR_ACCESS_DENIED, "creating a file in %ls as a user: error %lu, expected %u\n", szDesktop, dwError, ERROR_ACCESS_DENIED);
+    }
+    /* the legacy junctions of ProgramData (Application Data, Start Menu, ...): the object cannot be deleted or re-secured by a user */
+    {
+        WCHAR szFind[MAX_PATH], szLink[MAX_PATH];
+        WIN32_FIND_DATAW Find;
+        HANDLE hFind;
+
+        StringCchPrintfW(szFind, ARRAYSIZE(szFind), L"%s\\*", pszProgramData);
+        hFind = FindFirstFileW(szFind, &Find);
+        if (hFind != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if (!(Find.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) || !(Find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                    continue;
+                StringCchPrintfW(szLink, ARRAYSIZE(szLink), L"%s\\%s", pszProgramData, Find.cFileName);
+                dwError = OpenObjectAs(User.hToken, szLink, DELETE, TRUE);
+                ok(dwError == ERROR_ACCESS_DENIED, "opening the junction %ls to delete it as a user: error %lu, expected %u\n",
+                   szLink, dwError, ERROR_ACCESS_DENIED);
+                dwError = OpenObjectAs(User.hToken, szLink, WRITE_DAC, TRUE);
+                ok(dwError == ERROR_ACCESS_DENIED, "opening the junction %ls to change its DACL as a user: error %lu, expected %u\n",
+                   szLink, dwError, ERROR_ACCESS_DENIED);
+            } while (FindNextFileW(hFind, &Find));
+            FindClose(hFind);
+        }
+    }
+    /* the folder of the recycle bins: users add folders (their own bin) and nothing else; measured as $Recycle.Bin */
+    {
+        WCHAR szRecycler[MAX_PATH];
+
+        if (GetEnvironmentVariableW(L"SystemDrive", szRecycler, ARRAYSIZE(szRecycler)) &&
+            SUCCEEDED(StringCchCatW(szRecycler, ARRAYSIZE(szRecycler), L"\\RECYCLER")) &&
+            GetFileAttributesW(szRecycler) != INVALID_FILE_ATTRIBUTES)
+        {
+            CheckDaclEx(szRecycler, s_ExpectedRecycleRoot, ARRAYSIZE(s_ExpectedRecycleRoot));
+            dwError = CreateAs(User.hToken, szRecycler, L"pdsec-user.txt", FALSE);
+            ok(dwError == ERROR_ACCESS_DENIED, "creating a file in %ls as a user: error %lu, expected %u\n", szRecycler, dwError, ERROR_ACCESS_DENIED);
+            dwError = CreateAs(User.hToken, szRecycler, L"pdsec-user.dir", TRUE);
+            ok(dwError == 0, "creating a directory in %ls as a user: error %lu\n", szRecycler, dwError);
+        }
+        else
+            skip("No recycle bin folder\n");
+    }
+    /* what a user still needs: ProgramData itself (as measured), the own profile is not here */
+    dwError = CreateAs(User.hToken, (PWSTR)pszProgramData, L"pdsec-user.txt", FALSE);
+    ok(dwError == 0, "creating a file in ProgramData as a user: error %lu\n", dwError);
+    CleanupUser(&User);
+}
+
 START_TEST(ProgramDataSecurity)
 {
     WCHAR szPath[MAX_PATH];
@@ -450,4 +654,5 @@ START_TEST(ProgramDataSecurity)
     CheckDacl(szPath);
     CheckUsers(szPath);
     CheckWindowsAndConfig();
+    CheckAllUsersFolders(szPath);
 }

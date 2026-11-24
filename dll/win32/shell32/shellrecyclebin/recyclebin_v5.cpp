@@ -568,8 +568,10 @@ RecycleBin5_OwnerDescriptor(
         LocalFree(StringSid);
         return HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER);
     }
-    /* The order of Windows Server 2022's $Recycle.Bin\<SID> (measured): SYSTEM, Administrators, the user */
-    wsprintfW(Sddl, L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)", StringSid);
+    /* The order of Windows Server 2022's $Recycle.Bin\<SID> (measured): SYSTEM, Administrators, the user; and the label
+     * Low, NO_WRITE_UP, inherit-only for what is put into the folder (the items get S:AI(ML;ID;NW;;;LW), a moved file
+     * keeps its own) */
+    wsprintfW(Sddl, L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)S:AI(ML;OICIIO;NW;;;LW)", StringSid);
     LocalFree(StringSid);
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(Sddl, SDDL_REVISION_1, Descriptor, NULL))
         return HRESULT_FROM_WIN32(GetLastError());
@@ -650,6 +652,23 @@ RecycleBin5_Create(
                 {
                     hr = HRESULT_FROM_WIN32(rc);
                     goto cleanup;
+                }
+
+                /* ... and the label, if it has none (an older folder); a refusal leaves the folder as it is */
+                {
+                    PACL Sacl = NULL, CurrentSacl = NULL;
+                    PSECURITY_DESCRIPTOR Current = NULL;
+
+                    Present = FALSE;
+                    if (GetSecurityDescriptorSacl(OwnerDescriptor, &Present, &Sacl, &Defaulted) && Present && Sacl &&
+                        GetNamedSecurityInfoW(BufferName, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL,
+                                              &CurrentSacl, &Current) == ERROR_SUCCESS)
+                    {
+                        if (CurrentSacl == NULL || CurrentSacl->AceCount == 0)
+                            SetNamedSecurityInfoW(BufferName, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION,
+                                                  NULL, NULL, NULL, Sacl);
+                        LocalFree(Current);
+                    }
                 }
             }
         }

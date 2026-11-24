@@ -55,13 +55,24 @@ typedef enum _PROFILE_DIR_KIND
     ProfileDirUsers,    /* The profiles directory and the Default profile */
     ProfileDirPublic,
     ProfileDirProgramData,  /* C:\ProgramData: Users read, and add files and directories */
+    ProfileDirProgramDataMicrosoft, /* C:\ProgramData\Microsoft (Start Menu, Startup, Templates): Users read only */
+    ProfileDirPublicDesktop,        /* C:\Users\Public\Desktop: users read only */
     ProfileDirSystem,       /* Windows, Program Files: Users and application packages read only */
     ProfileDirTemp,         /* Windows\Temp */
+    ProfileDirRecycleRoot,  /* the folder of the recycle bins of the system volume: users add folders, nothing else */
     ProfileDirRoot,         /* the root of the system volume */
     ProfileDirConfig,       /* Windows\System32\config: SYSTEM and Administrators only */
     ProfileDirBootFile,     /* A boot file in the root of the system partition: Users read only */
     ProfileDirUser      /* The profile of a user: SYSTEM, Administrators and that user */
 } PROFILE_DIR_KIND;
+
+VOID
+SecureLegacyJunctionsInFolder(
+    _In_ PCWSTR pszFolder);
+
+VOID
+SecureRecycleBinRoot(
+    _In_ PCWSTR pszRoot);
 
 BOOL
 CreateSecuredProfileDir(

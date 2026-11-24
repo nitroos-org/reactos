@@ -83,6 +83,42 @@ static const PROFILE_ACE ProgramDataAces[] =
     {WinBuiltinUsersSid, USERS_ADD, CONTAINER_INHERIT_ACE},
 };
 
+/*
+ * ProgramData\Microsoft (a Windows Server 2022 reference: SYSTEM and Administrators full control, Users and Everyone read
+ * and execute, protected): what is below it (the all-users Start Menu with its Startup folder, Templates) inherits that and
+ * is not writable by a standard user, while ProgramData's own entry (Users add files and folders) stays out.
+ */
+static const PROFILE_ACE ProgramDataMicrosoftAces[] =
+{
+    {WinLocalSystemSid, FILE_ALL_ACCESS, OI_CI},
+    {WinBuiltinAdministratorsSid, FILE_ALL_ACCESS, OI_CI},
+    {WinBuiltinUsersSid, RX_ACCESS, OI_CI},
+    {WinWorldSid, RX_ACCESS, OI_CI},
+};
+
+/* Public\Desktop (the same reference): Administrators and SYSTEM full control, the interactive users read and execute, protected */
+static const PROFILE_ACE PublicDesktopAces[] =
+{
+    {WinBuiltinAdministratorsSid, FILE_ALL_ACCESS, OI_CI},
+    {WinInteractiveSid, RX_ACCESS, OI_CI},
+    {WinLocalSystemSid, FILE_ALL_ACCESS, OI_CI},
+};
+
+/*
+ * The folder that holds the recycle bins of a volume ($Recycle.Bin on the Windows Server 2022 reference, RECYCLER here, the
+ * name the shell uses): Administrators and SYSTEM full control, Users read and add folders (their own bin), not files and
+ * not the removal of what others made; the label Low, inherit-only, for what is made in it (SecureRecycleBinRoot).
+ */
+#define USERS_ADD_FOLDER 0x001201ad     /* read, add subdirectory, write attributes */
+static const PROFILE_ACE RecycleRootAces[] =
+{
+    {WinBuiltinAdministratorsSid, FILE_ALL_ACCESS, 0},
+    {WinBuiltinAdministratorsSid, GENERIC_ALL, OI_CI_IO},
+    {WinLocalSystemSid, FILE_ALL_ACCESS, 0},
+    {WinLocalSystemSid, GENERIC_ALL, OI_CI_IO},
+    {WinBuiltinUsersSid, USERS_ADD_FOLDER, 0},
+};
+
 #define SID_ALL_APP_PACKAGES            L"S-1-15-2-1"
 #define SID_ALL_RESTRICTED_APP_PACKAGES L"S-1-15-2-2"
 #define MODIFY_MASK 0x001301bf          /* Modify */
@@ -231,9 +267,24 @@ BuildProfileDescriptor(
             cAces = ARRAYSIZE(ProgramDataAces);
             break;
 
+        case ProfileDirProgramDataMicrosoft:
+            pAces = ProgramDataMicrosoftAces;
+            cAces = ARRAYSIZE(ProgramDataMicrosoftAces);
+            break;
+
+        case ProfileDirPublicDesktop:
+            pAces = PublicDesktopAces;
+            cAces = ARRAYSIZE(PublicDesktopAces);
+            break;
+
         case ProfileDirSystem:
             pAces = SystemAces;
             cAces = ARRAYSIZE(SystemAces);
+            break;
+
+        case ProfileDirRecycleRoot:
+            pAces = RecycleRootAces;
+            cAces = ARRAYSIZE(RecycleRootAces);
             break;
 
         case ProfileDirTemp:
@@ -1372,38 +1423,29 @@ SecureLegacyUsersJunction(
     return Result == JunctionSecured || Result == JunctionProtected;
 }
 
+/* One line of the legacy junction repair log (System32\LogFiles\FolderAcl\legacy-junction-repair.txt) */
 static VOID
-RepairLegacyUsersJunction(VOID)
+LogJunctionRepair(
+    _In_ PCWSTR pszLink,
+    _In_ PCWSTR pszTarget,
+    _In_ JUNCTION_RESULT Result,
+    _In_ DWORD dwError)
 {
-    WCHAR szLink[MAX_PATH], szProfiles[MAX_PATH], szLog[MAX_PATH], szLine[3 * MAX_PATH], szDir[MAX_PATH];
+    WCHAR szLog[MAX_PATH], szLine[3 * MAX_PATH], szDir[MAX_PATH];
     CHAR szUtf8[9 * MAX_PATH];
-    JUNCTION_RESULT Result;
     SYSTEMTIME st;
-    DWORD dwError = ERROR_SUCCESS, dwWritten;
+    DWORD dwWritten;
     HANDLE hLog;
     PWCHAR p;
     int n;
 
-    if (!ReadPathValue(L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList", L"ProfilesDirectory",
-                       szProfiles, ARRAYSIZE(szProfiles)) ||
-        !ExpandEnvironmentStringsW(L"%SystemDrive%\\Documents and Settings", szLink, ARRAYSIZE(szLink)))
-    {
-        return;
-    }
-    n = (int)wcslen(szProfiles);
-    if (n > 3 && szProfiles[n - 1] == L'\\')
-        szProfiles[n - 1] = UNICODE_NULL;
-
-    Result = SecureJunctionObject(szLink, szProfiles, ProfileDirUsers, TRUE, &dwError);
-    if (Result != JunctionSecured && Result != JunctionFailed)
-        return;
-
     GetSystemTime(&st);
     if (FAILED(StringCchPrintfW(szLine, ARRAYSIZE(szLine),
-                                L"%04u-%02u-%02uT%02u:%02u:%02uZ userenv: %s (junction to %s): %s (error %lu)\r\n",
-                                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, szLink, szProfiles,
-                                Result == JunctionSecured ? L"the root's entries replaced by the DACL of the profiles "
-                                L"directory, protected" : L"not repaired", dwError)))
+                                L"%04u-%02u-%02uT%02u:%02u:%02uZ userenv: %s (junction%s%s): %s (error %lu)\r\n",
+                                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, pszLink,
+                                pszTarget ? L" to " : L"", pszTarget ? pszTarget : L"",
+                                Result == JunctionSecured ? L"the entries it inherited replaced by the DACL of the "
+                                L"profiles directory, protected" : L"not repaired", dwError)))
     {
         return;
     }
@@ -1433,6 +1475,70 @@ RepairLegacyUsersJunction(VOID)
     if (n > 1)
         WriteFile(hLog, szUtf8, n - 1, &dwWritten, NULL);
     CloseHandle(hLog);
+}
+
+static VOID
+RepairLegacyUsersJunction(VOID)
+{
+    WCHAR szLink[MAX_PATH], szProfiles[MAX_PATH];
+    JUNCTION_RESULT Result;
+    DWORD dwError = ERROR_SUCCESS;
+    int n;
+
+    if (!ReadPathValue(L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList", L"ProfilesDirectory",
+                       szProfiles, ARRAYSIZE(szProfiles)) ||
+        !ExpandEnvironmentStringsW(L"%SystemDrive%\\Documents and Settings", szLink, ARRAYSIZE(szLink)))
+    {
+        return;
+    }
+    n = (int)wcslen(szProfiles);
+    if (n > 3 && szProfiles[n - 1] == L'\\')
+        szProfiles[n - 1] = UNICODE_NULL;
+
+    Result = SecureJunctionObject(szLink, szProfiles, ProfileDirUsers, TRUE, &dwError);
+    if (Result == JunctionSecured || Result == JunctionFailed)
+        LogJunctionRepair(szLink, szProfiles, Result, dwError);
+}
+
+/*
+ * The other legacy junctions of NT 5 (ProgramData\Application Data, Desktop, Documents, Start Menu, Templates, and
+ * Public\Documents\My Music, My Pictures, My Videos) are junction objects that setup made after the folder around them
+ * got its DACL: they inherited ProgramData's entry that lets Users add files and folders, so a standard user could delete
+ * a junction and put a directory of its own in its place (measured on a reference: the junctions are protected, Everyone
+ * reads, SYSTEM and Administrators full control). Every junction directly in pszFolder that SYSTEM or the Administrators
+ * own and that has no protected DACL yet gets the DACL of the profiles directory (the same as the Documents and Settings
+ * junction); one a user made is left alone, as is anything that is not a junction. Only the object is opened.
+ * Setup calls it after it made them, winlogon at every start for installs that made them before.
+ */
+VOID
+SecureLegacyJunctionsInFolder(
+    _In_ PCWSTR pszFolder)
+{
+    WCHAR szPattern[MAX_PATH], szLink[MAX_PATH];
+    WIN32_FIND_DATAW FindData;
+    HANDLE hFind;
+    JUNCTION_RESULT Result;
+    DWORD dwError;
+
+    if (FAILED(StringCchPrintfW(szPattern, ARRAYSIZE(szPattern), L"%s\\*", pszFolder)))
+        return;
+    hFind = FindFirstFileW(szPattern, &FindData);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return;
+    do
+    {
+        if ((FindData.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) !=
+            (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) ||
+            FAILED(StringCchPrintfW(szLink, ARRAYSIZE(szLink), L"%s\\%s", pszFolder, FindData.cFileName)))
+        {
+            continue;
+        }
+        dwError = ERROR_SUCCESS;
+        Result = SecureJunctionObject(szLink, NULL, ProfileDirUsers, TRUE, &dwError);
+        if (Result == JunctionSecured || Result == JunctionFailed)
+            LogJunctionRepair(szLink, NULL, Result, dwError);
+    } while (FindNextFileW(hFind, &FindData));
+    FindClose(hFind);
 }
 
 /* The value of a registry string under HKLM, expanded; FALSE when it is not there */
@@ -1681,8 +1787,9 @@ CreateProgramFilesDirectory(
 typedef struct _PF_REPAIR
 {
     HANDLE hLog;
-    PACL pRootAcl;                          /* the DACL setup gives the volume root (RootAces) */
-    BYTE AuthSid[SECURITY_MAX_SID_SIZE];    /* Authenticated Users */
+    PACL pRootAcl;                          /* the DACL whose inheritable entries the objects hold copies of */
+    BYTE TriggerSid[SECURITY_MAX_SID_SIZE]; /* an object is repaired when it holds a copy of an entry for this SID ... */
+    DWORD TriggerMask;                      /* ... with this access (0: any) */
     ULONG Checked, Repaired, Failed, Skipped;
 } PF_REPAIR, *PPF_REPAIR;
 
@@ -1759,6 +1866,7 @@ RepairProgramFilesVisit(
     SECURITY_DESCRIPTOR_CONTROL Control;
     PACL pOldAcl = NULL, pNewAcl;
     PACE_HEADER pAce;
+    PSID pOwner = NULL;
     BOOL bPresent, bDefaulted, bCopies = FALSE, bResult = TRUE;
     DWORD dwRevision, i, nRemoved = 0;
 
@@ -1789,7 +1897,7 @@ RepairProgramFilesVisit(
     }
 
     pCtx->Checked++;
-    pSd = QueryHandleSecurity(hObject, DACL_SECURITY_INFORMATION);
+    pSd = QueryHandleSecurity(hObject, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION);
     if (!pSd)
     {
         pCtx->Failed++;
@@ -1798,6 +1906,7 @@ RepairProgramFilesVisit(
     }
 
     if (!GetSecurityDescriptorControl(pSd, &Control, &dwRevision) ||
+        !GetSecurityDescriptorOwner(pSd, &pOwner, &bDefaulted) ||
         !GetSecurityDescriptorDacl(pSd, &bPresent, &pOldAcl, &bDefaulted))
     {
         pCtx->Failed++;
@@ -1812,11 +1921,21 @@ RepairProgramFilesVisit(
     if (!bPresent || !pOldAcl)
         goto done;
 
-    /* only the objects with the root's Authenticated Users entry are the ones setup left behind */
+    /* only what the system owns: an object a user made is theirs, and stays as it is (nothing is blessed) */
+    if (!pOwner || !IsValidSid(pOwner) || !IsSystemOrAdministrators(pOwner))
+    {
+        pCtx->Skipped++;
+        PfRepairLog(pCtx, L"left alone (not owned by SYSTEM or the Administrators): %s", pszPath);
+        bResult = FALSE;
+        goto done;
+    }
+
+    /* only the objects with a copy of the template's entry for the trigger SID are the ones setup left behind */
     for (i = 0; i < pOldAcl->AceCount; i++)
     {
         if (GetAce(pOldAcl, i, (PVOID *)&pAce) && IsRootCopyAce(pAce, pCtx->pRootAcl) &&
-            EqualSid((PSID)&((PACCESS_ALLOWED_ACE)pAce)->SidStart, (PSID)pCtx->AuthSid))
+            EqualSid((PSID)&((PACCESS_ALLOWED_ACE)pAce)->SidStart, (PSID)pCtx->TriggerSid) &&
+            (!pCtx->TriggerMask || ((PACCESS_ALLOWED_ACE)pAce)->Mask == pCtx->TriggerMask))
         {
             bCopies = TRUE;
             break;
@@ -1915,11 +2034,22 @@ RepairLogExists(
     return bResult;
 }
 
+/*
+ * One pass over the folders of pszRoots (cRoots of them, empty ones skipped): the objects below each that hold a copy of an
+ * inheritable entry of the template of TemplateKind for the trigger SID (with the trigger access, 0: any) inherit from their
+ * folder afresh. Logged to pszLog, which is the mark that the pass ran (see above).
+ */
 static VOID
-RepairProgramFiles(VOID)
+RunFolderRepair(
+    _In_ PCWSTR pszLog,
+    _In_ PCWSTR pszWhat,
+    _In_ PROFILE_DIR_KIND TemplateKind,
+    _In_ WELL_KNOWN_SID_TYPE TriggerSidType,
+    _In_ DWORD dwTriggerMask,
+    _In_reads_(cRoots) WCHAR (*pszRoots)[MAX_PATH],
+    _In_ UINT cRoots)
 {
-    static const PCWSTR Values[] = { L"ProgramFilesDir", L"ProgramFilesDir (x86)" };
-    WCHAR szLog[MAX_PATH], szTemp[MAX_PATH], szDir[MAX_PATH], szPath[MAX_PATH];
+    WCHAR szLog[MAX_PATH], szTemp[MAX_PATH], szDir[MAX_PATH];
     PSECURITY_DESCRIPTOR pRootSd;
     BOOL bPresent, bDefaulted;
     DWORD cbSid, dwSize;
@@ -1931,15 +2061,16 @@ RepairProgramFiles(VOID)
 
     if (IsSetupInProgress())
         return;
-    if (!ExpandEnvironmentStringsW(PF_REPAIR_LOG, szLog, ARRAYSIZE(szLog)) || RepairLogExists(szLog))
+    if (!ExpandEnvironmentStringsW(pszLog, szLog, ARRAYSIZE(szLog)) || RepairLogExists(szLog))
         return;
 
     ZeroMemory(&Ctx, sizeof(Ctx));
     Ctx.hLog = INVALID_HANDLE_VALUE;
-    cbSid = sizeof(Ctx.AuthSid);
-    if (!CreateWellKnownSid(WinAuthenticatedUserSid, NULL, Ctx.AuthSid, &cbSid))
+    Ctx.TriggerMask = dwTriggerMask;
+    cbSid = sizeof(Ctx.TriggerSid);
+    if (!CreateWellKnownSid(TriggerSidType, NULL, Ctx.TriggerSid, &cbSid))
         return;
-    pRootSd = BuildProfileDescriptor(ProfileDirRoot, NULL);
+    pRootSd = BuildProfileDescriptor(TemplateKind, NULL);
     if (!pRootSd)
         return;
     if (!GetSecurityDescriptorDacl(pRootSd, &bPresent, &Ctx.pRootAcl, &bDefaulted) || !bPresent || !Ctx.pRootAcl)
@@ -1966,38 +2097,37 @@ RepairProgramFiles(VOID)
     Ctx.hLog = CreateFileW(szTemp, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (Ctx.hLog == INVALID_HANDLE_VALUE)
     {
-        DPRINT1("Cannot create %S (error %lu): Program Files not checked\n", szTemp, GetLastError());
+        DPRINT1("Cannot create %S (error %lu): %S not checked\n", szTemp, GetLastError(), pszWhat);
         goto done;
     }
 
     GetSystemTime(&st);
-    PfRepairLog(&Ctx, L"%04u-%02u-%02uT%02u:%02u:%02uZ userenv: Program Files: objects that still have the entries of the "
-                L"volume root (Authenticated Users: Modify) inherit from their folder", st.wYear, st.wMonth, st.wDay,
-                st.wHour, st.wMinute, st.wSecond);
+    PfRepairLog(&Ctx, L"%04u-%02u-%02uT%02u:%02u:%02uZ userenv: %s: objects owned by the system that still have the entries "
+                L"of the folder they were made in inherit from their folder", st.wYear, st.wMonth, st.wDay,
+                st.wHour, st.wMinute, st.wSecond, pszWhat);
 
-    for (i = 0; i < ARRAYSIZE(Values); i++)
+    for (i = 0; i < cRoots; i++)
     {
-        if (!ReadPathValue(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion", Values[i], szPath, ARRAYSIZE(szPath)) ||
-            GetFileAttributesW(szPath) == INVALID_FILE_ATTRIBUTES)
-        {
+        PCWSTR pszPath = pszRoots[i];
+
+        if (!pszPath[0] || GetFileAttributesW(pszPath) == INVALID_FILE_ATTRIBUTES)
             continue;
-        }
         /* A volume without access control lists (FAT): nothing to repair there */
         dwSize = 0;
-        GetFileSecurityW(szPath, DACL_SECURITY_INFORMATION, NULL, 0, &dwSize);
+        GetFileSecurityW(pszPath, DACL_SECURITY_INFORMATION, NULL, 0, &dwSize);
         if (dwSize == 0)
         {
-            PfRepairLog(&Ctx, L"%s: no access control list to read (error %lu), nothing to repair", szPath, GetLastError());
+            PfRepairLog(&Ctx, L"%s: no access control list to read (error %lu), nothing to repair", pszPath, GetLastError());
             continue;
         }
-        hTop = OpenWalkTop(szPath, FALSE);
+        hTop = OpenWalkTop(pszPath, FALSE);
         if (!hTop)
         {
-            PfRepairLog(&Ctx, L"%s: not a directory, or a link: not checked", szPath);
+            PfRepairLog(&Ctx, L"%s: not a directory, or a link: not checked", pszPath);
             continue;
         }
-        PfRepairLog(&Ctx, L"checking %s", szPath);
-        WalkByHandle(hTop, szPath, 0, RepairProgramFilesVisit, &Ctx, NULL);
+        PfRepairLog(&Ctx, L"checking %s", pszPath);
+        WalkByHandle(hTop, pszPath, 0, RepairProgramFilesVisit, &Ctx, NULL);
         CloseHandle(hTop);
     }
 
@@ -2012,6 +2142,145 @@ done:
     if (Ctx.hLog != INVALID_HANDLE_VALUE)
         CloseHandle(Ctx.hLog);
     LocalFree(pRootSd);
+}
+
+static VOID
+RepairProgramFiles(VOID)
+{
+    WCHAR szRoots[2][MAX_PATH] = {{0}};
+
+    if (!ReadPathValue(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion", L"ProgramFilesDir", szRoots[0], MAX_PATH))
+        szRoots[0][0] = UNICODE_NULL;
+    if (!ReadPathValue(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion", L"ProgramFilesDir (x86)", szRoots[1], MAX_PATH))
+        szRoots[1][0] = UNICODE_NULL;
+    RunFolderRepair(PF_REPAIR_LOG, L"Program Files", ProfileDirRoot, WinAuthenticatedUserSid, 0, szRoots, ARRAYSIZE(szRoots));
+}
+
+/*
+ * The same for the folders of the all-users Start Menu and Templates (ProgramData\Microsoft) and the all-users Desktop, on
+ * installs that made them before they had their own descriptors: an object there that holds ProgramData's entry for
+ * Users (add files and folders), or Public's entries for the interactive users (modify), is one a standard user could
+ * write into, and a program put into Startup runs for every user at logon.
+ */
+#define PD_REPAIR_LOG L"%SystemRoot%\\System32\\LogFiles\\FolderAcl\\programdata-repair.txt"
+#define PD_DESKTOP_REPAIR_LOG L"%SystemRoot%\\System32\\LogFiles\\FolderAcl\\public-desktop-repair.txt"
+#define PROFILELIST_KEY L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList"
+
+static VOID
+RepairProgramData(VOID)
+{
+    WCHAR szRoots[1][MAX_PATH] = {{0}};
+
+    if (ReadPathValue(PROFILELIST_KEY, L"ProgramData", szRoots[0], MAX_PATH) &&
+        SUCCEEDED(StringCchCatW(szRoots[0], MAX_PATH, L"\\Microsoft")))
+    {
+        RunFolderRepair(PD_REPAIR_LOG, L"ProgramData\\Microsoft", ProfileDirProgramData, WinBuiltinUsersSid, USERS_ADD,
+                        szRoots, ARRAYSIZE(szRoots));
+    }
+
+    szRoots[0][0] = UNICODE_NULL;
+    if (ReadPathValue(PROFILELIST_KEY, L"Public", szRoots[0], MAX_PATH) &&
+        SUCCEEDED(StringCchCatW(szRoots[0], MAX_PATH, L"\\Desktop")))
+    {
+        RunFolderRepair(PD_DESKTOP_REPAIR_LOG, L"Public\\Desktop", ProfileDirPublic, WinInteractiveSid, MODIFY_DC,
+                        szRoots, ARRAYSIZE(szRoots));
+    }
+}
+
+/* The label Low (NO_WRITE_UP, inherit-only: what is made in the folder inherits it) of the recycle bin folder, when it has none */
+static VOID
+LabelRecycleBinRoot(
+    _In_ PCWSTR pszPath)
+{
+    PSECURITY_DESCRIPTOR pSd = NULL, pLabelSd = NULL;
+    PACL pSacl = NULL;
+    BOOL bPresent, bDefaulted, bHasLabel = FALSE;
+
+    if (GetNamedSecurityInfoW((PWSTR)pszPath, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL, &pSacl, &pSd) ==
+        ERROR_SUCCESS)
+    {
+        bHasLabel = (pSacl != NULL && pSacl->AceCount != 0);
+        LocalFree(pSd);
+    }
+    if (bHasLabel ||
+        !ConvertStringSecurityDescriptorToSecurityDescriptorW(L"S:(ML;OICIIO;NW;;;LW)", SDDL_REVISION_1, &pLabelSd, NULL))
+    {
+        return;
+    }
+    pSacl = NULL;
+    if (GetSecurityDescriptorSacl(pLabelSd, &bPresent, &pSacl, &bDefaulted) && pSacl &&
+        SetNamedSecurityInfoW((PWSTR)pszPath, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL, pSacl) != ERROR_SUCCESS)
+    {
+        DPRINT1("Cannot label %S\n", pszPath);
+    }
+    LocalFree(pLabelSd);
+}
+
+/*
+ * The folder of the recycle bins on the system volume gets the descriptor Windows has (see RecycleRootAces). Made here, by
+ * the system, the shell would make it as the first user who deletes a file and that user would own it: a user who owns the
+ * folder may give themselves the right to remove the bins of others. One that is there is given the descriptor only when
+ * SYSTEM or the Administrators own it; one a user made is left alone (nothing is blessed). pszRoot is the root of the volume
+ * with a closing backslash; a volume without access control lists (FAT) has none of this.
+ */
+VOID
+SecureRecycleBinRoot(
+    _In_ PCWSTR pszRoot)
+{
+    WCHAR szPath[MAX_PATH];
+    PSECURITY_DESCRIPTOR pSd = NULL;
+    PSID pOwner = NULL;
+    DWORD dwSize = 0;
+
+    GetFileSecurityW(pszRoot, DACL_SECURITY_INFORMATION, NULL, 0, &dwSize);
+    if (dwSize == 0 || FAILED(StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%sRECYCLER", pszRoot)))
+        return;
+
+    if (GetFileAttributesW(szPath) == INVALID_FILE_ATTRIBUTES)
+    {
+        if (CreateSecuredProfileDir(szPath, ProfileDirRecycleRoot, NULL))
+        {
+            SetFileAttributesW(szPath, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
+            LabelRecycleBinRoot(szPath);
+        }
+        return;
+    }
+
+    if (GetNamedSecurityInfoW(szPath, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &pOwner, NULL, NULL, NULL, &pSd) != ERROR_SUCCESS)
+        return;
+    if (pOwner && IsValidSid(pOwner) && IsSystemOrAdministrators(pOwner))
+    {
+        SecureExistingProfileDirectory(szPath, ProfileDirRecycleRoot, NULL, FALSE);
+        LabelRecycleBinRoot(szPath);
+    }
+    else
+    {
+        DPRINT1("%S: not owned by SYSTEM or the Administrators, left alone\n", szPath);
+    }
+    LocalFree(pSd);
+}
+
+/* The all-users Start Menu and Templates folder (ProgramData\Microsoft) and the all-users Desktop get their descriptors */
+static VOID
+SecureAllUsersFolders(VOID)
+{
+    WCHAR szPath[MAX_PATH];
+
+    if (ReadPathValue(PROFILELIST_KEY, L"ProgramData", szPath, ARRAYSIZE(szPath)))
+    {
+        SecureLegacyJunctionsInFolder(szPath);
+        if (SUCCEEDED(StringCchCatW(szPath, ARRAYSIZE(szPath), L"\\Microsoft")))
+            SecureExistingProfileDirectory(szPath, ProfileDirProgramDataMicrosoft, NULL, FALSE);
+    }
+    if (ReadPathValue(PROFILELIST_KEY, L"Public", szPath, ARRAYSIZE(szPath)))
+    {
+        WCHAR szDocuments[MAX_PATH];
+
+        if (SUCCEEDED(StringCchPrintfW(szDocuments, ARRAYSIZE(szDocuments), L"%s\\Documents", szPath)))
+            SecureLegacyJunctionsInFolder(szDocuments);
+        if (SUCCEEDED(StringCchCatW(szPath, ARRAYSIZE(szPath), L"\\Desktop")))
+            SecureExistingProfileDirectory(szPath, ProfileDirPublicDesktop, NULL, FALSE);
+    }
 }
 
 /*
@@ -2032,6 +2301,10 @@ SecureSystemDirectories(VOID)
     {
         SecureExistingProfileDirectory(szPath, ProfileDirProgramData, NULL, TRUE);
         bResult = TRUE;
+
+        /* What setup (or an older one) made below ProgramData\Microsoft and Public\Desktop, once */
+        SecureAllUsersFolders();
+        RepairProgramData();
     }
 
     /* Windows, with its Temp first: that has a DACL of its own, which the pass over the rest then leaves alone */
@@ -2069,6 +2342,7 @@ SecureSystemDirectories(VOID)
         szPath[2] = L'\\';
         szPath[3] = UNICODE_NULL;
         SecureExistingProfileDirectory(szPath, ProfileDirRoot, NULL, FALSE);
+        SecureRecycleBinRoot(szPath);
 
         /* The boot files, where setup puts them when the system partition is this volume */
         SecureBootFiles(szPath);

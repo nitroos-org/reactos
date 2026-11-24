@@ -12,11 +12,13 @@ extern void func_AccessCheckGenericAce(void);
 extern void func_AccessCheckMalformedAcl(void);
 extern void func_AccessCheckAppContainer(void);
 extern void func_AppContainerNamespace(void);
+extern void func_AdjustTokenGroupsRows(void);
 extern void func_AccessCheckObjectTypeList(void);
 extern void func_AddMandatoryAce(void);
 extern void func_RegSaveKeyExFormat(void);
 extern void func_RegSaveKeyBigValue(void);
 extern void func_SddlLabelAce(void);
+extern void func_SddlMandatoryLabel(void);
 extern void func_SddlNullAcl(void);
 extern void func_AuditCategories(void);
 extern void func_CveEventWrite(void);
@@ -193,6 +195,7 @@ extern void func_RegWow64RelativeView(void);
 extern void func_ServiceProcess(void);
 extern void func_ServiceInheritOnlyGeneric(void);
 extern void func_ServiceSharedToken(void);
+extern void func_ServiceTokenSd(void);
 extern void func_ServiceSidToken(void);
 extern void func_ServiceStructLayout(void);
 extern void func_ServiceTriggerPrivileges(void);
@@ -214,11 +217,13 @@ const struct test winetest_testlist[] =
     { "AccessCheckMalformedAcl", func_AccessCheckMalformedAcl },
     { "AccessCheckAppContainer", func_AccessCheckAppContainer },
     { "AppContainerNamespace", func_AppContainerNamespace },
+    { "AdjustTokenGroupsRows", func_AdjustTokenGroupsRows },
     { "AccessCheckObjectTypeList", func_AccessCheckObjectTypeList },
     { "AddMandatoryAce", func_AddMandatoryAce },
     { "RegSaveKeyExFormat", func_RegSaveKeyExFormat },
     { "RegSaveKeyBigValue", func_RegSaveKeyBigValue },
     { "SddlLabelAce", func_SddlLabelAce },
+    { "SddlMandatoryLabel", func_SddlMandatoryLabel },
     { "SddlNullAcl", func_SddlNullAcl },
     { "AuditCategories", func_AuditCategories },
     { "CveEventWrite", func_CveEventWrite },
@@ -394,6 +399,7 @@ const struct test winetest_testlist[] =
     { "ServiceProcess", func_ServiceProcess },
     { "ServiceInheritOnlyGeneric", func_ServiceInheritOnlyGeneric },
     { "ServiceSharedToken", func_ServiceSharedToken },
+    { "ServiceTokenSd", func_ServiceTokenSd },
     { "ServiceSidToken", func_ServiceSidToken },
     { "ServiceStructLayout", func_ServiceStructLayout },
     { "ServiceTriggerPrivileges", func_ServiceTriggerPrivileges },
