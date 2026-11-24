@@ -32,6 +32,8 @@ tDebugPrintFunc VirtioDebugPrintProc = VgpuVirtioDbg;
 #define VGPU_FLUSH_INTERVAL_100NS  (-160000LL)   /* ~16 ms */
 #define VGPU_CMD_BUF_SIZE          4096
 #define VGPU_MAX_MODES             64
+#define VGPU_CMD_TIMEOUT_MS        5000
+#define VGPU_CMD_TOKEN             ((void*)(ULONG_PTR)1)
 
 typedef struct _VGPU_MODE { USHORT w; USHORT h; } VGPU_MODE;
 
@@ -71,6 +73,7 @@ typedef struct _VGPU_CORE
     KEVENT            StopEvent;
     KMUTEX            CtrlMutex;
     volatile LONG     FlushEnabled;
+    volatile LONG     Broken;          /* the device stopped answering: reset, never used again */
 
     volatile LONG     DirtyValid;
     ULONG             Dx, Dy, Dw, Dh;
@@ -156,25 +159,74 @@ static const VirtIOSystemOps VgpuSystemOps =
 
 /* ---- control queue command submission (caller holds CtrlMutex) ----------- */
 
+/*
+ * The device owns a buffer from the moment it is made available until it comes back in the used
+ * ring (VIRTIO 1.2 cs01, 2.7.13 and 2.7.14). One command is in flight at a time and the command and
+ * response buffers are reused, so a command the device did not complete must never be followed by
+ * another: on a timeout the device is reset (2.4.1: once its status reads 0 it does not interact
+ * with the queues any more) and not used again.
+ */
+static void VgpuMarkBroken(VGPU_CORE *c, const char *why)
+{
+    if (InterlockedExchange(&c->Broken, 1) == 0)
+    {
+        c->FlushEnabled = 0;
+        virtio_device_reset(&c->VDev);
+        Vpw_Log(0, why, 0, 0);
+    }
+}
+
 static int VgpuSubmit(VGPU_CORE *c, ULONG cmdLen, ULONG respLen)
 {
     struct VirtIOBufferDescriptor sg[2];
-    void *done; unsigned int len; int ret, spin;
+    void *done; unsigned int len = 0; int ret;
+    ULONG spin, waitedMs = 0;
+    LARGE_INTEGER delay;
+
+    if (c->Broken) return -1;
+    if (cmdLen == 0 || cmdLen > VGPU_CMD_BUF_SIZE ||
+        respLen < sizeof(VIRTIO_GPU_CTRL_HDR) || respLen > VGPU_CMD_BUF_SIZE)
+        return -1;
+
+    /* A response the device does not write must not read as the answer to an earlier command */
+    RtlZeroMemory(c->RespVa, respLen);
 
     sg[0].physAddr = c->CmdPa;  sg[0].length = cmdLen;
     sg[1].physAddr = c->RespPa; sg[1].length = respLen;
 
-    ret = virtqueue_add_buf(c->ControlQ, sg, 1, 1, (void*)(ULONG_PTR)1, NULL, 0);
+    ret = virtqueue_add_buf(c->ControlQ, sg, 1, 1, VGPU_CMD_TOKEN, NULL, 0);
     if (ret < 0) return -1;
     virtqueue_kick(c->ControlQ);
 
-    for (spin = 0; spin < 500000; spin++)
+    /* QEMU answers a 2D command within microseconds: spin briefly, then sleep between polls */
+    for (spin = 0; ; spin++)
     {
         done = virtqueue_get_buf(c->ControlQ, &len);
-        if (done) return 0;
-        Vpw_Stall(2);                 /* up to ~1 s */
+        if (done) break;
+        if (spin < 500)
+        {
+            Vpw_Stall(2);
+            continue;
+        }
+        if (waitedMs >= VGPU_CMD_TIMEOUT_MS)
+        {
+            VgpuMarkBroken(c, "virtgpu: the device did not complete a command: reset, not used any more\n");
+            return -2;
+        }
+        delay.QuadPart = -10000LL;    /* 1 ms */
+        KeDelayExecutionThread(KernelMode, FALSE, &delay);
+        waitedMs++;
     }
-    return -2;
+
+    /* Only one buffer is outstanding, so the device can only return that one (the ring code drops
+       any other id). Bytes beyond the reported length are not to be used (2.7.8.3): the length
+       must cover a header, and more than the response buffer is a device error */
+    if (done != VGPU_CMD_TOKEN || len < sizeof(VIRTIO_GPU_CTRL_HDR) || len > respLen)
+    {
+        Vpw_Log(0, "virtgpu: invalid completion, %u response bytes\n", (ULONGLONG)len, 0);
+        return -1;
+    }
+    return 0;
 }
 
 static ULONG VgpuRespType(VGPU_CORE *c)
@@ -273,6 +325,27 @@ static int VgpuTransferAndFlush(VGPU_CORE *c, ULONG x, ULONG y, ULONG w, ULONG h
 
 /* ---- flush pump ---------------------------------------------------------- */
 
+/*
+ * The driver polls and connects no interrupt, but without MSI-X the device still raises its INTx
+ * line and sets the ISR status for used buffers and for configuration changes (VIRTIO 1.2 cs01,
+ * 4.1.5.3 and 4.1.5.4), such as a display event when the viewer window is resized (5.7.4.2). The
+ * line stays asserted until the ISR status is read (4.1.4.5), which would leave a shared interrupt
+ * line held for good. Read it on every tick and clear the events it reports (events_clear, 5.7.4.1).
+ * Caller holds CtrlMutex.
+ */
+static void VgpuAckInterrupt(VGPU_CORE *c)
+{
+    ULONG events = 0;
+
+    if (c->Broken) return;
+    if (virtio_read_isr_status(&c->VDev) & VIRTIO_PCI_ISR_CONFIG)
+    {
+        virtio_get_config(&c->VDev, FIELD_OFFSET(VIRTIO_GPU_CONFIG, events_read), &events, sizeof(events));
+        if (events)
+            virtio_set_config(&c->VDev, FIELD_OFFSET(VIRTIO_GPU_CONFIG, events_clear), &events, sizeof(events));
+    }
+}
+
 static VOID NTAPI VgpuFlushThread(PVOID arg)
 {
     VGPU_CORE *c = (VGPU_CORE*)arg;
@@ -285,14 +358,18 @@ static VOID NTAPI VgpuFlushThread(PVOID arg)
         st = KeWaitForSingleObject(&c->StopEvent, Executive, KernelMode, FALSE, &interval);
         if (st == STATUS_SUCCESS) break;          /* stop signalled */
 
-        if (!c->FlushEnabled || c->ResourceId == 0) continue;
+        if (c->Broken) continue;
 
         KeWaitForSingleObject(&c->CtrlMutex, Executive, KernelMode, FALSE, NULL);
-        if (c->FlushEnabled && c->ResourceId)
+        VgpuAckInterrupt(c);
+        if (c->FlushEnabled && c->ResourceId && !c->Broken)
         {
             ULONG x = 0, y = 0, w = c->Width, h = c->Height;
-            if (InterlockedCompareExchange(&c->DirtyValid, 0, 1) == 1)
+            if (InterlockedCompareExchange(&c->DirtyValid, 0, 1) == 1 &&
+                c->Dx < c->Width && c->Dy < c->Height &&
+                c->Dw && c->Dh && c->Dw <= c->Width - c->Dx && c->Dh <= c->Height - c->Dy)
             {
+                /* only a rectangle inside the current mode */
                 x = c->Dx; y = c->Dy; w = c->Dw; h = c->Dh;
             }
             VgpuTransferAndFlush(c, x, y, w, h);
@@ -404,9 +481,9 @@ int VgpuCreate(void *ext, void **pCtx)
 
     {
         ULONG numScanouts = 0;
-        /* num_scanouts is at offset 8 in virtio_gpu_config (4-byte read) */
+        /* num_scanouts is at offset 8 in virtio_gpu_config (4-byte read); 1 to 16 (5.7.4.1) */
         virtio_get_config(&c->VDev, 8, &numScanouts, sizeof(numScanouts));
-        c->NumScanouts = numScanouts ? numScanouts : 1;
+        c->NumScanouts = (numScanouts >= 1 && numScanouts <= VIRTIO_GPU_MAX_SCANOUTS) ? numScanouts : 1;
     }
 
     if (VgpuAllocFramebuffer(c) != 0) { Vpw_Log(0, "virtgpu: no frame buffer\n", 0, 0); goto fail; }
@@ -414,6 +491,7 @@ int VgpuCreate(void *ext, void **pCtx)
     KeWaitForSingleObject(&c->CtrlMutex, Executive, KernelMode, FALSE, NULL);
     (void)VgpuGetDisplayInfo(c, &prefW, &prefH);
     KeReleaseMutex(&c->CtrlMutex, FALSE);
+    if (c->Broken) goto fail;
 
     VgpuBuildModes(c, prefW, prefH);
     Vpw_Log(1, "virtgpu: ready, scanouts=%d modes avail\n", (ULONGLONG)c->NumScanouts, (ULONGLONG)c->ModeCount);
@@ -513,11 +591,19 @@ int VgpuSetModeByIndex(void *ctx, unsigned long index)
     if (size > c->FbSize) return -1;
 
     KeWaitForSingleObject(&c->CtrlMutex, Executive, KernelMode, FALSE, NULL);
+    if (c->Broken)
+    {
+        /* The device was reset and shows nothing any more. The frame buffer is still memory the
+           display driver may draw into, and win32k asserts a mode until the driver accepts it:
+           accept the mode that is already set, refuse any other */
+        if (c->Width == w && c->Height == h) rc = 0;
+        goto done;
+    }
 
     if (c->ResourceId && c->Width == w && c->Height == h)
     {
         VgpuTransferAndFlush(c, 0, 0, w, h);
-        c->FlushEnabled = 1;
+        c->FlushEnabled = !c->Broken;
         rc = 0;
         goto done;
     }
@@ -548,14 +634,17 @@ int VgpuSetModeByIndex(void *ctx, unsigned long index)
     RtlZeroMemory(c->FbVa, size);   /* a new mode starts black; the display driver draws it next */
     VGLOG("SetMode %dx%d resId=%d fbPa=0x%I64x OK\n", w, h, resId, (ULONGLONG)c->FbPa.QuadPart);
     VgpuTransferAndFlush(c, 0, 0, w, h);
-    c->FlushEnabled = 1;
-    Vpw_Log(1, "virtgpu: mode set %dx%d\n", (ULONGLONG)w, (ULONGLONG)h);
-    rc = 0;
+    if (!c->Broken)
+    {
+        c->FlushEnabled = 1;
+        Vpw_Log(1, "virtgpu: mode set %dx%d\n", (ULONGLONG)w, (ULONGLONG)h);
+        rc = 0;
+    }
     goto done;
 
 restore:
     /* The old resource is still scanned out: keep presenting it */
-    if (c->ResourceId) c->FlushEnabled = 1;
+    if (c->ResourceId && !c->Broken) c->FlushEnabled = 1;
 
 done:
     KeReleaseMutex(&c->CtrlMutex, FALSE);

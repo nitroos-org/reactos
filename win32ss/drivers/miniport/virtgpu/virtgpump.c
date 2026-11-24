@@ -196,6 +196,11 @@ VirtGpuInitialize(_In_ PVOID HwDeviceExtension)
     PVIRTGPU_DEVICE_EXTENSION ext = HwDeviceExtension;
 
     MLOG("Initialize\n");
+    if (ext->GpuCtx)
+    {
+        /* Already running: a second bring-up would reset the device under the first one */
+        return TRUE;
+    }
     if (VgpuCreate(ext, &ext->GpuCtx) != 0)
     {
         VideoPortDebugPrint(Error, "virtgpu: VgpuCreate failed\n");
