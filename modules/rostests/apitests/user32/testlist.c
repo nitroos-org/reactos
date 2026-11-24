@@ -12,6 +12,7 @@ extern void func_LifetimeActivePrevFreed(void);
 extern void func_LifetimeAttachSharedQueue(void);
 extern void func_LifetimeBeingActivatedExit(void);
 extern void func_LifetimeBroadcastDesktops(void);
+extern void func_LifetimeBroadcastListExitLeak(void);
 extern void func_LifetimeCallbackExitLeak(void);
 extern void func_LifetimeCaptureWinEvent(void);
 extern void func_LifetimeCbtActivateRecursion(void);
@@ -230,6 +231,7 @@ const struct test winetest_testlist[] =
     { "LifetimeAttachSharedQueue", func_LifetimeAttachSharedQueue },
     { "LifetimeBeingActivatedExit", func_LifetimeBeingActivatedExit },
     { "LifetimeBroadcastDesktops", func_LifetimeBroadcastDesktops },
+    { "LifetimeBroadcastListExitLeak", func_LifetimeBroadcastListExitLeak },
     { "LifetimeCallbackExitLeak", func_LifetimeCallbackExitLeak },
     { "LifetimeCaptureWinEvent", func_LifetimeCaptureWinEvent },
     { "LifetimeCbtActivateRecursion", func_LifetimeCbtActivateRecursion },

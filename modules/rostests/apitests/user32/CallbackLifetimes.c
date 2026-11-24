@@ -1211,6 +1211,95 @@ START_TEST(LifetimeWindowListExitLeak)
 }
 
 /*
+ * BroadcastListExitLeak: a thread broadcasts a message (BroadcastSystemMessage with BSF_QUERY to the
+ * applications, to all desktops, and SendNotifyMessage to HWND_BROADCAST) and its own top-level window ends the
+ * thread when it gets it (the thread's own windows get it at once, in the thread). The window list of the
+ * broadcast was kept across the sends and lost with the thread: Uswl must not grow by one block per thread.
+ */
+static UINT gBleMsg;
+
+static LRESULT CALLBACK BleWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (msg == gBleMsg && gBleMsg)
+        ExitThread(0x77);
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static DWORD WINAPI BleThread(LPVOID Param)
+{
+    DWORD Recipients;
+    HWND hwnd = CreateWindowExW(0, L"BleClass", L"ble", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL, ghInst,
+                                NULL);
+
+    if (!hwnd)
+        return 1;
+    switch ((INT_PTR)Param)
+    {
+        case 0:
+            Recipients = BSM_APPLICATIONS;
+            BroadcastSystemMessageW(BSF_QUERY | BSF_FORCEIFHUNG, &Recipients, gBleMsg, 0, 0);
+            break;
+        case 1:
+            Recipients = BSM_APPLICATIONS | BSM_ALLDESKTOPS;
+            BroadcastSystemMessageW(BSF_QUERY | BSF_FORCEIFHUNG, &Recipients, gBleMsg, 0, 0);
+            break;
+        default:
+            SendNotifyMessageW(HWND_BROADCAST, gBleMsg, 0, 0);
+            break;
+    }
+    DestroyWindow(hwnd);
+    return 1;
+}
+
+START_TEST(LifetimeBroadcastListExitLeak)
+{
+    static const char *Names[] = { "BroadcastSystemMessage BSF_QUERY applications",
+                                   "BroadcastSystemMessage BSF_QUERY all desktops",
+                                   "SendNotifyMessage HWND_BROADCAST" };
+    enum { N = 30 };
+    WNDCLASSW wc = { 0 };
+    ULONG Tag = TAG4("Uswl");
+    INT_PTR c;
+    int i, Ended;
+    LONG Before, After;
+
+    ClRegister();
+    gBleMsg = RegisterWindowMessageW(L"CbLifeBroadcastListExitLeak");
+    wc.lpfnWndProc = BleWndProc;
+    wc.hInstance = ghInst;
+    wc.lpszClassName = L"BleClass";
+    RegisterClassW(&wc);
+    for (c = 0; c < (INT_PTR)ARRAYSIZE(Names); c++)
+    {
+        Ended = 0;
+        Before = ClPoolLive(Tag);
+        for (i = 0; i < N; i++)
+        {
+            DWORD Code = 0;
+            HANDLE h = CreateThread(NULL, 0, BleThread, (LPVOID)c, 0, NULL);
+            if (!h)
+                continue;
+            ok(ClWait(h, 30000), "%s: thread %d did not end\n", Names[c], i);
+            GetExitCodeThread(h, &Code);
+            if (Code == 0x77)
+                Ended++;
+            CloseHandle(h);
+        }
+        ClSleepPump(300);
+        After = ClPoolLive(Tag);
+        trace("%s: %d of %d threads ended inside the message, Uswl live blocks %ld -> %ld\n", Names[c], Ended, N,
+              Before, After);
+        ok(Ended == N, "%s: only %d of %d threads ended inside the message\n", Names[c], Ended, N);
+        if (Before < 0 || After < 0)
+            skip("%s: no pool tag information\n", Names[c]);
+        else
+            ok(After - Before < N / 2, "%s: Uswl grew by %ld blocks for %d threads\n", Names[c], After - Before,
+               Ended);
+    }
+    UnregisterClassW(L"BleClass", ghInst);
+}
+
+/*
  * BroadcastDesktops: BroadcastSystemMessage to all desktops while another thread creates and closes
  * desktops (the desktop list changes while the broadcast waits for the windows of a desktop).
  */
