@@ -215,8 +215,19 @@ ControlHandler(DWORD request)
 {
     switch (request)
     {
-        case SERVICE_CONTROL_STOP:
         case SERVICE_CONTROL_SHUTDOWN:
+            /*
+             * The machine goes down and this process with it. The worker may be inside a name query for the time
+             * server (it ends tens of seconds later when no server answers, and cannot be cancelled), and the
+             * service manager waits for the service to report that it has stopped: report it at once.
+             */
+            ServiceStatus.dwWin32ExitCode = 0;
+            ServiceStatus.dwCurrentState  = SERVICE_STOPPED;
+            ServiceStatus.dwControlsAccepted = 0;
+            SetServiceStatus(hStatus, &ServiceStatus);
+            return;
+
+        case SERVICE_CONTROL_STOP:
             DPRINT("Stopping W32Time Service\n");
 
             ServiceStatus.dwWin32ExitCode = 0;
