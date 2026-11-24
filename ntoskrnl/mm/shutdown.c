@@ -308,11 +308,44 @@ MiShutdownLogLostWrite(
 /*
  * ClearPageFileAtShutdown (HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management = 1): the contents
  * of the paging files are overwritten with zeros before the system powers off, so that no private memory of the
- * session stays on the disk. The writer is stopped and nothing uses the files any more (the file objects stay
- * referenced until MmShutdownSystem(1)), the file systems are still up. It runs before the file is closed: the close
- * deletes it. The whole file is cleared: a slot that a process gave back keeps its old data (and its tag is 0 again).
+ * session stays on the disk. As Windows documents it, the inactive pages are filled with zeros: the slots that hold
+ * nobody's data. A slot in use belongs to a process or to the system that still runs (csrss, winlogon, services and
+ * the system's paged memory are still there at this point) and may be read back until the power goes: zeroing it
+ * made such a page-in read zeros, and a critical process died of it (CRITICAL_OBJECT_TERMINATION at shutdown).
+ * It runs in MmShutdownSystem(1), after the file systems' shutdown and the lazy writer, when the most slots are free:
+ * the writer is stopped, so no slot is taken any more; one given back while the clear runs may keep its data.
  */
 #define MI_CLEAR_CHUNK_PAGES 16
+/* Slots looked at under the slot lock at a time */
+#define MI_CLEAR_SCAN_SLOTS 4096
+
+/* The next run of free slots at or after *Start, of at most MI_CLEAR_CHUNK_PAGES; 0 = none before *End */
+static
+PFN_NUMBER
+MiNextFreeSlots(
+    _In_ PMMPAGING_FILE PagingFile,
+    _Inout_ PFN_NUMBER *Start,
+    _In_ PFN_NUMBER End)
+{
+    PFN_NUMBER Slot = *Start, Run = 0, Limit;
+    KIRQL OldIrql;
+
+    while (Slot < End)
+    {
+        KeAcquireSpinLock(&MiPagingFileSlotLock, &OldIrql);
+        Limit = min(End, (PFN_NUMBER)PagingFile->Bitmap->SizeOfBitMap);
+        Limit = min(Limit, Slot + MI_CLEAR_SCAN_SLOTS);
+        while (Slot < Limit && RtlTestBit(PagingFile->Bitmap, (ULONG)Slot))
+            Slot++;
+        while (Slot + Run < Limit && Run < MI_CLEAR_CHUNK_PAGES && !RtlTestBit(PagingFile->Bitmap, (ULONG)(Slot + Run)))
+            Run++;
+        KeReleaseSpinLock(&MiPagingFileSlotLock, OldIrql);
+        if (Run != 0 || Limit >= End || Limit >= (PFN_NUMBER)PagingFile->Bitmap->SizeOfBitMap)
+            break;
+    }
+    *Start = Slot;
+    return Run;
+}
 
 static
 VOID
@@ -321,38 +354,35 @@ MiClearPagingFile(
 {
     PVOID Zeros;
     PMDL Mdl;
-    PFN_NUMBER Chunk, Chunks;
+    PFN_NUMBER Slot = 0, Run, Size;
     ULONG Cleared = 0, Failed = 0;
 
-    if (PagingFile->FileObject == NULL || PagingFile->FileObject->DeviceObject == NULL)
+    if (PagingFile->FileObject == NULL || PagingFile->FileObject->DeviceObject == NULL || PagingFile->Bitmap == NULL)
         return;
 
     Zeros = ExAllocatePoolWithTag(NonPagedPool, MI_CLEAR_CHUNK_PAGES * PAGE_SIZE, TAG_MM);
     if (Zeros == NULL)
         return;
     RtlZeroMemory(Zeros, MI_CLEAR_CHUNK_PAGES * PAGE_SIZE);
-    Mdl = IoAllocateMdl(Zeros, MI_CLEAR_CHUNK_PAGES * PAGE_SIZE, FALSE, FALSE, NULL);
-    if (Mdl == NULL)
-    {
-        ExFreePoolWithTag(Zeros, TAG_MM);
-        return;
-    }
-    MmBuildMdlForNonPagedPool(Mdl);
 
-    Chunks = (PagingFile->Size + MI_CLEAR_CHUNK_PAGES - 1) / MI_CLEAR_CHUNK_PAGES;
-    for (Chunk = 0; Chunk < Chunks; Chunk++)
+    Size = PagingFile->Size;
+    while ((Run = MiNextFreeSlots(PagingFile, &Slot, Size)) != 0)
     {
         LARGE_INTEGER Offset;
         IO_STATUS_BLOCK Iosb;
         KEVENT Event;
         NTSTATUS Status;
-        /* The last chunk does not reach beyond the end of the file */
-        Offset.QuadPart = (LONGLONG)Chunk * MI_CLEAR_CHUNK_PAGES * PAGE_SIZE;
-        if (Chunk * MI_CLEAR_CHUNK_PAGES + MI_CLEAR_CHUNK_PAGES > PagingFile->Size)
-            Offset.QuadPart = ((LONGLONG)PagingFile->Size - MI_CLEAR_CHUNK_PAGES) * PAGE_SIZE;
-        if (Offset.QuadPart < 0)
-            Offset.QuadPart = 0;
 
+        Mdl = IoAllocateMdl(Zeros, (ULONG)(Run * PAGE_SIZE), FALSE, FALSE, NULL);
+        if (Mdl == NULL)
+        {
+            Failed += (ULONG)Run;
+            Slot += Run;
+            continue;
+        }
+        MmBuildMdlForNonPagedPool(Mdl);
+
+        Offset.QuadPart = (LONGLONG)Slot * PAGE_SIZE;
         KeInitializeEvent(&Event, NotificationEvent, FALSE);
         Status = IoSynchronousPageWrite(PagingFile->FileObject, Mdl, &Offset, &Event, &Iosb);
         if (Status == STATUS_PENDING)
@@ -361,20 +391,20 @@ MiClearPagingFile(
             Status = Iosb.Status;
         }
         if (NT_SUCCESS(Status))
-            Cleared++;
+            Cleared += (ULONG)Run;
         else
-            Failed++;
+            Failed += (ULONG)Run;
+        IoFreeMdl(Mdl);
+        Slot += Run;
     }
 
-    IoFreeMdl(Mdl);
     ExFreePoolWithTag(Zeros, TAG_MM);
-    DPRINT1("MM: ClearPageFileAtShutdown: %lu chunks of %lu pages cleared, %lu failed\n", Cleared, (ULONG)MI_CLEAR_CHUNK_PAGES, Failed);
+    DPRINT1("MM: ClearPageFileAtShutdown: %lu free pages of %lu cleared, %lu failed\n", Cleared, (ULONG)Size, Failed);
 }
 
 VOID
 MiShutdownSystem(VOID)
 {
-    ULONG i;
     PFN_NUMBER Page;
     BOOLEAN Dirty, Failed;
 
@@ -490,24 +520,35 @@ MiShutdownSystem(VOID)
      * its clusters back while such pages are still read from it (fastfat: FAT_FILE_SYSTEM in FatPagingFileIo). The
      * file stays on the disk; the next boot replaces it (FILE_SUPERSEDE).
      *
-     * ClearPageFileAtShutdown (the registry asks for it) keeps its order: the file is cleared, then closed, so that
-     * its clusters are given back holding zeros.
+     * ClearPageFileAtShutdown (the registry asks for it) is done in MmShutdownSystem(1), the last use of the files.
      */
-    if (!MmZeroPageFile)
-        return;
+}
 
-    for (i = 0; i < MmNumberOfPagingFiles; i++)
+/*
+ * Ask the storage below a paging file to write its cache: the clear comes after the file systems' own shutdown,
+ * which flushed it before.
+ */
+static
+VOID
+MiFlushPagingFileDevice(
+    _In_ PMMPAGING_FILE PagingFile)
+{
+    PDEVICE_OBJECT Device;
+    IO_STATUS_BLOCK Iosb;
+    KEVENT Event;
+    NTSTATUS Status;
+    PIRP Irp;
+
+    Device = IoGetAttachedDeviceReference(PagingFile->FileObject->DeviceObject);
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp = IoBuildSynchronousFsdRequest(IRP_MJ_FLUSH_BUFFERS, Device, NULL, 0, NULL, &Event, &Iosb);
+    if (Irp != NULL)
     {
-        MiClearPagingFile(MmPagingFile[i]);
-
-        /* Free page file name */
-        ASSERT(MmPagingFile[i]->PageFileName.Buffer != NULL);
-        ExFreePoolWithTag(MmPagingFile[i]->PageFileName.Buffer, TAG_MM);
-        MmPagingFile[i]->PageFileName.Buffer = NULL;
-
-        /* And close them */
-        ZwClose(MmPagingFile[i]->FileHandle);
+        Status = IoCallDriver(Device, Irp);
+        if (Status == STATUS_PENDING)
+            KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
     }
+    ObDereferenceObject(Device);
 }
 
 VOID
@@ -520,6 +561,23 @@ MmShutdownSystem(IN ULONG Phase)
     else if (Phase == 1)
     {
         ULONG i;
+
+        /*
+         * ClearPageFileAtShutdown: the inactive pages of the paging files are cleared here (see MiClearPagingFile),
+         * after the cache manager's and the file systems' shutdown and the lazy writer, when the most slots are
+         * free. The file systems still take paging file writes after their shutdown (fastfat and ntfsng do them
+         * outside the volume's shutdown state). The files stay open, as without the setting: closing one lets its
+         * file system give its clusters back while a page of it can still be read; the next boot replaces them.
+         */
+        if (MmZeroPageFile)
+        {
+            for (i = 0; i < MmNumberOfPagingFiles; i++)
+            {
+                MiClearPagingFile(MmPagingFile[i]);
+                if (MmPagingFile[i]->FileObject != NULL && MmPagingFile[i]->FileObject->DeviceObject != NULL)
+                    MiFlushPagingFileDevice(MmPagingFile[i]);
+            }
+        }
 
         /* Loop through all the paging files */
         for (i = 0; i < MmNumberOfPagingFiles; i++)
