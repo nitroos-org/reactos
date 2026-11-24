@@ -47,6 +47,10 @@ typedef struct _VGPU_CORE
     PVOID             RespVa;
     PHYSICAL_ADDRESS  RespPa;
 
+    /* The frame buffer is the backing of every mode: allocated once, for the largest mode, and kept
+       for the life of the device, like the memory of a real adapter. The display driver maps it once
+       and keeps drawing into that view across mode sets, so it must never move or be freed while
+       the device can be used. */
     PVOID             FbVa;
     PHYSICAL_ADDRESS  FbPa;
     ULONG             FbSize;
@@ -300,6 +304,35 @@ static VOID NTAPI VgpuFlushThread(PVOID arg)
 
 /* ---- mode list ----------------------------------------------------------- */
 
+/* The frame buffer for the largest candidate mode that fits the budget, or the largest one the
+   system can give contiguously */
+static int VgpuAllocFramebuffer(VGPU_CORE *c)
+{
+    PHYSICAL_ADDRESS hi;
+    ULONG i, want, limit = VGPU_BACKING_BUDGET;
+
+    hi.QuadPart = (LONGLONG)~0ULL;
+    for (;;)
+    {
+        want = 0;
+        for (i = 0; i < ARRAYSIZE(g_Candidates); i++)
+        {
+            ULONG sz = (ULONG)g_Candidates[i].w * g_Candidates[i].h * 4;
+            if (sz <= limit && sz > want) want = sz;
+        }
+        if (want == 0) return -1;
+        want = (want + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        c->FbVa = MmAllocateContiguousMemory(want, hi);
+        if (c->FbVa) break;
+        Vpw_Log(0, "virtgpu: no contiguous frame buffer of %u bytes, trying a smaller one\n", (ULONGLONG)want, 0);
+        limit = want - 1;
+    }
+    RtlZeroMemory(c->FbVa, want);
+    c->FbPa = MmGetPhysicalAddress(c->FbVa);
+    c->FbSize = want;
+    return 0;
+}
+
 static void VgpuBuildModes(VGPU_CORE *c, ULONG prefW, ULONG prefH)
 {
     ULONG i;
@@ -308,7 +341,7 @@ static void VgpuBuildModes(VGPU_CORE *c, ULONG prefW, ULONG prefH)
     for (i = 0; i < ARRAYSIZE(g_Candidates) && c->ModeCount < VGPU_MAX_MODES; i++)
     {
         ULONG w = g_Candidates[i].w, h = g_Candidates[i].h;
-        if ((ULONGLONG)w * h * 4 > VGPU_BACKING_BUDGET) continue;
+        if ((ULONGLONG)w * h * 4 > c->FbSize) continue;
         c->Modes[c->ModeCount] = g_Candidates[i];
         if (prefW && prefH && w == prefW && h == prefH)
             c->DefaultModeIndex = c->ModeCount;
@@ -316,10 +349,7 @@ static void VgpuBuildModes(VGPU_CORE *c, ULONG prefW, ULONG prefH)
             c->DefaultModeIndex = c->ModeCount;
         c->ModeCount++;
     }
-    if (c->ModeCount == 0)   /* paranoia: always offer 1024x768 */
-    {
-        c->Modes[0].w = 1024; c->Modes[0].h = 768; c->ModeCount = 1;
-    }
+    /* VgpuAllocFramebuffer sized the frame buffer for at least one candidate, so the list is never empty */
 }
 
 /* ---- public core API ----------------------------------------------------- */
@@ -331,6 +361,7 @@ int VgpuCreate(void *ext, void **pCtx)
     PHYSICAL_ADDRESS hi;
     u64 features, want;
     ULONG prefW = 0, prefH = 0;
+    BOOLEAN deviceUp = FALSE;
 
     c = (VGPU_CORE*)Vpw_AllocPool(ext, sizeof(VGPU_CORE));
     if (!c) return -1;
@@ -351,6 +382,7 @@ int VgpuCreate(void *ext, void **pCtx)
 
     st = virtio_device_initialize(&c->VDev, &VgpuSystemOps, c, FALSE);
     if (!NT_SUCCESS(st)) { Vpw_Log(0, "virtgpu: virtio init 0x%x\n", (ULONGLONG)st, 0); goto fail; }
+    deviceUp = TRUE;
 
     VGLOG("virtio_device_initialize st=0x%x\n", st);
     features = virtio_get_features(&c->VDev);
@@ -377,6 +409,8 @@ int VgpuCreate(void *ext, void **pCtx)
         c->NumScanouts = numScanouts ? numScanouts : 1;
     }
 
+    if (VgpuAllocFramebuffer(c) != 0) { Vpw_Log(0, "virtgpu: no frame buffer\n", 0, 0); goto fail; }
+
     KeWaitForSingleObject(&c->CtrlMutex, Executive, KernelMode, FALSE, NULL);
     (void)VgpuGetDisplayInfo(c, &prefW, &prefH);
     KeReleaseMutex(&c->CtrlMutex, FALSE);
@@ -395,6 +429,14 @@ int VgpuCreate(void *ext, void **pCtx)
     return 0;
 
 fail:
+    /* Nothing the device can reach is freed before the device is reset */
+    if (deviceUp)
+    {
+        virtio_device_reset(&c->VDev);
+        virtio_delete_queues(&c->VDev);
+        virtio_device_shutdown(&c->VDev);
+    }
+    if (c->FbVa)   MmFreeContiguousMemory(c->FbVa);
     if (c->CmdVa)  MmFreeContiguousMemory(c->CmdVa);
     if (c->RespVa) MmFreeContiguousMemory(c->RespVa);
     Vpw_FreePool(ext, c);
@@ -424,10 +466,11 @@ void VgpuDestroy(void *ctx)
     }
     KeReleaseMutex(&c->CtrlMutex, FALSE);
 
-    if (c->FbVa)   MmFreeContiguousMemory(c->FbVa);
+    /* The device reads the frame buffer and writes the queues and responses until it is reset */
     virtio_device_reset(&c->VDev);
     virtio_delete_queues(&c->VDev);
     virtio_device_shutdown(&c->VDev);
+    if (c->FbVa)   MmFreeContiguousMemory(c->FbVa);
     if (c->CmdVa)  MmFreeContiguousMemory(c->CmdVa);
     if (c->RespVa) MmFreeContiguousMemory(c->RespVa);
     Vpw_FreePool(c->Ext, c);
@@ -450,46 +493,69 @@ unsigned long VgpuGetDefaultModeIndex(void *ctx)
     return ((VGPU_CORE*)ctx)->DefaultModeIndex;
 }
 
+/*
+ * A mode set changes only the host resource that is scanned out; its backing is always the one
+ * frame buffer (VIRTIO 1.2 cs01, 5.7.6.1). The new resource is created, given the frame buffer
+ * and scanned out before the old one is released (the flip of 5.7.6.3), so a failure leaves the
+ * old mode on the screen. The display driver sets its mode again after every mode change and
+ * after a reset: the mode that is already set is then only presented again.
+ */
 int VgpuSetModeByIndex(void *ctx, unsigned long index)
 {
     VGPU_CORE *c = (VGPU_CORE*)ctx;
-    ULONG w, h, stride, size, resId;
-    PHYSICAL_ADDRESS hi;
+    ULONG w, h, stride, size, resId, oldId;
     int rc = -1;
 
     if (index >= c->ModeCount) return -1;
     VGLOG("SetModeByIndex idx=%d\n", index);
     w = c->Modes[index].w; h = c->Modes[index].h;
     stride = w * 4; size = stride * h;
+    if (size > c->FbSize) return -1;
 
     KeWaitForSingleObject(&c->CtrlMutex, Executive, KernelMode, FALSE, NULL);
-    c->FlushEnabled = 0;
 
-    if (c->ResourceId)
+    if (c->ResourceId && c->Width == w && c->Height == h)
     {
-        VgpuSetScanout(c, 0, 0, 0, 0);
-        VgpuUnref(c, c->ResourceId);
-        c->ResourceId = 0;
+        VgpuTransferAndFlush(c, 0, 0, w, h);
+        c->FlushEnabled = 1;
+        rc = 0;
+        goto done;
     }
-    if (c->FbVa) { MmFreeContiguousMemory(c->FbVa); c->FbVa = NULL; }
 
-    hi.QuadPart = (LONGLONG)~0ULL;
-    c->FbVa = MmAllocateContiguousMemory(size, hi);
-    if (!c->FbVa) { Vpw_Log(0, "virtgpu: fb alloc %d failed\n", (ULONGLONG)size, 0); goto done; }
-    RtlZeroMemory(c->FbVa, size);
-    c->FbPa = MmGetPhysicalAddress(c->FbVa);
-    c->FbSize = size; c->Width = w; c->Height = h; c->Stride = stride;
-
+    c->FlushEnabled = 0;
     resId = c->NextResourceId++;
-    if (VgpuCreate2D(c, resId, w, h) != 0) { Vpw_Log(0, "virtgpu: create2d failed\n", 0, 0); goto done; }
-    if (VgpuAttachBacking(c, resId, (ULONGLONG)c->FbPa.QuadPart, size) != 0) { Vpw_Log(0, "virtgpu: attach failed\n", 0, 0); goto done; }
-    if (VgpuSetScanout(c, 0, resId, w, h) != 0) { Vpw_Log(0, "virtgpu: scanout failed\n", 0, 0); goto done; }
+    if (resId == 0 || resId == c->ResourceId) resId = c->NextResourceId++;   /* 0 means no resource */
+
+    if (VgpuCreate2D(c, resId, w, h) != 0) { Vpw_Log(0, "virtgpu: create2d failed\n", 0, 0); goto restore; }
+    if (VgpuAttachBacking(c, resId, (ULONGLONG)c->FbPa.QuadPart, size) != 0)
+    {
+        Vpw_Log(0, "virtgpu: attach failed\n", 0, 0);
+        VgpuUnref(c, resId);
+        goto restore;
+    }
+    if (VgpuSetScanout(c, 0, resId, w, h) != 0)
+    {
+        Vpw_Log(0, "virtgpu: scanout failed\n", 0, 0);
+        VgpuUnref(c, resId);
+        goto restore;
+    }
+
+    oldId = c->ResourceId;
     c->ResourceId = resId;
+    c->Width = w; c->Height = h; c->Stride = stride;
+    InterlockedExchange(&c->DirtyValid, 0);
+    if (oldId) VgpuUnref(c, oldId);
+    RtlZeroMemory(c->FbVa, size);   /* a new mode starts black; the display driver draws it next */
     VGLOG("SetMode %dx%d resId=%d fbPa=0x%I64x OK\n", w, h, resId, (ULONGLONG)c->FbPa.QuadPart);
     VgpuTransferAndFlush(c, 0, 0, w, h);
     c->FlushEnabled = 1;
     Vpw_Log(1, "virtgpu: mode set %dx%d\n", (ULONGLONG)w, (ULONGLONG)h);
     rc = 0;
+    goto done;
+
+restore:
+    /* The old resource is still scanned out: keep presenting it */
+    if (c->ResourceId) c->FlushEnabled = 1;
 
 done:
     KeReleaseMutex(&c->CtrlMutex, FALSE);
