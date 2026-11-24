@@ -841,6 +841,10 @@ VOID
 WSAAPI
 WsProcDelete(IN PWSPROCESS Process);
 
+VOID
+WSAAPI
+WsProcDeleteAndCloseSockets(IN PWSPROCESS Process);
+
 INT
 WSAAPI
 WsProcStartup(VOID);

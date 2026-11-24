@@ -177,6 +177,9 @@ WsProcGetNsCatalog(IN PWSPROCESS Process)
     return Process->NamespaceCatalog;
 }
 
+/* Set by WSACleanup while the last reference to the process goes away: the sockets are closed then */
+static BOOL WsProcCloseSocketsOnDelete = FALSE;
+
 BOOL
 WSAAPI
 WsProcDetachSocket(IN PWSPROCESS Process,
@@ -186,6 +189,15 @@ WsProcDetachSocket(IN PWSPROCESS Process,
 
     /* Disassociate this socket from the table */
     WahRemoveHandleContext(WsSockHandleTable, Handle);
+
+    /* The last WSACleanup destroys the sockets of the process (a socket made before is no socket after
+     * a new WSAStartup: WSAENOTSOCK, as on Windows). The provider is still loaded here. */
+    if (WsProcCloseSocketsOnDelete && Socket->Provider)
+    {
+        INT CloseError;
+
+        Socket->Provider->Service.lpWSPCloseSocket((SOCKET)Socket->Handle, &CloseError);
+    }
 
     /* If this is isn't an IFS socket */
     if (!Socket->Provider)
@@ -319,6 +331,15 @@ WsProcDelete(IN PWSPROCESS Process)
 
     /* Delete us */
     HeapFree(WsSockHeap, 0, Process);
+}
+
+VOID
+WSAAPI
+WsProcDeleteAndCloseSockets(IN PWSPROCESS Process)
+{
+    WsProcCloseSocketsOnDelete = TRUE;
+    WsProcDelete(Process);
+    WsProcCloseSocketsOnDelete = FALSE;
 }
 
 VOID
