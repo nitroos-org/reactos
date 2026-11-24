@@ -546,7 +546,7 @@ _main(IN INT argc,
         Status = SmpStartConsoleSession();
         if (!NT_SUCCESS(Status))
         {
-            RtlInitUnicodeString(&DbgString, L"Session Manager: the console session (session 1) could not be started");
+            RtlInitUnicodeString(&DbgString, L"Session Manager (the console session, session 1, could not be started)");
             Parameters[1] = Status;
             _SEH2_LEAVE;
         }
