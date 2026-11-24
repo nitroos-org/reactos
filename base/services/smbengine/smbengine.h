@@ -195,6 +195,7 @@ typedef struct _SMBENG_GLOBAL
 {
     HANDLE Device;              /* \Device\NitroSmbEngine, overlapped */
     SRWLOCK Lock;               /* Conns, Bindings, Conn->Bindings/Closing */
+    SRWLOCK RouteLock;          /* held by the GET thread that takes a request and routes it */
     LIST_ENTRY Conns;
     ULONG ConnCount;
     PSMBENG_BINDING Bindings[SMBENG_BINDING_BUCKETS];

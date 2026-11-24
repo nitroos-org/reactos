@@ -794,8 +794,13 @@ HandleNotification(const SMBUP_HEADER *h)
     ReleaseSRWLockShared(&SmbEng.Lock);
 }
 
+/*
+ * Checks a request of the driver and routes it. Runs under RouteLock: a request reaches
+ * its connection's queue in the order the driver handed it out. A CONNECT or DISCONNECT
+ * (which can wait for a token or a connection) is returned to be handled after the lock.
+ */
 static
-VOID
+PSMBENG_OP
 Dispatch(PUCHAR Buffer, DWORD Got, HANDLE Event)
 {
     PSMBUP_HEADER h = (PSMBUP_HEADER)Buffer;
@@ -816,13 +821,13 @@ Dispatch(PUCHAR Buffer, DWORD Got, HANDLE Event)
         /* Whatever it was, it may carry a password: not left in the GET buffer */
         SecureZeroMemory(Buffer, Got <= SMBUP_MAX_MESSAGE ? Got : SMBUP_MAX_MESSAGE);
         SmbEngLog(0, "invalid request from the driver (%lu bytes)", Got);
-        return;
+        return NULL;
     }
 
     if (h->Flags & SMBUP_FLAG_NOTIFICATION)
     {
         HandleNotification(h);
-        return;
+        return NULL;
     }
 
     Op = calloc(1, sizeof(*Op));
@@ -842,7 +847,7 @@ Dispatch(PUCHAR Buffer, DWORD Got, HANDLE Event)
                 CloseHandle(Token);
             SecureZeroMemory(Buffer, Got);
         }
-        return;
+        return NULL;
     }
     InterlockedIncrement(&SmbEng.OpsLive);
     memcpy(Op->Request, h, Got);
@@ -856,17 +861,8 @@ Dispatch(PUCHAR Buffer, DWORD Got, HANDLE Event)
     SmbEngLog(2, "request %I64u op %u logon %08lx:%08lx pid %lu", h->RequestId, h->Opcode,
               h->LogonIdHigh, h->LogonIdLow, h->ProcessId);
 
-    switch (h->Opcode)
-    {
-        case SmbUpConnect:
-            HandleConnect(Op, Event);
-            return;
-        case SmbUpDisconnect:
-            HandleDisconnect(Op, Event);
-            return;
-        default:
-            break;
-    }
+    if (h->Opcode == SmbUpConnect || h->Opcode == SmbUpDisconnect)
+        return Op;
 
     /* Every other request names its connection first (C_ASSERTed layouts) */
     ConnectionId = *(const ULONGLONG UNALIGNED *)(Op->Request + 1);
@@ -881,6 +877,7 @@ Dispatch(PUCHAR Buffer, DWORD Got, HANDLE Event)
     ReleaseSRWLockShared(&SmbEng.Lock);
     if (Conn == NULL)
         SmbEngAnswerOp(Op, STATUS_CONNECTION_DISCONNECTED, Event);
+    return NULL;
 }
 
 static
@@ -891,6 +888,8 @@ GetThread(LPVOID Parameter)
     PUCHAR Buffer = VirtualAlloc(NULL, SMBUP_MAX_MESSAGE, MEM_COMMIT, PAGE_READWRITE);
     HANDLE Event = CreateEventW(NULL, TRUE, FALSE, NULL);
     DWORD Got, Error;
+    PSMBENG_OP Later;
+    BOOL Ok;
 
     UNREFERENCED_PARAMETER(Parameter);
 
@@ -901,9 +900,31 @@ GetThread(LPVOID Parameter)
     }
     while (!SmbEng.Stopping)
     {
-        if (!EngineIoctl(Event, IOCTL_SMBRDR_ENGINE_GET, NULL, 0, Buffer, SMBUP_MAX_MESSAGE, &Got))
+        /* One thread at a time takes a request and routes it, so that the requests of a
+         * connection reach its queue in the driver's order: a change notification request
+         * that its caller saw pended goes to the server before the caller's next request
+         * on that connection (a file created right after it would otherwise go first and
+         * the server would not report it). The routing is short; a CONNECT or DISCONNECT
+         * is handled after the lock is released. */
+        AcquireSRWLockExclusive(&SmbEng.RouteLock);
+        Later = NULL;
+        Ok = EngineIoctl(Event, IOCTL_SMBRDR_ENGINE_GET, NULL, 0, Buffer, SMBUP_MAX_MESSAGE, &Got);
+        Error = Ok ? ERROR_SUCCESS : GetLastError();
+        if (Ok)
         {
-            Error = GetLastError();
+            InterlockedIncrement(&SmbEng.Taken);
+            Later = Dispatch(Buffer, Got, Event);
+        }
+        ReleaseSRWLockExclusive(&SmbEng.RouteLock);
+        if (Later != NULL)
+        {
+            if (Later->Opcode == SmbUpConnect)
+                HandleConnect(Later, Event);
+            else
+                HandleDisconnect(Later, Event);
+        }
+        if (!Ok)
+        {
             if (!SmbEng.Stopping)
             {
                 /* Not attached any more (the driver detached us): this process cannot serve.
@@ -913,8 +934,6 @@ GetThread(LPVOID Parameter)
             }
             break;
         }
-        InterlockedIncrement(&SmbEng.Taken);
-        Dispatch(Buffer, Got, Event);
     }
     CloseHandle(Event);
     VirtualFree(Buffer, 0, MEM_RELEASE);
