@@ -66,6 +66,8 @@ static BOOL PingForever = FALSE;
 static PADDRINFOW Target = NULL;
 static PCWSTR TargetName = NULL;
 static WCHAR Address[46];
+/* the address of the target: Address holds the address of the last reply when the statistics are printed (Windows names the target) */
+static WCHAR TargetAddress[46];
 static WCHAR CanonName[NI_MAXHOST];
 static BOOL ResolveAddress = FALSE;
 
@@ -120,6 +122,8 @@ wmain(int argc, WCHAR *argv[])
         WSACleanup();
         return 1;
     }
+
+    wcscpy(TargetAddress, Address);
 
     if (Family == AF_INET6)
         hIcmpFile = Icmp6CreateFile();
@@ -500,6 +504,16 @@ Ping(void)
             ConResPrintf(StdOut, IDS_REQUEST_TIMED_OUT);
             break;
 
+        /* an IPv6 request that is answered by a failure comes back with the call failed and the status as the error
+           (Windows: no "Reply from" line for it) */
+        case IP_DEST_NET_UNREACHABLE:
+            ConResPrintf(StdOut, IDS_DEST_NET_UNREACHABLE);
+            break;
+
+        case IP_DEST_HOST_UNREACHABLE:
+            ConResPrintf(StdOut, IDS_DEST_HOST_UNREACHABLE);
+            break;
+
         default:
             ConResPrintf(StdOut, IDS_TRANSMIT_FAILED, Status);
             break;
@@ -674,7 +688,7 @@ PrintStats(void)
     ULONG EchosLost = EchosSent - EchosReceived;
     ULONG PercentLost = (ULONG)((EchosLost / (double)EchosSent) * 100.0);
 
-    ConResPrintf(StdOut, IDS_STATISTICS, Address, EchosSent, EchosReceived, EchosLost, PercentLost);
+    ConResPrintf(StdOut, IDS_STATISTICS, TargetAddress, EchosSent, EchosReceived, EchosLost, PercentLost);
 
     if (EchosSuccessful > 0)
     {
