@@ -10,6 +10,7 @@ list(APPEND SOURCE
     AccessCheckMalformedAcl.c
     AccessCheckAppContainer.c
     AppContainerNamespace.c
+    AdjustTokenGroupsRows.c
     AccessCheckObjectTypeList.c
     AddMandatoryAce.c
     RegSaveKeyExFormat.c

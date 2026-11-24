@@ -440,6 +440,8 @@ AdjustTokenGroups(HANDLE TokenHandle,
        return FALSE;
     }
 
+    /* the last error of a call that worked is ERROR_SUCCESS (measured on Windows Server 2022: a stale error is gone) */
+    SetLastError(ERROR_SUCCESS);
     return TRUE;
 }
 
