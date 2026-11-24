@@ -91,7 +91,8 @@ SmpDetachSession(VOID)
 static
 NTSTATUS
 SmpStartConsoleSessionOnce(
-    _In_ PUNICODE_STRING CsrCommand)
+    _In_ PUNICODE_STRING CsrCommand,
+    _Out_ PBOOLEAN Win32kLoaded)
 {
     NTSTATUS Status, Status2;
     ULONG MuSessionId = 0;
@@ -102,6 +103,7 @@ SmpStartConsoleSessionOnce(
 
     /* Single leader: SMSS must not be attached to any session now */
     ASSERT(AttachedSessionId == -1);
+    *Win32kLoaded = FALSE;
 
     Status = SmpAcquirePrivilege(SE_LOAD_DRIVER_PRIVILEGE, &State);
     if (!NT_SUCCESS(Status))
@@ -136,6 +138,7 @@ SmpStartConsoleSessionOnce(
     DPRINT1("SMSS: console session: win32k of session %lu, Status=%lx\n", MuSessionId, Status);
     SmpReleasePrivilege(State);
     if (!NT_SUCCESS(Status)) goto Quit;
+    *Win32kLoaded = TRUE;
 
     /* The session's csrss. SmpLoadSubSystem waits up to 60 s for it to
        connect, and on any failure detaches and terminates it */
@@ -160,10 +163,12 @@ Quit:
 
 /*
  * Start the console session. Runs once, from the main thread, after session 0's csrss and Winlogon are
- * started and SMSS has detached from session 0. A failed attempt is tried once more (a csrss that did
- * not connect in time under load, a transient lack of memory); when the second fails too, the caller
- * stops the machine: without the console session there is no display and no logon, and a machine that
- * runs on dark, with its boot accepted, would leave no way back to a working configuration.
+ * started and SMSS has detached from session 0. An attempt that failed before the session's win32k was
+ * loaded (the session create, the win32k load: a transient lack of memory) is tried once more. One that
+ * failed later is not: a session whose win32k was loaded cannot be created again in this boot (session
+ * images are not unloaded per session yet). When the start fails, the caller stops the machine: without
+ * the console session there is no display and no logon, and a machine that runs on dark, with its boot
+ * accepted, would leave no way back to a working configuration.
  */
 NTSTATUS
 NTAPI
@@ -173,6 +178,7 @@ SmpStartConsoleSession(VOID)
     PUNICODE_STRING CsrCommand;
     LARGE_INTEGER Delay;
     ULONG Attempt;
+    BOOLEAN Win32kLoaded;
 
     CsrCommand = SmpWindowsSubsystemCommand();
     if (!CsrCommand)
@@ -184,9 +190,9 @@ SmpStartConsoleSession(VOID)
     for (Attempt = 1; ; Attempt++)
     {
         RtlEnterCriticalSection(&SmpMuSessionLock);
-        Status = SmpStartConsoleSessionOnce(CsrCommand);
+        Status = SmpStartConsoleSessionOnce(CsrCommand, &Win32kLoaded);
         RtlLeaveCriticalSection(&SmpMuSessionLock);
-        if (NT_SUCCESS(Status) || (Attempt == 2)) break;
+        if (NT_SUCCESS(Status) || Win32kLoaded || (Attempt == 2)) break;
 
         DPRINT1("SMSS: console session: attempt %lu failed, Status=%lx, trying again\n", Attempt, Status);
 
