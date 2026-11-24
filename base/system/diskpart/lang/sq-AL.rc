@@ -186,6 +186,16 @@ BEGIN
     IDS_REMOVE_FAIL "\nDiskPart could not remove the drive letter or mount point.\nMake sure the drive letter or mount point is valid.\n"
     IDS_REMOVE_SUCCESS "\nDiskPart successfully removed the drive letter or mount point.\n"
     IDS_REMOVE_NO_LETTER "\nThe selected volume has no letter or mount point to remove.\n"
+    IDS_ONLINE_VOLUME_SUCCESS "DiskPart successfully onlined the selected volume.\n"
+    IDS_OFFLINE_VOLUME_SUCCESS "DiskPart successfully offlined the selected volume.\n"
+    IDS_ONLINE_NO_VOLUME "No volume was selected to online.\nPlease select a volume and try again.\n"
+    IDS_OFFLINE_NO_VOLUME "No volume was selected to offline.\nPlease select a volume and try again.\n"
+    IDS_ONLINE_BAD_ARGS "The arguments specified for this command are not valid.\nFor more information on the command type: HELP ONLINE VOLUME\n"
+    IDS_OFFLINE_BAD_ARGS "The arguments specified for this command are not valid.\nFor more information on the command type: HELP OFFLINE VOLUME\n"
+    IDS_OFFLINE_HAS_PATH "Virtual Disk Service error:\nThe volume still has access path to it.\n\n"
+    IDS_ONLINE_OFFLINE_FAILED "Virtual Disk Service error:\nThe volume could not be changed (error %lu).\n\n"
+    IDS_HELP_OFFLINE_VOLUME "Offline a volume that is currently marked as online.\n"
+    IDS_HELP_ONLINE_VOLUME "Online a volume that is currently marked as offline.\n"
     IDS_REMOVE_WRONG_LETTER "\nThe letter you specified is not assigned to that volume.\n"
 END
 

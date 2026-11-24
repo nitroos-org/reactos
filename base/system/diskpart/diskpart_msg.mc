@@ -7953,6 +7953,388 @@ Language=Taiwanese
 .
 
 
+MessageId=10054
+SymbolicName=MSG_COMMAND_OFFLINE_VOLUME
+Severity=Informational
+Facility=System
+Language=English
+    Brings selected online volume to the offline state.
+
+Syntax:  OFFLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+Examples:
+
+    OFFLINE VOLUME
+.
+Language=German
+    Brings selected online volume to the offline state.
+
+Syntax:  OFFLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+Examples:
+
+    OFFLINE VOLUME
+.
+Language=Polish
+    Brings selected online volume to the offline state.
+
+Syntax:  OFFLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+Examples:
+
+    OFFLINE VOLUME
+.
+Language=Portugese
+    Brings selected online volume to the offline state.
+
+Syntax:  OFFLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+Examples:
+
+    OFFLINE VOLUME
+.
+Language=Romanian
+    Brings selected online volume to the offline state.
+
+Syntax:  OFFLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+Examples:
+
+    OFFLINE VOLUME
+.
+Language=Russian
+    Brings selected online volume to the offline state.
+
+Syntax:  OFFLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+Examples:
+
+    OFFLINE VOLUME
+.
+Language=Albanian
+    Brings selected online volume to the offline state.
+
+Syntax:  OFFLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+Examples:
+
+    OFFLINE VOLUME
+.
+Language=Turkish
+    Brings selected online volume to the offline state.
+
+Syntax:  OFFLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+Examples:
+
+    OFFLINE VOLUME
+.
+Language=Chinese
+    Brings selected online volume to the offline state.
+
+Syntax:  OFFLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+Examples:
+
+    OFFLINE VOLUME
+.
+Language=Taiwanese
+    Brings selected online volume to the offline state.
+
+Syntax:  OFFLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+Examples:
+
+    OFFLINE VOLUME
+.
+
+
+MessageId=10055
+SymbolicName=MSG_COMMAND_ONLINE_VOLUME
+Severity=Informational
+Facility=System
+Language=English
+    Brings selected offline volume to the online state.
+
+Syntax:  ONLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+    This command does not operate on OEM, ESP or recovery partitions.
+
+
+Examples:
+
+    ONLINE VOLUME
+.
+Language=German
+    Brings selected offline volume to the online state.
+
+Syntax:  ONLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+    This command does not operate on OEM, ESP or recovery partitions.
+
+
+Examples:
+
+    ONLINE VOLUME
+.
+Language=Polish
+    Brings selected offline volume to the online state.
+
+Syntax:  ONLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+    This command does not operate on OEM, ESP or recovery partitions.
+
+
+Examples:
+
+    ONLINE VOLUME
+.
+Language=Portugese
+    Brings selected offline volume to the online state.
+
+Syntax:  ONLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+    This command does not operate on OEM, ESP or recovery partitions.
+
+
+Examples:
+
+    ONLINE VOLUME
+.
+Language=Romanian
+    Brings selected offline volume to the online state.
+
+Syntax:  ONLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+    This command does not operate on OEM, ESP or recovery partitions.
+
+
+Examples:
+
+    ONLINE VOLUME
+.
+Language=Russian
+    Brings selected offline volume to the online state.
+
+Syntax:  ONLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+    This command does not operate on OEM, ESP or recovery partitions.
+
+
+Examples:
+
+    ONLINE VOLUME
+.
+Language=Albanian
+    Brings selected offline volume to the online state.
+
+Syntax:  ONLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+    This command does not operate on OEM, ESP or recovery partitions.
+
+
+Examples:
+
+    ONLINE VOLUME
+.
+Language=Turkish
+    Brings selected offline volume to the online state.
+
+Syntax:  ONLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+    This command does not operate on OEM, ESP or recovery partitions.
+
+
+Examples:
+
+    ONLINE VOLUME
+.
+Language=Chinese
+    Brings selected offline volume to the online state.
+
+Syntax:  ONLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+    This command does not operate on OEM, ESP or recovery partitions.
+
+
+Examples:
+
+    ONLINE VOLUME
+.
+Language=Taiwanese
+    Brings selected offline volume to the online state.
+
+Syntax:  ONLINE VOLUME [NOERR]
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+                Without the NOERR parameter, an error causes DiskPart to exit
+                with an error code.
+
+    This command operates on a single volume. A volume must be selected for
+    this operation to succeed.
+
+    This command does not operate on OEM, ESP or recovery partitions.
+
+
+Examples:
+
+    ONLINE VOLUME
+.
+
+
 MessageId=10040
 SymbolicName=MSG_COMMAND_RECOVER
 Severity=Informational

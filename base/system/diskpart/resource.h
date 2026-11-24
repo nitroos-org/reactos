@@ -163,6 +163,17 @@
 
 #define IDS_UNIQUID_DISK_INVALID_STYLE 4500
 
+#define IDS_ONLINE_VOLUME_SUCCESS      4600
+#define IDS_OFFLINE_VOLUME_SUCCESS     4601
+#define IDS_ONLINE_NO_VOLUME           4602
+#define IDS_OFFLINE_NO_VOLUME          4603
+#define IDS_ONLINE_BAD_ARGS            4604
+#define IDS_OFFLINE_BAD_ARGS           4605
+#define IDS_OFFLINE_HAS_PATH           4606
+#define IDS_ONLINE_OFFLINE_FAILED      4607
+#define IDS_HELP_OFFLINE_VOLUME        4608
+#define IDS_HELP_ONLINE_VOLUME         4609
+
 #define IDS_STATUS_YES                      31
 #define IDS_STATUS_NO                       32
 #define IDS_STATUS_ONLINE                   33

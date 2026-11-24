@@ -70,8 +70,10 @@ COMMAND cmds[] =
 //    {L"LIST",        L"VDISK",     NULL,        ListVirtualDisk,         IDS_HELP_LIST_VDISK,                MSG_COMMAND_LIST_VDISK},
 
 //    {L"MERGE",       NULL,         NULL,        merge_main,              IDS_HELP_MERGE,                     MSG_COMMAND_MERGE},
-//    {L"OFFLINE",     NULL,         NULL,        offline_main,            IDS_HELP_OFFLINE,                   MSG_COMMAND_OFFLINE},
-//    {L"ONLINE",      NULL,         NULL,        online_main,             IDS_HELP_ONLINE,                    MSG_COMMAND_ONLINE},
+    {L"OFFLINE",     NULL,         NULL,        OfflineObject,           IDS_HELP_OFFLINE,                   MSG_NONE},
+    {L"OFFLINE",     L"VOLUME",    NULL,        OfflineVolume,           IDS_HELP_OFFLINE_VOLUME,            MSG_COMMAND_OFFLINE_VOLUME},
+    {L"ONLINE",      NULL,         NULL,        OnlineObject,            IDS_HELP_ONLINE,                    MSG_NONE},
+    {L"ONLINE",      L"VOLUME",    NULL,        OnlineVolume,            IDS_HELP_ONLINE_VOLUME,             MSG_COMMAND_ONLINE_VOLUME},
 //    {L"RECOVER",     NULL,         NULL,        recover_main,            IDS_HELP_RECOVER,                   MSG_COMMAND_RECOVER},
     {L"REM",         NULL,         NULL,        NULL,                    IDS_HELP_REM,                       MSG_COMMAND_REM},
     {L"REMOVE",      NULL,         NULL,        remove_main,             IDS_HELP_REMOVE,                    MSG_COMMAND_REMOVE},

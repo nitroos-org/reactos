@@ -389,6 +389,7 @@ PrintVolume(
     WCHAR szVolumeTypeBuffer[30];
     WCHAR szStatusBuffer[16];
     WCHAR szInfoBuffer[16];
+    BOOL bOffline = FALSE;
     WCHAR szSizeBuffer[8];
     INT nVolumeType, nVolumeStatus;
 
@@ -451,13 +452,20 @@ PrintVolume(
         LoadStringW(GetModuleHandle(NULL), IDS_INFO_VOLUME_SYSTEM, szInfoBuffer, ARRAYSIZE(szInfoBuffer));
     else if (VolumeEntry->IsBoot)
         LoadStringW(GetModuleHandle(NULL), IDS_INFO_VOLUME_BOOT, szInfoBuffer, ARRAYSIZE(szInfoBuffer));
+    else if (IsVolumeOffline(VolumeEntry->VolumeName))
+    {
+        LoadStringW(GetModuleHandle(NULL), IDS_INFO_VOLUME_OFFLINE, szInfoBuffer, ARRAYSIZE(szInfoBuffer));
+        /* an offline volume has no file system mounted: the RAW one that answers for it is not listed (as Windows does) */
+        bOffline = TRUE;
+    }
 
     ConResPrintf(StdOut, IDS_LIST_VOLUME_FORMAT,
                  (CurrentVolume == VolumeEntry) ? L'*' : L' ',
                  VolumeEntry->VolumeNumber,
                  VolumeEntry->DriveLetter,
                  (VolumeEntry->pszLabel) ? VolumeEntry->pszLabel : L"",
-                 (VolumeEntry->pszFilesystem) ? VolumeEntry->pszFilesystem : L"",
+                 (VolumeEntry->pszFilesystem && !(bOffline && !_wcsicmp(VolumeEntry->pszFilesystem, L"RAW"))) ?
+                     VolumeEntry->pszFilesystem : L"",
                  szVolumeTypeBuffer,
                  szSizeBuffer,
                  szStatusBuffer,
