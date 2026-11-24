@@ -3546,6 +3546,11 @@ HRESULT WINAPI ScriptPlaceOpenType( HDC hdc, SCRIPT_CACHE *psc, SCRIPT_ANALYSIS 
         if (piAdvance) piAdvance[i] = abc.abcA + abc.abcB + abc.abcC;
     }
 
+#ifdef __REACTOS__
+    /* With fNoGlyphIndex the "glyphs" are characters, and the font's GPOS lookups are keyed by glyph index:
+       Windows places such a run with the plain advances (measured on Windows Server 2022) */
+    if (!psa->fNoGlyphIndex)
+#endif
     SHAPE_ApplyOpenTypePositions(hdc, (ScriptCache *)*psc, psa, pwGlyphs, cGlyphs, piAdvance, pGoffset);
 
     if (pABC) TRACE("Total for run: abcA=%d, abcB=%d, abcC=%d\n", pABC->abcA, pABC->abcB, pABC->abcC);
