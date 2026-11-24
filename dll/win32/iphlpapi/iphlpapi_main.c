@@ -2169,8 +2169,16 @@ static int IpNetTableSorter(const void *a, const void *b)
 {
   int ret;
 
-  if (a && b)
-    ret = ((PMIB_IPNETROW)a)->dwAddr - ((PMIB_IPNETROW)b)->dwAddr;
+  if (a && b) {
+    const MIB_IPNETROW *rowA = a, *rowB = b;
+    DWORD addrA = ntohl(rowA->dwAddr), addrB = ntohl(rowB->dwAddr);
+
+    /* by interface, then by address (the address in host order, as it reads) */
+    if (rowA->dwIndex != rowB->dwIndex)
+      ret = rowA->dwIndex < rowB->dwIndex ? -1 : 1;
+    else
+      ret = addrA < addrB ? -1 : (addrA > addrB ? 1 : 0);
+  }
   else
     ret = 0;
   return ret;
@@ -3643,8 +3651,36 @@ DWORD WINAPI SetIpTTL(UINT nTTL)
  */
 DWORD WINAPI SetTcpEntry(PMIB_TCPROW pTcpRow)
 {
-  FIXME("(pTcpRow %p): stub\n", pTcpRow);
-  return 0;
+  PMIB_TCPTABLE table = NULL;
+  DWORD ret, size = 0, i, tries;
+
+  TRACE("pTcpRow %p\n", pTcpRow);
+  /* the only state a row can be set to is DELETE_TCB (Windows Server 2022: anything else is a bad parameter) */
+  if (!pTcpRow || pTcpRow->dwState != MIB_TCP_STATE_DELETE_TCB)
+    return ERROR_INVALID_PARAMETER;
+
+  ret = ERROR_INSUFFICIENT_BUFFER;
+  for (tries = 0; tries < 3 && ret == ERROR_INSUFFICIENT_BUFFER; tries++) {
+    free(table);
+    table = size ? malloc(size) : NULL;
+    if (size && !table)
+      return ERROR_NOT_ENOUGH_MEMORY;
+    ret = GetTcpTable(table, &size, FALSE);
+  }
+  if (ret == ERROR_NO_DATA || ret == NO_ERROR) {
+    /* a connection that does not exist is ERROR_MR_MID_NOT_FOUND */
+    ret = ERROR_MR_MID_NOT_FOUND;
+    for (i = 0; table && i < table->dwNumEntries; i++) {
+      if (table->table[i].dwLocalAddr == pTcpRow->dwLocalAddr && table->table[i].dwLocalPort == pTcpRow->dwLocalPort &&
+          table->table[i].dwRemoteAddr == pTcpRow->dwRemoteAddr && table->table[i].dwRemotePort == pTcpRow->dwRemotePort) {
+        /* the stack cannot end one connection: say so instead of reporting success */
+        ret = ERROR_NOT_SUPPORTED;
+        break;
+      }
+    }
+  }
+  free(table);
+  return ret;
 }
 
 
