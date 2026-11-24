@@ -1134,16 +1134,32 @@ MountMgrValidateBackPointer(IN PASSOCIATED_DEVICE_ENTRY AssociatedDeviceEntry,
         return STATUS_SUCCESS;
     }
 
-    /* Create a string with the substitute name */
-    SubstituteName.Length = ReparseData->SymbolicLinkReparseBuffer.SubstituteNameLength;
+    /* What the file system returned is not trusted: it has to be a mount point and its names must lie inside the data */
+    if (IoStatusBlock.Information < FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer) ||
+        ReparseData->ReparseTag != IO_REPARSE_TAG_MOUNT_POINT ||
+        !MountMgrIsRangeInBuffer(ReparseData->MountPointReparseBuffer.SubstituteNameOffset,
+                                 ReparseData->MountPointReparseBuffer.SubstituteNameLength,
+                                 (ULONG)IoStatusBlock.Information - FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer)) ||
+        (ReparseData->MountPointReparseBuffer.SubstituteNameOffset & 1) ||
+        (ReparseData->MountPointReparseBuffer.SubstituteNameLength & 1))
+    {
+        FreePool(ReparseData);
+        *Invalid = TRUE;
+        return STATUS_SUCCESS;
+    }
+
+    /* Create a string with the substitute name (a mount point has no flags before its names, unlike a symbolic link) */
+    SubstituteName.Length = ReparseData->MountPointReparseBuffer.SubstituteNameLength;
     SubstituteName.MaximumLength = SubstituteName.Length;
-    SubstituteName.Buffer = (PWSTR)((ULONG_PTR)ReparseData->SymbolicLinkReparseBuffer.PathBuffer + ReparseData->SymbolicLinkReparseBuffer.SubstituteNameOffset);
+    SubstituteName.Buffer = (PWSTR)((ULONG_PTR)ReparseData->MountPointReparseBuffer.PathBuffer + ReparseData->MountPointReparseBuffer.SubstituteNameOffset);
 
     /* If that's a volume name that matches our associated device, that's a success! */
     if (MOUNTMGR_IS_VOLUME_NAME(&SubstituteName))
     {
         if (SubstituteName.Length == 98 && SubstituteName.Buffer[1] == L'?')
         {
+            /* the mount point names the volume with a closing backslash, the device's link has none */
+            SubstituteName.Length -= sizeof(WCHAR);
             for (SymlinksEntry = DeviceInformation->SymbolicLinksListHead.Flink;
                  SymlinksEntry != &(DeviceInformation->SymbolicLinksListHead);
                  SymlinksEntry = SymlinksEntry->Flink)
