@@ -299,6 +299,7 @@ GetUserNameW(LPWSTR lpszName,
     SID_NAME_USE snu = SidTypeUser;
     WCHAR* domain_name = NULL;
     DWORD dn_len = 0;
+    DWORD dwSavedError = GetLastError();
 
     /* The thread token is opened as the process (OpenAsSelf): the token of an impersonated logon is a copy made
      * by the caller and its DACL does not allow the impersonated user to open it (measured on Windows Server
@@ -394,6 +395,9 @@ GetUserNameW(LPWSTR lpszName,
     LocalFree(domain_name);
     LocalFree(tu_buf);
     *lpSize = an_len + 1;
+
+    /* The failed OpenThreadToken above is part of the normal path: a success leaves the last error as it was */
+    SetLastError(dwSavedError);
     return TRUE;
 }
 
