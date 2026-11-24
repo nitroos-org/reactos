@@ -72,6 +72,9 @@ typedef struct _LOCK_SHARED_RANGE
     PVOID ProcessId;
     /* The file object that took the lock: a lock belongs to a file object (and process and key) */
     PFILE_OBJECT FileObject;
+    /* The range lies inside an exclusive lock of the same owner (Windows grants that shared lock): the table cannot hold
+       a shared range inside an exclusive one, so the range lives in the list only until that exclusive lock is unlocked */
+    BOOLEAN InsideOwnExclusive;
 }
     LOCK_SHARED_RANGE, *PLOCK_SHARED_RANGE;
 
@@ -726,6 +729,7 @@ FsRtlpLockRangeLocked(IN PLOCK_INFORMATION LockInfo,
         NewSharedRange->Key = ToInsert->Exclusive.FileLock.Key;
         NewSharedRange->ProcessId = ToInsert->Exclusive.FileLock.ProcessId;
         NewSharedRange->FileObject = ToInsert->Exclusive.FileLock.FileObject;
+        NewSharedRange->InsideOwnExclusive = FALSE;
     }
 
     Conflict = RtlInsertElementGenericTable(&LockInfo->RangeTable,
@@ -746,6 +750,24 @@ FsRtlpLockRangeLocked(IN PLOCK_INFORMATION LockInfo,
                Conflict->Exclusive.FileLock.EndingByte.QuadPart,
                Conflict->Exclusive.FileLock.ExclusiveLock,
                ExclusiveLock);
+
+        /* A shared lock inside an exclusive lock of the same owner is granted (measured on Windows Server 2022, NTFS);
+           an exclusive lock never is. The table cannot hold it: it is kept in the list of shared ranges alone until the
+           exclusive lock goes (FsRtlpUnlockRangeLocked). Only a range inside one exclusive range is let through. */
+        if (NewSharedRange &&
+            Conflict->Exclusive.FileLock.ExclusiveLock &&
+            Conflict->Exclusive.FileLock.FileObject == ToInsert->Exclusive.FileLock.FileObject &&
+            Conflict->Exclusive.FileLock.ProcessId == ToInsert->Exclusive.FileLock.ProcessId &&
+            Conflict->Exclusive.FileLock.Key == ToInsert->Exclusive.FileLock.Key &&
+            (ULONGLONG)Conflict->Exclusive.FileLock.StartingByte.QuadPart <=
+                (ULONGLONG)ToInsert->Exclusive.FileLock.StartingByte.QuadPart &&
+            (ULONGLONG)ToInsert->Exclusive.FileLock.EndingByte.QuadPart <=
+                (ULONGLONG)Conflict->Exclusive.FileLock.EndingByte.QuadPart)
+        {
+            NewSharedRange->InsideOwnExclusive = TRUE;
+            InsertTailList(&LockInfo->SharedLocks, &NewSharedRange->Entry);
+            return STATUS_SUCCESS;
+        }
 
         MustWait = Conflict->Exclusive.FileLock.ExclusiveLock || ExclusiveLock;
         if (!MustWait)
@@ -890,19 +912,42 @@ FsRtlpUnlockRangeLocked(IN PLOCK_INFORMATION LockInfo,
 
     if (Entry->Exclusive.FileLock.ExclusiveLock)
     {
-        if (Entry->Exclusive.FileLock.Key != Key ||
-            Entry->Exclusive.FileLock.ProcessId != Process ||
-            Entry->Exclusive.FileLock.FileObject != FileObject ||
-            Entry->Exclusive.FileLock.StartingByte.QuadPart != Start ||
-            Entry->Exclusive.FileLock.EndingByte.QuadPart != Start + Length)
+        if (Entry->Exclusive.FileLock.Key == Key &&
+            Entry->Exclusive.FileLock.ProcessId == Process &&
+            Entry->Exclusive.FileLock.FileObject == FileObject &&
+            Entry->Exclusive.FileLock.StartingByte.QuadPart == Start &&
+            Entry->Exclusive.FileLock.EndingByte.QuadPart == Start + Length)
         {
-            DPRINT("Range not locked\n");
-            return STATUS_RANGE_NOT_LOCKED;
+            *Unlocked = *Entry;
+            // Remove the old exclusive lock region
+            RtlDeleteElementGenericTable(&LockInfo->RangeTable, Entry);
+
+            /* The shared locks of its owner that lay inside it were kept in the list only: they stay locked, so
+               they go into the table now */
+            for (SharedEntry = LockInfo->SharedLocks.Flink;
+                 SharedEntry != &LockInfo->SharedLocks;
+                 SharedEntry = SharedEntry->Flink)
+            {
+                COMBINED_LOCK_ELEMENT LockElement;
+                PLOCK_SHARED_RANGE Range = CONTAINING_RECORD(SharedEntry, LOCK_SHARED_RANGE, Entry);
+
+                if (!Range->InsideOwnExclusive ||
+                    (ULONGLONG)Range->Start.QuadPart < (ULONGLONG)Unlocked->Exclusive.FileLock.StartingByte.QuadPart ||
+                    (ULONGLONG)Range->End.QuadPart > (ULONGLONG)Unlocked->Exclusive.FileLock.EndingByte.QuadPart)
+                    continue;
+                FsRtlpInitLockElement(&LockElement,
+                                      Range->FileObject,
+                                      Range->Start.QuadPart,
+                                      Range->End.QuadPart - Range->Start.QuadPart,
+                                      Range->ProcessId,
+                                      Range->Key,
+                                      FALSE);
+                if (FsRtlpRebuildSharedLockRange(LockInfo, &LockElement))
+                    Range->InsideOwnExclusive = FALSE;
+            }
+            return STATUS_SUCCESS;
         }
-        *Unlocked = *Entry;
-        // Remove the old exclusive lock region
-        RtlDeleteElementGenericTable(&LockInfo->RangeTable, Entry);
-        return STATUS_SUCCESS;
+        /* not the exclusive lock itself: it may be a shared lock of its owner inside it (list only, below) */
     }
 
     for (SharedEntry = LockInfo->SharedLocks.Flink;
@@ -1154,8 +1199,14 @@ FsRtlPrivateLock(IN PFILE_LOCK FileLock,
 
     if (UnsignedEnd.QuadPart < UnsignedStart.QuadPart)
     {
+        /* A range that ends beyond the 64-bit offsets: Windows answers ERROR_INVALID_LOCK_RANGE (307). A range that ends
+           exactly at 2^64 (its last byte is the last offset) is valid on Windows (kernel32's LockFile test, NT branch);
+           this package keeps no end that large, so it keeps the status it always gave for it */
         DPRINT("File offset out of range\n");
-        Status = STATUS_INVALID_PARAMETER;
+        if ((ULONGLONG)Length->QuadPart - 1 > ~(ULONGLONG)FileOffset->QuadPart)
+            Status = STATUS_INVALID_LOCK_RANGE;
+        else
+            Status = STATUS_INVALID_PARAMETER;
     }
     else if (!(LockInfo = FsRtlpCreateLockInformation(FileLock)))
     {

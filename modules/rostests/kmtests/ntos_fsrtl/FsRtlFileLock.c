@@ -409,6 +409,78 @@ TestEnumeration(PFILE_OBJECT FileObject)
     FsRtlFreeFileLock(FileLock);
 }
 
+/* A shared lock inside an exclusive lock of the same owner is granted and can be unlocked by its exact range; it stays
+   locked when the exclusive lock goes (measured on Windows Server 2022, NTFS: self-ES rows). Any other overlap with an
+   exclusive lock conflicts. A range that wraps past the 64-bit offsets is STATUS_INVALID_LOCK_RANGE. */
+static
+VOID
+TestSharedInsideOwnExclusive(PFILE_OBJECT FileObject)
+{
+    FILE_LOCK FileLock;
+    TEST_RANGE Excl = { 100, 100, NULL, 0, TRUE };
+    TEST_RANGE Inner = { 120, 10, NULL, 0, FALSE };
+    TEST_RANGE InnerKey = { 120, 10, NULL, 1, FALSE };
+    TEST_RANGE Partial = { 150, 100, NULL, 0, FALSE };
+    TEST_RANGE OtherExcl = { 120, 10, NULL, 0, TRUE };
+    LARGE_INTEGER Offset, Length;
+    IO_STATUS_BLOCK IoStatus;
+    NTSTATUS Status;
+
+    FsRtlInitializeFileLock(&FileLock, NULL, NULL);
+    Excl.Process = ProcessA;
+    Inner.Process = ProcessA;
+    InnerKey.Process = ProcessA;
+    Partial.Process = ProcessA;
+    OtherExcl.Process = ProcessB;
+
+    ok(TakeLock(&FileLock, FileObject, &Excl), "Exclusive lock not granted\n");
+    ok(TakeLock(&FileLock, FileObject, &Inner), "Shared lock inside the owner's exclusive lock not granted\n");
+    ok(!TakeLock(&FileLock, FileObject, &InnerKey), "Shared lock of another key inside an exclusive lock granted\n");
+    ok(!TakeLock(&FileLock, FileObject, &Partial), "Shared lock reaching out of the exclusive lock granted\n");
+    Inner.Process = ProcessB;
+    ok(!TakeLock(&FileLock, FileObject, &Inner), "Shared lock of another process inside an exclusive lock granted\n");
+    Inner.Process = ProcessA;
+
+    Offset.QuadPart = 120;
+    Length.QuadPart = 10;
+    Status = FsRtlFastUnlockSingle(&FileLock, FileObject, &Offset, &Length, ProcessA, 0, NULL, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = FsRtlFastUnlockSingle(&FileLock, FileObject, &Offset, &Length, ProcessA, 0, NULL, FALSE);
+    ok_eq_hex(Status, STATUS_RANGE_NOT_LOCKED);
+
+    /* the shared lock outlives the exclusive lock it was taken inside */
+    ok(TakeLock(&FileLock, FileObject, &Inner), "Shared lock inside the owner's exclusive lock not granted again\n");
+    Offset.QuadPart = 100;
+    Length.QuadPart = 100;
+    Status = FsRtlFastUnlockSingle(&FileLock, FileObject, &Offset, &Length, ProcessA, 0, NULL, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok(!TakeLock(&FileLock, FileObject, &OtherExcl), "Exclusive lock over a shared lock that was inside an exclusive lock granted\n");
+    ok(!CanWrite(&FileLock, FileObject, 125, 1, ProcessB, 0), "Write into the shared range allowed\n");
+    ok(CanWrite(&FileLock, FileObject, 150, 1, ProcessB, 0), "Write outside the shared range refused\n");
+    Offset.QuadPart = 120;
+    Length.QuadPart = 10;
+    Status = FsRtlFastUnlockSingle(&FileLock, FileObject, &Offset, &Length, ProcessA, 0, NULL, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok(TakeLock(&FileLock, FileObject, &OtherExcl), "Exclusive lock refused after the shared lock was unlocked\n");
+
+    /* the shared lock goes with its owner's other locks */
+    FsRtlFastUnlockAll(&FileLock, FileObject, ProcessB, NULL);
+    ok(TakeLock(&FileLock, FileObject, &Excl), "Exclusive lock not granted\n");
+    ok(TakeLock(&FileLock, FileObject, &Inner), "Shared lock inside the owner's exclusive lock not granted\n");
+    Status = FsRtlFastUnlockAll(&FileLock, FileObject, ProcessA, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok(CanWrite(&FileLock, FileObject, 120, 10, ProcessB, 0), "Range still locked after FsRtlFastUnlockAll\n");
+
+    /* a range that wraps */
+    Offset.QuadPart = (LONGLONG)0xFFFFFFFFFFFFFF00ULL;
+    Length.QuadPart = 0x200;
+    IoStatus.Status = STATUS_UNSUCCESSFUL;
+    ok(!FsRtlFastLock(&FileLock, FileObject, &Offset, &Length, ProcessA, 0, TRUE, TRUE, &IoStatus, NULL, FALSE),
+       "Wrapping lock granted\n");
+    ok_eq_hex(IoStatus.Status, STATUS_INVALID_LOCK_RANGE);
+    FsRtlUninitializeFileLock(&FileLock);
+}
+
 START_TEST(FsRtlFileLock)
 {
     PFILE_OBJECT FileObject;
@@ -425,6 +497,7 @@ START_TEST(FsRtlFileLock)
     TestUnlockAllInterleaved(FileObject);
     TestUnlockAllByKey(FileObject);
     TestEnumeration(FileObject);
+    TestSharedInsideOwnExclusive(FileObject);
 
     ExFreePoolWithTag(FileObject, 'kLsF');
 }
