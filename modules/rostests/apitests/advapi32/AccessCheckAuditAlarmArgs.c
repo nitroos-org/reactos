@@ -490,6 +490,92 @@ static void NoLeaks(void)
        HandlesAfter);
 }
 
+/* Rows measured on Windows Server 2022 where the services used to answer otherwise */
+static void WindowsRows(void)
+{
+    static const ULONG Counts[] = { 0x10000000, 0x20000000, 0xffffffff };
+    ARGS Args;
+    int Form;
+    ULONG i;
+    UNICODE_STRING BadString;
+    PUCHAR Big;
+    PACCESS_MASK Odd;
+    ACCESS_MASK Value;
+    NTSTATUS Result, Expected;
+    BOOL Wow64 = FALSE;
+
+    IsWow64Process(GetCurrentProcess(), &Wow64);
+    Big = VirtualAlloc(NULL, 0x10000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!Big)
+    {
+        skip("no memory\n");
+        return;
+    }
+
+    for (Form = FORM_BYTYPE; Form < FORM_COUNT; Form++)
+    {
+        /* Name arguments: an odd length, a length and maximum length of 0xfffe, a NULL buffer with a length */
+        BadString.Buffer = (PWSTR)Big;
+        BadString.Length = 3;
+        BadString.MaximumLength = 4;
+        Defaults(&Args);
+        Args.Name = &BadString;
+        EXPECT_FAILURE(Form, &Args, STATUS_INVALID_PARAMETER, "odd object name length");
+        Args.Name = &Name;
+        Args.Subsystem = &BadString;
+        EXPECT_FAILURE(Form, &Args, STATUS_INVALID_PARAMETER, "odd subsystem name length");
+
+        BadString.Length = 0xfffe;
+        BadString.MaximumLength = 0xfffe;
+        Defaults(&Args);
+        Args.TypeName = &BadString;
+        EXPECT_FAILURE(Form, &Args, STATUS_INVALID_PARAMETER, "type name length and maximum length 0xfffe");
+
+        BadString.Buffer = NULL;
+        BadString.Length = 10;
+        BadString.MaximumLength = 10;
+        Defaults(&Args);
+        Args.Name = &BadString;
+        EXPECT_FAILURE(Form, &Args, STATUS_ACCESS_VIOLATION, "NULL object name buffer with a length");
+    }
+
+    /* A misaligned GrantedAccess of the single result forms is written */
+    Odd = (PACCESS_MASK)((PUCHAR)Granted + 1);
+    Defaults(&Args);
+    Args.Granted = Odd;
+    Result = Call(FORM_BYTYPE, &Args);
+    ok(Result == STATUS_SUCCESS, "ByType misaligned GrantedAccess: 0x%08lx\n", Result);
+    CopyMemory(&Value, Odd, sizeof(Value));
+    ok(Value == R1 && Status[0] == STATUS_SUCCESS, "ByType misaligned GrantedAccess: 0x%lx 0x%lx\n", Value, Status[0]);
+    /* (the form without Flags stops at the audit privilege, not at the alignment) */
+    Defaults(&Args);
+    Args.Granted = Odd;
+    EXPECT_FAILURE(FORM_AND, &Args, STATUS_PRIVILEGE_NOT_HELD, "misaligned GrantedAccess without SeAuditPrivilege");
+
+    /* Object type list counts far beyond the list (two good entries, then the inaccessible page) */
+    for (i = 0; i < _countof(Counts); i++)
+    {
+        POBJECT_TYPE_LIST List = (POBJECT_TYPE_LIST)(NoAccess - 2 * sizeof(OBJECT_TYPE_LIST));
+        char What[64];
+
+        List[0] = GoodList[0];
+        List[1] = GoodList[1];
+        Defaults(&Args);
+        Args.List = List;
+        Args.Count = Counts[i];
+#ifdef _WIN64
+        Expected = STATUS_ACCESS_VIOLATION;
+#else
+        /* (under WoW64 the thunk reads the list first) */
+        Expected = Wow64 ? 0 : STATUS_NO_MEMORY;
+#endif
+        StringCbPrintfA(What, sizeof(What), "list count 0x%lx", Counts[i]);
+        EXPECT_FAILURE(FORM_BYTYPE, &Args, Expected, What);
+    }
+
+    VirtualFree(Big, 0, MEM_RELEASE);
+}
+
 START_TEST(AccessCheckAuditAlarmArgs)
 {
     if (!Setup())
@@ -501,6 +587,7 @@ START_TEST(AccessCheckAuditAlarmArgs)
     GoodCalls();
     OutputPointers();
     InputArguments();
+    WindowsRows();
     TokenHandles();
     NoLeaks();
 
