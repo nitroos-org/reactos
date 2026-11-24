@@ -128,6 +128,7 @@ typedef struct _MUP_MQC
     NTSTATUS LatestStatus;
     LIST_ENTRY QueryPathList;
     LIST_ENTRY MQCListEntry;
+    ULONG CancelSeq;            /* identifies this search for a cancel of its IRP (MupCancelCreate) */
 } MUP_MQC, *PMUP_MQC;
 
 typedef struct _FORWARDED_IO_CONTEXT

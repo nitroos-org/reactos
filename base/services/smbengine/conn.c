@@ -39,6 +39,12 @@
 #define DATA_OFFSET ALIGN8(sizeof(SMBUP_HEADER) + sizeof(SMBUP_DATA_REPLY))
 #define MAX_IN_FLIGHT 64
 
+/* SMB2_LOCK_ELEMENT Flags ([MS-SMB2] 2.2.26.1; libsmb2 has no names for them) */
+#define SMB2_LOCKFLAG_SHARED_LOCK       0x00000001
+#define SMB2_LOCKFLAG_EXCLUSIVE_LOCK    0x00000002
+#define SMB2_LOCKFLAG_UNLOCK            0x00000004
+#define SMB2_LOCKFLAG_FAIL_IMMEDIATELY  0x00000010
+
 static VOID ConnTake(PSMBENG_CONN Conn, PSMBENG_OP Op, BOOLEAN FromBacklog);
 static VOID OpCb(struct smb2_context *smb2, int status, void *command_data, void *private_data);
 
@@ -72,10 +78,12 @@ SmbEngMapStatus(USHORT Opcode, uint32_t Status)
         case (uint32_t)STATUS_MORE_PROCESSING_REQUIRED:
         case (uint32_t)STATUS_CANT_WAIT:
         case (uint32_t)STATUS_CONNECTION_ACTIVE:
-        case (uint32_t)STATUS_LOCK_NOT_GRANTED:
         case (uint32_t)STATUS_PENDING:
         case (uint32_t)STATUS_REPARSE:
             return STATUS_UNEXPECTED_NETWORK_ERROR;
+        case (uint32_t)STATUS_LOCK_NOT_GRANTED:
+            /* The answer to a LOCK; from any other request an instruction to rdbss */
+            return Opcode == SmbUpLock ? STATUS_LOCK_NOT_GRANTED : STATUS_UNEXPECTED_NETWORK_ERROR;
     }
     if ((Status & 0xC0000000) == 0xC0000000)
         return (NTSTATUS)Status;
@@ -86,6 +94,8 @@ SmbEngMapStatus(USHORT Opcode, uint32_t Status)
     }
     if (Status == (uint32_t)STATUS_NO_MORE_FILES && Opcode == SmbUpQueryDirectory)
         return STATUS_NO_MORE_FILES;
+    if ((Status == (uint32_t)STATUS_NOTIFY_ENUM_DIR || Status == (uint32_t)STATUS_NOTIFY_CLEANUP) && Opcode == SmbUpNotify)
+        return (NTSTATUS)Status;
     return STATUS_UNEXPECTED_NETWORK_ERROR;
 }
 
@@ -195,6 +205,49 @@ CloseOrphan(PSMBENG_CONN Conn, PSMBENG_FILE File)
     Conn->InFlightCount++;
 }
 
+/*
+ * Releases a range the server granted after the driver gave up on the lock (cancelled, the reply not
+ * taken): nobody holds it, and it would refuse other opens' locks until the handle is closed. No
+ * reply; on the same libsmb2 context, so it goes out before any later CLOSE of the file.
+ */
+static
+VOID
+UnlockOrphan(PSMBENG_CONN Conn, ULONGLONG FileId, ULONGLONG BindingId, ULONGLONG Offset, ULONGLONG Length)
+{
+    struct smb2_lock_request req;
+    struct smb2_lock_element el;
+    PSMBENG_FILE File = FileId != 0 ? *FileSlot(Conn, FileId) : NULL;
+    PSMBENG_OP Op;
+    struct smb2_pdu *pdu;
+
+    /* Closed meanwhile (the server dropped its locks with it), or of another session */
+    if (File == NULL || File->BindingId != BindingId || !FileIsLive(Conn, File) || (Op = calloc(1, sizeof(*Op))) == NULL)
+        return;
+    InterlockedIncrement(&SmbEng.OpsLive);
+    Op->Conn = Conn;
+    Op->Opcode = SmbUpLock;
+    Op->Internal = TRUE;
+    memset(&req, 0, sizeof(req));
+    memset(&el, 0, sizeof(el));
+    el.offset = Offset;
+    el.length = Length;
+    el.flags = SMB2_LOCKFLAG_UNLOCK;
+    req.lock_count = 1;
+    req.locks = &el;
+    memcpy(req.file_id, File->FileId, SMB2_FD_SIZE);
+    pdu = smb2_cmd_lock_async(Conn->Smb2, &req, OpCb, Op);
+    if (pdu == NULL)
+    {
+        SmbEngFreeOp(Op);
+        return;
+    }
+    SmbEngLog(1, "lock granted after the driver gave up: released again");
+    smb2_queue_pdu(Conn->Smb2, pdu);
+    Op->Pdu = pdu;
+    InsertTailList(&Conn->InFlight, &Op->Link);
+    Conn->InFlightCount++;
+}
+
 /* Replies *******************************************************************/
 
 /* The error answer of a request; a CONNECT that fails leaves no binding behind */
@@ -240,6 +293,16 @@ SendBuiltReply(PSMBENG_CONN Conn, PSMBENG_OP Op, NTSTATUS Status)
         else if (Op->Opcode == SmbUpConnect)
         {
             SmbEngRemoveBinding(Op->BindingId, Op);
+        }
+        else if (Op->Opcode == SmbUpLock)
+        {
+            /* A lock the driver no longer waits for (cancelled, or its handle cleaned up) */
+            PSMBUP_LOCK_REQUEST Req = (PSMBUP_LOCK_REQUEST)(Op->Request + 1);
+
+            /* By the driver's id, not Op->File: a CLOSE of the file may have been answered (and the
+             * file freed) before this reply came */
+            if (!(Req->Flags & SMBUP_LOCK_UNLOCK))
+                UnlockOrphan(Conn, Req->FileId, Op->BindingId, Req->Offset, Req->Length);
         }
     }
     SmbEngFreeOp(Op);
@@ -335,6 +398,13 @@ ConnectFailed(PSMBENG_CONN Conn, NTSTATUS Status, ULONG Win32)
         return;
     }
     Conn->State = ConnDown;
+    /* Abandoned because nobody waited for it any more: not a failure of the server (no back-off, the
+     * next request connects at once); a request that came meanwhile gets a new connect */
+    if (Status == STATUS_CANCELLED)
+    {
+        Conn->QuickRetries = 0;
+        return;
+    }
     /* A connect refused at once as unreachable (seen for the first connects after boot, while
      * the stack resolves the neighbour) is tried again shortly, before the waiting requests fail */
     /* Only for a server that did not answer: a share the server refused (STATUS_BAD_NETWORK_NAME,
@@ -691,7 +761,10 @@ Track(PSMBENG_CONN Conn, PSMBENG_OP Op, struct smb2_pdu *pdu)
     smb2_queue_pdu(Conn->Smb2, pdu);
     Op->Pdu = pdu;
     InsertTailList(&Conn->InFlight, &Op->Link);
-    Conn->InFlightCount++;
+    if (Op->LongWait)
+        Conn->LongCount++;
+    else
+        Conn->InFlightCount++;
     Conn->LastActivity = GetTickCount();
     return TRUE;
 }
@@ -1047,6 +1120,96 @@ IssueHandleOp(PSMBENG_CONN Conn, PSMBENG_OP Op)
             return;
         }
 
+        case SmbUpLock:
+        {
+            PSMBUP_LOCK_REQUEST r = (PSMBUP_LOCK_REQUEST)(h + 1);
+            ULONG Kind = r->Flags & (SMBUP_LOCK_SHARED | SMBUP_LOCK_EXCLUSIVE | SMBUP_LOCK_UNLOCK);
+            struct smb2_lock_request req;
+            struct smb2_lock_element el;
+            struct smb2_pdu *pdu;
+
+            /* Exactly one kind; FAIL_IMMEDIATELY only with a lock; nothing else ([MS-SMB2] 3.2.4.19 sends
+             * these combinations only) */
+            if ((Kind != SMBUP_LOCK_SHARED && Kind != SMBUP_LOCK_EXCLUSIVE && Kind != SMBUP_LOCK_UNLOCK) ||
+                (r->Flags & ~(Kind | SMBUP_LOCK_FAIL_IMMEDIATELY)) != 0 ||
+                (Kind == SMBUP_LOCK_UNLOCK && (r->Flags & SMBUP_LOCK_FAIL_IMMEDIATELY)))
+            {
+                FailOp(Conn, Op, STATUS_INVALID_PARAMETER);
+                return;
+            }
+            memset(&el, 0, sizeof(el));
+            el.offset = r->Offset;
+            el.length = r->Length;
+            el.flags = (Kind == SMBUP_LOCK_SHARED ? SMB2_LOCKFLAG_SHARED_LOCK :
+                        Kind == SMBUP_LOCK_EXCLUSIVE ? SMB2_LOCKFLAG_EXCLUSIVE_LOCK : SMB2_LOCKFLAG_UNLOCK) |
+                       ((r->Flags & SMBUP_LOCK_FAIL_IMMEDIATELY) ? SMB2_LOCKFLAG_FAIL_IMMEDIATELY : 0);
+            memset(&req, 0, sizeof(req));
+            req.lock_count = 1;
+            req.locks = &el;
+            memcpy(req.file_id, File->FileId, SMB2_FD_SIZE);
+
+            /* A lock that waits for another open's range has no time limit (the driver cancels it when
+             * its caller gives up): libsmb2's per-request limit is off for this one request */
+            if (Kind != SMBUP_LOCK_UNLOCK && !(r->Flags & SMBUP_LOCK_FAIL_IMMEDIATELY))
+            {
+                if (Conn->LongCount >= SMBENG_MAX_LONG_PER_CONN)
+                {
+                    FailOp(Conn, Op, STATUS_INSUFFICIENT_RESOURCES);
+                    return;
+                }
+                Op->LongWait = TRUE;
+                smb2_set_timeout(Conn->Smb2, 0);
+                pdu = smb2_cmd_lock_async(Conn->Smb2, &req, OpCb, Op);
+                smb2_set_timeout(Conn->Smb2, (int)SmbEngConfig.RequestTimeoutSeconds);
+            }
+            else
+            {
+                pdu = smb2_cmd_lock_async(Conn->Smb2, &req, OpCb, Op);
+            }
+            SmbEngLog(2, "request %I64u lock %08lx offset %I64u length %I64u", h->RequestId, r->Flags, r->Offset, r->Length);
+            Track(Conn, Op, pdu);
+            return;
+        }
+
+        case SmbUpNotify:
+        {
+            PSMBUP_NOTIFY_REQUEST r = (PSMBUP_NOTIFY_REQUEST)(h + 1);
+            struct smb2_change_notify_request req;
+            struct smb2_pdu *pdu;
+
+            if (r->OutputLength > SMBUP_MAX_INFO || (r->Flags & ~SMBUP_NOTIFY_WATCH_TREE) != 0)
+            {
+                FailOp(Conn, Op, STATUS_INVALID_PARAMETER);
+                return;
+            }
+            if (Conn->LongCount >= SMBENG_MAX_LONG_PER_CONN)
+            {
+                FailOp(Conn, Op, STATUS_INSUFFICIENT_RESOURCES);
+                return;
+            }
+            if (!AllocReply(Op, DATA_OFFSET + r->OutputLength))
+            {
+                FailOp(Conn, Op, STATUS_INSUFFICIENT_RESOURCES);
+                return;
+            }
+            Op->DataOffset = DATA_OFFSET;
+            Op->DataMax = r->OutputLength;
+            memset(&req, 0, sizeof(req));
+            req.flags = (r->Flags & SMBUP_NOTIFY_WATCH_TREE) ? SMB2_CHANGE_NOTIFY_WATCH_TREE : 0;
+            req.output_buffer_length = r->OutputLength;
+            req.completion_filter = r->CompletionFilter;
+            memcpy(req.file_id, File->FileId, SMB2_FD_SIZE);
+            /* Waits at the server until something changes: no time limit (the driver cancels it) */
+            Op->LongWait = TRUE;
+            smb2_set_timeout(Conn->Smb2, 0);
+            pdu = smb2_cmd_change_notify_async(Conn->Smb2, &req, OpCb, Op);
+            smb2_set_timeout(Conn->Smb2, (int)SmbEngConfig.RequestTimeoutSeconds);
+            SmbEngLog(2, "request %I64u notify filter %08lx flags %lx length %lu", h->RequestId, r->CompletionFilter,
+                      r->Flags, r->OutputLength);
+            Track(Conn, Op, pdu);
+            return;
+        }
+
         default:
             FailOp(Conn, Op, STATUS_NOT_SUPPORTED);
             return;
@@ -1283,7 +1446,10 @@ OpCb(struct smb2_context *smb2, int status, void *command_data, void *private_da
         return;
 
     RemoveEntryList(&Op->Link);
-    Conn->InFlightCount--;
+    if (Op->LongWait)
+        Conn->LongCount--;
+    else
+        Conn->InFlightCount--;
     Op->Pdu = NULL;
     Conn->LastActivity = GetTickCount();
 
@@ -1450,6 +1616,34 @@ OpCb(struct smb2_context *smb2, int status, void *command_data, void *private_da
             break;
         }
 
+        case SmbUpNotify:
+        {
+            const struct smb2_change_notify_reply *nr = command_data;
+
+            /* "Enumerate again" (and the server's own cleanup) carry no entries */
+            if (Status == STATUS_NOTIFY_ENUM_DIR || Status == STATUS_NOTIFY_CLEANUP)
+            {
+                Data->Length = 0;
+                Data->DataOffset = 0;
+                break;
+            }
+            if (!NT_SUCCESS(Status))
+                break;
+            /* The entries as the server sent them, at most what was asked for; the driver checks the chain */
+            if (nr == NULL || nr->output_buffer_length > Op->DataMax ||
+                (nr->output == NULL && nr->output_buffer_length != 0))
+            {
+                Status = STATUS_INVALID_NETWORK_RESPONSE;
+                break;
+            }
+            if (nr->output_buffer_length)
+                memcpy(Op->Reply + Op->DataOffset, nr->output, nr->output_buffer_length);
+            Data->Length = nr->output_buffer_length;
+            Data->DataOffset = Op->DataOffset;
+            Op->ReplySize = Op->DataOffset + Data->Length;
+            break;
+        }
+
         default:
             break;
     }
@@ -1533,6 +1727,15 @@ ConnTake(PSMBENG_CONN Conn, PSMBENG_OP Op, BOOLEAN FromBacklog)
                 if (Target->Opcode == SmbUpConnect)
                     SmbEngRemoveBinding(Target->BindingId, Target);
                 SmbEngFreeOp(Target);
+                /* The last request that waited for a connect in progress was given up (a UNC open
+                 * cancelled): the connect is abandoned, without a back-off, so that it neither keeps
+                 * a socket to a server that does not answer nor holds up the next open */
+                if (Conn->State == ConnConnecting && IsListEmpty(&Conn->Pending))
+                {
+                    SmbEngLog(1, "connect %S\\%S logon %08lx:%08lx abandoned: nobody waits for it",
+                              Conn->Server, Conn->Share, Conn->LogonId.HighPart, Conn->LogonId.LowPart);
+                    TearDown(Conn, STATUS_CANCELLED, ERROR_OPERATION_ABORTED);
+                }
                 return;
             }
             /* At the server: ask it to give up (its reply still comes, and is dropped by the driver) */
@@ -1562,7 +1765,8 @@ ConnTake(PSMBENG_CONN Conn, PSMBENG_OP Op, BOOLEAN FromBacklog)
             }
             /* A new identity or password for this key: a new session, not the old one (only while
              * no file of the key is open: those belong to the old session) */
-            if (Conn->Reauth && Conn->State == ConnUp && Conn->FileCount == 0 && Conn->InFlightCount == 0)
+            if (Conn->Reauth && Conn->State == ConnUp && Conn->FileCount == 0 && Conn->InFlightCount == 0 &&
+                Conn->LongCount == 0)
             {
                 InterlockedExchange(&Conn->Reauth, 0);
                 TearDown(Conn, STATUS_SUCCESS, 0);
@@ -1672,7 +1876,8 @@ TryLeave(PSMBENG_CONN Conn, BOOLEAN Stop)
     BOOLEAN Empty;
     ULONG i;
 
-    if (!Stop && (!IsListEmpty(&Conn->Pending) || !IsListEmpty(&Conn->Backlog) || Conn->InFlightCount != 0))
+    if (!Stop && (!IsListEmpty(&Conn->Pending) || !IsListEmpty(&Conn->Backlog) || Conn->InFlightCount != 0 ||
+                  Conn->LongCount != 0))
         return FALSE;
 
     AcquireSRWLockExclusive(&SmbEng.Lock);
@@ -1890,14 +2095,23 @@ ConnThread(LPVOID Parameter)
             TimeReached(Now, Conn->ConnectStart,
                         min(SmbEngConfig.RequestTimeoutSeconds, SMBENG_CONNECT_SECONDS) * 1000))
         {
-            TearDown(Conn, STATUS_BAD_NETWORK_PATH, ERROR_BAD_NETPATH);
+            struct nitro_smb2_auth_info Info;
+
+            /* A server that took the TCP connection and then did not answer: the time-out (Windows Server
+             * 2022 as a client: error 121 after 20.7 s); one that never answered the TCP connect: no path */
+            memset(&Info, 0, sizeof(Info));
+            Info.size = sizeof(Info);
+            if (Conn->Smb2 != NULL && NitroSmb2GetAuthInfo(Conn->Smb2, &Info) == 0 && Info.tcp_connected)
+                TearDown(Conn, STATUS_IO_TIMEOUT, ERROR_SEM_TIMEOUT);
+            else
+                TearDown(Conn, STATUS_BAD_NETWORK_PATH, ERROR_BAD_NETPATH);
         }
 
         /* Idle: no open file, nothing at the server, nothing waiting. A key with explicit
          * credentials that the driver no longer holds (net use /delete, the last use gone) is not
          * kept for the idle time: its session, the credentials acquired for it and its password
          * go now (FreeConn wipes them when the key leaves below) */
-        if (Conn->State == ConnUp && Conn->FileCount == 0 && Conn->InFlightCount == 0 &&
+        if (Conn->State == ConnUp && Conn->FileCount == 0 && Conn->InFlightCount == 0 && Conn->LongCount == 0 &&
             IsListEmpty(&Conn->Pending) && IsListEmpty(&Conn->Backlog) &&
             (TimeReached(Now, Conn->LastActivity, SmbEngConfig.IdleSeconds * 1000) ||
              (Conn->Explicit && *(volatile LONG *)&Conn->Bindings == 0)))

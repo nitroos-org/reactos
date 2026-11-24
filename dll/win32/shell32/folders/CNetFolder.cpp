@@ -41,6 +41,26 @@ LPITEMIDLIST ILCreateFromNetworkPlaceW(LPCWSTR lpNetworkPlace)
 
     return pidl;
 }
+
+/* The UNC path of such an item, without a trailing backslash; FALSE for an item that is not one */
+static BOOL NetPlaceItemPath(PCUIDLIST_RELATIVE pidl, LPWSTR pszPath, SIZE_T cchPath)
+{
+    SIZE_T cch, i;
+    const WCHAR *psz;
+
+    if (!pidl || pidl->mkid.cb < sizeof(WORD) + 2 * sizeof(WCHAR))
+        return FALSE;
+    cch = (pidl->mkid.cb - sizeof(WORD)) / sizeof(WCHAR);
+    psz = (const WCHAR *)pidl->mkid.abID;
+    for (i = 0; i < cch && psz[i] != UNICODE_NULL; i++)
+        ;
+    if (i == cch || i >= cchPath)
+        return FALSE;
+    CopyMemory(pszPath, psz, i * sizeof(WCHAR));
+    pszPath[i] = UNICODE_NULL;
+    PathRemoveBackslashW(pszPath);
+    return TRUE;
+}
 #endif
 
 /***********************************************************************
@@ -331,7 +351,21 @@ HRESULT WINAPI CNetFolder::BindToStorage(PCUIDLIST_RELATIVE pidl, LPBC pbcReserv
 
 HRESULT WINAPI CNetFolder::CompareIDs(LPARAM lParam, PCUIDLIST_RELATIVE pidl1, PCUIDLIST_RELATIVE pidl2)
 {
+#ifdef HACKY_UNC_PATHS
+    /* An item is a UNC path: the same place whatever its case and a trailing backslash (a window opened on
+     * \\server\share\dir\ is the parent of the items of \\server\share\dir, which change notifications name) */
+    WCHAR szPath1[MAX_PATH], szPath2[MAX_PATH];
+    int iResult;
+
+    if (!NetPlaceItemPath(pidl1, szPath1, _countof(szPath1)) || !NetPlaceItemPath(pidl2, szPath2, _countof(szPath2)))
+        return E_INVALIDARG;
+    iResult = _wcsicmp(szPath1, szPath2);
+    if (iResult != 0)
+        return MAKE_COMPARE_HRESULT(iResult);
+    return SHELL32_CompareChildren(this, lParam, pidl1, pidl2);
+#else
     return E_NOTIMPL;
+#endif
 }
 
 /**************************************************************************

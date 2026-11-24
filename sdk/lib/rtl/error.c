@@ -32,7 +32,7 @@ struct error_table
     const DWORD *table;
 };
 
-static const struct error_table error_table[22];
+static const struct error_table error_table[23];
 
 /**************************************************************************
  *           RtlNtStatusToDosErrorNoTeb (NTDLL.@)
@@ -875,6 +875,11 @@ static const DWORD table_c0000001[411] =
    ERROR_DOMAIN_TRUST_INCONSISTENT         /* c000019b (STATUS_DOMAIN_TRUST_INCONSISTENT) */
 };
 
+static const DWORD table_c00001a1[1] =
+{
+   ERROR_INVALID_LOCK_RANGE,               /* c00001a1 (STATUS_INVALID_LOCK_RANGE) */
+};
+
 static const DWORD table_c00001ac[1] =
 {
    ERROR_NOT_SAME_OBJECT,                  /* c00001ac (STATUS_NOT_SAME_OBJECT) */
@@ -1558,6 +1563,7 @@ static const struct error_table error_table[] =
     { 0x80096004, 0x80096005, table_80096004 },
     { 0x80130001, 0x80130006, table_80130001 },
     { 0xc0000001, 0xc000019c, table_c0000001 },
+    { 0xc00001a1, 0xc00001a2, table_c00001a1 },
     { 0xc00001ac, 0xc00001ad, table_c00001ac },
     { 0xc0000202, 0xc000038e, table_c0000202 },
     { 0xc0000446, 0xc0000447, table_c0000446 },

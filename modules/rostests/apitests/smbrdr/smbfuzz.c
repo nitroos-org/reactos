@@ -105,7 +105,9 @@ static const NTSTATUS SpecialStatus[] = {
     STATUS_CANT_WAIT, STATUS_LOCK_NOT_GRANTED, STATUS_BUFFER_OVERFLOW, STATUS_NO_MORE_FILES,
     STATUS_NOT_FOUND, STATUS_ACCESS_VIOLATION, STATUS_SUCCESS, (NTSTATUS)0x40000000, (NTSTATUS)0x80000001,
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SHARING_VIOLATION, STATUS_END_OF_FILE, STATUS_BUFFER_TOO_SMALL,
-    STATUS_INVALID_PARAMETER, STATUS_NETWORK_CREDENTIAL_CONFLICT, STATUS_STACK_OVERFLOW, STATUS_OPLOCK_BREAK_IN_PROGRESS
+    STATUS_INVALID_PARAMETER, STATUS_NETWORK_CREDENTIAL_CONFLICT, STATUS_STACK_OVERFLOW, STATUS_OPLOCK_BREAK_IN_PROGRESS,
+    STATUS_FILE_LOCK_CONFLICT, STATUS_RANGE_NOT_LOCKED, STATUS_CANCELLED, STATUS_INVALID_LOCK_RANGE,
+    STATUS_NOTIFY_ENUM_DIR, STATUS_NOTIFY_CLEANUP
 };
 
 /* Token checks on a CONNECT ************************************************/
@@ -547,8 +549,30 @@ static ULONG answer(const SMBUP_HEADER *h, UCHAR *rb, BOOL *dirlisting)
             *dirlisting = (n != 0);
             break;
         }
+        case SmbUpNotify:
+        {
+            /* one change: "n.txt" added (the chain mutations of the hostile mode apply to it) */
+            const SMBUP_NOTIFY_REQUEST *q = (const void *)(h + 1);
+            FILE_NOTIFY_INFORMATION *f = (FILE_NOTIFY_INFORMATION *)data;
+            ULONG n = FIELD_OFFSET(FILE_NOTIFY_INFORMATION, FileName) + 10;
+
+            if (q->OutputLength < n)
+            {
+                r->Status = STATUS_NOTIFY_ENUM_DIR;
+                break;
+            }
+            f->NextEntryOffset = 0;
+            f->Action = FILE_ACTION_ADDED;
+            f->FileNameLength = 10;
+            memcpy(f->FileName, L"n.txt", 10);
+            dr->Length = n;
+            dr->DataOffset = sizeof(SMBUP_HEADER) + sizeof(SMBUP_DATA_REPLY);
+            total += n;
+            *dirlisting = TRUE;
+            break;
+        }
         default:
-            /* DISCONNECT, CLOSE, FLUSH, SET_INFO, RENAME: done */
+            /* DISCONNECT, CLOSE, FLUSH, SET_INFO, RENAME, LOCK: done */
             break;
     }
     r->TotalSize = total;
@@ -879,8 +903,11 @@ int wmain(int argc, WCHAR **argv)
         CloseHandle(CreateThread(NULL, 0, worker, (LPVOID)0, 0, NULL));
         Sleep(opt.seconds * 1000);
         summary();
-        CloseHandle(Dev);
-        return 0;
+        /* Not CloseHandle(Dev): the device is open for synchronous I/O, and the workers' GETs hold its file object
+         * lock while they wait, so the close would wait for them and they for the detach the close does (the tool
+         * hung for good). Exiting ends the workers first; the handle is closed after them. */
+        fflush(stdout);
+        ExitProcess(0);
     }
     worker(NULL);
     return 0;

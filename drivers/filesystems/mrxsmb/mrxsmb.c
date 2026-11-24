@@ -1934,17 +1934,377 @@ SmbDeallocateForFobx(PMRX_FOBX Fobx)
     return STATUS_SUCCESS;
 }
 
+/*
+ * Byte-range locks go to the server (SMB2 LOCK, one range per request); rdbss keeps the granted ones
+ * in the FCB's FILE_LOCK too, so that reads and writes of other handles of this computer are checked
+ * against them locally, and the server checks those of other computers. A range the local FILE_LOCK
+ * cannot hold (its end beyond 2^64) is refused before the server is asked (a lock the server granted
+ * that rdbss then could not record would stay held at the server), with STATUS_INVALID_LOCK_RANGE:
+ * Windows Server 2022 as a client refuses it so (error 307) against Samba and Windows alike.
+ */
 static
 NTSTATUS
 NTAPI
 SmbIsLockRealizable(PMRX_FCB Fcb, PLARGE_INTEGER ByteOffset, PLARGE_INTEGER Length, ULONG LowIoLockFlags)
 {
     UNREFERENCED_PARAMETER(Fcb);
-    UNREFERENCED_PARAMETER(ByteOffset);
-    UNREFERENCED_PARAMETER(Length);
     UNREFERENCED_PARAMETER(LowIoLockFlags);
-    /* M1: byte-range locks are not sent to the server */
-    return STATUS_NOT_SUPPORTED;
+
+    if ((ULONGLONG)ByteOffset->QuadPart + (ULONGLONG)Length->QuadPart < (ULONGLONG)ByteOffset->QuadPart)
+        return STATUS_INVALID_LOCK_RANGE;
+    return STATUS_SUCCESS;
+}
+
+/* RxContext->MRxContext of a lock request the server has: its request id, for the cancel routine */
+#define SmbLockRequestId(RxContext) (*(ULONGLONG UNALIGNED *)&(RxContext)->MRxContext[0])
+
+/* A lock request's answer as the caller gets it: the server's (STATUS_LOCK_NOT_GRANTED and
+ * STATUS_FILE_LOCK_CONFLICT are both ERROR_LOCK_VIOLATION for LockFileEx), or the exchange's */
+static
+NTSTATUS
+SmbLockStatus(PSMB_REQUEST Request)
+{
+    return SmbReplyStatus(Request, 0, NULL, NULL);
+}
+
+/* An asynchronous lock request ended (answered, cancelled, or the engine went) */
+static
+VOID
+SmbLockCompletion(PSMB_REQUEST Request)
+{
+    PRX_CONTEXT RxContext = Request->CompletionContext;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    /* No cancel any more: the request is gone (a cancel routine running now finds no request by the id) */
+    RxSetMinirdrCancelRoutine(RxContext, NULL);
+    Status = SmbLockStatus(Request);
+    SmbReleaseRequest(Request);
+
+    RxContext->IoStatusBlock.Status = Status;
+    RxContext->IoStatusBlock.Information = 0;
+    RxLowIoCompletion(RxContext);
+}
+
+/* How long a cancelled lock waits for the server's answer to the cancel before it ends anyway */
+#define SMB_LOCK_CANCEL_GRACE_SECONDS 10
+
+/* rdbss's cancel of a pended lock request (CancelIo, CancelSynchronousIo, the cleanup of its handle, the
+ * end of its thread): the server answers it (SmbCancelRequestGracefully), so that the caller never sees a
+ * cancelled lock that the server still holds */
+static
+NTSTATUS
+NTAPI
+SmbLockCancel(PRX_CONTEXT RxContext)
+{
+    PAGED_CODE();
+
+    SmbCancelRequestGracefully(SmbLockRequestId(RxContext), SMB_LOCK_CANCEL_GRACE_SECONDS);
+    return STATUS_SUCCESS;
+}
+
+/*
+ * One range to the server. Flags: SMBUP_LOCK_*. A request rdbss sends asynchronously (an overlapped
+ * handle's, and every lock that may wait at the server: rdbss posts those of synchronous callers too)
+ * is pended: rdbss gets STATUS_PENDING, a cancel routine is set, and the reply completes it
+ * (SmbLockCompletion); it has no time limit (the engine gives a waiting lock none either). The others
+ * wait here with the request time limit. Irp: the caller's IRP (NULL for the unlocks of a cleanup,
+ * which must not be given up).
+ */
+static
+NTSTATUS
+SmbSendLock(PRX_CONTEXT RxContext, ULONG Flags, LONGLONG Offset, LONGLONG Length, PIRP Irp, BOOLEAN Async)
+{
+    PSMBUP_LOCK_REQUEST Fixed;
+    PSMB_SRVOPEN Handle;
+    PSMB_REQUEST Request;
+    PMRX_V_NET_ROOT VNetRoot;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    Status = SmbGetHandle(RxContext->pRelevantSrvOpen, &Handle);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    VNetRoot = RxContext->pRelevantSrvOpen->pVNetRoot;
+    Status = SmbAllocateRequestForIrp(SmbUpLock, 0, &VNetRoot->LogonId, Irp, &Request);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Request->Irp = Irp;
+    Fixed = SmbRequestFixed(Request);
+    Fixed->ConnectionId = Handle->ConnectionId;
+    Fixed->FileId = Handle->FileId;
+    Fixed->Offset = (ULONGLONG)Offset;
+    Fixed->Length = (ULONGLONG)Length;
+    Fixed->Flags = Flags;
+
+    if (Async)
+    {
+        /* The id first: the cancel routine finds the request by it, from the moment it is set */
+        SmbLockRequestId(RxContext) = SmbAssignRequestId(Request);
+        if (!NT_SUCCESS(RxSetMinirdrCancelRoutine(RxContext, SmbLockCancel)))
+        {
+            /* Cancelled already */
+            SmbReleaseRequest(Request);
+            return STATUS_CANCELLED;
+        }
+
+        /* The request may end (and rdbss free the context) as soon as it is sent: keep the context
+         * until the check below, which catches a cancel that came after the routine was set but
+         * before the request could be found by its id */
+        InterlockedIncrement((volatile long *)&RxContext->ReferenceCount);
+        Status = SmbSendRequestAsync(Request, SmbLockCompletion, RxContext);
+        if (Status != STATUS_PENDING)
+        {
+            RxSetMinirdrCancelRoutine(RxContext, NULL);
+            SmbReleaseRequest(Request);
+        }
+        else if (BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_CANCELLED))
+        {
+            SmbCancelRequestById(SmbLockRequestId(RxContext));
+        }
+        RxDereferenceAndDeleteRxContext(RxContext);
+        return Status;
+    }
+
+    /* A lock that may wait at the server comes here asynchronously (rdbss posts it for a synchronous
+     * caller too, RxCommonLockControl); what comes here has the request time limit */
+    Status = SmbSendRequest(Request, Irp != NULL ? 0 : SMB_CLOSE_TIMEOUT_SECONDS);
+    if (NT_SUCCESS(Status))
+        Status = SmbLockStatus(Request);
+    SmbReleaseRequest(Request);
+    return Status;
+}
+
+/* LOWIO_OP_SHAREDLOCK, LOWIO_OP_EXCLUSIVELOCK, LOWIO_OP_UNLOCK */
+static
+NTSTATUS
+NTAPI
+SmbLock(PRX_CONTEXT RxContext)
+{
+    PLOWIO_CONTEXT LowIo = &RxContext->LowIoContext;
+    BOOLEAN Async = BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    ULONG Flags;
+
+    PAGED_CODE();
+
+    switch (LowIo->Operation)
+    {
+        case LOWIO_OP_SHAREDLOCK:
+            Flags = SMBUP_LOCK_SHARED;
+            break;
+        case LOWIO_OP_EXCLUSIVELOCK:
+            Flags = SMBUP_LOCK_EXCLUSIVE;
+            break;
+        default:
+            Flags = SMBUP_LOCK_UNLOCK;
+            break;
+    }
+    if (Flags != SMBUP_LOCK_UNLOCK && BooleanFlagOn(LowIo->ParamsFor.Locks.Flags, SL_FAIL_IMMEDIATELY))
+        Flags |= SMBUP_LOCK_FAIL_IMMEDIATELY;
+
+    return SmbSendLock(RxContext, Flags, LowIo->ParamsFor.Locks.ByteOffset, LowIo->ParamsFor.Locks.Length,
+                       RxContext->CurrentIrp, Async);
+}
+
+/* Change notifications *****************************************************/
+
+/*
+ * The FILE_NOTIFY_INFORMATION chain of a NOTIFY reply, as the server sent it ([MS-FSCC] 2.7.1): every
+ * entry and its name inside the data, NextEntryOffset a multiple of 4 past the entry's name. A last
+ * entry whose NextEntryOffset points exactly at the end of the data gets 0 (as SmbCheckEntryChain).
+ */
+static
+BOOLEAN
+SmbCheckNotifyChain(PUCHAR Data, ULONG Length)
+{
+    const ULONG Fixed = FIELD_OFFSET(FILE_NOTIFY_INFORMATION, FileName);
+    ULONG Offset = 0, Next, NameLength;
+
+    if (Length == 0)
+        return TRUE;
+    if (Data == NULL)
+        return FALSE;
+    for (;;)
+    {
+        if (Length - Offset < Fixed)
+            return FALSE;
+        Next = *(ULONG UNALIGNED *)(Data + Offset);
+        NameLength = *(ULONG UNALIGNED *)(Data + Offset + FIELD_OFFSET(FILE_NOTIFY_INFORMATION, FileNameLength));
+        if (NameLength > Length - Offset - Fixed || (NameLength & 1))
+            return FALSE;
+        if (Next == 0)
+            return TRUE;
+        if (Next < Fixed + NameLength || (Next & 3) != 0 || Next > Length - Offset)
+            return FALSE;
+        if (Next == Length - Offset)
+        {
+            *(ULONG UNALIGNED *)(Data + Offset) = 0;
+            return TRUE;
+        }
+        Offset += Next;
+    }
+}
+
+/* RxContext->MRxContext of a NOTIFY the server has: its request id (as a lock's), and whether the
+ * cleanup of its handle ended it (rather than a cancel of the IRP) */
+#define SmbNotifyRequestId(RxContext) SmbLockRequestId(RxContext)
+#define SmbNotifyClosed(RxContext) ((RxContext)->MRxContext[2])
+
+static
+ULONG
+SmbNotifyOutputLength(PRX_CONTEXT RxContext)
+{
+    return min(RxContext->LowIoContext.ParamsFor.NotifyChangeDirectory.NotificationBufferLength, SMBUP_MAX_INFO);
+}
+
+/* A NOTIFY ended (answered, given up, or the engine went) */
+static
+VOID
+SmbNotifyCompletion(PSMB_REQUEST Request)
+{
+    PRX_CONTEXT RxContext = Request->CompletionContext;
+    PVOID Data;
+    ULONG DataLength;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    RxSetMinirdrCancelRoutine(RxContext, NULL);
+    Status = SmbReplyStatus(Request, SmbNotifyOutputLength(RxContext), &Data, &DataLength);
+    if (Status == STATUS_SUCCESS)
+    {
+        /* The server's entries reach the caller's buffer only as a well-formed chain */
+        if (!SmbCheckNotifyChain(Data, DataLength))
+        {
+            Status = STATUS_INVALID_NETWORK_RESPONSE;
+            DataLength = 0;
+        }
+        else if (DataLength != 0)
+        {
+            RtlCopyMemory(RxContext->LowIoContext.ParamsFor.NotifyChangeDirectory.pNotificationBuffer, Data, DataLength);
+        }
+    }
+    else
+    {
+        DataLength = 0;
+        /* Ended by the cleanup of its handle, not by a cancel of its IRP: as a local directory's
+         * notification at cleanup (FsRtlNotifyCleanup) */
+        if (Status == STATUS_CANCELLED && SmbNotifyClosed(RxContext) != NULL)
+            Status = STATUS_NOTIFY_CLEANUP;
+    }
+    SmbReleaseRequest(Request);
+
+    RxContext->IoStatusBlock.Status = Status;
+    RxContext->IoStatusBlock.Information = DataLength;
+    RxLowIoCompletion(RxContext);
+}
+
+/* rdbss's cancel of a pended NOTIFY: CancelIo of its IRP, or the cleanup of its handle */
+static
+NTSTATUS
+NTAPI
+SmbNotifyCancel(PRX_CONTEXT RxContext)
+{
+    PAGED_CODE();
+
+    if (RxContext->CurrentIrp == NULL || !RxContext->CurrentIrp->Cancel)
+        SmbNotifyClosed(RxContext) = (PVOID)1;
+    SmbCancelRequestById(SmbNotifyRequestId(RxContext));
+    return STATUS_SUCCESS;
+}
+
+/*
+ * LOWIO_OP_NOTIFY_CHANGE_DIRECTORY (always asynchronous in rdbss): the request waits at the server
+ * without a time limit; rdbss's cancel (CancelIo, the cleanup of the handle) ends it. The output is
+ * at most SMBUP_MAX_INFO bytes (a larger buffer is asked for with that much).
+ */
+static
+NTSTATUS
+NTAPI
+SmbNotify(PRX_CONTEXT RxContext)
+{
+    PLOWIO_CONTEXT LowIo = &RxContext->LowIoContext;
+    PSMBUP_NOTIFY_REQUEST Fixed;
+    PSMB_SRVOPEN Handle;
+    PSMB_REQUEST Request;
+    PMRX_V_NET_ROOT VNetRoot;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    RxContext->IoStatusBlock.Information = 0;
+    if (!BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION))
+        return STATUS_INVALID_DEVICE_REQUEST;
+    if (LowIo->ParamsFor.NotifyChangeDirectory.pNotificationBuffer == NULL &&
+        LowIo->ParamsFor.NotifyChangeDirectory.NotificationBufferLength != 0)
+        return STATUS_INVALID_USER_BUFFER;
+
+    Status = SmbGetHandle(RxContext->pRelevantSrvOpen, &Handle);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    VNetRoot = RxContext->pRelevantSrvOpen->pVNetRoot;
+    Status = SmbAllocateRequestForIrp(SmbUpNotify, 0, &VNetRoot->LogonId, RxContext->CurrentIrp, &Request);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Request->Irp = RxContext->CurrentIrp;
+    Fixed = SmbRequestFixed(Request);
+    Fixed->ConnectionId = Handle->ConnectionId;
+    Fixed->FileId = Handle->FileId;
+    Fixed->CompletionFilter = LowIo->ParamsFor.NotifyChangeDirectory.CompletionFilter;
+    Fixed->OutputLength = SmbNotifyOutputLength(RxContext);
+    Fixed->Flags = LowIo->ParamsFor.NotifyChangeDirectory.WatchTree ? SMBUP_NOTIFY_WATCH_TREE : 0;
+
+    /* As a lock of an asynchronous request (SmbSendLock) */
+    SmbNotifyClosed(RxContext) = NULL;
+    SmbNotifyRequestId(RxContext) = SmbAssignRequestId(Request);
+    if (!NT_SUCCESS(RxSetMinirdrCancelRoutine(RxContext, SmbNotifyCancel)))
+    {
+        SmbReleaseRequest(Request);
+        return STATUS_CANCELLED;
+    }
+    InterlockedIncrement((volatile long *)&RxContext->ReferenceCount);
+    Status = SmbSendRequestAsync(Request, SmbNotifyCompletion, RxContext);
+    if (Status != STATUS_PENDING)
+    {
+        RxSetMinirdrCancelRoutine(RxContext, NULL);
+        SmbReleaseRequest(Request);
+    }
+    else if (BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_CANCELLED))
+    {
+        if (RxContext->CurrentIrp == NULL || !RxContext->CurrentIrp->Cancel)
+            SmbNotifyClosed(RxContext) = (PVOID)1;
+        SmbCancelRequestById(SmbNotifyRequestId(RxContext));
+    }
+    RxDereferenceAndDeleteRxContext(RxContext);
+    return Status;
+}
+
+/* LOWIO_OP_UNLOCK_MULTIPLE: unlock-all (by key) and the cleanup of a handle; synchronous (rdbss) */
+static
+NTSTATUS
+NTAPI
+SmbUnlockMultiple(PRX_CONTEXT RxContext)
+{
+    PLOWIO_LOCK_LIST Entry;
+    NTSTATUS Status, First = STATUS_SUCCESS;
+    PIRP Irp = (RxContext->MajorFunction == IRP_MJ_LOCK_CONTROL) ? RxContext->CurrentIrp : NULL;
+
+    PAGED_CODE();
+
+    /* One request per range (the server releases every lock of the handle with its close anyway);
+     * the first failure is the answer, but every range is tried */
+    for (Entry = RxContext->LowIoContext.ParamsFor.Locks.LockList; Entry != NULL; Entry = Entry->Next)
+    {
+        Status = SmbSendLock(RxContext, SMBUP_LOCK_UNLOCK, Entry->ByteOffset, Entry->Length, Irp, FALSE);
+        if (!NT_SUCCESS(Status) && NT_SUCCESS(First))
+            First = Status;
+        /* The handle is gone or the connection with it: the server has dropped its locks */
+        if (Status == STATUS_INVALID_HANDLE || Status == STATUS_CONNECTION_DISCONNECTED)
+            break;
+    }
+    return First;
 }
 
 /*
@@ -2026,13 +2386,61 @@ SmbLogonTerminated(PLUID LogonId)
 }
 
 /*
+ * Prefix claims are answered from a thread of their own. MUP asks the providers from inside the
+ * caller's NtCreateFile, in its own critical region (FsRtlEnterFileSystem), with an IRP of its own;
+ * a claim of a server that does not answer takes up to the engine's connect limit (20 s). Done in
+ * the caller's thread, nothing could end that wait: CancelSynchronousIo cancels from a normal kernel
+ * APC, which the critical region holds back. Pended to MUP, the caller waits for its create in the
+ * I/O manager, where the APC runs; MUP then cancels its query IRPs (MupCancelCreate), and the wait
+ * here (SmbIrpCancelled: the query IRP, the caller's thread) ends within 250 ms.
+ */
+typedef struct _SMB_QUERY_WORK
+{
+    LIST_ENTRY Link;                /* SmbQueryWorkList */
+    PETHREAD Worker;                /* the thread doing it */
+    PIRP Irp;                       /* MUP's IOCTL_REDIR_QUERY_PATH_EX, pended */
+    PETHREAD Caller;                /* the thread of the open, referenced */
+} SMB_QUERY_WORK, *PSMB_QUERY_WORK;
+
+static KSPIN_LOCK SmbQueryWorkLock;
+static LIST_ENTRY SmbQueryWorkList;
+
+/* Whether the current thread answers a claim whose caller gave up (its open cancelled, its thread ending) */
+BOOLEAN
+SmbQueryCallerGaveUp(VOID)
+{
+    PETHREAD Self = PsGetCurrentThread();
+    PLIST_ENTRY Entry;
+    BOOLEAN Gave = FALSE;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&SmbQueryWorkLock, &OldIrql);
+    for (Entry = SmbQueryWorkList.Flink; Entry != &SmbQueryWorkList; Entry = Entry->Flink)
+    {
+        PSMB_QUERY_WORK Work = CONTAINING_RECORD(Entry, SMB_QUERY_WORK, Link);
+
+        /* Only the worker removes its own entry: the caller stays valid here, and the IRP until the
+         * worker completes it (it is cleared first: MUP frees it in its completion routine and may hand
+         * the create to us, in this thread, right after) */
+        if (Work->Worker == Self)
+        {
+            Gave = (Work->Irp != NULL && Work->Irp->Cancel) || PsIsThreadTerminating(Work->Caller);
+            break;
+        }
+    }
+    KeReleaseSpinLock(&SmbQueryWorkLock, OldIrql);
+    return Gave;
+}
+
+/*
  * MUP asks providers registered by device object with IOCTL_REDIR_QUERY_PATH_EX;
  * rdbss understands IOCTL_REDIR_QUERY_PATH only. Ask rdbss with that on its
- * device FCB, and answer MUP with what it accepted.
+ * device FCB, and answer MUP with what it accepted. Returns the status for Irp
+ * (the caller completes it).
  */
 static
 NTSTATUS
-SmbQueryPathEx(PIRP Irp, PIO_STACK_LOCATION Stack)
+SmbQueryPathExWork(PIRP Irp, PIO_STACK_LOCATION Stack)
 {
     PQUERY_PATH_REQUEST_EX RequestEx = Stack->Parameters.DeviceIoControl.Type3InputBuffer;
     PQUERY_PATH_RESPONSE Response = Irp->UserBuffer;
@@ -2046,22 +2454,13 @@ SmbQueryPathEx(PIRP Irp, PIO_STACK_LOCATION Stack)
 
     PAGED_CODE();
 
-    if (Irp->RequestorMode != KernelMode || RequestEx == NULL || Response == NULL ||
-        Stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(QUERY_PATH_REQUEST_EX) ||
-        Stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(QUERY_PATH_RESPONSE))
-    {
-        Status = STATUS_INVALID_DEVICE_REQUEST;
-        goto Complete;
-    }
-
     /* Without an engine nothing can be claimed: do not make rdbss build connections. The starter
      * (the Workstation service) is asked for one first. */
-    if (SmbRdrDeviceFileObject == NULL ||
-        RequestEx->PathName.Length == 0 || RequestEx->PathName.Length >= MAXUSHORT - sizeof(WCHAR) ||
-        SmbIsEngineProcess(IoGetCurrentProcess()) ||
-        !NT_SUCCESS(SmbEnsureEngine(Irp)))
+    Status = SmbEnsureEngine(Irp);
+    if (!NT_SUCCESS(Status))
     {
-        Status = STATUS_BAD_NETWORK_PATH;
+        if (Status != STATUS_CANCELLED)
+            Status = STATUS_BAD_NETWORK_PATH;
         goto Complete;
     }
 
@@ -2110,6 +2509,110 @@ SmbQueryPathEx(PIRP Irp, PIO_STACK_LOCATION Stack)
         Status = STATUS_SUCCESS;
     }
     ExFreePoolWithTag(Request, TAG_SMB_MISC);
+
+Complete:
+    return Status;
+}
+
+/* Completes MUP's query IRP; MUP's completion routine takes its resources (and may hand the create to
+ * us right here) as it does inside its own dispatch routine: in a critical region */
+static
+VOID
+SmbCompleteQuery(PIRP Irp, NTSTATUS Status)
+{
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = 0;
+    FsRtlEnterFileSystem();
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    FsRtlExitFileSystem();
+}
+
+static
+VOID
+NTAPI
+SmbQueryWorker(PVOID Context)
+{
+    PSMB_QUERY_WORK Work = Context;
+    PIRP Irp = Work->Irp;
+    NTSTATUS Status;
+    KIRQL OldIrql;
+
+    PAGED_CODE();
+
+    Work->Worker = PsGetCurrentThread();
+    KeAcquireSpinLock(&SmbQueryWorkLock, &OldIrql);
+    InsertTailList(&SmbQueryWorkList, &Work->Link);
+    KeReleaseSpinLock(&SmbQueryWorkLock, OldIrql);
+
+    Status = SmbQueryPathExWork(Irp, IoGetCurrentIrpStackLocation(Irp));
+
+    /* From here on only the caller's thread tells whether it gave up (see SmbQueryCallerGaveUp) */
+    KeAcquireSpinLock(&SmbQueryWorkLock, &OldIrql);
+    Work->Irp = NULL;
+    KeReleaseSpinLock(&SmbQueryWorkLock, OldIrql);
+    SmbCompleteQuery(Irp, Status);
+
+    KeAcquireSpinLock(&SmbQueryWorkLock, &OldIrql);
+    RemoveEntryList(&Work->Link);
+    KeReleaseSpinLock(&SmbQueryWorkLock, OldIrql);
+    ObDereferenceObject(Work->Caller);
+    ExFreePoolWithTag(Work, TAG_SMB_MISC);
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+static
+NTSTATUS
+SmbQueryPathEx(PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    PQUERY_PATH_REQUEST_EX RequestEx = Stack->Parameters.DeviceIoControl.Type3InputBuffer;
+    PSMB_QUERY_WORK Work;
+    HANDLE Thread;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (Irp->RequestorMode != KernelMode || RequestEx == NULL || Irp->UserBuffer == NULL ||
+        Stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(QUERY_PATH_REQUEST_EX) ||
+        Stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(QUERY_PATH_RESPONSE))
+    {
+        Status = STATUS_INVALID_DEVICE_REQUEST;
+        goto Complete;
+    }
+
+    /* Nothing to claim (and the engine's own opens of a share would wait for the engine): at once,
+     * in the caller's thread; so also when no engine can be had (SmbEnsureEngine answers at once then) */
+    if (SmbRdrDeviceFileObject == NULL ||
+        RequestEx->PathName.Length == 0 || RequestEx->PathName.Length >= MAXUSHORT - sizeof(WCHAR) ||
+        SmbIsEngineProcess(IoGetCurrentProcess()))
+    {
+        Status = STATUS_BAD_NETWORK_PATH;
+        goto Complete;
+    }
+
+    Work = ExAllocatePoolZero(NonPagedPool, sizeof(*Work), TAG_SMB_MISC);
+    if (Work == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Complete;
+    }
+    Work->Irp = Irp;
+    Work->Caller = Irp->Tail.Overlay.Thread != NULL ? Irp->Tail.Overlay.Thread : PsGetCurrentThread();
+    ObReferenceObject(Work->Caller);
+
+    IoMarkIrpPending(Irp);
+    Status = PsCreateSystemThread(&Thread, THREAD_ALL_ACCESS, NULL, NULL, NULL, SmbQueryWorker, Work);
+    if (NT_SUCCESS(Status))
+    {
+        ZwClose(Thread);
+        return STATUS_PENDING;
+    }
+
+    /* No thread: in the caller's (uncancellable) as before */
+    DPRINT1("mrxsmb: no thread for a prefix claim (0x%08lx)\n", Status);
+    ObDereferenceObject(Work->Caller);
+    ExFreePoolWithTag(Work, TAG_SMB_MISC);
+    SmbCompleteQuery(Irp, SmbQueryPathExWork(Irp, Stack));
+    return STATUS_PENDING;
 
 Complete:
     Irp->IoStatus.Status = Status;
@@ -2465,6 +2968,11 @@ SmbInitializeDispatch(VOID)
         SmbDispatch.MRxLowIOSubmit[i] = SmbLowIoUnsupported;
     SmbDispatch.MRxLowIOSubmit[LOWIO_OP_READ] = SmbReadT;
     SmbDispatch.MRxLowIOSubmit[LOWIO_OP_WRITE] = SmbWriteT;
+    SmbDispatch.MRxLowIOSubmit[LOWIO_OP_SHAREDLOCK] = SmbLock;
+    SmbDispatch.MRxLowIOSubmit[LOWIO_OP_EXCLUSIVELOCK] = SmbLock;
+    SmbDispatch.MRxLowIOSubmit[LOWIO_OP_UNLOCK] = SmbLock;
+    SmbDispatch.MRxLowIOSubmit[LOWIO_OP_UNLOCK_MULTIPLE] = SmbUnlockMultiple;
+    SmbDispatch.MRxLowIOSubmit[LOWIO_OP_NOTIFY_CHANGE_DIRECTORY] = SmbNotify;
 
     SmbDispatch.MRxTruncate = SmbNotSupported;
     SmbDispatch.MRxZeroExtend = SmbNotSupported;
@@ -2562,6 +3070,8 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     SmbEngineInitialize();
     ExInitializeFastMutex(&SmbConnLock);
     InitializeListHead(&SmbConnList);
+    KeInitializeSpinLock(&SmbQueryWorkLock);
+    InitializeListHead(&SmbQueryWorkList);
 #if DBG
     SmbReadDebugParameters(RegistryPath);
 #endif

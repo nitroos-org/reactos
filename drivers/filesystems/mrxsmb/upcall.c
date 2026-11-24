@@ -516,7 +516,9 @@ SmbQueueRequest(PSMB_REQUEST Request)
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    Request->RequestId = ++SmbEngine.NextRequestId;
+    /* An asynchronous request has its id already (SmbAssignRequestId) */
+    if (Request->RequestId == 0)
+        Request->RequestId = ++SmbEngine.NextRequestId;
     Request->Message->RequestId = Request->RequestId;
     Request->Generation = SmbEngine.Generation;
     Request->State = SmbRequestQueued;
@@ -528,7 +530,8 @@ SmbQueueRequest(PSMB_REQUEST Request)
     return STATUS_SUCCESS;
 }
 
-/* The caller gave up: its IRP was cancelled, or the thread that sent it is terminating */
+/* The caller gave up: its IRP was cancelled, or the thread that sent it is terminating, or (in the
+ * thread that answers a prefix claim for a UNC open) the open was cancelled or its thread is ending */
 BOOLEAN
 SmbIrpCancelled(PIRP Irp)
 {
@@ -536,7 +539,9 @@ SmbIrpCancelled(PIRP Irp)
         return FALSE;
     if (Irp->Cancel)
         return TRUE;
-    return Irp->Tail.Overlay.Thread != NULL && PsIsThreadTerminating(Irp->Tail.Overlay.Thread);
+    if (Irp->Tail.Overlay.Thread != NULL && PsIsThreadTerminating(Irp->Tail.Overlay.Thread))
+        return TRUE;
+    return SmbQueryCallerGaveUp();
 }
 
 /* A notification (LOGOFF, CANCEL): queued, no reply; the queue owns it */
@@ -587,17 +592,18 @@ SmbSendRequest(PSMB_REQUEST Request, ULONG TimeoutSeconds)
     if (TimeoutSeconds == 0 || TimeoutSeconds > SmbRequestTimeoutSeconds)
         TimeoutSeconds = SmbRequestTimeoutSeconds;
 
-    /* With the caller's IRP, wait in slices of one second and give up early when the
+    /* With the caller's IRP, wait in slices and give up early when the
      * IRP is cancelled (CancelIoEx, IoCancelThreadIo) or its thread is terminating:
      * rdbss has no cancel routine for a mini-redirector, and the thread cannot be
      * stopped in this wait otherwise (normal kernel APCs are disabled in file systems) */
-    Timeout.QuadPart = Request->Irp != NULL ? -10000000LL : -10000000LL * TimeoutSeconds;
+    Timeout.QuadPart = Request->Irp != NULL ? -2500000LL : -10000000LL * TimeoutSeconds;
     for (Waited = 0; ; )
     {
         Status = KeWaitForSingleObject(&Request->Done, Executive, KernelMode, FALSE, &Timeout);
         if (Status != STATUS_TIMEOUT)
             break;
-        if (Request->Irp == NULL || ++Waited >= TimeoutSeconds)
+        /* With an IRP: slices of 250 ms, the longest a caller that gave up waits */
+        if (Request->Irp == NULL || ++Waited >= TimeoutSeconds * 4)
         {
             Reason = STATUS_IO_TIMEOUT;
             break;
@@ -626,6 +632,174 @@ SmbSendRequest(PSMB_REQUEST Request, ULONG TimeoutSeconds)
 
     /* Completed: Done is set under the lock together with the state */
     return Request->Status;
+}
+
+/*
+ * Asynchronous requests. The caller gives the request an id first (SmbAssignRequestId: it must
+ * know the id before the request can complete, to cancel it by id), then sends it with
+ * SmbSendRequestAsync. From then on the request belongs to the channel: Completion is called once,
+ * at PASSIVE_LEVEL, by whoever ends it (the engine's reply, SmbCancelRequestById, the engine's
+ * detach), and releases it. The caller must not touch the request after sending it.
+ */
+ULONGLONG
+SmbAssignRequestId(PSMB_REQUEST Request)
+{
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&SmbEngine.Lock, &OldIrql);
+    Request->RequestId = ++SmbEngine.NextRequestId;
+    KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
+    return Request->RequestId;
+}
+
+/* STATUS_PENDING: sent, Completion will be called. Any other status: not sent, the caller still owns it */
+NTSTATUS
+SmbSendRequestAsync(PSMB_REQUEST Request, PSMB_REQUEST_COMPLETION Completion, PVOID Context)
+{
+    NTSTATUS Status;
+
+    PAGED_CODE();
+    ASSERT(!Request->Notification && Completion != NULL && Request->RequestId != 0);
+
+    Request->Completion = Completion;
+    Request->CompletionContext = Context;
+    Status = SmbQueueRequest(Request);
+    if (!NT_SUCCESS(Status))
+    {
+        Request->Completion = NULL;
+        return Status;
+    }
+    return STATUS_PENDING;
+}
+
+static
+PSMB_REQUEST
+SmbFindRequestLocked(ULONGLONG RequestId)
+{
+    PLIST_ENTRY Lists[3] = { &SmbEngine.Queue, &SmbCopyingList, &SmbEngine.Sent };
+    PLIST_ENTRY Entry;
+    ULONG i;
+
+    for (i = 0; i < RTL_NUMBER_OF(Lists); i++)
+    {
+        for (Entry = Lists[i]->Flink; Entry != Lists[i]; Entry = Entry->Flink)
+        {
+            PSMB_REQUEST Request = CONTAINING_RECORD(Entry, SMB_REQUEST, Link);
+
+            if (Request->RequestId == RequestId && !Request->Notification)
+                return Request;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * Ends an asynchronous request the caller gave up (its IRP cancelled, its handle cleaned up) with
+ * STATUS_CANCELLED, and tells the engine if it has it already. FALSE when the request has ended
+ * already (or is being ended by its reply right now): its completion runs or has run.
+ */
+BOOLEAN
+SmbCancelRequestById(ULONGLONG RequestId)
+{
+    PSMB_REQUEST Request;
+    KIRQL OldIrql;
+    BOOLEAN WasSent;
+
+    PAGED_CODE();
+
+    KeAcquireSpinLock(&SmbEngine.Lock, &OldIrql);
+    Request = SmbFindRequestLocked(RequestId);
+    if (Request == NULL || Request->Completion == NULL || Request->State == SmbRequestCompleted)
+    {
+        KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
+        return FALSE;
+    }
+    WasSent = (Request->State != SmbRequestQueued);
+    SmbCompleteLocked(Request, STATUS_CANCELLED);
+    KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
+
+    DPRINT1("mrxsmb: request %I64u (op %u) cancelled\n", RequestId, Request->Opcode);
+    if (WasSent)
+        SmbSendCancel(RequestId);
+    Request->Completion(Request);
+    return TRUE;
+}
+
+/* The bound of a graceful cancel (SmbCancelRequestGracefully): a work item ends the request then */
+typedef struct _SMB_CANCEL_GRACE
+{
+    KTIMER Timer;
+    KDPC Dpc;
+    WORK_QUEUE_ITEM Work;
+    ULONGLONG RequestId;
+} SMB_CANCEL_GRACE, *PSMB_CANCEL_GRACE;
+
+static
+VOID
+NTAPI
+SmbCancelGraceWork(PVOID Context)
+{
+    PSMB_CANCEL_GRACE Grace = Context;
+
+    /* By id: a request the engine answered meanwhile is gone, nothing happens */
+    if (SmbCancelRequestById(Grace->RequestId))
+        DPRINT1("mrxsmb: request %I64u not answered after its cancel: ended here\n", Grace->RequestId);
+    ExFreePoolWithTag(Grace, TAG_SMB_MISC);
+}
+
+static
+VOID
+NTAPI
+SmbCancelGraceDpc(PKDPC Dpc, PVOID Context, PVOID Argument1, PVOID Argument2)
+{
+    PSMB_CANCEL_GRACE Grace = Context;
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(Argument1);
+    UNREFERENCED_PARAMETER(Argument2);
+    ExQueueWorkItem(&Grace->Work, DelayedWorkQueue);
+}
+
+/*
+ * A cancel that lets the server answer: an asynchronous request the engine has is not ended here; the
+ * engine is told (CANCEL: it sends SMB2 CANCEL) and the server's answer ends it (STATUS_CANCELLED, or the
+ * grant that came first: a lock is then held, as the caller learns). For a byte-range lock that matters:
+ * a cancelled lock is not held at the server once its caller sees the cancel (Windows Server 2022 as a
+ * client: after CancelIoEx of a waiting lock the range is free at once). A request the engine has not
+ * taken yet, or one not answered within GraceSeconds of the cancel (a server or engine that does not
+ * answer), is ended here with STATUS_CANCELLED (SmbCancelRequestById).
+ */
+VOID
+SmbCancelRequestGracefully(ULONGLONG RequestId, ULONG GraceSeconds)
+{
+    PSMB_CANCEL_GRACE Grace;
+    PSMB_REQUEST Request;
+    LARGE_INTEGER Due;
+    KIRQL OldIrql;
+    BOOLEAN Taken;
+
+    PAGED_CODE();
+
+    KeAcquireSpinLock(&SmbEngine.Lock, &OldIrql);
+    Request = SmbFindRequestLocked(RequestId);
+    Taken = (Request != NULL && Request->Completion != NULL && Request->State != SmbRequestCompleted &&
+             Request->State != SmbRequestQueued);
+    KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
+
+    Grace = Taken ? ExAllocatePoolWithTag(NonPagedPool, sizeof(*Grace), TAG_SMB_MISC) : NULL;
+    if (Grace == NULL)
+    {
+        /* Not taken by the engine (nothing at the server), already answered, or no memory: at once */
+        SmbCancelRequestById(RequestId);
+        return;
+    }
+    SmbSendCancel(RequestId);
+    Grace->RequestId = RequestId;
+    ExInitializeWorkItem(&Grace->Work, SmbCancelGraceWork, Grace);
+    KeInitializeDpc(&Grace->Dpc, SmbCancelGraceDpc, Grace);
+    KeInitializeTimer(&Grace->Timer);
+    Due.QuadPart = -10000000LL * GraceSeconds;
+    KeSetTimer(&Grace->Timer, Due, &Grace->Dpc);
 }
 
 /*
@@ -670,22 +844,27 @@ SmbReplyStatus(PSMB_REQUEST Request, ULONG MaxDataLength, PVOID *Data, PULONG Da
         !(Status == STATUS_BUFFER_OVERFLOW &&
           (Request->Opcode == SmbUpQueryInfo || Request->Opcode == SmbUpQueryVolume ||
            Request->Opcode == SmbUpQueryDirectory)) &&
-        !(Status == STATUS_NO_MORE_FILES && Request->Opcode == SmbUpQueryDirectory))
+        !(Status == STATUS_NO_MORE_FILES && Request->Opcode == SmbUpQueryDirectory) &&
+        !((Status == STATUS_NOTIFY_ENUM_DIR || Status == STATUS_NOTIFY_CLEANUP) && Request->Opcode == SmbUpNotify))
     {
         DPRINT1("mrxsmb: engine status %lx refused (op %u)\n", Status, Request->Opcode);
         return STATUS_INVALID_NETWORK_RESPONSE;
     }
+    /* STATUS_LOCK_NOT_GRANTED is the answer to a LOCK (rdbss acts on it only as the result of its own
+     * FCB acquisitions, never on a lock request's status); for anything else it is refused */
     if (Status == STATUS_MORE_PROCESSING_REQUIRED ||
         Status == STATUS_RETRY ||
         Status == STATUS_CANT_WAIT ||
         Status == STATUS_CONNECTION_ACTIVE ||
-        Status == STATUS_LOCK_NOT_GRANTED)
+        (Status == STATUS_LOCK_NOT_GRANTED && Request->Opcode != SmbUpLock))
     {
         DPRINT1("mrxsmb: engine status %lx refused (op %u)\n", Status, Request->Opcode);
         return STATUS_INVALID_NETWORK_RESPONSE;
     }
 
-    if (NT_ERROR(Status) || Status == STATUS_NO_MORE_FILES)
+    /* Without data: errors, the end of a directory, and a notification that only says "enumerate again" */
+    if (NT_ERROR(Status) || Status == STATUS_NO_MORE_FILES || Status == STATUS_NOTIFY_ENUM_DIR ||
+        Status == STATUS_NOTIFY_CLEANUP)
         return Status;
 
     /* Success or overflow: the fixed part must be there */
@@ -799,8 +978,9 @@ SmbEngineDetach(PFILE_OBJECT FileObject)
             SmbCompleteLocked(Request, STATUS_CONNECTION_DISCONNECTED);
             Failed++;
             /* Nobody waits for a notification: free it once outside the lock.
-             * A notification being copied keeps its GET reference. */
-            if (Request->Notification)
+             * A notification being copied keeps its GET reference. An asynchronous
+             * request is completed outside the lock too. */
+            if (Request->Notification || Request->Completion != NULL)
                 InsertTailList(&Release, &Request->Link);
         }
     }
@@ -812,7 +992,10 @@ SmbEngineDetach(PFILE_OBJECT FileObject)
     {
         Request = CONTAINING_RECORD(RemoveHeadList(&Release), SMB_REQUEST, Link);
         InitializeListHead(&Request->Link);
-        SmbReleaseRequest(Request);
+        if (Request->Notification)
+            SmbReleaseRequest(Request);
+        else
+            Request->Completion(Request);
     }
 
     if (Process != NULL)
@@ -994,20 +1177,30 @@ SmbEngineReply(PIRP Irp, PIO_STACK_LOCATION Stack)
          * behind its thread with it). The request leaves the Sent list, so a later reply for the
          * same id finds nothing and is not completed twice. */
         ULONGLONG RequestId = Request->RequestId;
+        BOOLEAN Async = (Request->Completion != NULL);
 
-        /* After this the waiter may free the request: do not touch it again */
+        /* After this the waiter may free the request: do not touch it again (an asynchronous one
+         * is ours to complete) */
         SmbCompleteLocked(Request, STATUS_INVALID_NETWORK_RESPONSE);
         KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
         ExFreePoolWithTag(Reply, TAG_SMB_REPLY);
         DPRINT1("mrxsmb: reply for request %I64u refused (%s), request failed\n",
                 RequestId, Valid ? "opcode" : "header");
+        if (Async)
+            Request->Completion(Request);
         return Valid ? STATUS_NOT_FOUND : STATUS_INVALID_PARAMETER;
     }
 
     Request->Reply = Reply;
     Request->ReplySize = Length;
-    SmbCompleteLocked(Request, STATUS_SUCCESS);
-    KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
+    {
+        BOOLEAN Async = (Request->Completion != NULL);
+
+        SmbCompleteLocked(Request, STATUS_SUCCESS);
+        KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
+        if (Async)
+            Request->Completion(Request);
+    }
 
     return STATUS_SUCCESS;
 }
