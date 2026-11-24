@@ -940,6 +940,17 @@ ExitThreadCallback(PETHREAD Thread)
             ptiCurrent->cRefObjectCo--;
 #endif
         }
+
+        /* Pool blocks held across a callback by kernel frames that will never run again (the thread
+           ends inside the callback) */
+        psle = PopEntryList(&ptiCurrent->HeldPoolList);
+        while (psle)
+        {
+            PUSER_HELD_POOL_ENTRY Held = CONTAINING_RECORD(psle, USER_HELD_POOL_ENTRY, Entry);
+            TRACE_CH(UserThread, "thread clean: free held pool block 0x%p\n", Held->pv);
+            ExFreePoolWithTag(Held->pv, Held->Tag);
+            psle = PopEntryList(&ptiCurrent->HeldPoolList);
+        }
     }
 
     if (ptiCurrent->cEnterCount)
@@ -1012,6 +1023,9 @@ ExitThreadCallback(PETHREAD Thread)
        ObDereferenceObject(ptiCurrent->pEventQueueServer);
     }
     ptiCurrent->hEventQueueClient = NULL;
+    /* The THREADINFO can outlive this (its windows, hooks, a queue other attached threads keep): a wake of the
+       thread from then on must not reach the event (MsqWakeQueue and the timers check it) */
+    ptiCurrent->pEventQueueServer = NULL;
 
     ASSERT(ptiCurrent->cRefObjectCo == 0);
 

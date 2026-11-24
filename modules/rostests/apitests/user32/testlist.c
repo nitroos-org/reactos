@@ -8,6 +8,24 @@ extern void func_AniEmpty(void);
 extern void func_AniMalformed(void);
 extern void func_AutoRotation(void);
 extern void func_BroadcastHung(void);
+extern void func_LifetimeActivePrevFreed(void);
+extern void func_LifetimeAttachSharedQueue(void);
+extern void func_LifetimeBroadcastDesktops(void);
+extern void func_LifetimeCallbackExitLeak(void);
+extern void func_LifetimeCaptureWinEvent(void);
+extern void func_LifetimeCbtActivateRecursion(void);
+extern void func_LifetimeEventProcExitThread(void);
+extern void func_LifetimeForegroundWinEvent(void);
+extern void func_LifetimeFreeExitClass(void);
+extern void func_LifetimeHookExitLeak(void);
+extern void func_LifetimeInfoCallbacks(void);
+extern void func_LifetimeKeyboardLayoutWalk(void);
+extern void func_LifetimeOwnerDestroyRace(void);
+extern void func_LifetimeSendSenderEnds(void);
+extern void func_LifetimeSetActiveHookAttach(void);
+extern void func_LifetimeSetFocusTopDestroy(void);
+extern void func_LifetimeWinEventUnhook(void);
+extern void func_LifetimeWindowListExitLeak(void);
 extern void func_CharFuncs(void);
 extern void func_CloseWindow(void);
 extern void func_CopyImage(void);
@@ -194,6 +212,24 @@ const struct test winetest_testlist[] =
     { "BroadcastHung", func_BroadcastHung },
     { "AniEmpty", func_AniEmpty },
     { "AniMalformed", func_AniMalformed },
+    { "LifetimeActivePrevFreed", func_LifetimeActivePrevFreed },
+    { "LifetimeAttachSharedQueue", func_LifetimeAttachSharedQueue },
+    { "LifetimeBroadcastDesktops", func_LifetimeBroadcastDesktops },
+    { "LifetimeCallbackExitLeak", func_LifetimeCallbackExitLeak },
+    { "LifetimeCaptureWinEvent", func_LifetimeCaptureWinEvent },
+    { "LifetimeCbtActivateRecursion", func_LifetimeCbtActivateRecursion },
+    { "LifetimeEventProcExitThread", func_LifetimeEventProcExitThread },
+    { "LifetimeForegroundWinEvent", func_LifetimeForegroundWinEvent },
+    { "LifetimeFreeExitClass", func_LifetimeFreeExitClass },
+    { "LifetimeHookExitLeak", func_LifetimeHookExitLeak },
+    { "LifetimeInfoCallbacks", func_LifetimeInfoCallbacks },
+    { "LifetimeKeyboardLayoutWalk", func_LifetimeKeyboardLayoutWalk },
+    { "LifetimeOwnerDestroyRace", func_LifetimeOwnerDestroyRace },
+    { "LifetimeSendSenderEnds", func_LifetimeSendSenderEnds },
+    { "LifetimeSetActiveHookAttach", func_LifetimeSetActiveHookAttach },
+    { "LifetimeSetFocusTopDestroy", func_LifetimeSetFocusTopDestroy },
+    { "LifetimeWinEventUnhook", func_LifetimeWinEventUnhook },
+    { "LifetimeWindowListExitLeak", func_LifetimeWindowListExitLeak },
     { "CharFuncs", func_CharFuncs },
     { "CloseWindow", func_CloseWindow },
     { "CopyImage", func_CopyImage },

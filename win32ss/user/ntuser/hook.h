@@ -25,6 +25,7 @@ typedef struct tagEVENTHOOK
   ULONG_PTR      offPfn;
   INT_PTR        ihmod;
   UNICODE_STRING ModuleName; /* In-context hooks: the DLL, so the target process can load it */
+  ULONG          ulNotified; /* The last notification (IntNotifyWinEvent) that called it */
 } EVENTHOOK, *PEVENTHOOK;
 
 typedef struct tagEVENTTABLE

@@ -224,7 +224,7 @@ IntFreeDesktopWindow(IN PWND pwnd)
 {
     USER_REFERENCE_ENTRY Ref;
     PETHREAD Thread = PsGetCurrentThread();
-    BOOLEAN bBorrowed = FALSE, bAttached = FALSE;
+    BOOLEAN bBorrowed = FALSE, bAttached = FALSE, bStillReferenced;
     KAPC_STATE ApcState;
 
     ASSERT(UserIsEnteredExclusive());
@@ -261,6 +261,18 @@ IntFreeDesktopWindow(IN PWND pwnd)
 
     UserRefObjectCo(pwnd, &Ref);
     co_UserFreeWindow(pwnd, gptiDesktopThread->ppi, gptiDesktopThread, FALSE);
+    /* Still referenced by someone else (a thread that sent it a message and waits for the answer in
+       co_IntSendMessageTimeoutSingle, BroadcastSystemMessage to all desktops): the window object stays
+       in the desktop heap until that reference goes, and its handle with it. Freeing the heap now would
+       leave both pointing at unmapped memory (the next UserGetWindowObject of the handle, or the last
+       dereference, faults). Leak the heap instead, as when there is nothing to free the window with. */
+    bStillReferenced = (pwnd->head.cLockObj > 1);
+    if (bStillReferenced)
+    {
+        /* The desktop object is freed after this: the last dereference must not free the window into
+           the heap of a desktop that is gone (FreeDeskThreadObject leaves it in the leaked heap) */
+        pwnd->head.rpdesk = NULL;
+    }
     UserDerefObjectCo(pwnd);
 
     /* Undo in the reverse order: nothing above returns early */
@@ -270,6 +282,11 @@ IntFreeDesktopWindow(IN PWND pwnd)
     if (bAttached)
         KeUnstackDetachProcess(&ApcState);
 
+    if (bStillReferenced)
+    {
+        ERR("Window %p of a deleted desktop is still referenced, keeping its heap\n", pwnd);
+        return FALSE;
+    }
     return TRUE;
 }
 

@@ -617,6 +617,11 @@ IntImmActivateLayout(
         hImeWnd = UserHMGetHandle(pImeWnd);
         co_IntSendMessage(hImeWnd, WM_IME_SYSTEM, IMS_ACTIVATELAYOUT, (LPARAM)pKL->hkl);
         UserDerefObjectCo(pImeWnd);
+
+        /* The thread can have ended during the message (the IME window kept its THREADINFO, not its
+           TEB, which holds the client info written below) */
+        if (pti->TIF_flags & TIF_INCLEANUP)
+            return;
     }
     else
     {
@@ -637,25 +642,33 @@ IntImmActivateLayout(
 
 static VOID co_IntSetKeyboardLayoutForProcess(PPROCESSINFO ppi, PKL pKL)
 {
-    PTHREADINFO ptiNode, ptiNext;
+    PTHREADINFO ptiNode, ptiNext, ptiCurrent = PsGetCurrentThreadWin32Thread();
     PCLIENTINFO pClientInfo;
     BOOL bImmMode = IS_IMM_MODE();
 
     for (ptiNode = ppi->ptiList; ptiNode; ptiNode = ptiNext)
     {
-        IntReferenceThreadInfo(ptiNode);
-        ptiNext = ptiNode->ptiSibling;
-
         /* Skip this thread if its keyboard layout is already the correct one, or if it's dying */
         if (ptiNode->KeyboardLayout == pKL || (ptiNode->TIF_flags & TIF_INCLEANUP))
         {
-            IntDereferenceThreadInfo(ptiNode);
+            ptiNext = ptiNode->ptiSibling;
             continue;
         }
 
         if (bImmMode)
         {
+            /* IntImmActivateLayout sends a message to the IME window of the thread, the USER lock is
+               released: the thread can end, and so can the next one of the list. ptiNode is held (not the
+               running thread: one that ends inside the message never gives a reference back), and the next
+               thread is taken after the message, from ptiNode while it is still on the list (a thread
+               leaves it in its exit cleanup, after TIF_INCLEANUP is set), else from the head of the list
+               again (the threads done have pKL and are skipped) */
+            if (ptiNode != ptiCurrent)
+                IntReferenceThreadInfo(ptiNode);
             IntImmActivateLayout(ptiNode, pKL);
+            ptiNext = (ptiNode->TIF_flags & TIF_INCLEANUP) ? ppi->ptiList : ptiNode->ptiSibling;
+            if (ptiNode != ptiCurrent)
+                IntDereferenceThreadInfo(ptiNode);
         }
         else
         {
@@ -663,9 +676,8 @@ static VOID co_IntSetKeyboardLayoutForProcess(PPROCESSINFO ppi, PKL pKL)
             pClientInfo = ptiNode->pClientInfo;
             pClientInfo->CodePage = pKL->CodePage;
             pClientInfo->hKL = pKL->hkl;
+            ptiNext = ptiNode->ptiSibling;
         }
-
-        IntDereferenceThreadInfo(ptiNode);
     }
 }
 
@@ -684,7 +696,8 @@ co_UserActivateKeyboardLayout(
     PCLIENTINFO ClientInfo;
     BOOL bSetForProcess = !!(uFlags & KLF_SETFORPROCESS);
 
-    IntReferenceThreadInfo(pti);
+    /* pti is the running thread: no reference across the messages below (a thread that ends inside
+       WM_INPUTLANGCHANGE would never give it back, and its THREADINFO, queue and ETHREAD would stay) */
     ClientInfo = pti->pClientInfo;
 
     pOldKL = pti->KeyboardLayout;
@@ -698,7 +711,6 @@ co_UserActivateKeyboardLayout(
 
     if (!bSetForProcess && pKL == pti->KeyboardLayout)
     {
-        IntDereferenceThreadInfo(pti);
         return hOldKL;
     }
 
@@ -780,7 +792,6 @@ co_UserActivateKeyboardLayout(
     if (pOldKL)
         UserDerefObjectCo(pOldKL);
 
-    IntDereferenceThreadInfo(pti);
     return hOldKL;
 }
 

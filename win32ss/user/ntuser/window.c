@@ -559,15 +559,18 @@ static void IntSendDestroyMsg(HWND hWnd)
    if (IntIsWindow(hWnd))
    {
       HWND* pWndArray;
+      USER_HELD_POOL_ENTRY HeldList;
       int i;
 
       if (!(pWndArray = IntWinListChildren( Window ))) return;
 
+      /* The children's WM_DESTROY: the list goes with the thread if it ends in one */
+      UserHoldPoolCo(pWndArray, USERTAG_WINDOWLIST, &HeldList);
       for (i = 0; pWndArray[i]; i++)
       {
          if (IntIsWindow( pWndArray[i] )) IntSendDestroyMsg( pWndArray[i] );
       }
-      ExFreePoolWithTag(pWndArray, USERTAG_WINDOWLIST);
+      UserFreePoolCo(&HeldList);
    }
    else
    {
@@ -628,6 +631,17 @@ LRESULT co_UserFreeWindow(PWND Window,
 
    if(Window->state2 & WNDS2_INDESTROY)
    {
+      /* The thread of the window ended inside a callback of an earlier free of it (WM_NCDESTROY, a send
+         to a child of another thread, a termination in such a wait): that frame never comes back, and the
+         window kept its class, handle and links. Its thread cleanup, where no callback runs any more,
+         finishes the free. Everything after the marking above WNDS_DESTROYED runs without a callback, so
+         a window still without WNDS_DESTROYED is one whose free stopped before that point. */
+      if (!(Window->state & WNDS_DESTROYED) && ThreadData == PsGetCurrentThreadWin32Thread() &&
+          Window->head.pti == ThreadData && (ThreadData->TIF_flags & TIF_INCLEANUP))
+      {
+         ERR("Finishing the free of window %p that its thread left in a callback\n", UserHMGetHandle(Window));
+         goto ResumeFree;
+      }
       TRACE("Tried to call co_UserFreeWindow() twice\n");
       return 0;
    }
@@ -641,6 +655,7 @@ LRESULT co_UserFreeWindow(PWND Window,
    if (!IsListEmpty(&Window->ThreadListEntry))
        RemoveEntryList(&Window->ThreadListEntry);
 
+ResumeFree:
    BelongsToThreadData = IntWndBelongsToThread(Window, ThreadData);
 
    IntDeRegisterShellHookWindow(UserHMGetHandle(Window));
@@ -649,10 +664,18 @@ LRESULT co_UserFreeWindow(PWND Window,
    Children = IntWinListChildren(Window);
    if (Children)
    {
+      USER_HELD_POOL_ENTRY HeldChildren;
+
+      /* The sends to children of other threads and the children's own free can end the thread: the list and
+         each child are held so that its cleanup gives them back */
+      UserHoldPoolCo(Children, USERTAG_WINDOWLIST, &HeldChildren);
       for (ChildHandle = Children; *ChildHandle; ++ChildHandle)
       {
-         if ((Child = IntGetWindowObject(*ChildHandle)))
+         USER_REFERENCE_ENTRY ChildRef;
+
+         if ((Child = UserGetWindowObject(*ChildHandle)))
          {
+            UserRefObjectCo(Child, &ChildRef);
             if (!IntWndBelongsToThread(Child, ThreadData))
             {
                /* send WM_DESTROY messages to windows not belonging to the same thread */
@@ -680,10 +703,10 @@ LRESULT co_UserFreeWindow(PWND Window,
             else
                co_UserFreeWindow(Child, ProcessData, ThreadData, SendMessages);
 
-            UserDereferenceObject(Child);
+            UserDerefObjectCo(Child);
          }
       }
-      ExFreePoolWithTag(Children, USERTAG_WINDOWLIST);
+      UserFreePoolCo(&HeldChildren);
    }
 
    if (SendMessages)
@@ -708,6 +731,34 @@ LRESULT co_UserFreeWindow(PWND Window,
 
    /* flush the message queue */
    MsqRemoveWindowMessagesFromQueue(Window);
+
+   /* Windows still owned by this one: co_UserDestroyWindow takes the owner away from the windows it owns
+      before it sends WM_DESTROY, but another thread can create a window with this owner after that (during
+      the destroy messages). Their owner link keeps this window's memory, not its storage (the class, the
+      links): every walk of the owner chain would read the freed storage. They have no owner from now on,
+      before this window is marked destroyed below (user32 reads the owner of a window without the USER
+      lock: once it sees this window destroyed, no window names it as its owner any more). A window created
+      later with this owner drops it before it is linked (co_UserCreateWindowEx). */
+   if (Window->head.rpdesk && Window->head.rpdesk->pDeskInfo &&
+       !(Window->head.rpdesk->dwDTFlags & DF_DESTROYED) &&
+       Window != Window->head.rpdesk->pDeskInfo->spwnd && Window != Window->head.rpdesk->spwndMessage)
+   {
+      PWND pwndRoots[2], pwndNode;
+      ULONG i;
+
+      pwndRoots[0] = Window->head.rpdesk->pDeskInfo->spwnd;
+      pwndRoots[1] = Window->head.rpdesk->spwndMessage;
+      for (i = 0; i < ARRAYSIZE(pwndRoots); i++)
+      {
+         if (!pwndRoots[i])
+            continue;
+         for (pwndNode = pwndRoots[i]->spwndChild; pwndNode; pwndNode = pwndNode->spwndNext)
+         {
+            if (pwndNode->spwndOwner == Window)
+               WndSetOwner(pwndNode, NULL);
+         }
+      }
+   }
 
    /* from now on no messages can be sent to this window anymore */
    Window->state |= WNDS_DESTROYED;
@@ -742,6 +793,18 @@ LRESULT co_UserFreeWindow(PWND Window,
 
    if (ThreadData->MessageQueue->spwndActive == Window)
       ThreadData->MessageQueue->spwndActive = NULL;
+
+   /* The previous active window too: a window freed here without co_UserDestroyWindow (a child of a
+      window being destroyed, that SetParent made a child while it was the previous active window) would
+      be left as a plain pointer, read later by the activation (VerifyWnd, can_activate_window). Its own
+      thread's queue as well, when another thread frees it (a child of another thread) */
+   if (ThreadData->MessageQueue->spwndActivePrev == Window)
+      ThreadData->MessageQueue->spwndActivePrev = NULL;
+   if (Window->head.pti->MessageQueue &&
+       Window->head.pti->MessageQueue->spwndActivePrev == Window)
+   {
+      Window->head.pti->MessageQueue->spwndActivePrev = NULL;
+   }
 
    if (ThreadData->MessageQueue->spwndCapture == Window)
    {
@@ -1251,6 +1314,14 @@ co_IntSetParent(PWND Wnd, PWND WndNewParent)
       return NULL;
    }
 
+   /* A window in destroy (SetParent from its own WM_NCDESTROY) gets no new parent: the user32 winetest
+      win.c ncdestroy_test_proc expects 0 and ERROR_INVALID_PARAMETER, and nothing is hidden first */
+   if ((Wnd->state & WNDS_DESTROYED) || (Wnd->state2 & WNDS2_INDESTROY))
+   {
+      EngSetLastError(ERROR_INVALID_PARAMETER);
+      return NULL;
+   }
+
    /* Some applications try to set a child as a parent */
    if (IntIsChildWindow(Wnd, WndNewParent))
    {
@@ -1277,6 +1348,17 @@ co_IntSetParent(PWND Wnd, PWND WndNewParent)
     * including the WM_SHOWWINDOW messages and all
     */
    WasVisible = co_WinPosShowWindow(Wnd, SW_HIDE);
+
+   /* Hiding sends messages to the window's thread: the window, or the new parent, can have been destroyed
+      there (both are held, their storage is gone). Linking either would put a freed window into a list of
+      siblings (every walk of it reads the freed storage), or a child below a freed parent */
+   if ((Wnd->state & WNDS_DESTROYED) || (Wnd->state2 & WNDS2_INDESTROY) ||
+       (WndNewParent->state & WNDS_DESTROYED) || (WndNewParent->state2 & WNDS2_INDESTROY))
+   {
+      ERR("IntSetParent: the window or its new parent was destroyed while it was hidden\n");
+      EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+      return NULL;
+   }
 
    /* Windows allows the window to belong to another process (WebView2 hosting: the host process
       re-parents the browser process' window into its own). The two threads are attached below. */
@@ -2403,6 +2485,8 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
    PTHREADINFO pti;
    DWORD dwShowMode = SW_SHOW;
    CREATESTRUCTW *pCsw = NULL;
+   USER_HELD_POOL_ENTRY HeldCsw, HeldCbtCreate;
+   BOOL bGuiConsoleClass = FALSE;
    PVOID pszClass = NULL, pszName = NULL;
    PWND ret = NULL;
 
@@ -2427,6 +2511,9 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
        ERR("Failed to find class %wZ\n", ClassName);
        goto cleanup;
    }
+   /* Read now: the window's reference on the class goes when the window is destroyed during its
+      creation messages, and the class can go with it */
+   bGuiConsoleClass = (Class->atomClassName == gaGuiConsoleWndClass);
 
    /* The desktop and message windows of the desktop are gone once CSRSS has exited
       (IntDesktopThreadProcessExit): nothing to create a window under */
@@ -2567,18 +2654,30 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
       pCbtCreate->hwndInsertAfter = hwndInsertAfter;
 
       //// Call the WH_CBT hook ////
+      /* The two blocks are needed for the hook only: held across it (the thread can end inside the hook
+         procedure), freed right after it. Kept to the end of the creation, they were lost whenever the
+         thread ended inside one of the creation messages */
+      UserHoldPoolCo(pCsw, TAG_HOOK, &HeldCsw);
+      UserHoldPoolCo(pCbtCreate, TAG_HOOK, &HeldCbtCreate);
       Result = co_HOOK_CallHooks(WH_CBT, HCBT_CREATEWND, (WPARAM) hWnd, (LPARAM) pCbtCreate);
+      if (Result == 0)
+      {
+         // Write back changes.
+         Cs->cx = pCsw->cx;
+         Cs->cy = pCsw->cy;
+         Cs->x = pCsw->x;
+         Cs->y = pCsw->y;
+         hwndInsertAfter = pCbtCreate->hwndInsertAfter;
+      }
+      UserFreePoolCo(&HeldCbtCreate);
+      UserFreePoolCo(&HeldCsw);
+      pCbtCreate = NULL;
+      pCsw = NULL;
       if (Result != 0)
       {
          ERR("WH_CBT HCBT_CREATEWND hook failed! 0x%x\n", Result);
          goto cleanup;
       }
-      // Write back changes.
-      Cs->cx = pCsw->cx;
-      Cs->cy = pCsw->cy;
-      Cs->x = pCsw->x;
-      Cs->y = pCsw->y;
-      hwndInsertAfter = pCbtCreate->hwndInsertAfter;
    }
 
    if ((Cs->style & (WS_CHILD|WS_POPUP)) == WS_CHILD)
@@ -2660,6 +2759,16 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
       goto cleanup;
    }
 
+   /* The owner can have been destroyed by its thread during the callbacks above (the hook, WM_NCCREATE):
+      its storage went (co_UserFreeWindow) while this window, not linked yet, kept it as the owner. Owned
+      windows that are linked lose such an owner in co_UserFreeWindow; this one has none from now on */
+   if (Window->spwndOwner &&
+       ((Window->spwndOwner->state & WNDS_DESTROYED) || (Window->spwndOwner->state2 & WNDS2_INDESTROY)))
+   {
+      ERR("co_UserCreateWindowEx(%wZ): the owner was destroyed meanwhile\n", ClassName);
+      WndSetOwner(Window, NULL);
+   }
+
    /* Link the window */
    if (ParentWindow != NULL)
    {
@@ -2734,6 +2843,13 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
         co_WinPosSendSizeMoveEx(Window, TRUE);
    }
 
+   /* From here on the creation has succeeded, but the window procedure can destroy the window in any of
+      the messages below (WM_SIZE, WM_MOVE, the show messages ...): its storage is gone then (the class,
+      the links), the window itself is held. The steps that read it are skipped once it is destroyed; the
+      result is the same as before (the handle). */
+   if (Window->state & WNDS_DESTROYED)
+      goto created;
+
    /* Show or maybe minimize or maximize the window. */
 
    style = IntSetStyle( Window, 0, WS_MAXIMIZE | WS_MINIMIZE );
@@ -2762,10 +2878,14 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
       {
          co_WinPosSendNcCalcSizeStateChanged(Window);
       }
+      if (Window->state & WNDS_DESTROYED)
+         goto created;
    }
 
    /* Send the WM_PARENTNOTIFY message */
    IntSendParentNotify(Window, WM_CREATE);
+   if (Window->state & WNDS_DESTROYED)
+      goto created;
 
    /* Notify the shell that a new window was created */
    if (Window->spwndOwner == NULL ||
@@ -2786,10 +2906,12 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
    {
       co_UserShowScrollBar(Window, SB_VERT, FALSE, TRUE);
    }
-   if (Window->style & WS_HSCROLL)
+   if (!(Window->state & WNDS_DESTROYED) && (Window->style & WS_HSCROLL))
    {
       co_UserShowScrollBar(Window, SB_HORZ, TRUE, FALSE);
    }
+   if (Window->state & WNDS_DESTROYED)
+      goto created;
 
    /* Show the new window */
    if (Cs->style & WS_VISIBLE)
@@ -2801,7 +2923,7 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
 
       co_WinPosShowWindow(Window, dwShowMode);
 
-      if (Window->ExStyle & WS_EX_MDICHILD)
+      if (!(Window->state & WNDS_DESTROYED) && (Window->ExStyle & WS_EX_MDICHILD))
       {
           ASSERT(ParentWindow);
           if(!ParentWindow)
@@ -2826,14 +2948,16 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
       }
    }
 
-   if (Class->atomClassName == gaGuiConsoleWndClass)
+created:
+   if (bGuiConsoleClass)
    {
        /* Count only console windows manually */
        co_IntUserManualGuiCheck(TRUE);
    }
 
    /* Set the hotkey */
-   if (!(Window->style & (WS_POPUP | WS_CHILD)) || (Window->ExStyle & WS_EX_APPWINDOW))
+   if (!(Window->state & WNDS_DESTROYED) &&
+       (!(Window->style & (WS_POPUP | WS_CHILD)) || (Window->ExStyle & WS_EX_APPWINDOW)))
    {
        if (pti->ppi->dwHotkey)
        {
@@ -2843,6 +2967,15 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
    }
 
    TRACE("co_UserCreateWindowEx(%wZ): Created window %p\n", ClassName, hWnd);
+   /* A window its procedure (or an in-context WinEvent procedure for EVENT_OBJECT_CREATE) destroyed during
+      the creation messages lives only on the reference of this function, which goes below: the caller
+      would get freed memory (the IME window of the thread is assignment-locked with it, NtUserCreateWindowEx
+      reads its handle from it). The creation fails then. */
+   if (Window->state & WNDS_DESTROYED)
+   {
+      ERR("co_UserCreateWindowEx(%wZ): window %p was destroyed during its creation\n", ClassName, hWnd);
+      goto cleanup;
+   }
    ret = Window;
 
 cleanup:
@@ -3092,11 +3225,14 @@ VOID FASTCALL IntDestroyOwnedWindows(PWND Window)
     HWND* phWnd;
     PWND pWnd;
     USER_REFERENCE_ENTRY Ref;
+    USER_HELD_POOL_ENTRY HeldList;
 
     List = IntWinListOwnedPopups(Window);
     if (!List)
         return;
 
+    /* The destroy of each owned window calls its procedure: the list goes with the thread if it ends there */
+    UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
     for (phWnd = List; *phWnd; ++phWnd)
     {
         pWnd = ValidateHwndNoErr(*phWnd);
@@ -3118,7 +3254,7 @@ VOID FASTCALL IntDestroyOwnedWindows(PWND Window)
         }
     }
 
-    ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+    UserFreePoolCo(&HeldList);
 }
 
 BOOLEAN co_UserDestroyWindow(PVOID Object)
@@ -5074,6 +5210,7 @@ IntShowOwnedPopups(PWND OwnerWnd, BOOL fShow )
    PWND pWnd;
    HWND *win_array;
    USER_REFERENCE_ENTRY Ref;
+   USER_HELD_POOL_ENTRY HeldList;
 
 //   ASSERT(OwnerWnd);
 
@@ -5084,6 +5221,9 @@ IntShowOwnedPopups(PWND OwnerWnd, BOOL fShow )
 
    if (!win_array)
       return TRUE;
+
+   /* WM_SHOWWINDOW to each popup: the list goes with the thread if it ends in one */
+   UserHoldPoolCo(win_array, USERTAG_WINDOWLIST, &HeldList);
 
    while (win_array[count])
       count++;
@@ -5129,7 +5269,7 @@ IntShowOwnedPopups(PWND OwnerWnd, BOOL fShow )
          }
       }
    }
-   ExFreePoolWithTag(win_array, USERTAG_WINDOWLIST);
+   UserFreePoolCo(&HeldList);
    TRACE("Leave ShowOwnedPopups\n");
    return TRUE;
 }

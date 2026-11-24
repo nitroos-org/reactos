@@ -17,6 +17,8 @@ typedef struct _EVENTPACK
 } EVENTPACK, *PEVENTPACK;
 
 static PEVENTTABLE GlobalEvents = NULL;
+/* Counts the notifications (IntNotifyWinEvent), under the USER lock */
+static ULONG gulWinEventNotification = 0;
 
 /* PRIVATE FUNCTIONS *********************************************************/
 
@@ -133,6 +135,8 @@ IntRemoveEvent(PVOID Object)
       TRACE("IntRemoveEvent pEH %p\n", pEH);
       KeEnterCriticalRegion();
       RemoveEntryList(&pEH->Chain);
+      /* Off the list: its links name itself, not the neighbours it had */
+      InitializeListHead(&pEH->Chain);
       GlobalEvents->Counts--;
       if (!GlobalEvents->Counts) gpsi->dwInstalledEventHooks = 0;
       if (pEH->ModuleName.Buffer)
@@ -212,10 +216,13 @@ IntNotifyWinEvent(
    LONG  idChild,
    DWORD flags)
 {
-   PEVENTHOOK pEH;
+   PEVENTHOOK pEH, pEHNext;
    PLIST_ENTRY ListEntry;
    PTHREADINFO pti, ptiCurrent;
-   USER_REFERENCE_ENTRY Ref;
+   PPROCESSINFO ppi;
+   ULONG idProcess, idThread, ulNotification;
+   HWND hWnd;
+   USER_REFERENCE_ENTRY Ref, RefNext;
 
    TRACE("IntNotifyWinEvent GlobalEvents = %p pWnd %p\n", GlobalEvents, pWnd);
 
@@ -230,6 +237,19 @@ IntNotifyWinEvent(
    else
       pti = ptiCurrent;
 
+   /* In-context event procedures run in this thread, with the USER lock released: they can destroy pWnd
+      (and with it the last reference on its THREADINFO, pti) and unhook any event hook. What is needed of
+      pWnd and pti is taken here, once; pti itself is only compared after the first call */
+   hWnd = pWnd ? UserHMGetHandle(pWnd) : NULL;
+   ppi = pti->ppi;
+   idProcess = PtrToUint(pti->pEThread->Cid.UniqueProcess);
+   idThread = PtrToUint(pti->pEThread->Cid.UniqueThread);
+
+   /* Marks the hooks this notification calls (never 0: the value of a new hook) */
+   ulNotification = ++gulWinEventNotification;
+   if (!ulNotification)
+      ulNotification = ++gulWinEventNotification;
+
    ListEntry = GlobalEvents->Events.Flink;
    ASSERT(ListEntry != &GlobalEvents->Events);
    while (ListEntry != &GlobalEvents->Events)
@@ -237,18 +257,23 @@ IntNotifyWinEvent(
      pEH = CONTAINING_RECORD(ListEntry, EVENTHOOK, Chain);
      ListEntry = ListEntry->Flink;
 
+     /* Called by this notification already (the walk started again at the head) */
+     if (pEH->ulNotified == ulNotification)
+        continue;
+
      // Must be inside the event window.
      if ( Event >= pEH->eventMin && Event <= pEH->eventMax )
      {
      // if all process || all thread || other thread same process
      // if ^skip own thread && ((Pid && CPid == Pid && ^skip own process) || all process)
-        if (!( (pEH->idProcess && pEH->idProcess != PtrToUint(pti->pEThread->Cid.UniqueProcess)) ||
-               (pEH->Flags & WINEVENT_SKIPOWNPROCESS && pEH->head.pti->ppi == pti->ppi) ||
-               (pEH->idThread && pEH->idThread != PtrToUint(pti->pEThread->Cid.UniqueThread)) ||
+        if (!( (pEH->idProcess && pEH->idProcess != idProcess) ||
+               (pEH->Flags & WINEVENT_SKIPOWNPROCESS && pEH->head.pti->ppi == ppi) ||
+               (pEH->idThread && pEH->idThread != idThread) ||
                (pEH->Flags & WINEVENT_SKIPOWNTHREAD && pEH->head.pti == pti) ||
                 pEH->head.pti->rpdesk != ptiCurrent->rpdesk ) ) // Same as hooks.
         {
            UserRefObjectCo(pEH, &Ref);
+           pEH->ulNotified = ulNotification;
            if (pEH->Flags & WINEVENT_INCONTEXT)
            {
               if (!IntEventInContextAllowed(pEH, ptiCurrent))
@@ -256,10 +281,17 @@ IntNotifyWinEvent(
                  UserDerefObjectCo(pEH);
                  continue;
               }
-              TRACE("In       Event 0x%x, idObject %d hwnd %p\n", Event, idObject, pWnd ? UserHMGetHandle(pWnd) : NULL);
+
+              /* The next hook is held across the call too: the procedure can unhook it (or this one),
+                 which takes it off the list and frees it once it is no longer referenced */
+              pEHNext = (ListEntry != &GlobalEvents->Events) ? CONTAINING_RECORD(ListEntry, EVENTHOOK, Chain) : NULL;
+              if (pEHNext)
+                 UserRefObjectCo(pEHNext, &RefNext);
+
+              TRACE("In       Event 0x%x, idObject %d hwnd %p\n", Event, idObject, hWnd);
               co_IntCallEventProc( UserHMGetHandle(pEH),
                                    Event,
-                                   pWnd ? UserHMGetHandle(pWnd) : NULL,
+                                   hWnd,
                                    idObject,
                                    idChild,
                                    PtrToUint(NtCurrentTeb()->ClientId.UniqueThread),
@@ -268,13 +300,26 @@ IntNotifyWinEvent(
                                    pEH->ihmod,
                                    pEH->offPfn,
                                    &pEH->ModuleName);
+
+              /* Go on after the hook that was called if it is still hooked (its links are those of the
+                 list now), else at the next one if that is still hooked; with both unhooked, at the head
+                 of the list again, past the hooks this notification called already */
+              if (!UserObjectInDestroy(UserHMGetHandle(pEH)))
+                 ListEntry = pEH->Chain.Flink;
+              else if (pEHNext && !UserObjectInDestroy(UserHMGetHandle(pEHNext)))
+                 ListEntry = &pEHNext->Chain;
+              else
+                 ListEntry = GlobalEvents->Events.Flink;
+
+              if (pEHNext)
+                 UserDerefObjectCo(pEHNext);
            }
            else
            {
-              TRACE("Out      Event 0x%x, idObject %d hwnd %p\n", Event, idObject, pWnd ? UserHMGetHandle(pWnd) : NULL);
+              TRACE("Out      Event 0x%x, idObject %d hwnd %p\n", Event, idObject, hWnd);
               IntCallLowLevelEvent( pEH,
                                     Event,
-                                    pWnd ? UserHMGetHandle(pWnd) : NULL,
+                                    hWnd,
                                     idObject,
                                     idChild,
                                     PtrToUint(NtCurrentTeb()->ClientId.UniqueThread));
@@ -506,9 +551,15 @@ NtUserUnhookWinEvent(
    UserEnterExclusive();
 
    pEH = (PEVENTHOOK)UserGetObject(gHandleTable, hWinEventHook, TYPE_WINEVENTHOOK);
-   if (pEH)
+   /* A hook unhooked already (by this call before, or destroyed with its thread) that something still
+      holds (a notification walking the hooks) keeps its handle entry, in destroy: it is not unhooked twice */
+   if (pEH && !UserObjectInDestroy(hWinEventHook))
    {
       Ret = IntRemoveEvent(pEH);
+   }
+   else if (pEH)
+   {
+      EngSetLastError(ERROR_INVALID_HANDLE);
    }
 
    UserLeave();

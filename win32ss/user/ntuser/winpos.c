@@ -1417,6 +1417,7 @@ HWND FASTCALL
 WinPosDoOwnedPopups(PWND Window, HWND hWndInsertAfter)
 {
    HWND *List = NULL;
+   USER_HELD_POOL_ENTRY HeldList;
    HWND Owner;
    LONG Style;
    PWND DesktopWindow, ChildObject;
@@ -1543,6 +1544,8 @@ WinPosDoOwnedPopups(PWND Window, HWND hWndInsertAfter)
         }
       }
 
+      /* The owned popups' SetWindowPos calls their window procedures: held, the list goes if the thread ends there */
+      UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
       for (; List[i]; i++)
       {
          PWND Wnd;
@@ -1566,7 +1569,7 @@ WinPosDoOwnedPopups(PWND Window, HWND hWndInsertAfter)
          UserDerefObjectCo(Wnd);
          hWndInsertAfter = List[i];
       }
-      ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+      UserFreePoolCo(&HeldList);
    }
 done:
    return hWndInsertAfter;
@@ -1590,6 +1593,7 @@ co_WinPosNotifyOwnerGroup(PWND Window)
 {
    PWND Root, Desktop, Wnd;
    HWND *List, hWindow, hRoot;
+   USER_HELD_POOL_ENTRY HeldList;
    int i;
 
    hWindow = UserHMGetHandle(Window);
@@ -1601,6 +1605,8 @@ co_WinPosNotifyOwnerGroup(PWND Window)
    if (!List)
       return;
 
+   /* Held across the WM_WINDOWPOSCHANGING sends: the list goes if the thread ends in one of them */
+   UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
    for (i = 0; List[i]; i++)
    {
       USER_REFERENCE_ENTRY Ref;
@@ -1625,7 +1631,7 @@ co_WinPosNotifyOwnerGroup(PWND Window)
       co_IntSendMessage(WinPos.hwnd, WM_WINDOWPOSCHANGING, 0, (LPARAM)&WinPos);
       UserDerefObjectCo(Wnd);
    }
-   ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+   UserFreePoolCo(&HeldList);
 }
 
 ////
@@ -1955,6 +1961,7 @@ co_WinPosSetWindowPosEx(
    PREGION VisBeforeJustClient = NULL;
    PREGION VisAfter = NULL;
    BOOL bRedirKeep = FALSE;
+   BOOL bHadVisBefore, bHadVisAfter;
    PREGION CopyRgn = NULL;
    ULONG WvrFlags = 0;
    RECTL OldWindowRect, OldClientRect;
@@ -2062,6 +2069,13 @@ co_WinPosSetWindowPosEx(
             }
          }
          WinPos.hwndInsertAfter = WinPosDoOwnedPopups(Window, WinPos.hwndInsertAfter);
+         /* The owned popups were moved with messages to their threads, and this thread answers the
+            messages sent to it while it waits: the window can be gone */
+         if (!IntIsWindow(WinPos.hwnd))
+         {
+            EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+            return FALSE;
+         }
       }
    }
 
@@ -2130,6 +2144,16 @@ co_WinPosSetWindowPosEx(
    }
    else
       WvrFlags = co_WinPosDoNCCALCSize(Window, &WinPos, &NewWindowRect, &NewClientRect, valid_rects);
+
+   /* WM_NCCALCSIZE went to the window's procedure, which can destroy the window (the caller holds it):
+      its storage and links are gone, it must not be linked into the z-order again */
+   if (!IntIsWindow(WinPos.hwnd))
+   {
+      if (VisBefore) REGION_Delete(VisBefore);
+      if (VisBeforeJustClient) REGION_Delete(VisBeforeJustClient);
+      EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+      return FALSE;
+   }
 
 //   ERR("co_WinPosDoNCCALCSize returned 0x%x\n valid dest: %d %d %d %d\n valid src : %d %d %d %d\n", WvrFlags,
 //      valid_rects[0].left,valid_rects[0].top,valid_rects[0].right,valid_rects[0].bottom,
@@ -2228,6 +2252,17 @@ co_WinPosSetWindowPosEx(
    else if (!NoMessages)
    {
       IntCheckFullscreen(Window);
+   }
+
+   /* EVENT_OBJECT_HIDE / EVENT_OBJECT_SHOW (in-context WinEvent procedures run in this thread), the shell
+      hook and the redraw above call back: the window can have been destroyed there (the caller holds it, its
+      storage is gone). Its new visible region and the repaint are not computed then. */
+   if (!IntIsWindow(WinPos.hwnd))
+   {
+      if (VisBefore) REGION_Delete(VisBefore);
+      if (VisBeforeJustClient) REGION_Delete(VisBeforeJustClient);
+      EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+      return FALSE;
    }
 
    if (Window->hrgnUpdate != NULL && Window->hrgnUpdate != HRGN_WINDOW)
@@ -2564,6 +2599,32 @@ co_WinPosSetWindowPosEx(
       }
    }
 
+   /* What follows needs only to know whether there were visible regions. The regions go before the
+      activation messages and the paints below: a thread that ends in one of those callbacks would never free
+      them (regions belong to no process). */
+   bHadVisBefore = (VisBefore != NULL || VisBeforeJustClient != NULL);
+   bHadVisAfter = (VisAfter != NULL);
+   if (VisBefore != NULL)
+   {
+      REGION_Delete(VisBefore);
+      VisBefore = NULL;
+   }
+   if (VisBeforeJustClient != NULL)
+   {
+      REGION_Delete(VisBeforeJustClient);
+      VisBeforeJustClient = NULL;
+   }
+   if (VisAfter != NULL)
+   {
+      REGION_Delete(VisAfter);
+      VisAfter = NULL;
+   }
+   if (CopyRgn != NULL)
+   {
+      REGION_Delete(CopyRgn);
+      CopyRgn = NULL;
+   }
+
    if (!(WinPos.flags & (SWP_NOACTIVATE|SWP_HIDEWINDOW)))
    {
       if ((Window->style & (WS_CHILD | WS_POPUP)) == WS_CHILD)
@@ -2592,8 +2653,8 @@ co_WinPosSetWindowPosEx(
 
    if ( !PosChanged &&
          (WinPos.flags & SWP_FRAMECHANGED) &&
-        !(WinPos.flags & SWP_DEFERERASE) &&    // Prevent sending WM_SYNCPAINT message. 
-         VisAfter )
+        !(WinPos.flags & SWP_DEFERERASE) &&    // Prevent sending WM_SYNCPAINT message.
+         bHadVisAfter )
    {
        PWND Parent = Window->spwndParent;
        if ( !(Window->style & WS_CHILD) && (Parent) && (Parent->style & WS_CLIPCHILDREN))
@@ -2604,34 +2665,12 @@ co_WinPosSetWindowPosEx(
    }
 
    // Fix wine msg test_SetFocus, prevents sending WM_WINDOWPOSCHANGED.
-   if ( VisBefore == NULL &&
-        VisBeforeJustClient == NULL &&
+   if ( !bHadVisBefore &&
        !(Window->ExStyle & WS_EX_TOPMOST) &&
         (WinPos.flags & SWP_AGG_STATUSFLAGS) == (SWP_AGG_NOPOSCHANGE & ~SWP_NOZORDER))
    {
       TRACE("No drawing, set no Z order and no redraw!\n");
       WinPos.flags |= SWP_NOZORDER|SWP_NOREDRAW;
-   }
-
-   if (VisBefore != NULL)
-   {
-      REGION_Delete(VisBefore);
-      VisBefore = NULL;
-   }
-   if (VisBeforeJustClient != NULL)
-   {
-      REGION_Delete(VisBeforeJustClient);
-      VisBeforeJustClient = NULL;
-   }
-   if (VisAfter != NULL)
-   {
-      REGION_Delete(VisAfter);
-      VisAfter = NULL;
-   }
-   if (CopyRgn != NULL)
-   {
-      REGION_Delete(CopyRgn);
-      CopyRgn = NULL;
    }
 
    if(!(flags & SWP_DEFERERASE))
@@ -2794,6 +2833,11 @@ co_WinPosSendSizeMoveEx(PWND Wnd, BOOL bCreate)
     }
 
     co_IntSendMessageNoWait(UserHMGetHandle(Wnd), WM_SIZE, wParam, lParam);
+
+    /* The window procedure can destroy the window in WM_SIZE (the caller holds it): its storage is
+       gone, spwndParent with it */
+    if ((Wnd->state & WNDS_DESTROYED) || !Wnd->spwndParent)
+        return;
 
     if (UserIsDesktopWindow(Wnd->spwndParent))
        lParam = MAKELONG(Wnd->rcClient.left, Wnd->rcClient.top);
@@ -3413,11 +3457,17 @@ co_WinPosSearchChildren(
     if (!(ScopeWin->style & WS_MINIMIZE) &&
          RECTL_bPointInRect(&ScopeWin->rcClient, Point->x, Point->y) )
     {
-        UserReferenceObject(ScopeWin);
+        USER_REFERENCE_ENTRY ScopeRef;
+        USER_HELD_POOL_ENTRY HeldList;
+
+        /* The children's WM_NCHITTEST runs window procedures: the window and the list are held so that the thread
+           cleanup gives them back if the thread ends in one of them */
+        UserRefObjectCo(ScopeWin, &ScopeRef);
 
         List = IntWinListChildren(ScopeWin);
         if (List)
         {
+            UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
             for (phWnd = List; *phWnd; ++phWnd)
             {
                 if (!(pwndChild = ValidateHwndNoErr(*phWnd)))
@@ -3430,19 +3480,32 @@ co_WinPosSearchChildren(
                 if (pwndChild != NULL)
                 {
                     /* We found a window. Don't send any more WM_NCHITTEST messages */
-                    ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
-                    UserDereferenceObject(ScopeWin);
+                    UserFreePoolCo(&HeldList);
+                    UserDerefObjectCo(ScopeWin);
                     return pwndChild;
                 }
             }
-            ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+            UserFreePoolCo(&HeldList);
         }
-        UserDereferenceObject(ScopeWin);
+        UserDerefObjectCo(ScopeWin);
     }
 
     if (ScopeWin->head.pti == PsGetCurrentThreadWin32Thread())
     {
+       USER_REFERENCE_ENTRY Ref;
+       BOOL bDestroyed;
+
+       /* The window procedure can destroy the window in WM_NCHITTEST: held across it, and a destroyed window
+          is not the window at the point (nothing may get its storage, which is gone) */
+       UserRefObjectCo(ScopeWin, &Ref);
        *HitTest = (USHORT)co_IntSendMessage(UserHMGetHandle(ScopeWin), WM_NCHITTEST, 0, MAKELONG(Point->x, Point->y));
+       bDestroyed = !!(ScopeWin->state & WNDS_DESTROYED);
+       UserDerefObjectCo(ScopeWin);
+       if (bDestroyed)
+       {
+           *HitTest = HTNOWHERE;
+           return NULL;
+       }
 
        if ((*HitTest) == (USHORT)HTTRANSPARENT)
        {

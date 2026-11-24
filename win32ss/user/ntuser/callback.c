@@ -1102,6 +1102,16 @@ co_IntCallEventProc(HWINEVENTHOOK hook,
    PEVENTPROC_CALLBACK_ARGUMENTS Common;
    ULONG ArgumentLength, ResultLength, NameLength = 0;
    PVOID Argument, ResultPointer;
+   PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+
+   /* The events of a thread's own cleanup (EVENT_OBJECT_DESTROY of the windows it leaves) come after its
+      DLLs were told that it detaches and its TLS was freed: an in-context procedure must not run in it any
+      more (as co_IntCallHookProc for the hooks) */
+   if (pti->TIF_flags & TIF_INCLEANUP)
+   {
+      TRACE("Thread is in cleanup, no in-context event procedure for event 0x%lx\n", event);
+      return 0;
+   }
 
    /* An in-context hook runs in a process that may not have the DLL loaded: its path follows the arguments
       as a NUL-terminated string, for user32 to load it by name */

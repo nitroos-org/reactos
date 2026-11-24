@@ -384,12 +384,15 @@ IntDeactivateWindow(PTHREADINFO pti, HANDLE tid)
       HANDLE OldTID = PsGetThreadId(ptiPrev->pEThread);
       PWND cWindow;
       HWND *List, *phWnd;
+      USER_HELD_POOL_ENTRY HeldList;
 
       /* The windows of ptiPrev are on ptiPrev's desktop */
       cWindow = ptiPrev->rpdesk ? IntGetThreadDesktopWindow(ptiPrev) : NULL;
       List = cWindow ? IntWinListChildren(cWindow) : NULL;
       if ( List )
       {
+         /* Held across WM_ACTIVATEAPP: the thread can end inside it */
+         UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
          if ( OldTID )
          {
             for (phWnd = List; *phWnd; ++phWnd)
@@ -405,7 +408,7 @@ IntDeactivateWindow(PTHREADINFO pti, HANDLE tid)
                }
             }
          }
-         ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+         UserFreePoolCo(&HeldList);
       }
    }
 
@@ -618,7 +621,12 @@ co_IntSendActivateMessages(PWND WindowPrev, PWND Window, BOOL MouseActivate, BOO
          pwndDesktop = co_GetDesktopWindow(Window);//UserGetDesktopWindow();
          if (Window->spwndParent == pwndDesktop )
          {
+            USER_HELD_POOL_ENTRY HeldTopLevel;
+
             phwndTopLevel = IntWinListChildren(pwndDesktop);
+            /* Held across WM_WINDOWPOSCHANGING: the thread can end inside it */
+            if (phwndTopLevel)
+               UserHoldPoolCo(phwndTopLevel, USERTAG_WINDOWLIST, &HeldTopLevel);
             phwndCurrent = phwndTopLevel;
             while(phwndCurrent && *phwndCurrent)
             {
@@ -634,7 +642,7 @@ co_IntSendActivateMessages(PWND WindowPrev, PWND Window, BOOL MouseActivate, BOO
                 }
                 phwndCurrent++;
             }
-            if (phwndTopLevel) ExFreePoolWithTag(phwndTopLevel, USERTAG_WINDOWLIST);
+            if (phwndTopLevel) UserFreePoolCo(&HeldTopLevel);
           }
       }
       ////
@@ -652,12 +660,15 @@ co_IntSendActivateMessages(PWND WindowPrev, PWND Window, BOOL MouseActivate, BOO
    {
       PWND cWindow;
       HWND *List, *phWnd;
+      USER_HELD_POOL_ENTRY HeldList;
 
       /* The windows of the activated and deactivated threads, on their (own) desktop */
       cWindow = co_GetDesktopWindow(Window ? Window : WindowPrev);
       List = cWindow ? IntWinListChildren(cWindow) : NULL;
       if ( List )
       {
+         /* Held across WM_ACTIVATEAPP: the thread can end inside it */
+         UserHoldPoolCo(List, USERTAG_WINDOWLIST, &HeldList);
          if ( OldTID )
          {
             ptiOld->TIF_flags |= TIF_INACTIVATEAPPMSG;
@@ -694,7 +705,7 @@ co_IntSendActivateMessages(PWND WindowPrev, PWND Window, BOOL MouseActivate, BOO
                }
             }
          }
-         ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+         UserFreePoolCo(&HeldList);
       }
    }
 
@@ -1214,6 +1225,7 @@ co_IntSetActiveWindow(
    PWND pWndChg, WndPrev; // State changes.
    HWND hWnd = 0;
    BOOL InAAPM;
+   LRESULT Hooked;
    CBTACTIVATESTRUCT cbt;
 
    //ERR("co_IntSetActiveWindow 1\n");
@@ -1258,11 +1270,19 @@ co_IntSetActiveWindow(
 
    if ( Wnd->state & WNDS_BEINGACTIVATED ) return TRUE;
 
+   /* The activation of Wnd is in progress while the CBT hook runs: an activation of Wnd from inside the
+      hook (SetFocus on one of its children, a click on one of its buttons) does not call the hook again.
+      It did, each time one level deeper on the kernel stack, until no callback fitted any more (and the
+      number of HCBT_ACTIVATE calls was the number of levels that fitted). Wnd is held by the caller. */
+   Wnd->state |= WNDS_BEINGACTIVATED;
+
    /* Call CBT hook chain */
    cbt.fMouse     = bMouse;
    /* Windows gives the hook the window that is being activated, not the one that was active */
    cbt.hWndActive = hWnd;
-   if (co_HOOK_CallHooks( WH_CBT, HCBT_ACTIVATE, (WPARAM)hWnd, (LPARAM)&cbt))
+   Hooked = co_HOOK_CallHooks( WH_CBT, HCBT_ACTIVATE, (WPARAM)hWnd, (LPARAM)&cbt);
+   Wnd->state &= ~WNDS_BEINGACTIVATED;
+   if (Hooked)
    {
       ERR("SetActiveWindow: WH_CBT Call Hook return!\n");
       return FALSE;
@@ -1320,6 +1340,15 @@ co_IntSetActiveWindow(
    Wnd->state |= WNDS_BEINGACTIVATED;
 
    IntNotifyWinEvent(EVENT_SYSTEM_FOREGROUND, Wnd, OBJID_WINDOW, CHILDID_SELF, WEF_SETBYWNDPTI);
+
+   /* An in-context WinEvent procedure ran in this thread: it can have attached the input of the thread
+      (the queue is freed) or destroyed Wnd, as the hook above */
+   if (ThreadQueue != pti->MessageQueue || !VerifyWnd(Wnd))
+   {
+      ERR("SetActiveWindow: the queue or the window changed in the foreground event\n");
+      Wnd->state &= ~WNDS_BEINGACTIVATED;
+      return FALSE;
+   }
 
    // Clear out activate EVENT messages.
    FindRemoveEventMsg(pti, POSTEVENT_SAW, POSTEVENT_DAW);
@@ -1524,6 +1553,77 @@ UserSetActiveWindow( _In_opt_ PWND Wnd )
   return FALSE;
 }
 
+/*
+ * co_UserSetFocus: activate pwndTop, the top-level window above Window, before Window gets the focus.
+ * pwndTop is held for the whole activation: the activation callbacks (the CBT hook, the deactivation and
+ * activation messages, the shell hook) can destroy it, and co_IntSetForegroundAndFocusWindow and
+ * co_IntSetActiveWindow use their window after them. Window (held by the caller) and the queue of the
+ * thread are checked again after it. FALSE: the focus does not change.
+ */
+static BOOL FASTCALL
+co_IntSetFocusActivateTop(
+   _In_ PTHREADINFO pti,
+   _In_ PUSER_MESSAGE_QUEUE ThreadQueue,
+   _In_ PWND Window,
+   _In_ PWND pwndTop)
+{
+   USER_REFERENCE_ENTRY RefTop;
+   PUSER_MESSAGE_QUEUE ForegroundQueue;
+   HWND hWnd = UserHMGetHandle(Window), hwndTop = UserHMGetHandle(pwndTop);
+   BOOL Ret = FALSE;
+
+   UserRefObjectCo(pwndTop, &RefTop);
+
+   ForegroundQueue = IntGetFocusMessageQueue(); // Keep it based on desktop.
+   if (ThreadQueue != ForegroundQueue && IsAllowedFGActive(pti, pwndTop)) // Rule 2 & 3.
+   {
+      //ERR("SetFocus: Set Foreground!\n");
+      if (!(pwndTop->style & WS_VISIBLE))
+      {
+          pti->ppi->W32PF_flags |= W32PF_ALLOWFOREGROUNDACTIVATE;
+      }
+      if (!co_IntSetForegroundAndFocusWindow(pwndTop, FALSE, TRUE))
+      {
+         ERR("SetFocus: Set Foreground and Focus Failed!\n");
+         goto Exit;
+      }
+      /* A held window that was destroyed keeps its memory, not its handle */
+      if (ThreadQueue != pti->MessageQueue || ValidateHwndNoErr(hWnd) != Window ||
+          ValidateHwndNoErr(hwndTop) != pwndTop)
+      {
+         goto Exit;
+      }
+   }
+
+   /* Set Active when it is needed. */
+   if (pwndTop != ThreadQueue->spwndActive)
+   {
+      //ERR("SetFocus: Set Active! %p\n",pwndTop?UserHMGetHandle(pwndTop):0);
+      if (!co_IntSetActiveWindow(pwndTop, FALSE, FALSE, FALSE))
+      {
+         ERR("SetFocus: Set Active Failed!\n");
+         goto Exit;
+      }
+   }
+
+   if (ThreadQueue != pti->MessageQueue || ValidateHwndNoErr(hWnd) != Window)
+      goto Exit;
+   /* Abort if window destroyed */
+   if (Window->state2 & WNDS2_INDESTROY)
+      goto Exit;
+   /* Do not change focus if the window is no longer active (pointers compared only) */
+   if (pwndTop != ThreadQueue->spwndActive)
+   {
+      ERR("SetFocus: Top window did not go active!\n");
+      goto Exit;
+   }
+   Ret = TRUE;
+
+Exit:
+   UserDerefObjectCo(pwndTop);
+   return Ret;
+}
+
 HWND FASTCALL
 co_UserSetFocus(PWND Window)
 {
@@ -1575,10 +1675,9 @@ co_UserSetFocus(PWND Window)
          EngSetLastError(ERROR_INVALID_PARAMETER); /* Windows 10 22H2, oracle 2026-11-04 */
          return 0;
       }
-      /* pwndTop is held only through the parent chain of Window, which the hook and the callbacks of
-         the foreground switch can change (and the old parent then be destroyed): it is found again by
-         its handle after them. (Not with a reference: a referenced window that is destroyed meanwhile
-         keeps its handle, which changes the activations of its destruction.) */
+      /* pwndTop is held only through the parent chain of Window, which the hook can change (and the old
+         parent then be destroyed): it is found again by its handle after the hook, and held from then on
+         while it is activated (co_IntSetFocusActivateTop) */
       hwndTop = UserHMGetHandle(pwndTop);
       /* So is Window when the caller passes a parent (co_UserSetFocus(Window->spwndParent)); and a window
          destroyed by the callbacks must not become the focus. AttachThreadInput during them can free the
@@ -1598,46 +1697,8 @@ co_UserSetFocus(PWND Window)
       /* Activate pwndTop if needed. */
       if (pwndTop != ThreadQueue->spwndActive)
       {
-         PUSER_MESSAGE_QUEUE ForegroundQueue = IntGetFocusMessageQueue(); // Keep it based on desktop.
-         if (ThreadQueue != ForegroundQueue && IsAllowedFGActive(pti, pwndTop)) // Rule 2 & 3.
-         {
-            //ERR("SetFocus: Set Foreground!\n");
-            if (!(pwndTop->style & WS_VISIBLE))
-            {
-                pti->ppi->W32PF_flags |= W32PF_ALLOWFOREGROUNDACTIVATE;
-            }
-            if (!co_IntSetForegroundAndFocusWindow(pwndTop, FALSE, TRUE))
-            {
-               ERR("SetFocus: Set Foreground and Focus Failed!\n");
-               return 0;
-            }
-            if (ThreadQueue != pti->MessageQueue || ValidateHwndNoErr(hWnd) != Window)
-               return 0;
-            if (!(pwndTop = ValidateHwndNoErr(hwndTop)))
-               return 0;
-         }
-
-         /* Set Active when it is needed. */
-         if (pwndTop != ThreadQueue->spwndActive)
-         {
-            //ERR("SetFocus: Set Active! %p\n",pwndTop?UserHMGetHandle(pwndTop):0);
-            if (!co_IntSetActiveWindow(pwndTop, FALSE, FALSE, FALSE))
-            {
-               ERR("SetFocus: Set Active Failed!\n");
-               return 0;
-            }
-         }
-
-         if (ThreadQueue != pti->MessageQueue || ValidateHwndNoErr(hWnd) != Window)
+         if (!co_IntSetFocusActivateTop(pti, ThreadQueue, Window, pwndTop))
             return 0;
-         /* Abort if window destroyed */
-         if (Window->state2 & WNDS2_INDESTROY) return 0;
-         /* Do not change focus if the window is no longer active (pointers compared only) */
-         if (pwndTop != ThreadQueue->spwndActive)
-         {
-            ERR("SetFocus: Top window did not go active!\n");
-            return 0;
-         }
       }
 
       // Check again! SetActiveWindow could have set the focus via WM_ACTIVATE.
@@ -1703,6 +1764,7 @@ co_UserSetCapture(HWND hWnd)
    PUSER_MESSAGE_QUEUE ThreadQueue;
    PWND pWnd, Window = NULL;
    HWND hWndPrev;
+   USER_REFERENCE_ENTRY Ref, RefPrev;
 
    pti = PsGetCurrentThreadWin32Thread();
    ThreadQueue = pti->MessageQueue;
@@ -1719,13 +1781,23 @@ co_UserSetCapture(HWND hWnd)
       }
    }
 
+   /* The capture events can run in-context WinEvent procedures in this thread, which can destroy either
+      window or attach the input of the thread (which frees its queue): both windows are held across them,
+      and the queue is used only while it is still the thread's */
+   if (Window)
+      UserRefObjectCo(Window, &Ref);
+
    hWndPrev = MsqSetStateWindow(pti, MSQ_STATE_CAPTURE, hWnd);
 
    if (hWndPrev)
    {
       pWnd = UserGetWindowObject(hWndPrev);
       if (pWnd)
+      {
+         UserRefObjectCo(pWnd, &RefPrev);
          IntNotifyWinEvent(EVENT_SYSTEM_CAPTUREEND, pWnd, OBJID_WINDOW, CHILDID_SELF, WEF_SETBYWNDPTI);
+         UserDerefObjectCo(pWnd);
+      }
    }
 
    if (Window)
@@ -1737,7 +1809,7 @@ co_UserSetCapture(HWND hWnd)
    //
    if (hWndPrev)
    {
-      if (ThreadQueue->MenuOwner && Window) ThreadQueue->QF_flags |= QF_CAPTURELOCKED;
+      if (ThreadQueue == pti->MessageQueue && ThreadQueue->MenuOwner && Window) ThreadQueue->QF_flags |= QF_CAPTURELOCKED;
 
       co_IntSendMessage(hWndPrev, WM_CAPTURECHANGED, 0, (LPARAM)hWnd);
 
@@ -1763,6 +1835,8 @@ co_UserSetCapture(HWND hWnd)
       mi.dwExtraInfo = 0;
       UserSendMouseInput(&mi, FALSE);
    }
+   if (Window)
+      UserDerefObjectCo(Window);
    return hWndPrev;
 }
 
