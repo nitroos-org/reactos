@@ -5036,7 +5036,7 @@ ScmAutoStartServices(VOID)
 #define SCM_PRESHUTDOWN_SILENT_TIMEOUT_MAX 20000
 #define SCM_PRESHUTDOWN_POLL            50
 #define SCM_PRESHUTDOWN_THREAD_WAIT     10000
-#define SCM_SHUTDOWN_DEFAULT_WAIT       20000
+#define SCM_SHUTDOWN_DEFAULT_WAIT       5000    /* the value of the system hive when WaitToKillServiceTimeout is absent */
 #define SCM_SHUTDOWN_COUNT_PERIOD       500
 
 /*
