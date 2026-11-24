@@ -520,6 +520,7 @@ CmpDoCreateChild(IN PHHIVE Hive,
     KeyBody->Type = CM_KEY_BODY_TYPE;
     KeyBody->KeyControlBlock = NULL;
     KeyBody->KcbLocked = FALSE;
+    KeyBody->NotifySet = FALSE;
 
     /* Check if we had a class */
     if (ParseContext->Class.Length > 0)
@@ -1025,6 +1026,7 @@ CmpDoOpen(IN PHHIVE Hive,
         KeyBody->Type = CM_KEY_BODY_TYPE;
         KeyBody->ProcessID = PsGetCurrentProcessId();
         KeyBody->NotifyBlock = NULL;
+        KeyBody->NotifySet = FALSE;
 
         /* Link to the KCB */
         EnlistKeyBodyWithKCB(KeyBody, IsLockShared ? CMP_ENLIST_KCB_LOCKED_SHARED : CMP_ENLIST_KCB_LOCKED_EXCLUSIVE);

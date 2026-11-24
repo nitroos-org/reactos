@@ -1164,6 +1164,7 @@ CmpCreateRegistryRoot(VOID)
     RootKey->NotifyBlock = NULL;
     RootKey->ProcessID = PsGetCurrentProcessId();
     RootKey->KcbLocked = FALSE;
+    RootKey->NotifySet = FALSE;
     RootKey->Wow64View = 0;
 
     /* Link with KCB */
