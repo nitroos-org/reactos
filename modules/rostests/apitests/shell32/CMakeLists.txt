@@ -54,6 +54,7 @@ list(APPEND SOURCE
     SHCreateFileDataObject.cpp
     SHCreateFileExtractIconW.cpp
     RecycleBinAcl.cpp
+    RecycleBinOtherVolume.cpp
     SHEmptyRecycleBin.cpp
     SHEvaluateSystemCommandTemplate.cpp
     SHGetComputerDisplayNameW.cpp
