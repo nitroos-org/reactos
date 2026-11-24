@@ -738,25 +738,27 @@ ResumeFree:
       links): every walk of the owner chain would read the freed storage. They have no owner from now on,
       before this window is marked destroyed below (user32 reads the owner of a window without the USER
       lock: once it sees this window destroyed, no window names it as its owner any more). A window created
-      later with this owner drops it before it is linked (co_UserCreateWindowEx). */
-   if (Window->head.rpdesk && Window->head.rpdesk->pDeskInfo &&
-       !(Window->head.rpdesk->dwDTFlags & DF_DESTROYED) &&
-       Window != Window->head.rpdesk->pDeskInfo->spwnd && Window != Window->head.rpdesk->spwndMessage)
+      later with this owner drops it before it is linked (co_UserCreateWindowEx).
+      Every window is looked at, not only the ones linked below the desktop window or the message window:
+      a window whose own destroy is under way is unlinked (co_UserDestroyWindow walks its owner chain after
+      its messages, IntImeCanDestroyDefIME), and a top-level window that SetParent or a hide moved can be
+      linked elsewhere at this moment. The handle table holds them all; the objects of every entry are
+      mapped (each holds its desktop, IntReferenceDesktopForObject). Desktop and message windows own
+      nothing. */
+   if (!IntIsDesktopOwnedWindow(Window))
    {
-      PWND pwndRoots[2], pwndNode;
       ULONG i;
 
-      pwndRoots[0] = Window->head.rpdesk->pDeskInfo->spwnd;
-      pwndRoots[1] = Window->head.rpdesk->spwndMessage;
-      for (i = 0; i < ARRAYSIZE(pwndRoots); i++)
+      for (i = 0; i < gHandleTable->nb_handles; i++)
       {
-         if (!pwndRoots[i])
+         PUSER_HANDLE_ENTRY Entry = &gHandleTable->handles[i];
+         PWND pwndNode;
+
+         if (Entry->type != TYPE_WINDOW)
             continue;
-         for (pwndNode = pwndRoots[i]->spwndChild; pwndNode; pwndNode = pwndNode->spwndNext)
-         {
-            if (pwndNode->spwndOwner == Window)
-               WndSetOwner(pwndNode, NULL);
-         }
+         pwndNode = Entry->ptr;
+         if (pwndNode && pwndNode != Window && pwndNode->spwndOwner == Window)
+            WndSetOwner(pwndNode, NULL);
       }
    }
 

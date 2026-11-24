@@ -2239,6 +2239,8 @@ IntImeCanDestroyDefIME(
         {
             if (pwndNode == pwndTarget)
                 break;
+            if (pwndNode->state & WNDS_DESTROYED) /* see below */
+                return FALSE;
         }
 
         if (!pwndNode)
@@ -2248,6 +2250,11 @@ IntImeCanDestroyDefIME(
     // Any ancestor of pwndTarget is IME-like?
     for (pwndNode = pwndTarget; pwndNode; pwndNode = pwndNode->spwndOwner)
     {
+        /* A freed window has no class any more: co_UserFreeWindow takes every owned window away from
+           it before it marks it destroyed, so the chain is not expected to reach one; if it does, the
+           IME window stays */
+        if (pwndNode->state & WNDS_DESTROYED)
+            return FALSE;
         if (IS_WND_IMELIKE(pwndNode))
             return FALSE;
     }
