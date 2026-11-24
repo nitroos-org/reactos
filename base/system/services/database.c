@@ -486,6 +486,7 @@ typedef struct _SCM_TOKEN_CONFIG
     PSID *ppSids;           /* the SIDs of the token, the service's own first; NULL: just pServiceSid */
     ULONG cSids;
     PWSTR pszKeep;          /* the privileges the token keeps: pszPrivileges, or the union of an image; NULL: all */
+    BOOL bAllSids;          /* every service of the image (this one alone for an own process) has a service SID */
 } SCM_TOKEN_CONFIG, *PSCM_TOKEN_CONFIG;
 
 static
@@ -634,6 +635,7 @@ sid:
     }
 
     pConfig->pszKeep = pConfig->pszPrivileges;
+    pConfig->bAllSids = (pConfig->pServiceSid != NULL);
     return ERROR_SUCCESS;
 }
 
@@ -738,12 +740,15 @@ ScmReadSharedTokenConfig(
         if (pOther == pService || !ScmServiceIsInImage(pOther, pImage))
             continue;
 
-        /* A service whose settings cannot be read adds nothing and counts as having no list */
+        /* A service whose settings cannot be read adds nothing and counts as having no list and no SID */
         if (ScmReadTokenConfig(pOther, FALSE, &Member) != ERROR_SUCCESS)
         {
             bAllLists = FALSE;
+            pConfig->bAllSids = FALSE;
             continue;
         }
+        if (Member.pServiceSid == NULL)
+            pConfig->bAllSids = FALSE;
 
         if (pConfig->dwSidType == SERVICE_SID_TYPE_RESTRICTED && Member.dwSidType != SERVICE_SID_TYPE_RESTRICTED)
         {
@@ -969,6 +974,8 @@ ScmCreateSystemServiceToken(
     ULONG cSids;
     ULONG WriteRestrictedSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
     ULONG ServiceGroupSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    ULONG LogonSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    LUID LogonSidValue;
     SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
     TOKEN_OWNER NewOwner;
     HANDLE hSelf = NULL, hImpersonation = NULL;
@@ -989,7 +996,8 @@ ScmCreateSystemServiceToken(
 
     *phToken = NULL;
     ppSids = ScmTokenConfigSids(pConfig, &cSids);
-    dwExtra = cSids + (bRestricted ? 1 : 0) + 1;    /* the service SIDs, WRITE RESTRICTED, NT AUTHORITY\SERVICE */
+    /* the service SIDs, WRITE RESTRICTED, NT AUTHORITY\SERVICE, the logon SID */
+    dwExtra = cSids + (bRestricted ? 1 : 0) + 2;
 
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_QUERY_SOURCE | TOKEN_DUPLICATE, &hSelf))
         return GetLastError();
@@ -1040,6 +1048,29 @@ ScmCreateSystemServiceToken(
     pNewGroups->Groups[pNewGroups->GroupCount].Attributes = SCM_GROUP_ENABLED_ALL;
     pNewGroups->GroupCount++;
     NewOwner.Owner = pUser->User.Sid;
+
+    /*
+     * The logon SID of the process, a new one for each (Windows Server 2022, measured with scratch LocalSystem
+     * services that have a service SID: S-1-5-5-0-<n>, one for each own-process service and one for a shared
+     * process, which is no logon session of the LSA: the token stays in the SYSTEM logon session). Its attributes
+     * are those of a logon SID, with SE_GROUP_OWNER when every service of the image has a service SID (0xc000000f;
+     * 0xc0000007 when one of a shared process has none). It is what the restricted copy of a RESTRICTED service
+     * names as its logon session SID. A LocalSystem service without a service SID runs with the controller's token,
+     * which has no logon SID, as on Windows.
+     */
+    if (!AllocateLocallyUniqueId(&LogonSidValue))
+    {
+        dwError = GetLastError();
+        goto done;
+    }
+    RtlInitializeSid((PSID)LogonSidBuffer, &NtAuthority, SECURITY_LOGON_IDS_RID_COUNT);
+    *RtlSubAuthoritySid((PSID)LogonSidBuffer, 0) = SECURITY_LOGON_IDS_RID;
+    *RtlSubAuthoritySid((PSID)LogonSidBuffer, 1) = (ULONG)LogonSidValue.HighPart;
+    *RtlSubAuthoritySid((PSID)LogonSidBuffer, 2) = LogonSidValue.LowPart;
+    pNewGroups->Groups[pNewGroups->GroupCount].Sid = (PSID)LogonSidBuffer;
+    pNewGroups->Groups[pNewGroups->GroupCount].Attributes = SCM_GROUP_ENABLED_ALL | SE_GROUP_LOGON_ID |
+                                                            (pConfig->bAllSids ? SE_GROUP_OWNER : 0);
+    pNewGroups->GroupCount++;
 
     /* SeCreateTokenPrivilege, on an impersonation copy of the token of the controller */
     if (!DuplicateTokenEx(hSelf, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenImpersonation, &hImpersonation))
