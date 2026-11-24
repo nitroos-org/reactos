@@ -2627,6 +2627,31 @@ CmpUnlinkHiveFromMaster(IN PCMHIVE CmHive,
     return TRUE;
 }
 
+/* The number of key bodies of the key that have a handle open: a body whose last handle is closed stays on the
+ * lists of the KCB until the object is deleted, which can be a moment later */
+static
+ULONG
+CmpCountOpenKeyHandles(IN PCM_KEY_CONTROL_BLOCK Kcb)
+{
+    PLIST_ENTRY Entry;
+    ULONG Count = 0, i;
+
+    for (i = 0; i < RTL_NUMBER_OF(Kcb->KeyBodyArray); i++)
+    {
+        if (Kcb->KeyBodyArray[i] != NULL &&
+            OBJECT_TO_OBJECT_HEADER((PCM_KEY_BODY)Kcb->KeyBodyArray[i])->HandleCount != 0)
+            Count++;
+    }
+    for (Entry = Kcb->KeyBodyListHead.Flink; Entry != &Kcb->KeyBodyListHead; Entry = Entry->Flink)
+    {
+        PCM_KEY_BODY KeyBody = CONTAINING_RECORD(Entry, CM_KEY_BODY, KeyBodyList);
+
+        if (OBJECT_TO_OBJECT_HEADER(KeyBody)->HandleCount != 0)
+            Count++;
+    }
+    return Count;
+}
+
 NTSTATUS
 NTAPI
 CmUnloadKey(
@@ -2693,6 +2718,17 @@ CmUnloadKey(
                 return STATUS_CANNOT_DELETE;
             }
         }
+    }
+
+    /*
+     * A handle that is open on the hive root itself also keeps the hive loaded (STATUS_CANNOT_DELETE, as
+     * measured on Windows Server 2022); the key body that keeps the linked hive alive has no handle and is
+     * not one. A forced unload takes the handles with the hive.
+     */
+    if (Flags != REG_FORCE_UNLOAD && CmpCountOpenKeyHandles(Kcb) != 0)
+    {
+        Hive->HiveFlags &= ~HIVE_IS_UNLOADING;
+        return STATUS_CANNOT_DELETE;
     }
 
     /* Set the loading flag */
