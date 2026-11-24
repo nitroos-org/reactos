@@ -808,6 +808,33 @@ ResumeFree:
       Window->head.pti->MessageQueue->spwndActivePrev = NULL;
    }
 
+   /* Every other queue that names this window as its active, focus, previous active or capture window: a
+      queue the window's thread shared before it detached (AttachThreadInput, a thread that ended), or the
+      window's own queue when another thread frees it. Those pointers hold nothing; left as they are, the
+      next activation of that queue read the freed window (IntDeactivateWindow, co_IntSetActiveWindow). The
+      queues are those of the threads on the window's desktop (a queue is shared only within a desktop). */
+   if (Window->head.rpdesk)
+   {
+      PLIST_ENTRY Entry;
+
+      for (Entry = Window->head.rpdesk->PtiList.Flink; Entry != &Window->head.rpdesk->PtiList; Entry = Entry->Flink)
+      {
+         PTHREADINFO ptiNode = CONTAINING_RECORD(Entry, THREADINFO, PtiLink);
+         PUSER_MESSAGE_QUEUE Queue = ptiNode->MessageQueue;
+
+         if (!Queue || Queue == ThreadData->MessageQueue)
+            continue;
+         if (Queue->spwndActive == Window)
+            Queue->spwndActive = NULL;
+         if (Queue->spwndFocus == Window)
+            Queue->spwndFocus = NULL;
+         if (Queue->spwndActivePrev == Window)
+            Queue->spwndActivePrev = NULL;
+         if (Queue->spwndCapture == Window)
+            Queue->spwndCapture = NULL;
+      }
+   }
+
    if (ThreadData->MessageQueue->spwndCapture == Window)
    {
       IntReleaseCapture();
