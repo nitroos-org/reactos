@@ -82,6 +82,7 @@ extern void func_GetIconInfo(void);
 extern void func_GetKeyState(void);
 extern void func_GetMessageTime(void);
 extern void func_GetPeekMessage(void);
+extern void func_PostMessageLimit(void);
 extern void func_GetSetWindowInt(void);
 extern void func_GetSystemMetrics(void);
 extern void func_GetUpdatedClipboardFormats(void);
@@ -89,6 +90,8 @@ extern void func_GetUserObjectInformation(void);
 extern void func_GetWindowPlacement(void);
 extern void func_GW_ENABLEDPOPUP(void);
 extern void func_Handle32(void);
+extern void func_HandleQuota(void);
+extern void func_HandleQuotaChild(void);
 extern void func_HookInputBatch(void);
 extern void func_UserLowsBatch(void);
 extern void func_HookChainUnhookUaf(void);
@@ -302,6 +305,7 @@ const struct test winetest_testlist[] =
     { "GetKeyState", func_GetKeyState },
     { "GetMessageTime", func_GetMessageTime },
     { "GetPeekMessage", func_GetPeekMessage },
+    { "PostMessageLimit", func_PostMessageLimit },
     { "GetSetWindowInt", func_GetSetWindowInt },
     { "GetSystemMetrics", func_GetSystemMetrics },
     { "GetUpdatedClipboardFormats", func_GetUpdatedClipboardFormats },
@@ -309,6 +313,8 @@ const struct test winetest_testlist[] =
     { "GetWindowPlacement", func_GetWindowPlacement },
     { "GW_ENABLEDPOPUP", func_GW_ENABLEDPOPUP },
     { "Handle32", func_Handle32 },
+    { "HandleQuota", func_HandleQuota },
+    { "HandleQuotaChild", func_HandleQuotaChild },
     { "HookInputBatch", func_HookInputBatch },
     { "UserLowsBatch", func_UserLowsBatch },
     { "HookChainUnhookUaf", func_HookChainUnhookUaf },

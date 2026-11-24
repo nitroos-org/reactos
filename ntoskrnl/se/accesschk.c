@@ -374,6 +374,9 @@ SepTokenGetsImplicitOwnerRights(
  * @param[in] GenericMapping
  * The generic mapping of the object.
  *
+ * @param[out] LabelLevel
+ * The level of the label of the object (the implicit Medium one without a label).
+ *
  * @return
  * The rights the token may be granted at most, or MAXULONG when the label
  * does not restrict the token.
@@ -383,7 +386,8 @@ ACCESS_MASK
 SepMandatoryAllowedAccess(
     _In_ PTOKEN Token,
     _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
-    _In_ PGENERIC_MAPPING GenericMapping)
+    _In_ PGENERIC_MAPPING GenericMapping,
+    _Out_opt_ PULONG LabelLevel)
 {
     ULONG Level = SECURITY_MANDATORY_MEDIUM_RID;
     ACCESS_MASK Policy = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
@@ -467,6 +471,9 @@ SepMandatoryAllowedAccess(
             break;
         }
     }
+
+    if (LabelLevel)
+        *LabelLevel = Level;
 
     if (Token->IntegrityLevel >= Level)
         return MAXULONG;
@@ -692,7 +699,7 @@ SepMandatoryAccessDenied(
     PAGED_CODE();
 
     SepAcquireTokenLockShared(Token);
-    Allowed = SepMandatoryAllowedAccess(Token, CapturedSecurityDescriptor, GenericMapping);
+    Allowed = SepMandatoryAllowedAccess(Token, CapturedSecurityDescriptor, GenericMapping, NULL);
     SepReleaseTokenLock(Token);
 
     return Allowed != MAXULONG && (DesiredAccess & ~(MAXIMUM_ALLOWED | Allowed)) != 0;
@@ -1975,7 +1982,7 @@ SepAccessCheckCaptured(
     _Out_writes_(UseResultList ? ObjectTypeListLength : 1) PNTSTATUS AccessStatusList)
 {
     ACCESS_MASK MandatoryAllowed, AppContainerAllowed;
-    ULONG ResultIndex;
+    ULONG ResultIndex, LabelLevel;
 
     PAGED_CODE();
 
@@ -1991,14 +1998,16 @@ SepAccessCheckCaptured(
      * denied every right it asks for that the label does not leave it, also
      * one a privilege granted, whatever the DACL says
      */
-    MandatoryAllowed = SepMandatoryAllowedAccess(Token, CapturedSecurityDescriptor, CapturedGenericMapping);
-    if (MandatoryAllowed != MAXULONG)
+    MandatoryAllowed = SepMandatoryAllowedAccess(Token, CapturedSecurityDescriptor, CapturedGenericMapping, &LabelLevel);
+    if (MandatoryAllowed != MAXULONG && LabelLevel <= SECURITY_MANDATORY_MEDIUM_RID)
     {
         /*
          * What the descriptor grants the package SID of a lowbox token itself is not held back by the label
          * (Windows: an AppContainer writes the storage key of its package, which has no label, through its
          * package SID's entry; the other SIDs of the pass, ALL APPLICATION PACKAGES and the capabilities, do
-         * not lift the label)
+         * not lift the label). Only for a label of Medium or below: measured on Windows Server 2022, a lowbox
+         * token is granted what the package ACE and the user's ACE allow with no label, a Low and a Medium
+         * label, and nothing with a High one
          */
         ACCESS_MASK PackageGranted = SepAppContainerAllowedAccess(Token, CapturedSecurityDescriptor, TRUE);
 
@@ -2705,6 +2714,7 @@ SeAccessCheck(
     _Out_ PNTSTATUS AccessStatus)
 {
     ACCESS_MASK MandatoryAllowed, MappedAccess, CallerGrantedAccess;
+    ULONG LabelLevel;
     ACCESS_MASK AppContainerAllowed, AppContainerCallerGranted;
     PACCESS_TOKEN Token;
     BOOLEAN ret;
@@ -2767,9 +2777,9 @@ SeAccessCheck(
      * stay granted. MAXIMUM_ALLOWED gets the DACL's rights within the label's.
      */
     ASSERT(Token != NULL);
-    MandatoryAllowed = SepMandatoryAllowedAccess(Token, SecurityDescriptor, GenericMapping);
+    MandatoryAllowed = SepMandatoryAllowedAccess(Token, SecurityDescriptor, GenericMapping, &LabelLevel);
     CallerGrantedAccess = 0;
-    if (MandatoryAllowed != MAXULONG)
+    if (MandatoryAllowed != MAXULONG && LabelLevel <= SECURITY_MANDATORY_MEDIUM_RID)
     {
         /* What the descriptor grants the package SID of a lowbox token itself is not held back by the label (see SepAccessCheckCaptured) */
         ACCESS_MASK PackageGranted = SepAppContainerAllowedAccess((PTOKEN)Token, SecurityDescriptor, TRUE);

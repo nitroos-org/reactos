@@ -19,6 +19,9 @@ extern PPROCESSINFO gppiList;
 extern PPROCESSINFO ppiScrnSaver;
 extern PPROCESSINFO gppiInputProvider;
 extern BOOL g_AlwaysDisplayVersion;
+/* Handles one process may hold (GDIProcessHandleQuota, USERProcessHandleQuota; read at start) */
+extern ULONG gGdiProcessHandleQuota;
+extern ULONG gUserProcessHandleQuota;
 extern ATOM gaGuiConsoleWndClass;
 extern ATOM AtomDDETrack;
 extern ATOM AtomQOS;

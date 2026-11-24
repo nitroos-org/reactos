@@ -941,6 +941,12 @@ MsqDestroyMessage(PUSER_MESSAGE Message)
       return;
    }
    RemoveEntryList(&Message->ListEntry);
+   if (Message->Counted)
+   {
+      ASSERT(Message->pti->cPostedMessages != 0);
+      Message->pti->cPostedMessages--;
+      Message->Counted = FALSE;
+   }
    Message->pti = NULL;
 
    /* A win event that was not delivered (its window was destroyed, its thread exits):
@@ -1719,6 +1725,19 @@ MsqPostMessage(PTHREADINFO pti,
       return FALSE;
    }
 
+   /*
+    * A thread whose queue holds the limit of posted messages gets no more (PostMessage fails with
+    * ERROR_NOT_ENOUGH_QUOTA, as measured on Windows Server 2022: 10000 messages, then the call fails
+    * for both PostThreadMessage and PostMessage). Without it a thread that does not read its queue
+    * (or reads it slower than the others post, as a shell does with shell hook messages) takes
+    * paged pool without bound. The events of the system (activation, win events) are not counted.
+    */
+   if (!HardwareMessage && dwQEvent == 0 && pti->cPostedMessages >= USER_POST_MESSAGE_LIMIT)
+   {
+      EngSetLastError(ERROR_NOT_ENOUGH_QUOTA);
+      return FALSE;
+   }
+
    Message = MsqCreateMessage(Msg);
    if (!Message)
       return FALSE;
@@ -1734,6 +1753,11 @@ MsqPostMessage(PTHREADINFO pti,
    if (!HardwareMessage)
    {
        InsertTailList(&pti->PostedMessagesListHead, &Message->ListEntry);
+       if (dwQEvent == 0)
+       {
+          Message->Counted = TRUE;
+          pti->cPostedMessages++;
+       }
    }
    else
    {

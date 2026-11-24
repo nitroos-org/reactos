@@ -13,6 +13,7 @@ extern void func_LaunchPipe(void);
 extern void func_MsiPasswordEdit(void);
 extern void func_NoImpersonateAction(void);
 extern void func_RefusedPackageLog(void);
+extern void func_RemoteRefusal(void);
 extern void func_RemoveUnknownProduct(void);
 extern void func_Wow64Folders(void);
 
@@ -23,6 +24,7 @@ const struct test winetest_testlist[] =
     { "MsiPasswordEdit", func_MsiPasswordEdit },
     { "NoImpersonateAction", func_NoImpersonateAction },
     { "RefusedPackageLog", func_RefusedPackageLog },
+    { "RemoteRefusal", func_RemoteRefusal },
     { "RemoveUnknownProduct", func_RemoveUnknownProduct },
     { "Wow64Folders", func_Wow64Folders },
     { 0, 0 }

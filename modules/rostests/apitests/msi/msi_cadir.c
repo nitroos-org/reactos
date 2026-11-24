@@ -72,3 +72,38 @@ UINT WINAPI CheckDir(MSIHANDLE hInstall)
     MsiSetPropertyW(hInstall, L"CA_CMD", szResult);
     return ERROR_SUCCESS;
 }
+
+/*
+ * Deferred custom action of the RemoteRefusal test. Its own call to the installation (MsiGetProperty on its package
+ * handle goes through the installation's RPC interface) must work: it reads CustomActionData, the path stem of two
+ * files. It writes "<installer process id> <result>" to <stem>.ready and waits for <stem>.done, so that the test
+ * can call the interface from another process meanwhile. The installer process id is what its custom action server
+ * got on its command line ("-Embedding <pid>").
+ */
+UINT WINAPI WaitForRefusal(MSIHANDLE hInstall)
+{
+    WCHAR szStem[MAX_PATH], szReady[MAX_PATH + 8], szDone[MAX_PATH + 8], szText[64];
+    DWORD cch = ARRAYSIZE(szStem), cbWritten, i;
+    PCWSTR pszCmd;
+    HANDLE hFile;
+    UINT r;
+
+    szStem[0] = UNICODE_NULL;
+    r = MsiGetPropertyW(hInstall, L"CustomActionData", szStem, &cch);
+    if (r != ERROR_SUCCESS || !szStem[0])
+        return ERROR_INSTALL_FAILURE;
+
+    pszCmd = wcsstr(GetCommandLineW(), L"-Embedding ");
+    swprintf(szText, ARRAYSIZE(szText), L"%lu %u", pszCmd ? wcstoul(pszCmd + 11, NULL, 10) : 0, r);
+    swprintf(szReady, ARRAYSIZE(szReady), L"%s.ready", szStem);
+    swprintf(szDone, ARRAYSIZE(szDone), L"%s.done", szStem);
+    hFile = CreateFileW(szReady, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return ERROR_INSTALL_FAILURE;
+    WriteFile(hFile, szText, lstrlenW(szText) * sizeof(WCHAR), &cbWritten, NULL);
+    CloseHandle(hFile);
+
+    for (i = 0; i < 600 && GetFileAttributesW(szDone) == INVALID_FILE_ATTRIBUTES; i++)
+        Sleep(100);
+    return ERROR_SUCCESS;
+}

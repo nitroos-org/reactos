@@ -1643,8 +1643,7 @@ UserPostThreadMessage( PTHREADINFO pti,
     Message.lParam = lParam;
     Message.pt = gpsi->ptCursor;
     Message.time = EngGetTickCount32();
-    MsqPostMessage(pti, &Message, FALSE, QS_POSTMESSAGE, 0, 0);
-    return TRUE;
+    return MsqPostMessage(pti, &Message, FALSE, QS_POSTMESSAGE, 0, 0);
 }
 
 PTHREADINFO FASTCALL
@@ -1756,7 +1755,7 @@ UserPostMessage( HWND Wnd,
            Message.lParam = lParam;
         }
 
-        MsqPostMessage(pti, &Message, FALSE, QS_POSTMESSAGE, 0, ExtraInfo);
+        return MsqPostMessage(pti, &Message, FALSE, QS_POSTMESSAGE, 0, ExtraInfo);
     }
     return TRUE;
 }

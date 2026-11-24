@@ -54,6 +54,7 @@ list(APPEND SOURCE
     GetKeyState.c
     GetMessageTime.c
     GetPeekMessage.c
+    PostMessageLimit.c
     GetSetWindowInt.c
     GetSystemMetrics.c
     GetUpdatedClipboardFormats.c
@@ -61,6 +62,7 @@ list(APPEND SOURCE
     GetWindowPlacement.c
     GW_ENABLEDPOPUP.c
     Handle32.c
+    HandleQuota.c
     HookInputBatch.c
     UserLowsBatch.c
     HookChainUnhookUaf.c

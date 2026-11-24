@@ -41,6 +41,12 @@ PFromRva(RVA rva)
 
 /**** load helper ****/
 
+#ifdef _M_AMD64
+/* The entry point of that name is in amd64/delayload_asm.S: it saves xmm0-xmm3, which the stubs of
+   dlltool do not, and calls this function */
+#define __delayLoadHelper2 __delayLoadHelper2_c
+#endif
+
 FARPROC WINAPI
 __delayLoadHelper2(PCImgDelayDescr pidd, PImgThunkData pIATEntry)
 {

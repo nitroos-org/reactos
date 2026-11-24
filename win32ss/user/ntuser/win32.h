@@ -138,6 +138,7 @@ typedef struct _THREADINFO
     INT                 cEnterCount;
     /* Queue of messages posted to the queue. */
     LIST_ENTRY          PostedMessagesListHead; // mlPost
+    ULONG               cPostedMessages;        // posted messages of PostedMessagesListHead that count against the limit
     WORD                fsChangeBitsRemoved;
     WCHAR               wchInjected;
     UINT                cWindows;

@@ -9,6 +9,7 @@ list(APPEND SOURCE
     AccessCheckGenericAce.c
     AccessCheckMalformedAcl.c
     AccessCheckAppContainer.c
+    AccessCheckAppContainerLabel.c
     AppContainerNamespace.c
     AdjustTokenGroupsRows.c
     AdjustTokenPreviousState.c

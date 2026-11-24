@@ -15,6 +15,10 @@ BOOL FASTCALL RegisterControlAtoms(VOID);
 PTHREADINFO gptiCurrent = NULL;
 PPROCESSINFO gppiInputProvider = NULL;
 BOOL g_AlwaysDisplayVersion = FALSE;
+
+/* The documented defaults (Windows: 10000 each) and ranges (GDI 256..65536, USER 200..18000) */
+ULONG gGdiProcessHandleQuota = 10000;
+ULONG gUserProcessHandleQuota = 10000;
 ERESOURCE UserLock;
 ATOM AtomMessage;       // Window Message atom.
 ATOM AtomWndObj;        // Window Object atom.
@@ -112,6 +116,14 @@ InitUserImpl(VOID)
         DWORD dwValue = 0;
         RegReadDWORD(hKey, L"DisplayVersion", &dwValue);
         g_AlwaysDisplayVersion = !!dwValue;
+
+        /* The quotas are read once, here; a value outside the documented range is brought into it */
+        dwValue = 0;
+        if (RegReadDWORD(hKey, L"GDIProcessHandleQuota", &dwValue))
+            gGdiProcessHandleQuota = min(max(dwValue, 256), 65536);
+        dwValue = 0;
+        if (RegReadDWORD(hKey, L"USERProcessHandleQuota", &dwValue))
+            gUserProcessHandleQuota = min(max(dwValue, 200), 18000);
         ZwClose(hKey);
     }
 
