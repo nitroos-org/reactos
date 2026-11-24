@@ -5,6 +5,7 @@ list(APPEND SOURCE
     CertEnumSystemStoreLocation.c
     ChainCaEku.c
     ChainRootAdded.c
+    ChainServerName.c
     ChainTrust.c
     RootStoreSeed.c
     CryptExportPublicKeyInfoFromBCryptKeyHandle.c
