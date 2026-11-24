@@ -2287,7 +2287,7 @@ DWORD WINAPI GetIpStatisticsEx(PMIB_IPSTATS pStats, DWORD dwFamily)
     if (dwFamily == AF_INET6 && Ipv6GetIpStatistics(pStats))
         return NO_ERROR;
 
-    if (!NT_SUCCESS(openTcpFile(&tcpFile, FILE_READ_DATA)))
+    if (!NT_SUCCESS(openTcpFile(&tcpFile, FILE_READ_ATTRIBUTES)))
         return ERROR_NOT_SUPPORTED;
 
     TRACE("pStats %p\n", pStats);
@@ -2854,7 +2854,7 @@ DWORD WINAPI GetTcpStatisticsEx(PMIB_TCPSTATS pStats, DWORD dwFamily)
     if (dwFamily == AF_INET6 && Ipv6GetTcpStatistics(pStats))
         return NO_ERROR;
 
-    if (!NT_SUCCESS(openTcpFile(&tcpFile, FILE_READ_DATA)))
+    if (!NT_SUCCESS(openTcpFile(&tcpFile, FILE_READ_ATTRIBUTES)))
         return ERROR_NOT_SUPPORTED;
 
     TRACE("pStats %p\n", pStats);
@@ -3127,7 +3127,7 @@ DWORD WINAPI GetUdpStatisticsEx(PMIB_UDPSTATS pStats, DWORD dwFamily)
     if (dwFamily != AF_INET && dwFamily != AF_INET6)
         return ERROR_INVALID_PARAMETER;
 
-    if (!NT_SUCCESS(openTcpFile(&tcpFile, FILE_READ_DATA)))
+    if (!NT_SUCCESS(openTcpFile(&tcpFile, FILE_READ_ATTRIBUTES)))
         return ERROR_NOT_SUPPORTED;
 
     TRACE("pStats %p\n", pStats);
@@ -3308,7 +3308,7 @@ static DWORD notify_change(PHANDLE Handle, LPOVERLAPPED overlapped, ULONG IoCont
   if (!overlapped)
   {
     /* blocking form: a synchronous handle makes the IOCTL wait */
-    status = openTcpFile(&file, FILE_READ_DATA);
+    status = openTcpFile(&file, FILE_READ_ATTRIBUTES);
     if (!NT_SUCCESS(status))
       return RtlNtStatusToDosError(status);
     status = NtDeviceIoControlFile(file, NULL, NULL, NULL, &iosb,
@@ -3321,7 +3321,7 @@ static DWORD notify_change(PHANDLE Handle, LPOVERLAPPED overlapped, ULONG IoCont
   /* asynchronous handle: the request stays pending in the driver */
   RtlInitUnicodeString(&name, L"\\Device\\Tcp");
   InitializeObjectAttributes(&attrs, &name, OBJ_CASE_INSENSITIVE, NULL, NULL);
-  status = NtOpenFile(&file, FILE_READ_DATA | SYNCHRONIZE, &attrs, &iosb,
+  status = NtOpenFile(&file, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attrs, &iosb,
                       FILE_SHARE_READ | FILE_SHARE_WRITE, 0);
   if (!NT_SUCCESS(status))
     return RtlNtStatusToDosError(status);
@@ -3745,7 +3745,7 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetAdaptersAddresses(ULONG Family,ULONG Flags,PVO
     if (!indexTable)
         return ERROR_NOT_ENOUGH_MEMORY;
 
-    ret = openTcpFile(&tcpFile, FILE_READ_DATA);
+    ret = openTcpFile(&tcpFile, FILE_READ_ATTRIBUTES);
     if (!NT_SUCCESS(ret))
     {
         free(indexTable);

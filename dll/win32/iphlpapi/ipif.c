@@ -35,7 +35,7 @@ BOOL IpGetInterfaceConfig(PIP_INTERFACE_CONFIG Config)
   NTSTATUS Status;
 
   RtlZeroMemory(Config, sizeof(*Config));
-  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_ATTRIBUTES)))
     return FALSE;
   Status = tdiGetSetOfThings(TcpFile, INFO_CLASS_PROTOCOL, INFO_TYPE_PROVIDER, IP_INTERFACE_CONFIG_ENTRY_ID,
                              CL_NL_ENTITY, 0, 0, 1, &Blob, &Size);

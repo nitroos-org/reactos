@@ -482,7 +482,7 @@ DWORD getNumRoutes(void)
 
     TRACE("called.\n");
 
-    status = openTcpFile(&tcpFile, FILE_READ_DATA);
+    status = openTcpFile(&tcpFile, FILE_READ_ATTRIBUTES);
     if (!NT_SUCCESS(status))
     {
         ERR("openTcpFile returned 0x%08lx\n", status);
@@ -539,7 +539,7 @@ RouteTable *getRouteTable(void)
     DWORD numRoutes = getNumRoutes(), routesAdded = 0, capacity;
     TDIEntityID ent;
     HANDLE tcpFile;
-    NTSTATUS status = openTcpFile(&tcpFile, FILE_READ_DATA);
+    NTSTATUS status = openTcpFile(&tcpFile, FILE_READ_ATTRIBUTES);
     int i;
 
     if (!NT_SUCCESS(status))
@@ -615,7 +615,7 @@ DWORD getNumArpEntries(void)
 
     TRACE("called.\n");
 
-    status = openTcpFile(&tcpFile, FILE_READ_DATA);
+    status = openTcpFile(&tcpFile, FILE_READ_ATTRIBUTES);
     if (!NT_SUCCESS(status))
     {
         ERR("openTcpFile returned 0x%08lx\n", status);
@@ -665,7 +665,7 @@ PMIB_IPNETTABLE getArpTable(void)
 
     totalNumber = getNumArpEntries();
 
-    status = openTcpFile(&tcpFile, FILE_READ_DATA);
+    status = openTcpFile(&tcpFile, FILE_READ_ATTRIBUTES);
     if (!NT_SUCCESS(status))
     {
         ERR("openTcpFile returned 0x%08lx\n", status);
@@ -762,7 +762,7 @@ DWORD getNumUdpEntries(void)
 
     TRACE("called.\n");
 
-    status = openTcpFile(&tcpFile, FILE_READ_DATA);
+    status = openTcpFile(&tcpFile, FILE_READ_ATTRIBUTES);
     if (!NT_SUCCESS(status))
     {
         ERR("openTcpFile returned 0x%08lx\n", status);
@@ -813,7 +813,7 @@ PVOID getUdpTable(CLASS_TABLE Class)
 
     totalNumber = getNumUdpEntries();
 
-    status = openTcpFile(&tcpFile, FILE_READ_DATA);
+    status = openTcpFile(&tcpFile, FILE_READ_ATTRIBUTES);
     if (!NT_SUCCESS(status))
     {
         ERR("openTcpFile returned 0x%08lx\n", status);
@@ -900,7 +900,7 @@ DWORD getNumTcpEntries(void)
 
     TRACE("called.\n");
 
-    status = openTcpFile(&tcpFile, FILE_READ_DATA);
+    status = openTcpFile(&tcpFile, FILE_READ_ATTRIBUTES);
     if (!NT_SUCCESS(status))
     {
         ERR("openTcpFile returned 0x%08lx\n", status);
@@ -958,7 +958,7 @@ PVOID getTcpTable(CLASS_TABLE Class)
 
     totalNumber = getNumTcpEntries();
 
-    status = openTcpFile(&tcpFile, FILE_READ_DATA);
+    status = openTcpFile(&tcpFile, FILE_READ_ATTRIBUTES);
     if (!NT_SUCCESS(status))
     {
         ERR("openTcpFile returned 0x%08lx\n", status);
@@ -1040,7 +1040,7 @@ PMIB_TCP6TABLE_OWNER_PID getTcp6Table(void)
 
     C_ASSERT(sizeof(TCP6_ROW_OWNER_PID) == sizeof(MIB_TCP6ROW_OWNER_PID));
 
-    if (!NT_SUCCESS(openTcpFile(&tcpFile, FILE_READ_DATA)))
+    if (!NT_SUCCESS(openTcpFile(&tcpFile, FILE_READ_ATTRIBUTES)))
         return NULL;
 
     status = tdiGetEntityIDSet(tcpFile, &entitySet, &numEntities);
@@ -1103,7 +1103,7 @@ PMIB_UDP6TABLE_OWNER_PID getUdp6Table(void)
 
     C_ASSERT(sizeof(UDP6_ROW_OWNER_PID) == sizeof(MIB_UDP6ROW_OWNER_PID));
 
-    if (!NT_SUCCESS(openTcpFile(&tcpFile, FILE_READ_DATA)))
+    if (!NT_SUCCESS(openTcpFile(&tcpFile, FILE_READ_ATTRIBUTES)))
         return NULL;
 
     status = tdiGetEntityIDSet(tcpFile, &entitySet, &numEntities);

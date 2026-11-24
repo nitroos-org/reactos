@@ -239,7 +239,7 @@ WSHIoctl_GetInterfaceList(
     list_init(&IntfIDList->entry);
 
     /* open tcp-driver */
-    Status = openTcpFile(&TcpFile, FILE_READ_DATA | FILE_WRITE_DATA);
+    Status = openTcpFile(&TcpFile, FILE_READ_ATTRIBUTES);
     if (!NT_SUCCESS(Status))
     {
         res = RtlNtStatusToDosError(Status);
@@ -431,7 +431,8 @@ WSHIoctl_GetInterfaceList(
     res = NO_ERROR;
 cleanup:
     DPRINT("WSHIoctl_GetInterfaceList - CLEANUP\n");
-    if (TcpFile != NULL)
+    /* openTcpFile leaves INVALID_HANDLE_VALUE when it fails (a caller that may not open the device) */
+    if (TcpFile != NULL && TcpFile != INVALID_HANDLE_VALUE)
         closeTcpFile(TcpFile);
     if (pIFEntry != NULL)
         HeapFree(hHeap, 0, pIFEntry);

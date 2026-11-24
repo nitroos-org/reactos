@@ -938,7 +938,7 @@ static DWORD unicast_row_interface(const MIB_UNICASTIPADDRESS_ROW *Row, DWORD *I
   if (If)
   {
     *Index = If->Index;
-    if (Row->Address.Ipv4.sin_addr.s_addr && NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+    if (Row->Address.Ipv4.sin_addr.s_addr && NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_ATTRIBUTES)))
     {
       /* the stack lists the first address of the interface first, then the additional ones */
       if (NT_SUCCESS(getIpEntityByIfIndex(TcpFile, If->Index, &Entity)) &&

@@ -61,7 +61,7 @@ BOOL Ipv6GetState(PIPV6_STATE State)
   BOOL Result;
 
   RtlZeroMemory(State, sizeof(*State));
-  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_ATTRIBUTES)))
     return FALSE;
 
   Result = Ipv6GetStateFromFile(TcpFile, State);

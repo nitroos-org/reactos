@@ -264,7 +264,7 @@ AddrChangeThread(PVOID Param)
     InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
 
     /* An asynchronous handle: another thread can cancel the request on it */
-    Status = NtOpenFile(&File, FILE_READ_DATA | SYNCHRONIZE, &Attributes, &Iosb,
+    Status = NtOpenFile(&File, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &Attributes, &Iosb,
                         FILE_SHARE_READ | FILE_SHARE_WRITE, 0);
     for (i = 0; i < 2 && NT_SUCCESS(Status); i++)
         Status = NtCreateEvent(&Requests[i].Event, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE);
@@ -622,7 +622,7 @@ MsafdQueryIpv6Addresses(
         return 0;
 
     InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
-    Status = NtOpenFile(&File, FILE_READ_DATA | SYNCHRONIZE, &Attributes, &Iosb, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    Status = NtOpenFile(&File, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &Attributes, &Iosb, FILE_SHARE_READ | FILE_SHARE_WRITE,
                         FILE_SYNCHRONOUS_IO_NONALERT);
     if (NT_SUCCESS(Status))
     {

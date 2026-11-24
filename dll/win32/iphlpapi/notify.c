@@ -375,7 +375,7 @@ static DWORD register_notify(int Kind, ADDRESS_FAMILY Family, PVOID Callback, PV
     Notify->IoEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
     RtlInitUnicodeString(&Name, L"\\Device\\Tcp");
     InitializeObjectAttributes(&Attrs, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
-    Status = NtOpenFile(&Notify->File, FILE_READ_DATA | SYNCHRONIZE, &Attrs, &Iosb,
+    Status = NtOpenFile(&Notify->File, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &Attrs, &Iosb,
                         FILE_SHARE_READ | FILE_SHARE_WRITE, 0);
     if (!Notify->Stop || !Notify->IoEvent || !NT_SUCCESS(Status))
     {

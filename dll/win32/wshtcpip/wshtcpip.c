@@ -69,7 +69,7 @@ WshIpv6Enabled(VOID)
     if (State != 0)
         return State == 1;
 
-    if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+    if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_ATTRIBUTES)))
         return FALSE;
     Status = tdiQueryIpv6StackState(TcpFile, &Flags);
     closeTcpFile(TcpFile);
@@ -102,7 +102,7 @@ WshIpv6TypeEnabled(
 
     if (Flags == -1)
     {
-        if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+        if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_ATTRIBUTES)))
             return FALSE;
         Flags = (LONG)tdiGetIpv6StackState(TcpFile);
         closeTcpFile(TcpFile);
@@ -1141,7 +1141,7 @@ WSHNotify(
 
         case WSH_NOTIFY_BIND:
             DPRINT("WSHNotify: WSH_NOTIFY_BIND\n");
-            Status = openTcpFile(&TcpCC, FILE_READ_DATA);
+            Status = openTcpFile(&TcpCC, FILE_READ_ATTRIBUTES);
             if (Status != STATUS_SUCCESS)
                 return WSAEINVAL;
 

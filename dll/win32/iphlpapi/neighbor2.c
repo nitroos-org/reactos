@@ -253,7 +253,7 @@ static BOOL solicit_v6(const UCHAR *Address, DWORD Index)
 
   Request.IfIndex = Index;
   memcpy(Request.Address, Address, 16);
-  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_ATTRIBUTES)))
     return FALSE;
   Status = NtDeviceIoControlFile(TcpFile, NULL, NULL, NULL, &Iosb, IOCTL_IP6_SOLICIT, &Request, sizeof(Request),
                                  NULL, 0);

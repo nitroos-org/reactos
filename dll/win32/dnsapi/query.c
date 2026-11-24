@@ -339,7 +339,7 @@ ArmV6Change(VOID)
     {
         /* an asynchronous handle: the request stays pending in the driver */
         InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
-        Status = NtOpenFile(&g_V6ChangeFile, FILE_READ_DATA | SYNCHRONIZE, &Attributes, &Iosb,
+        Status = NtOpenFile(&g_V6ChangeFile, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &Attributes, &Iosb,
                             FILE_SHARE_READ | FILE_SHARE_WRITE, 0);
         if (!NT_SUCCESS(Status))
         {
