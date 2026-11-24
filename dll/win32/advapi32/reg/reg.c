@@ -2644,25 +2644,18 @@ RegSetKeyValueW(IN HKEY hKey,
 
     if (lpSubKey != NULL)
     {
-        OBJECT_ATTRIBUTES ObjectAttributes;
-        UNICODE_STRING SubKeyName;
-
-        RtlInitUnicodeString(&SubKeyName, lpSubKey);
-
-        InitializeObjectAttributes(&ObjectAttributes,
-                                   &SubKeyName,
-                                   OBJ_CASE_INSENSITIVE,
-                                   KeyHandle,
-                                   NULL);
-
-        Status = NtOpenKey(&SubKeyHandle,
-                           KEY_SET_VALUE,
-                           &ObjectAttributes);
-        if (!NT_SUCCESS(Status))
-        {
-            Ret = RtlNtStatusToDosError(Status);
+        /* the subkey is created when it does not exist (measured on Windows Server 2022) */
+        Ret = RegCreateKeyExW((HKEY)KeyHandle,
+                              lpSubKey,
+                              0,
+                              NULL,
+                              REG_OPTION_NON_VOLATILE,
+                              KEY_SET_VALUE,
+                              NULL,
+                              (PHKEY)&SubKeyHandle,
+                              NULL);
+        if (Ret != ERROR_SUCCESS)
             goto Cleanup;
-        }
 
         CurKey = SubKeyHandle;
     }
@@ -2718,32 +2711,18 @@ RegSetKeyValueA(IN HKEY hKey,
 
     if (lpSubKey != NULL)
     {
-        OBJECT_ATTRIBUTES ObjectAttributes;
-        UNICODE_STRING SubKeyName;
-
-        if (!RtlCreateUnicodeStringFromAsciiz(&SubKeyName, lpSubKey))
-        {
-            Ret = ERROR_NOT_ENOUGH_MEMORY;
+        /* the subkey is created when it does not exist (measured on Windows Server 2022) */
+        Ret = RegCreateKeyExA((HKEY)KeyHandle,
+                              lpSubKey,
+                              0,
+                              NULL,
+                              REG_OPTION_NON_VOLATILE,
+                              KEY_SET_VALUE,
+                              NULL,
+                              (PHKEY)&SubKeyHandle,
+                              NULL);
+        if (Ret != ERROR_SUCCESS)
             goto Cleanup;
-        }
-
-        InitializeObjectAttributes(&ObjectAttributes,
-                                   &SubKeyName,
-                                   OBJ_CASE_INSENSITIVE,
-                                   KeyHandle,
-                                   NULL);
-
-        Status = NtOpenKey(&SubKeyHandle,
-                           KEY_SET_VALUE,
-                           &ObjectAttributes);
-
-        RtlFreeUnicodeString(&SubKeyName);
-
-        if (!NT_SUCCESS(Status))
-        {
-            Ret = RtlNtStatusToDosError(Status);
-            goto Cleanup;
-        }
 
         CurKey = SubKeyHandle;
     }
