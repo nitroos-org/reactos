@@ -2294,6 +2294,12 @@ IntCheckImeShowStatus(
     if (pwndIme->state2 & WNDS2_INDESTROY)
         return FALSE;
 
+    /* An IME window that is not linked has no siblings to look at: freed (WNDS_DESTROYED, co_UserFreeWindow
+       unlinked it; the caller holds it, or a callback of IntNotifyImeShowStatus freed it), or not linked yet
+       (another thread of the process reached it by handle during its creation messages) */
+    if ((pwndIme->state & WNDS_DESTROYED) || !pwndIme->spwndParent)
+        return FALSE;
+
     // Build a window list
     pwl = IntBuildHwndList(pwndIme->spwndParent->spwndChild, IACE_LIST, NULL);
     if (!pwl)
