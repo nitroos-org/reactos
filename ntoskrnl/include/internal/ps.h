@@ -128,6 +128,14 @@
 #define PSP_JOB_MAX_NESTING     32
 
 //
+// EPROCESS Flags bit 30 (spare in the NDK layout): the process has started, that is one of
+// its threads has run past its start-up suspension or a second thread was created in it.
+// A started process keeps its primary token (NtSetInformationProcess(ProcessAccessToken)
+// fails with STATUS_NOT_SUPPORTED, as measured on Windows Server 2022).
+//
+#define PSF_STARTED_BIT         0x40000000
+
+//
 // Context flags that report the kind of kernel entry a thread is in (Windows 7+).
 // A get with CONTEXT_EXCEPTION_REQUEST returns CONTEXT_EXCEPTION_REPORTING plus
 // CONTEXT_SERVICE_ACTIVE (system call) or CONTEXT_EXCEPTION_ACTIVE (exception

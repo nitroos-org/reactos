@@ -86,6 +86,9 @@ PspUserThreadStartup(IN PKSTART_ROUTINE StartRoutine,
     }
     else
     {
+        /* Past the start-up suspension: the process has started (its primary token is fixed) */
+        PspSetProcessFlag(PsGetCurrentProcess(), PSF_STARTED_BIT);
+
         /* Get the Locale ID and save Preferred Proc */
         Teb =  NtCurrentTeb();
         Teb->CurrentLocale = MmGetSessionLocaleId();
@@ -442,6 +445,9 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
      */
     InsertTailList(&Process->ThreadListHead, &Thread->ThreadListEntry);
     Process->ActiveThreads++;
+
+    /* A process with a second thread counts as started (its primary token is fixed) */
+    if (Process->ActiveThreads > 1) PspSetProcessFlag(Process, PSF_STARTED_BIT);
 
     /* Start the thread */
     KeStartThread(&Thread->Tcb);

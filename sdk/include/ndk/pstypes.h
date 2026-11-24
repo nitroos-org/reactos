@@ -59,7 +59,8 @@ extern POBJECT_TYPE NTSYSAPI PsJobType;
 /* ReactOS-private NtSetInformationProcess class, input PROCESS_ACCESS_TOKEN: the process is given a
  * new primary copy of the token, which may be a primary or an impersonation token (level
  * SecurityImpersonation or above) whose handle grants TOKEN_ASSIGN_PRIMARY, with the checks of
- * ProcessAccessToken. This is what process creation with a token does on Windows (CreateProcessAsUser);
+ * ProcessAccessToken (among them: the process has not started, else STATUS_NOT_SUPPORTED).
+ * This is what process creation with a token does on Windows (CreateProcessAsUser);
  * ProcessAccessToken itself keeps the Windows behaviour (the primary token object itself). */
 #define ProcessRosAccessTokenCopy ((PROCESSINFOCLASS)0x00010009)
 typedef struct _ROS_PS_ATTRIBUTE

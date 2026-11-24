@@ -331,6 +331,20 @@ PspSetPrimaryToken(IN PEPROCESS Process,
     }
 
     /*
+     * Only a process that has not started gets a primary token: measured on Windows Server
+     * 2022, ProcessAccessToken fails with STATUS_NOT_SUPPORTED on a process that runs, that
+     * ran and is suspended again, that has a second thread (also one created suspended that
+     * never ran), and on the caller's own process; after the handle, the level and the
+     * privilege, before the type and the in-use check. The copy of the creation path follows
+     * the same rule: it is for a child that was created suspended and has not run.
+     */
+    if (Process->Flags & PSF_STARTED_BIT)
+    {
+        if (!Token) ObDereferenceObject(NewToken);
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    /*
      * Every check has passed (they hold for the copy, which has the token's user, groups,
      * logon session, parent token id and integrity level). The reference of the handle's
      * token goes; the copy comes with one reference of its own, which the common
