@@ -7,6 +7,16 @@
 
 #include <kmt_test.h>
 
+/* Windows 8 and later report the PointerCount of an object with the references cached by its handle table (65537,
+ * 32769, ...). ReactOS counts exactly (2, 3), whatever version it reports, so the expectations of Windows 8 are not
+ * the ones for it (ObQueryObject reports ObjectHeader->PointerCount, ntoskrnl/ob/oblife.c) */
+static
+BOOLEAN
+HasFastRefCounts(VOID)
+{
+    return GetNTVersion() >= _WIN32_WINNT_WIN8 && !is_reactos();
+}
+
 #define CheckObject(Handle, Pointers, Handles) do                   \
 {                                                                   \
     PUBLIC_OBJECT_BASIC_INFORMATION ObjectInfo;                     \
@@ -243,7 +253,7 @@ TestCreateSection(
     if (!skip(FileHandle1 != NULL && FileObject1 != NULL &&
               FileHandle2 != NULL && FileObject2 != NULL, "No file handle or object\n"))
     {
-        if (GetNTVersion() < _WIN32_WINNT_WIN8)
+        if (!HasFastRefCounts())
         {
             PointerCount1 = 3;
             PointerCount2 = 3;
@@ -269,17 +279,17 @@ TestCreateSection(
         ok_eq_longlong(MaximumSize.QuadPart, 1LL);
         ok(SectionObject != KmtInvalidPointer, "Section object pointer untouched\n");
         ok(SectionObject != NULL, "Section object pointer NULL\n");
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             PointerCount2 -= 2;
         CheckObject(FileHandle2, PointerCount2, 1L);
-        if (GetNTVersion() < _WIN32_WINNT_WIN8)
+        if (!HasFastRefCounts())
             CheckSection(SectionObject, SEC_IMAGE);
         TestMapView(SectionObject, FALSE, TRUE);
 
         if (SectionObject && SectionObject != KmtInvalidPointer)
             ObDereferenceObject(SectionObject);
 
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             PointerCount2--;
         CheckObject(FileHandle2, PointerCount2, 1L);
         SectionObject = KmtInvalidPointer;
@@ -297,7 +307,7 @@ TestCreateSection(
         ok(SectionObject != NULL, "Section object pointer NULL\n");
         if (GetNTVersion() == _WIN32_WINNT_WS03)
             ++PointerCount2;
-        else if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        else if (HasFastRefCounts())
             --PointerCount2;
         CheckObject(FileHandle2, PointerCount2, 1L);
         CheckSection(SectionObject, 0);
@@ -306,7 +316,7 @@ TestCreateSection(
         if (SectionObject && SectionObject != KmtInvalidPointer)
             ObDereferenceObject(SectionObject);
 
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             PointerCount2--;
         CheckObject(FileHandle2, PointerCount2, 1L);
         SectionObject = KmtInvalidPointer;
@@ -322,7 +332,7 @@ TestCreateSection(
         if (GetNTVersion() < _WIN32_WINNT_WIN8)
             ok(SectionObject != KmtInvalidPointer, "Section object pointer untouched\n");
         ok(SectionObject != NULL, "Section object pointer NULL\n");
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             PointerCount2--;
         CheckObject(FileHandle2, PointerCount2, 1L);
         CheckSection(SectionObject, 0);
@@ -341,14 +351,14 @@ TestCreateSection(
         ok_eq_hex(Status, STATUS_INVALID_IMAGE_NOT_MZ);
         ok_eq_longlong(MaximumSize.QuadPart, 1LL);
         ok_eq_pointer(SectionObject, KmtInvalidPointer);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             PointerCount1 -= 2;
         CheckObject(FileHandle1, PointerCount1, 1L);
 
         if (SectionObject && SectionObject != KmtInvalidPointer)
             ObDereferenceObject(SectionObject);
 
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             PointerCount1--;
         CheckObject(FileHandle1, PointerCount1, 1L);
         SectionObject = KmtInvalidPointer;
@@ -366,7 +376,7 @@ TestCreateSection(
         ok(SectionObject != NULL, "Section object pointer NULL\n");
         if (GetNTVersion() == _WIN32_WINNT_WS03)
             ++PointerCount1;
-        else if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        else if (HasFastRefCounts())
             --PointerCount1;
         CheckObject(FileHandle1, PointerCount1, 1L);
         CheckSection(SectionObject, 0);
@@ -375,7 +385,7 @@ TestCreateSection(
         if (SectionObject && SectionObject != KmtInvalidPointer)
             ObDereferenceObject(SectionObject);
 
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             --PointerCount1;
         CheckObject(FileHandle1, PointerCount1, 1L);
         SectionObject = KmtInvalidPointer;
@@ -391,7 +401,7 @@ TestCreateSection(
         if (GetNTVersion() < _WIN32_WINNT_WIN8)
             ok(SectionObject != KmtInvalidPointer, "Section object pointer untouched\n");
         ok(SectionObject != NULL, "Section object pointer NULL\n");
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             --PointerCount1;
         CheckObject(FileHandle1, PointerCount1, 1L);
         CheckSection(SectionObject, 0);
@@ -401,7 +411,7 @@ TestCreateSection(
             ObDereferenceObject(SectionObject);
 
         /* image section with two different files */
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             --PointerCount1;
         CheckObject(FileHandle1, PointerCount1, 1L);
         SectionObject = KmtInvalidPointer;
@@ -417,7 +427,7 @@ TestCreateSection(
         if (GetNTVersion() < _WIN32_WINNT_WIN8)
             ok(SectionObject != KmtInvalidPointer, "Section object pointer untouched\n");
         ok(SectionObject != NULL, "Section object pointer NULL\n");
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
         {
             --PointerCount1;
             --PointerCount2;
@@ -430,7 +440,7 @@ TestCreateSection(
         if (SectionObject && SectionObject != KmtInvalidPointer)
             ObDereferenceObject(SectionObject);
 
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             --PointerCount1;
         CheckObject(FileHandle1, PointerCount1, 1L);
         SectionObject = KmtInvalidPointer;
@@ -446,7 +456,7 @@ TestCreateSection(
         if (GetNTVersion() < _WIN32_WINNT_WIN8)
             ok(SectionObject != KmtInvalidPointer, "Section object pointer untouched\n");
         ok(SectionObject != NULL, "Section object pointer NULL\n");
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
         {
             --PointerCount1;
             --PointerCount2;
@@ -460,7 +470,7 @@ TestCreateSection(
             ObDereferenceObject(SectionObject);
 
         /* data file section */
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             --PointerCount1;
         CheckObject(FileHandle1, PointerCount1, 1L);
         SectionObject = KmtInvalidPointer;
@@ -472,17 +482,17 @@ TestCreateSection(
         ok_eq_longlong(MaximumSize.QuadPart, 1LL);
         ok(SectionObject != KmtInvalidPointer, "Section object pointer untouched\n");
         ok(SectionObject != NULL, "Section object pointer NULL\n");
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             PointerCount1 -= 2;
         CheckObject(FileHandle1, PointerCount1, 1L);
-        if (GetNTVersion() < _WIN32_WINNT_WIN8)
+        if (!HasFastRefCounts())
             CheckSection(SectionObject, 0);
         TestMapView(SectionObject, TRUE, FALSE);
 
         if (SectionObject && SectionObject != KmtInvalidPointer)
             ObDereferenceObject(SectionObject);
 
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             --PointerCount1;
         CheckObject(FileHandle1, PointerCount1, 1L);
         SectionObject = KmtInvalidPointer;
@@ -493,17 +503,17 @@ TestCreateSection(
         ok_eq_longlong(MaximumSize.QuadPart, 1LL);
         ok(SectionObject != KmtInvalidPointer, "Section object pointer untouched\n");
         ok(SectionObject != NULL, "Section object pointer NULL\n");
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             --PointerCount1;
         CheckObject(FileHandle1, PointerCount1, 1L);
-        if (GetNTVersion() < _WIN32_WINNT_WIN8)
+        if (!HasFastRefCounts())
             CheckSection(SectionObject, 0);
         TestMapView(SectionObject, TRUE, FALSE);
 
         if (SectionObject && SectionObject != KmtInvalidPointer)
             ObDereferenceObject(SectionObject);
 
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             --PointerCount1;
         CheckObject(FileHandle1, PointerCount1, 1L);
         SectionObject = KmtInvalidPointer;
@@ -515,17 +525,17 @@ TestCreateSection(
         ok_eq_longlong(MaximumSize.QuadPart, 1LL);
         ok(SectionObject != KmtInvalidPointer, "Section object pointer untouched\n");
         ok(SectionObject != NULL, "Section object pointer NULL\n");
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             --PointerCount1;
         CheckObject(FileHandle1, PointerCount1, 1L);
-        if (GetNTVersion() < _WIN32_WINNT_WIN8)
+        if (!HasFastRefCounts())
             CheckSection(SectionObject, 0);
         TestMapView(SectionObject, TRUE, FALSE);
 
         if (SectionObject && SectionObject != KmtInvalidPointer)
             ObDereferenceObject(SectionObject);
 
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (HasFastRefCounts())
             --PointerCount1;
         CheckObject(FileHandle1, PointerCount1, 1L);
     }
@@ -1453,7 +1463,7 @@ START_TEST(MmSection)
     ok_eq_hex(Status, STATUS_SUCCESS);
     ok_eq_ulongptr(IoStatusBlock.Information, FILE_OPENED);
     ok(FileHandle1 != NULL, "FileHandle1 is NULL\n");
-    if (GetNTVersion() < _WIN32_WINNT_WIN8)
+    if (!HasFastRefCounts())
         CheckObject(FileHandle1, 2L, 1L);
 #ifdef _M_IX86
     else
@@ -1474,7 +1484,7 @@ START_TEST(MmSection)
         Status = ObReferenceObjectByHandle(FileHandle1, FILE_READ_DATA | FILE_WRITE_DATA, *IoFileObjectType, KernelMode, (PVOID *)&FileObject1, NULL);
         ok_eq_hex(Status, STATUS_SUCCESS);
         ok(FileObject1 != NULL, "FileObject1 is NULL\n");
-        if (GetNTVersion() < _WIN32_WINNT_WIN8)
+        if (!HasFastRefCounts())
             CheckObject(FileHandle1, 3L, 1L);
 #ifdef _M_IX86
         else
