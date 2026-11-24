@@ -111,7 +111,9 @@ IntGdiExtCreatePen(
 
     if (!pbrushPen)
     {
-        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        /* at the handle quota of the process the last error is left alone, as on Windows */
+        if (!GDIOBJ_bProcessAtHandleQuota())
+            EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
         DPRINT("Can't allocate pen\n");
         return 0;
     }

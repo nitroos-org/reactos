@@ -1559,7 +1559,7 @@ AllocInputContextObject(
     ObjHead->pti = pti;
     IntReferenceThreadInfo(pti);
     *HandleOwner = pti;
-    pti->ppi->UserHandleCount++;
+    IntIncrementUserHandleCount(pti->ppi);
 
     return ObjHead;
 }

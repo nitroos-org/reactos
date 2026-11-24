@@ -37,7 +37,7 @@ static PVOID AllocThreadObject(
     IntReferenceThreadInfo(pti);
     *HandleOwner = pti;
     /* It's a thread object, but it still count as one for the process */
-    pti->ppi->UserHandleCount++;
+    IntIncrementUserHandleCount(pti->ppi);
 
     return ObjHead;
 }
@@ -83,7 +83,7 @@ static PVOID AllocDeskThreadObject(
     IntReferenceThreadInfo(pti);
     *HandleOwner = pti;
     /* It's a thread object, but it still count as one for the process */
-    pti->ppi->UserHandleCount++;
+    IntIncrementUserHandleCount(pti->ppi);
 
     return ObjHead;
 }
@@ -138,7 +138,7 @@ static PVOID AllocDeskProcObject(
     /* As AllocDeskThreadObject: a menu or a call procedure keeps the desktop whose heap it lives in */
     IntReferenceDesktopForObject(pDesk);
     ObjHead->hTaskWow = (DWORD_PTR)ppi;
-    ppi->UserHandleCount++;
+    IntIncrementUserHandleCount(ppi);
     IntReferenceProcessInfo(ppi);
     *HandleOwner = ppi;
 
@@ -182,7 +182,7 @@ static PVOID AllocProcMarkObject(
     ObjHead->ppi = ppi;
     IntReferenceProcessInfo(ppi);
     *HandleOwner = ppi;
-    ppi->UserHandleCount++;
+    IntIncrementUserHandleCount(ppi);
 
     return ObjHead;
 }

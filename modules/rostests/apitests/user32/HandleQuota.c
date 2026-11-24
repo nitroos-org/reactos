@@ -20,6 +20,11 @@
 #include "precomp.h"
 #include <winreg.h>
 
+#ifndef GR_GDIOBJECTS_PEAK
+#define GR_GDIOBJECTS_PEAK 2
+#define GR_USEROBJECTS_PEAK 4
+#endif
+
 static void ReadQuota(PCWSTR Name, ULONG Default, ULONG Min, ULONG Max, PULONG Quota)
 {
     HKEY hKey;
@@ -95,6 +100,8 @@ START_TEST(HandleQuota)
     DWORD Error;
     HRGN hRgn;
     HBRUSH hBrush;
+    HBITMAP hBitmap;
+    HPEN hPen;
     HMENU hMenu;
 
     ReadQuota(L"GDIProcessHandleQuota", 10000, 256, 65536, &GdiQuota);
@@ -123,16 +130,33 @@ START_TEST(HandleQuota)
     Error = GetLastError();
     ok(Count == GdiQuota - Start, "%lu regions were made, expected %lu (quota %lu, %lu held at the start)\n",
        Count, GdiQuota - Start, GdiQuota, Start);
-    /* Windows leaves the last error alone; here the region code sets one of its own */
-    if (Error != 0xdeadbeef)
-        trace("the failed call set the last error to %lu (Windows: not set)\n", Error);
+    /* measured on Windows Server 2022: the failing call leaves the last error alone, and the peak is the quota */
+    ok(Error == 0xdeadbeef, "CreateRectRgn at the quota set the last error to %lu\n", Error);
+    ok(GetGuiResources(Process, GR_GDIOBJECTS_PEAK) == GdiQuota, "GetGuiResources(GR_GDIOBJECTS_PEAK) says %lu, expected %lu\n",
+       GetGuiResources(Process, GR_GDIOBJECTS_PEAK), GdiQuota);
     ok(GetGuiResources(Process, GR_GDIOBJECTS) == GdiQuota, "GetGuiResources(GR_GDIOBJECTS) says %lu\n",
        GetGuiResources(Process, GR_GDIOBJECTS));
+    SetLastError(0xdeadbeef);
     hBrush = CreateSolidBrush(RGB(1, 2, 3));
     ok(hBrush == NULL, "a brush was made at the limit\n");
     if (hBrush)
         DeleteObject(hBrush);
+    ok(GetLastError() == 0xdeadbeef, "CreateSolidBrush at the quota set the last error to %lu\n", GetLastError());
+    SetLastError(0xdeadbeef);
     ok(CreateCompatibleDC(NULL) == NULL, "a DC was made at the limit\n");
+    ok(GetLastError() == 0xdeadbeef, "CreateCompatibleDC at the quota set the last error to %lu\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    hBitmap = CreateBitmap(1, 1, 1, 1, NULL);
+    ok(hBitmap == NULL, "a bitmap was made at the limit\n");
+    if (hBitmap)
+        DeleteObject(hBitmap);
+    ok(GetLastError() == 0xdeadbeef, "CreateBitmap at the quota set the last error to %lu\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    hPen = CreatePen(PS_SOLID, 1, RGB(1, 2, 3));
+    ok(hPen == NULL, "a pen was made at the limit\n");
+    if (hPen)
+        DeleteObject(hPen);
+    ok(GetLastError() == 0xdeadbeef, "CreatePen at the quota set the last error to %lu\n", GetLastError());
     hMenu = CreateMenu();
     ok(hMenu != NULL, "a USER object cannot be made when the GDI quota is reached: %lu\n", GetLastError());
     if (hMenu)
@@ -170,6 +194,8 @@ START_TEST(HandleQuota)
        Count, UserQuota - Start, UserQuota, Start);
     ok(GetGuiResources(Process, GR_USEROBJECTS) == UserQuota, "GetGuiResources(GR_USEROBJECTS) says %lu\n",
        GetGuiResources(Process, GR_USEROBJECTS));
+    ok(GetGuiResources(Process, GR_USEROBJECTS_PEAK) == UserQuota, "GetGuiResources(GR_USEROBJECTS_PEAK) says %lu, expected %lu\n",
+       GetGuiResources(Process, GR_USEROBJECTS_PEAK), UserQuota);
     /* the other kinds fail too (measured: ERROR_NO_MORE_USER_HANDLES) */
     SetLastError(0);
     hMenu = CreateMenu();

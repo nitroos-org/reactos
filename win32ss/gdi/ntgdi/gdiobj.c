@@ -329,10 +329,23 @@ InitGdiHandleTable(void)
 
 FORCEINLINE
 VOID
+IncrementProcessGdiHandleCount(PPROCESSINFO ppi)
+{
+    LONG Count = InterlockedIncrement((LONG*)&ppi->GDIHandleCount);
+    LONG Peak;
+
+    /* The peak is the highest count the process has held (GetGuiResources GR_GDIOBJECTS_PEAK) */
+    while (Count > (Peak = ppi->GDIHandleCountPeak) &&
+           InterlockedCompareExchange((LONG*)&ppi->GDIHandleCountPeak, Count, Peak) != Peak)
+        ;
+}
+
+FORCEINLINE
+VOID
 IncrementCurrentProcessGdiHandleCount(void)
 {
     PPROCESSINFO ppi = PsGetCurrentProcessWin32Process();
-    if (ppi) InterlockedIncrement((LONG*)&ppi->GDIHandleCount);
+    if (ppi) IncrementProcessGdiHandleCount(ppi);
 }
 
 FORCEINLINE
@@ -356,7 +369,7 @@ IncrementGdiHandleCount(ULONG ulProcessId)
     __analysis_assume(NT_SUCCESS(Status));
 
     ppi = PsGetProcessWin32Process(pep);
-    if (ppi) InterlockedIncrement((LONG*)&ppi->GDIHandleCount);
+    if (ppi) IncrementProcessGdiHandleCount(ppi);
     if (NT_SUCCESS(Status)) ObDereferenceObject(pep);
 }
 
@@ -993,6 +1006,15 @@ GDIOBJ_vUnlockObject(POBJ pobj)
         GDIOBJ_vFreeDeletedHandle(pobj, ulIndex);
 }
 
+BOOL
+NTAPI
+GDIOBJ_bProcessAtHandleQuota(VOID)
+{
+    PPROCESSINFO ppi = PsGetCurrentProcessWin32Process();
+
+    return ppi && ppi->GDIHandleCount >= (LONG)gGdiProcessHandleQuota;
+}
+
 HGDIOBJ
 NTAPI
 GDIOBJ_hInsertObject(
@@ -1009,14 +1031,10 @@ GDIOBJ_hInsertObject(
 
     /* A process holds at most GDIProcessHandleQuota GDI objects (measured on Windows Server 2022: 10000, then
        the creating call returns NULL and leaves the last error alone; other processes are not affected) */
-    if (ulOwner == GDI_OBJ_HMGR_POWNED)
+    if (ulOwner == GDI_OBJ_HMGR_POWNED && GDIOBJ_bProcessAtHandleQuota())
     {
-        PPROCESSINFO ppi = PsGetCurrentProcessWin32Process();
-        if (ppi && ppi->GDIHandleCount >= (LONG)gGdiProcessHandleQuota)
-        {
-            DPRINT("GDIOBJ: the process holds %ld GDI handles (quota %lu)\n", ppi->GDIHandleCount, gGdiProcessHandleQuota);
-            return NULL;
-        }
+        DPRINT("GDIOBJ: the process holds its quota of GDI handles (%lu)\n", gGdiProcessHandleQuota);
+        return NULL;
     }
 
     /* Get a free handle entry */

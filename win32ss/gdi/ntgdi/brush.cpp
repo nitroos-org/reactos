@@ -55,8 +55,9 @@ BRUSH::BRUSH(
 BRUSH::~BRUSH(
     VOID)
 {
-    /* Check if we have a user mode brush attribute */
-    if (this->pBrushAttr != &this->BrushAttr)
+    /* Check if we have a user mode brush attribute (a pen that was refused its handle by the quota of the process
+       is deleted before PEN_vInit: its memory is zero and has none) */
+    if (this->pBrushAttr != NULL && this->pBrushAttr != &this->BrushAttr)
     {
         /* Free memory to the process GDI pool */
         GdiPoolFree(GetBrushAttrPool(), this->pBrushAttr);
