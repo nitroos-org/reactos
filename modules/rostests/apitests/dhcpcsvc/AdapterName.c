@@ -119,6 +119,47 @@ START_TEST(AdapterName)
     memset(Descr, 'z', sizeof(Descr));
     DhcpAdapterNameToWide(W.Buf, Descr, 10);
     ok(wcslen(W.Buf) == 10, "source size honoured: %lu\n", (unsigned long)wcslen(W.Buf));
+
+    /* the name of an interface row: the guid after \DEVICE\TCPIP_ (any case of the prefix), nothing otherwise */
+    {
+        static const wchar_t Good[] = L"\\DEVICE\\TCPIP_{E19C9217-81DB-4E02-BF1A-15E7C465C771}";
+        static const wchar_t LowerPrefix[] = L"\\device\\tcpip_{E19C9217-81DB-4E02-BF1A-15E7C465C771}";
+        static const wchar_t NoPrefix[] = L"Intel(R) PRO/1000 Network Connection";
+        static const wchar_t OnlyPrefix[] = L"\\DEVICE\\TCPIP_";
+        static const wchar_t Wide[] = { '\\', 'D', 'E', 'V', 'I', 'C', 'E', '\\', 'T', 'C', 'P', 'I', 'P', '_', 0x263A, 0 };
+        wchar_t Long[300];
+        char Out[DESCR_MAX];
+        int Ret;
+
+        memset(Out, 0x7E, sizeof(Out));
+        Ret = DhcpAdapterNameFromWszName(Out, sizeof(Out), Good, 256);
+        ok(Ret == 1, "guid name: %d\n", Ret);
+        ok(strcmp(Out, "{E19C9217-81DB-4E02-BF1A-15E7C465C771}") == 0, "guid name: '%s'\n", Out);
+
+        Ret = DhcpAdapterNameFromWszName(Out, sizeof(Out), LowerPrefix, 256);
+        ok(Ret == 1, "lower case prefix: %d\n", Ret);
+        ok(strcmp(Out, "{E19C9217-81DB-4E02-BF1A-15E7C465C771}") == 0, "lower case prefix: '%s'\n", Out);
+
+        ok(DhcpAdapterNameFromWszName(Out, sizeof(Out), NoPrefix, 256) == 0, "no prefix\n");
+        ok(DhcpAdapterNameFromWszName(Out, sizeof(Out), OnlyPrefix, 256) == 0, "prefix only\n");
+        ok(DhcpAdapterNameFromWszName(Out, sizeof(Out), Wide, 256) == 0, "name above 0x7f\n");
+        ok(DhcpAdapterNameFromWszName(Out, 0, Good, 256) == 0, "empty destination\n");
+
+        /* the source is read only up to its size: a full, unterminated name */
+        Ret = DhcpAdapterNameFromWszName(Out, sizeof(Out), Good, 14 + 5);
+        ok(Ret == 1 && strcmp(Out, "{E19C") == 0, "short source: %d '%s'\n", Ret, Out);
+
+        /* a long name is cut and terminated */
+        wcscpy(Long, L"\\DEVICE\\TCPIP_");
+        for (i = 14; i < 299; i++)
+            Long[i] = L'a';
+        Long[299] = 0;
+        memset(Out, 0x7E, sizeof(Out));
+        Ret = DhcpAdapterNameFromWszName(Out, sizeof(Out), Long, 300);
+        ok(Ret == 1 && strlen(Out) == DHCP_ADAPTER_NAME_MAX, "long name: %d %lu\n", Ret, (unsigned long)strlen(Out));
+        Ret = DhcpAdapterNameFromWszName(Out, 8, Good, 256);
+        ok(Ret == 1 && strlen(Out) == 7, "small destination: %d %lu\n", Ret, (unsigned long)strlen(Out));
+    }
 }
 
 #endif

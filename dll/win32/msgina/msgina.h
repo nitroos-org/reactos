@@ -41,6 +41,7 @@ typedef struct
     ULONG AuthenticationPackage;
     BOOL bDisableCAD;
     BOOL bAutoAdminLogon;
+    BOOL bForcedAutoLogon;      /* the automatic logon is a ForceAutoLogon one, after a logoff: it does not use up AutoLogonCount */
     BOOL bDontDisplayLastUserName;
     BOOL bShutdownWithoutLogon;
     BOOL bIgnoreShiftOverride;

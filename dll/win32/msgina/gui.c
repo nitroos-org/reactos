@@ -1226,7 +1226,7 @@ DoLogon(
      * does not work is tried as many times as the count says and then deleted, never at every start (an
      * account lock-out policy would count each try). The password is in memory (Password) already.
      */
-    if (pgContext->bAutoAdminLogon)
+    if (pgContext->bAutoAdminLogon && !pgContext->bForcedAutoLogon)
         ConsumeAutoLogon();
 
     Status = DoLoginTasks(pgContext, UserName, Domain, Password, &SubStatus);
@@ -1398,6 +1398,7 @@ DoLogon(
 
 done:
     pgContext->bAutoAdminLogon = FALSE;
+    pgContext->bForcedAutoLogon = FALSE;
 
     /* The logon attempt is over: no password stays in the context (a stored automatic logon password that was read
        into it) nor in this function (the one a password change gave) */

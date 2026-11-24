@@ -1180,6 +1180,29 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete( FCB, STATUS_SUCCESS, Irp, TotalBytesCopied );
     }
 
+    /* An overlapped send whose bytes all went into the send window is complete at once, with the byte count (Windows:
+     * a send that fits the send buffer does not wait for the transport). The transport takes the bytes of the window
+     * in the background; no request waits for them, so they are ghosts like those of a send that cannot wait */
+    if ((SendReq->AfdFlags & AFD_OVERLAPPED) && TotalBytesCopied == SendLength)
+    {
+        UnlockBuffers( SendReq->BufferArray, SendReq->BufferCount, FALSE );
+
+        if (!FCB->SendIrp.InFlightRequest)
+        {
+            TdiSend(&FCB->SendIrp.InFlightRequest,
+                    FCB->Connection.Object,
+                    0,
+                    FCB->Send.Window,
+                    FCB->Send.BytesUsed,
+                    SendComplete,
+                    FCB);
+        }
+
+        AfdAddSendGhost(FCB, FCB->Send.BytesUsed - TotalBytesCopied, TotalBytesCopied);
+
+        return UnlockAndMaybeComplete( FCB, STATUS_SUCCESS, Irp, TotalBytesCopied );
+    }
+
     /* We use the IRP tail for some temporary storage here */
     AfdSetSendState(Irp, Whole ? SendLength : 0, TotalBytesCopied);
 

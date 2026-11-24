@@ -385,6 +385,13 @@ IcmpSendEcho2Common(
         return 0;
     }
 
+    /* 0.0.0.0 is no destination (Windows Server 2022, the waiting call; the same on every network) */
+    if (!Async && DestinationAddress == 0)
+    {
+        SetLastError(ERROR_INVALID_NETNAME);
+        return 0;
+    }
+
     if (Async)
     {
         // The call may return before the request ends, so the IO_STATUS_BLOCK
@@ -592,6 +599,13 @@ IcmpSendEcho(
     if (ReplySize < RequestSize + sizeof(ICMP_ECHO_REPLY))
     {
         SetLastError(IP_GENERAL_FAILURE);
+        return 0;
+    }
+
+    /* 0.0.0.0 is no destination (Windows Server 2022: the same on every network) */
+    if (DestinationAddress == 0)
+    {
+        SetLastError(ERROR_INVALID_NETNAME);
         return 0;
     }
 

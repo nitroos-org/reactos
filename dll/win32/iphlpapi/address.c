@@ -339,6 +339,68 @@ CountPrefixBits(
     return BitCount;
 }
 
+/*
+ * The loopback interface: Windows names it with a guid (the one GetIfEntry2 and ConvertInterfaceLuidToGuid give, which
+ * is made up here: see LoopbackGuid in netio.c), describes it "Software Loopback Interface 1" and calls it
+ * "Loopback Pseudo-Interface 1"; the stack calls it "Loopback".
+ */
+#define LOOPBACK_GUID_TEXT "{6A6F6783-D2EA-11F1-9F53-806E6F6E6963}"
+static const WCHAR LoopbackDescription[] = L"Software Loopback Interface 1";
+static const WCHAR LoopbackFriendlyName[] = L"Loopback Pseudo-Interface 1";
+
+/*
+ * The origin and lifetimes of an IPv4 address of an adapter (Windows Server 2022): an address of a DHCP-enabled adapter
+ * comes from the lease (the lifetimes count down to its end, the lease lifetime is the length of the lease), the others
+ * are set by hand and never expire.
+ */
+static
+VOID
+QueryIpv4Origin(
+    _In_ PCSTR AdapterName,
+    _Out_ PBOOL Dhcp,
+    _Out_ PULONG Valid,
+    _Out_ PULONG Lease)
+{
+    HKEY InterfaceKey;
+    CHAR KeyName[256];
+    DWORD Type, Size, Data;
+
+    *Dhcp = FALSE;
+    *Valid = 0xFFFFFFFF;
+    *Lease = 0xFFFFFFFF;
+
+    snprintf(KeyName, sizeof(KeyName), "SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\%s", AdapterName);
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, KeyName, 0, KEY_READ, &InterfaceKey) != ERROR_SUCCESS)
+        return;
+
+    Size = sizeof(DWORD);
+    if (RegQueryValueExA(InterfaceKey, "EnableDHCP", NULL, &Type, (LPBYTE)&Data, &Size) == ERROR_SUCCESS &&
+        Type == REG_DWORD && Data == 1)
+    {
+        FILETIME Now;
+        ULARGE_INTEGER Value;
+        ULONGLONG Seconds;
+
+        *Dhcp = TRUE;
+        Size = sizeof(DWORD);
+        if (RegQueryValueExA(InterfaceKey, "Lease", NULL, &Type, (LPBYTE)&Data, &Size) == ERROR_SUCCESS &&
+            Type == REG_DWORD && Data != 0)
+            *Lease = Data;
+
+        Size = sizeof(DWORD);
+        if (RegQueryValueExA(InterfaceKey, "LeaseTerminatesTime", NULL, &Type, (LPBYTE)&Data, &Size) == ERROR_SUCCESS &&
+            Type == REG_DWORD && Data != 0)
+        {
+            GetSystemTimeAsFileTime(&Now);
+            Value.LowPart = Now.dwLowDateTime;
+            Value.HighPart = Now.dwHighDateTime;
+            Seconds = (Value.QuadPart - 116444736000000000ULL) / 10000000ULL;
+            *Valid = Data > Seconds ? (ULONG)(Data - Seconds) : 0;
+        }
+    }
+    RegCloseKey(InterfaceKey);
+}
+
 /* IP_ADAPTER_IPV6_MANAGED_ADDRESS_CONFIGURATION_SUPPORTED of Windows 7: not in the headers of this tree */
 #define IP_ADAPTER_IPV6_MANAGED_ADDRESS_CONFIGURATION_SUPPORTED_NITRO 0x0200
 /* GAA_FLAG_SKIP_DNS_INFO of Windows Vista SP1 and later: no DNS servers and no DNS suffix list */
@@ -441,6 +503,9 @@ GetAdaptersAddressesImpl(
             break;
     }
 
+    /* GAA_FLAG_SKIP_FRIENDLY_NAME is ignored: the friendly name is always there (Windows Server 2022) */
+    Flags &= ~GAA_FLAG_SKIP_FRIENDLY_NAME;
+
     BufferSize = RemainingSize = *pOutBufLen;
     if (Ptr)
         ZeroMemory(Ptr, RemainingSize);
@@ -496,6 +561,12 @@ GetAdaptersAddressesImpl(
             Status = GetInterfaceEntry(TcpFile, InterfacesList[i], Entry);
             if (!NT_SUCCESS(Status))
                 goto Error;
+
+            if (Entry->if_type == IF_TYPE_SOFTWARE_LOOPBACK)
+            {
+                memcpy(Entry->if_descr, LOOPBACK_GUID_TEXT, sizeof(LOOPBACK_GUID_TEXT));
+                Entry->if_descrlen = sizeof(LOOPBACK_GUID_TEXT) - 1;
+            }
 
             /* Family IPv6 lists the adapters that have IPv6 (Windows 10 measured) */
             if (SkipV4 && !Ipv6FindInterface(V6, Entry->if_index))
@@ -561,7 +632,7 @@ GetAdaptersAddressesImpl(
             /* Add the description. */
             if (Entry->if_type == IF_TYPE_SOFTWARE_LOOPBACK)
             {
-                DescriptionSize = mbstowcs(NULL, (PCSTR)&Entry->if_descr[0], Entry->if_descrlen) * sizeof(WCHAR);
+                DescriptionSize = sizeof(LoopbackDescription) - sizeof(WCHAR);
                 CurrentAASize += DescriptionSize;
             }
             else
@@ -610,7 +681,7 @@ GetAdaptersAddressesImpl(
             {
                 if (Entry->if_type == IF_TYPE_SOFTWARE_LOOPBACK)
                 {
-                    FriendlySize = mbstowcs(NULL, (PCSTR)&Entry->if_descr[0], Entry->if_descrlen) * sizeof(WCHAR);
+                    FriendlySize = sizeof(LoopbackFriendlyName) - sizeof(WCHAR);
                     CurrentAASize += FriendlySize;
                 }
                 else
@@ -797,7 +868,8 @@ GetAdaptersAddressesImpl(
                     if (Entry->if_type == IF_TYPE_SOFTWARE_LOOPBACK)
                     {
                         size_t size;
-                        size = mbstowcs((PWCHAR)Ptr, (PCSTR)&Entry->if_descr[0], Entry->if_descrlen);
+                        size = ARRAYSIZE(LoopbackDescription) - 1;
+                        memcpy(Ptr, LoopbackDescription, sizeof(LoopbackDescription));
                         CurrentAA->Description = (PWCHAR)Ptr;
                         CurrentAA->Description[size] = '\0';
                         /* Next items */
@@ -867,7 +939,8 @@ GetAdaptersAddressesImpl(
                         if (Entry->if_type == IF_TYPE_SOFTWARE_LOOPBACK)
                         {
                             size_t size;
-                            size = mbstowcs(CurrentAA->FriendlyName, (PCSTR)&Entry->if_descr[0], Entry->if_descrlen);
+                            size = ARRAYSIZE(LoopbackFriendlyName) - 1;
+                            memcpy(CurrentAA->FriendlyName, LoopbackFriendlyName, sizeof(LoopbackFriendlyName));
                             CurrentAA->FriendlyName[size] = '\0';
                             /* Next items */
                             Ptr = (BYTE*)(CurrentAA->FriendlyName + size + 1);
@@ -1045,15 +1118,36 @@ GetAdaptersAddressesImpl(
                         UnicastAddress->Length = sizeof(IP_ADAPTER_UNICAST_ADDRESS);
                         UnicastAddress->Next = CurrentAA->FirstUnicastAddress;
 
-                        // FIXME: Put meaningful value here
                         UnicastAddress->Flags = 0;
                         UnicastAddress->PrefixOrigin = IpPrefixOriginOther;
                         UnicastAddress->SuffixOrigin = IpSuffixOriginOther;
+                        UnicastAddress->ValidLifetime = 0xFFFFFFFF;
+                        UnicastAddress->PreferredLifetime = 0xFFFFFFFF;
+                        UnicastAddress->LeaseLifetime = 0xFFFFFFFF;
+                        if (CurrentAA->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
+                        {
+                            /* Windows Server 2022: not eligible for DNS, a well-known prefix and suffix */
+                            UnicastAddress->PrefixOrigin = IpPrefixOriginWellKnown;
+                            UnicastAddress->SuffixOrigin = IpSuffixOriginWellKnown;
+                        }
+                        else if (((PUCHAR)&AddrEntries[j].iae_addr)[0] != 169 || ((PUCHAR)&AddrEntries[j].iae_addr)[1] != 254)
+                        {
+                            BOOL Dhcp;
+                            ULONG Valid, Lease;
+
+                            /* eligible for DNS; leased from a DHCP server or set by hand (the link-local address
+                               of an adapter without either keeps the origin Other) */
+                            UnicastAddress->Flags = IP_ADAPTER_ADDRESS_DNS_ELIGIBLE;
+                            QueryIpv4Origin(CurrentAA->AdapterName, &Dhcp, &Valid, &Lease);
+                            UnicastAddress->PrefixOrigin = Dhcp ? IpPrefixOriginDhcp : IpPrefixOriginManual;
+                            UnicastAddress->SuffixOrigin = Dhcp ? IpSuffixOriginDhcp : IpSuffixOriginManual;
+                            UnicastAddress->ValidLifetime = Valid;
+                            UnicastAddress->PreferredLifetime = Valid;
+                            UnicastAddress->LeaseLifetime = Lease;
+                        }
                         /* the addresses of a disconnected interface stay and are Deprecated until the link is back
                            (Windows Server 2022: GetAdaptersAddresses, GetUnicastIpAddressTable, Get-NetIPAddress) */
                         UnicastAddress->DadState = (CurrentAA->OperStatus == IfOperStatusUp) ? IpDadStatePreferred : IpDadStateDeprecated;
-                        UnicastAddress->ValidLifetime = 0xFFFFFFFF;
-                        UnicastAddress->PreferredLifetime = 0xFFFFFFFF;
                         UnicastAddress->OnLinkPrefixLength = (UINT8)CountPrefixBits(AddrEntries[j].iae_mask);
 
                         /* Set the address */
@@ -1430,10 +1524,13 @@ Gateways:
     HeapFree(GetProcessHeap(), 0, AdapterNames);
     HeapFree(GetProcessHeap(), 0, InterfacesList);
     NtClose(TcpFile);
-    *pOutBufLen = TotalSize;
     if (TotalSize > BufferSize)
+    {
+        *pOutBufLen = TotalSize;
         return ERROR_BUFFER_OVERFLOW;
-    TRACE("TotalSize: %x\n", *pOutBufLen);
+    }
+    /* a buffer that was big enough keeps its size: the size is not lowered to what was used (Windows Server 2022) */
+    TRACE("TotalSize: %x\n", TotalSize);
     return ERROR_SUCCESS;
 
 Error:

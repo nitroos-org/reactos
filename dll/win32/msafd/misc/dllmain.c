@@ -107,7 +107,7 @@ WSPSocket(int AddressFamily,
     UNICODE_STRING              DevName;
     LARGE_INTEGER               GroupData;
     INT                         Status;
-    PSOCK_SHARED_INFO           SharedData = NULL;
+    PSOCK_SHARED_INFO           SharedData = NULL, SharedCopy;
     BOOLEAN                     HaveTransportName = FALSE;
 
     TRACE("Creating Socket, getting TDI Name - AddressFamily (%d)  SocketType (%d)  Protocol (%d).\n",
@@ -136,7 +136,25 @@ WSPSocket(int AddressFamily,
             Status = WSAEINVAL;
             goto error;
         }
-        InterlockedIncrement(&SharedData->RefCount);
+
+        /*
+         * The new socket keeps a copy of the state of the socket it was duplicated from as that is now (Windows: what
+         * the source does afterwards, a bind say, is not seen by this socket, and the other way round; the endpoint
+         * is the same one). The live state stays with the source.
+         */
+        SharedCopy = HeapAlloc(GlobalHeap, 0, sizeof(*SharedCopy));
+        if (!SharedCopy)
+        {
+            UnmapViewOfFile(SharedData);
+            SharedData = NULL;
+            NtClose(UlongToHandle(lpProtocolInfo->dwServiceFlags3));
+            Status = WSAENOBUFS;
+            goto error;
+        }
+        RtlCopyMemory(SharedCopy, SharedData, sizeof(*SharedCopy));
+        UnmapViewOfFile(SharedData);
+        SharedData = SharedCopy;
+        SharedData->RefCount = 1;
         AddressFamily = SharedData->AddressFamily;
         SocketType = SharedData->SocketType;
         Protocol = SharedData->Protocol;
@@ -226,6 +244,7 @@ WSPSocket(int AddressFamily,
     {
         Socket->SharedData = SharedData;
         Socket->SharedDataHandle = UlongToHandle(lpProtocolInfo->dwServiceFlags3);
+        Socket->SharedDataIsCopy = TRUE;
         Sock = UlongToHandle(lpProtocolInfo->dwServiceFlags4);
         Socket->Handle = (SOCKET)lpProtocolInfo->dwServiceFlags4;
 
@@ -494,7 +513,8 @@ error:
 
     if( SharedData )
     {
-        UnmapViewOfFile(SharedData);
+        /* the copy of the state of the socket this one was to be a duplicate of */
+        HeapFree(GlobalHeap, 0, SharedData);
         NtClose(UlongToHandle(lpProtocolInfo->dwServiceFlags3));
     }
     else
@@ -1003,10 +1023,18 @@ ok:
 
     if( Socket->SharedDataHandle != INVALID_HANDLE_VALUE )
     {
-        /* It is a duplicated socket, so unmap the memory */
-        UnmapViewOfFile(Socket->SharedData);
-        NtClose(Socket->SharedDataHandle);
-        Socket->SharedData = NULL;
+        if( Socket->SharedDataIsCopy )
+        {
+            /* It was made from a duplicate: the state is a heap copy, the section is only to be closed */
+            NtClose(Socket->SharedDataHandle);
+        }
+        else
+        {
+            /* It was duplicated, so unmap the memory */
+            UnmapViewOfFile(Socket->SharedData);
+            NtClose(Socket->SharedDataHandle);
+            Socket->SharedData = NULL;
+        }
     }
     if( !References && Socket->SharedData )
     {
@@ -5103,6 +5131,7 @@ SetSocketInformation(PSOCKET_INFORMATION Socket,
     NTSTATUS                Status;
     PMSAFD_INFO_APC_CONTEXT APCContext;
     PIO_APC_ROUTINE         APCFunction;
+    LPWSAOVERLAPPED         DirectContext = NULL;
     HANDLE                  Event = NULL;
     HANDLE                  SockEvent;
 
@@ -5158,21 +5187,33 @@ SetSocketInformation(PSOCKET_INFORMATION Socket,
             return MsafdReturnWithErrno(STATUS_SUCCESS, NULL, 0, NULL);
         }
 
-        APCContext = HeapAlloc(GlobalHeap, 0, sizeof(*APCContext));
-        if (!APCContext)
-        {
-            ERR("Not enough memory for APC Context\n");
-            NtClose(SockEvent);
-            HeapFree(GlobalHeap, 0, InfoData);
-            return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, NULL, 0, NULL);
-        }
-        APCContext->lpCompletionRoutine = CompletionRoutine;
-        APCContext->lpOverlapped = Overlapped;
-        APCContext->lpInfoData = InfoData;
-        APCFunction = &MsafdInfoAPC;
-
         if (!CompletionRoutine)
+        {
+            /*
+             * The overlapped is the request: AFD takes the information and completes before it returns, so the
+             * completion port of the socket, if it has one, gets the overlapped itself (not a context of ours, as on
+             * Windows) and the event is signalled
+             */
+            APCContext = NULL;
+            APCFunction = NULL;
             Event = Overlapped->hEvent;
+            DirectContext = ((ULONG_PTR)Event & 1) ? NULL : Overlapped;
+        }
+        else
+        {
+            APCContext = HeapAlloc(GlobalHeap, 0, sizeof(*APCContext));
+            if (!APCContext)
+            {
+                ERR("Not enough memory for APC Context\n");
+                NtClose(SockEvent);
+                HeapFree(GlobalHeap, 0, InfoData);
+                return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, NULL, 0, NULL);
+            }
+            APCContext->lpCompletionRoutine = CompletionRoutine;
+            APCContext->lpOverlapped = Overlapped;
+            APCContext->lpInfoData = InfoData;
+            APCFunction = &MsafdInfoAPC;
+        }
 
         IOSB = (PIO_STATUS_BLOCK)&Overlapped->Internal;
     }
@@ -5183,7 +5224,7 @@ SetSocketInformation(PSOCKET_INFORMATION Socket,
     Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
                                    Event,
                                    APCFunction,
-                                   APCContext,
+                                   DirectContext ? (PVOID)DirectContext : (PVOID)APCContext,
                                    IOSB,
                                    IOCTL_AFD_SET_INFO,
                                    InfoData,

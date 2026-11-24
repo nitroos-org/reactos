@@ -146,12 +146,79 @@ GetLsaDefaultPassword(_Inout_ PGINA_CONTEXT pgContext)
     return Status == STATUS_SUCCESS;
 }
 
+/* The account and the password of the automatic logon, from the Winlogon key (the password from the LSA secret
+   DefaultPassword when the key has none) */
+static
+VOID
+ReadAutoLogonAccount(_In_ HKEY hKey, _Inout_ PGINA_CONTEXT pgContext)
+{
+    DWORD dwSize;
+    LONG rc;
+
+    dwSize = sizeof(pgContext->UserName);
+    rc = RegQueryValueExW(hKey,
+                          L"DefaultUserName",
+                          NULL,
+                          NULL,
+                          (PBYTE)&pgContext->UserName,
+                          &dwSize);
+
+    dwSize = sizeof(pgContext->DomainName);
+    rc = RegQueryValueExW(hKey,
+                          L"DefaultDomainName",
+                          NULL,
+                          NULL,
+                          (PBYTE)&pgContext->DomainName,
+                          &dwSize);
+
+    dwSize = sizeof(pgContext->Password);
+    rc = RegQueryValueExW(hKey,
+                          L"DefaultPassword",
+                          NULL,
+                          NULL,
+                          (PBYTE)&pgContext->Password,
+                          &dwSize);
+    if (rc)
+        GetLsaDefaultPassword(pgContext);
+}
+
+/*
+ * ForceAutoLogon (Windows Server 2022, measured): AutoAdminLogon=1 logs the account on when Winlogon starts and
+ * nothing more; with ForceAutoLogon=1 as well it logs it on again after every logoff, and the values stay as they
+ * are. The values are read again at the logoff: a count (AutoLogonCount, see ConsumeAutoLogon) that ran out at the
+ * start has turned the automatic logon off by then; the logons after a logoff do not use the count up (AutoLogonCount=2
+ * stayed 1 over two logoffs on Windows Server 2022).
+ */
+static
+VOID
+RearmAutoLogon(_Inout_ PGINA_CONTEXT pgContext)
+{
+    HKEY hKey;
+    DWORD dwAuto = 0, dwForce = 0;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
+                      0,
+                      KEY_QUERY_VALUE,
+                      &hKey) != ERROR_SUCCESS)
+        return;
+
+    if (ReadRegDwordValue(hKey, L"AutoAdminLogon", &dwAuto) == ERROR_SUCCESS && dwAuto != 0 &&
+        ReadRegDwordValue(hKey, L"ForceAutoLogon", &dwForce) == ERROR_SUCCESS && dwForce != 0)
+    {
+        ReadAutoLogonAccount(hKey, pgContext);
+        pgContext->bAutoAdminLogon = TRUE;
+        pgContext->bForcedAutoLogon = TRUE;
+    }
+    RegCloseKey(hKey);
+}
+
 static
 BOOL
 GetRegistrySettings(PGINA_CONTEXT pgContext)
 {
     HKEY hKey = NULL;
-    DWORD dwValue, dwSize;
+    DWORD dwValue;
     DWORD dwDisableCAD = 0;
     LONG rc;
 
@@ -195,31 +262,7 @@ GetRegistrySettings(PGINA_CONTEXT pgContext)
     if (rc == ERROR_SUCCESS)
         pgContext->bIgnoreShiftOverride = !!dwValue;
 
-    dwSize = sizeof(pgContext->UserName);
-    rc = RegQueryValueExW(hKey,
-                          L"DefaultUserName",
-                          NULL,
-                          NULL,
-                          (PBYTE)&pgContext->UserName,
-                          &dwSize);
-
-    dwSize = sizeof(pgContext->DomainName);
-    rc = RegQueryValueExW(hKey,
-                          L"DefaultDomainName",
-                          NULL,
-                          NULL,
-                          (PBYTE)&pgContext->DomainName,
-                          &dwSize);
-
-    dwSize = sizeof(pgContext->Password);
-    rc = RegQueryValueExW(hKey,
-                          L"DefaultPassword",
-                          NULL,
-                          NULL,
-                          (PBYTE)&pgContext->Password,
-                          &dwSize);
-    if (rc)
-        GetLsaDefaultPassword(pgContext);
+    ReadAutoLogonAccount(hKey, pgContext);
 
     if (hKey != NULL)
         RegCloseKey(hKey);
@@ -1235,6 +1278,9 @@ WlxLogoff(
     /* Close the user token */
     CloseHandle(pgContext->UserToken);
     pgContext->UserToken = NULL;
+
+    /* With ForceAutoLogon the account is logged on again */
+    RearmAutoLogon(pgContext);
 }
 
 
