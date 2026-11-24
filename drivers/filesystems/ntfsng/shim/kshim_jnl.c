@@ -146,6 +146,8 @@ int kshim_jnl_noret;		/* registry NoRetainedCommit=1: every commit puts its page
 unsigned long kshim_jnl_fault;
 unsigned long kshim_jnl_fault_stage;	/* where in the commit the fault stops it: 0 half way through the in-place pass, 1 before the COMMITTED header, 2 after it, 3 after the in-place pass */
 unsigned long kshim_jnl_stall_ms;	/* the journal I/O of a sealed transaction sleeps this long between its phases */
+unsigned long kshim_jnl_hdr_fail;	/* the next n COMMITTED header writes complete but report a failure (JournalHdrFail) */
+unsigned long kshim_jnl_hdr_fail_after;	/* ... from the commit with this number on (JournalHdrFailAfter) */
 #endif
 
 static void kj_crc_init(void)
@@ -1149,6 +1151,28 @@ static void kj_sort(struct kj_ent **v, struct kj_ent **tmp, unsigned long n)
 	memcpy(v, tmp, n * sizeof(*v));
 }
 
+/*
+ * Bounded retries of the two steps of a commit that can be repeated without changing what a crash finds.  Each of them runs
+ * after every precondition of the commit is on the medium and with nothing else written to the volume meanwhile (the
+ * sealed transaction is owned by this I/O, a later one cannot be sealed before it ends, a direct write over a sealed sector
+ * waits for it):
+ *   - the COMMITTED header: a pure function of the journal state, which does not change between the attempts; writing it
+ *     again puts the same bytes in the same page, whether or not the failed attempt reached the medium, and a torn page is
+ *     what its CRC is for.  A replay finds the old header or the new one, never a mixture.
+ *   - the in-place pass: the replay of that header does exactly this, to the same sectors, from the same pages; a page
+ *     that is in place already is written again with the same bytes.
+ * A device that comes back within the retry window (a reset that outlasted the class driver's own retries, a paused
+ * virtual disk) therefore costs a delay, not the volume.  After the last attempt the failure is final: the header may or may
+ * not name the new area, the transaction is back in the live overlay, and only the replay at the next mount knows which
+ * (see the latch in kshim_jnl_io and kj_tx_apply).  1 + 2 + 4 + 8 + 16 s.
+ */
+#define KJ_RETRY_MAX 5
+#define KJ_RETRY_MS 1000u
+static int kj_can_retry(struct block_device *b, int try)
+{
+	return try < KJ_RETRY_MAX && !b->kshim_gone && !b->kshim_frozen;
+}
+
 /* DBG: stops the system here when JournalFault asks for this stage of this commit (kshim_jnl_fault_stage). */
 #if DBG
 static void kj_fault_at(struct block_device *b, struct kshim_jnl *j, unsigned long stage, struct kj_ent **v,
@@ -1252,7 +1276,21 @@ static int kj_tx_commit(struct block_device *b, struct kshim_jnl *j, struct kj_e
 	if (ndesc + n > j->hwm)
 		j->hwm = ndesc + n;
 	j->hdr_tried = 1;
-	err = kj_hdr_write(b, j, KJ_ST_COMMITTED, (u32)n, (u32)ndesc, crc, 1, usn_new);
+	for (int try = 0;; try++) {
+		err = kj_hdr_write(b, j, KJ_ST_COMMITTED, (u32)n, (u32)ndesc, crc, 1, usn_new);
+#if DBG
+		if (!err && kshim_jnl_hdr_fail && j->commits >= kshim_jnl_hdr_fail_after) {
+			/* Test only (JournalHdrFail): the write reached the medium, its completion says it failed. */
+			kshim_jnl_hdr_fail--;
+			err = -EIO;
+		}
+#endif
+		if (!err || !kj_can_retry(b, try))
+			break;
+		printk(KERN_WARNING "journal: the COMMITTED header of seq %llu failed %d, again in %u ms (%d of %d)\n",
+		       (unsigned long long)j->seq, err, KJ_RETRY_MS << try, try + 1, KJ_RETRY_MAX);
+		msleep(KJ_RETRY_MS << try);
+	}
 out:
 	kfree(d);
 	return err;
@@ -1280,6 +1318,14 @@ static int kj_tx_apply(struct block_device *b, struct kshim_jnl *j, struct kj_en
 	}
 	if (!err && kj_dev_flush(b))
 		err = -EIO;
+	for (int try = 0; err && kj_can_retry(b, try); try++) {
+		printk(KERN_WARNING "journal: the in-place pass of seq %llu failed %d, again in %u ms (%d of %d)\n",
+		       (unsigned long long)j->seq, err, KJ_RETRY_MS << try, try + 1, KJ_RETRY_MAX);
+		msleep(KJ_RETRY_MS << try);
+		err = kj_apply(b, v, n);
+		if (!err && kj_dev_flush(b))
+			err = -EIO;
+	}
 	if (err) {
 		/*
 		 * Part of a committed transaction may be in place.  Its COMMITTED header is on the medium,

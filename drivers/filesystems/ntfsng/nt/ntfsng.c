@@ -965,6 +965,15 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     i = NgReadDword(RegistryPath, L"JournalFaultStage");
     if (i)
         ngc_set_journal_fault_stage(i);
+    i = NgReadDword(RegistryPath, L"JournalHdrFail");
+    if (i)
+    {
+        /* Test only: the next JournalHdrFail writes of a COMMITTED header, from commit JournalHdrFailAfter on, report a failure
+         * (the write itself reached the medium). */
+        ULONG After = NgReadDword(RegistryPath, L"JournalHdrFailAfter");
+        ngc_set_journal_hdr_fail(i, After);
+        DPRINT1("ntfsng: JournalHdrFail: the next %lu COMMITTED header writes after commit %lu report a failure\n", i, After);
+    }
     i = NgReadDword(RegistryPath, L"JournalStall");
     if (i)
     {

@@ -168,6 +168,9 @@ void ngc_set_journal_fault(unsigned long commit_no);
  * COMMITTED header, 2 after it, 3 after the in-place pass), and a pause in ms of the unlocked journal I/O between its phases. */
 void ngc_set_journal_fault_stage(unsigned long stage);
 void ngc_set_journal_stall(unsigned long ms);
+/* Test only: the next n writes of a COMMITTED header, from commit number "after" on, report a failure after they reached the
+ * medium (the retry of the header write). */
+void ngc_set_journal_hdr_fail(unsigned long n, unsigned long after);
 /* Test only: report every every'th unlocked write (ngc_dio_end) as "mapping changed", to run the glue's write-again path; 0 = off. */
 void ngc_set_dio_fault(unsigned long every);
 extern unsigned long ngc_dio_forced;
