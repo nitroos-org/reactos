@@ -3217,11 +3217,8 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     FullPath.MaximumLength = sizeof(StringBuffer);
     RtlInitUnicodeString(&NtSystemRoot, SharedUserData->NtSystemRoot);
     RtlAppendUnicodeStringToString(&FullPath, &NtSystemRoot);
-#ifdef _M_IX86
-    if (NtCurrentTeb()->WOW32Reserved)
-        RtlAppendUnicodeToString(&FullPath, L"\\SysWOW64\\");
-    else
-#endif
+    /* The logical System32 directory also for a 32-bit process on a 64-bit system, as Windows names its ntdll
+     * (file system redirection maps it to SysWOW64 where a file is opened by it) */
     RtlAppendUnicodeToString(&FullPath, L"\\System32\\");
 
     /* Open the Known DLLs directory */
@@ -3266,6 +3263,23 @@ LdrpInitializeProcess(IN PCONTEXT Context,
                 DPRINT1("LDR: %s - failed call to ZwQuerySymbolicLinkObject with status %x\n", "", Status);
                 return Status;
             }
+#ifdef _M_IX86
+            /*
+             * A 32-bit process on a 64-bit system names the system DLLs it takes from \KnownDlls32 by the
+             * logical System32 directory, the one GetSystemDirectory returns and the other DLLs of the
+             * process are named by (measured on Windows Server 2022: GetModuleFileName of kernel32, user32
+             * or imagehlp is ...\System32\..., as for a DLL found by the search path). File system
+             * redirection maps that name to SysWOW64 where a file is opened by it.
+             */
+            if (NtCurrentTeb()->WOW32Reserved &&
+                LdrpKnownDllPath.Length >= 9 * sizeof(WCHAR) &&
+                !_wcsnicmp(&LdrpKnownDllPath.Buffer[LdrpKnownDllPath.Length / sizeof(WCHAR) - 9], L"\\SysWOW64", 9))
+            {
+                RtlCopyMemory(&LdrpKnownDllPath.Buffer[LdrpKnownDllPath.Length / sizeof(WCHAR) - 9],
+                              L"\\System32",
+                              9 * sizeof(WCHAR));
+            }
+#endif
         }
     }
 
