@@ -1299,7 +1299,16 @@ GetSecurityInfo(HANDLE handle,
                 PACL *ppSacl,
                 PSECURITY_DESCRIPTOR *ppSecurityDescriptor)
 {
+    PSECURITY_DESCRIPTOR UnusedSd = NULL;
     DWORD ErrorCode;
+
+    /* Without a pointer for the descriptor Windows still returns the owner, group and ACLs that were asked
+     * for (they point into a descriptor that the caller then cannot free): measured on Windows Server 2022 */
+    if (ppSecurityDescriptor == NULL &&
+        (ppsidOwner != NULL || ppsidGroup != NULL || ppDacl != NULL || ppSacl != NULL))
+    {
+        ppSecurityDescriptor = &UnusedSd;
+    }
 
     if (handle != NULL)
     {
