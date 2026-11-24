@@ -468,6 +468,11 @@ typedef struct tagMSIPACKAGE
     HANDLE custom_server_64_process;
     HANDLE custom_server_32_pipe;
     HANDLE custom_server_64_pipe;
+    /* the servers of deferred "no impersonation" actions: LocalSystem, started through the Installer service */
+    HANDLE custom_server_32_system_process;
+    HANDLE custom_server_64_system_process;
+    HANDLE custom_server_32_system_pipe;
+    HANDLE custom_server_64_system_pipe;
 
     LPWSTR PackagePath;
     LPWSTR ProductCode;
