@@ -1048,6 +1048,21 @@ WSPRecvMsg(
     return SOCKET_ERROR;
 }
 
+/* The bytes the buffers of a send hold (saturated: a sum above 4 GB is as much as any send can take) */
+static
+ULONG
+MsafdSendTotal(
+    _In_reads_(Count) LPWSABUF Buffers,
+    _In_ DWORD Count)
+{
+    ULONG64 Total = 0;
+    DWORD i;
+
+    for (i = 0; Buffers && i < Count; i++)
+        Total += Buffers[i].len;
+    return Total > MAXULONG ? MAXULONG : (ULONG)Total;
+}
+
 int
 WSPAPI
 WSPSend(SOCKET Handle,
@@ -1287,8 +1302,10 @@ WSPSend(SOCKET Handle,
 
     NumberOfBytesSent = (DWORD)IOSB->Information;
 
-    /* Re-enable Async Event */
-    SockReenableAsyncSelectEvent(Socket, FD_WRITE);
+    /* Re-enable Async Event: FD_WRITE is posted again after a send that did not take everything (WSAEWOULDBLOCK, an
+     * error or a short write), not after every send that went through (Windows) */
+    if (!NT_SUCCESS(Status) || Status == STATUS_CANT_WAIT || MsafdSendTotal(lpBuffers, dwBufferCount) > NumberOfBytesSent)
+        SockReenableAsyncSelectEvent(Socket, FD_WRITE);
 
     TRACE("Leaving (%lx %ld)\n", Status, NumberOfBytesSent);
 
