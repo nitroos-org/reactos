@@ -3401,6 +3401,102 @@ WSPGetPeerName(IN SOCKET s,
 #define SIO_BASE_HANDLE         _WSAIOR(IOC_WS2,34)
 #endif
 
+/*
+ * SIO_ROUTING_INTERFACE_QUERY: the local address a datagram to the destination in the input buffer would carry,
+ * from the routing table (GetBestRoute2 of iphlpapi, loaded when it is first needed). An input of the wrong
+ * family is WSAEAFNOSUPPORT, the unspecified address WSAEINVAL, a missing or short buffer WSAEFAULT; the source
+ * address comes back in a SOCKADDR_IN (SOCKADDR_IN6) of the output buffer (Windows Server 2022, sock.c).
+ */
+static
+INT
+MsafdQueryRoutingInterface(
+    _In_ PSOCKET_INFORMATION Socket,
+    _In_reads_bytes_opt_(cbInBuffer) LPVOID lpvInBuffer,
+    _In_ DWORD cbInBuffer,
+    _Out_writes_bytes_opt_(cbOutBuffer) LPVOID lpvOutBuffer,
+    _In_ DWORD cbOutBuffer,
+    _Out_ LPDWORD pcbRet)
+{
+    typedef DWORD (WINAPI *PFN_GETBESTROUTE2)(PVOID, ULONG, const SOCKADDR_INET *, const SOCKADDR_INET *,
+                                              ULONG, PVOID, SOCKADDR_INET *);
+    static PFN_GETBESTROUTE2 pGetBestRoute2;
+    SOCKADDR_INET Destination, Source;
+    UCHAR Route[512];
+    DWORD Result;
+    ULONG Family;
+
+    *pcbRet = 0;
+
+    if (IS_INTRESOURCE(lpvInBuffer) || cbInBuffer < sizeof(SOCKADDR_IN))
+        return WSAEFAULT;
+
+    Family = ((PSOCKADDR)lpvInBuffer)->sa_family;
+    if (Family == AF_INET6 && Socket->SharedData->AddressFamily == AF_INET6)
+    {
+        if (cbInBuffer < sizeof(SOCKADDR_IN6))
+            return WSAEFAULT;
+    }
+    else if (Family != AF_INET)
+    {
+        return WSAEAFNOSUPPORT;
+    }
+
+    RtlZeroMemory(&Destination, sizeof(Destination));
+    if (Family == AF_INET)
+    {
+        Destination.Ipv4 = *(PSOCKADDR_IN)lpvInBuffer;
+        if (Destination.Ipv4.sin_addr.s_addr == 0)
+            return WSAEINVAL;
+    }
+    else
+    {
+        Destination.Ipv6 = *(PSOCKADDR_IN6)lpvInBuffer;
+        {
+            static const UCHAR Unspecified[sizeof(IN6_ADDR)] = {0};
+
+            if (RtlCompareMemory(&Destination.Ipv6.sin6_addr, Unspecified, sizeof(IN6_ADDR)) == sizeof(IN6_ADDR))
+                return WSAEINVAL;
+        }
+    }
+
+    if (IS_INTRESOURCE(lpvOutBuffer) ||
+        cbOutBuffer < (Family == AF_INET ? sizeof(SOCKADDR_IN) : sizeof(SOCKADDR_IN6)))
+        return WSAEFAULT;
+
+    if (pGetBestRoute2 == NULL)
+    {
+        HMODULE hIphlpapi = LoadLibraryW(L"iphlpapi.dll");
+
+        if (hIphlpapi != NULL)
+            pGetBestRoute2 = (PFN_GETBESTROUTE2)GetProcAddress(hIphlpapi, "GetBestRoute2");
+    }
+    if (pGetBestRoute2 == NULL)
+        return WSAEOPNOTSUPP;
+
+    RtlZeroMemory(&Source, sizeof(Source));
+    Result = pGetBestRoute2(NULL, 0, NULL, &Destination, 0, Route, &Source);
+    if (Result != NO_ERROR)
+    {
+        if (Result == ERROR_NETWORK_UNREACHABLE || Result == ERROR_NOT_FOUND || Result == ERROR_HOST_UNREACHABLE)
+            return WSAENETUNREACH;
+        return WSAEINVAL;
+    }
+
+    if (Family == AF_INET)
+    {
+        RtlZeroMemory(lpvOutBuffer, sizeof(SOCKADDR_IN));
+        ((PSOCKADDR_IN)lpvOutBuffer)->sin_family = AF_INET;
+        ((PSOCKADDR_IN)lpvOutBuffer)->sin_addr = Source.Ipv4.sin_addr;
+        *pcbRet = sizeof(SOCKADDR_IN);
+    }
+    else
+    {
+        *(PSOCKADDR_IN6)lpvOutBuffer = Source.Ipv6;
+        *pcbRet = sizeof(SOCKADDR_IN6);
+    }
+    return NO_ERROR;
+}
+
 INT
 WSPAPI
 WSPIoctl(IN  SOCKET Handle,
@@ -3623,6 +3719,11 @@ WSPIoctl(IN  SOCKET Handle,
             cbRet = sizeof(SOCKET);
             Errno = NO_ERROR;
             Ret = NO_ERROR;
+            break;
+        case SIO_ROUTING_INTERFACE_QUERY:
+            Errno = MsafdQueryRoutingInterface(Socket, lpvInBuffer, cbInBuffer, lpvOutBuffer, cbOutBuffer, &cbRet);
+            if (Errno == NO_ERROR)
+                Ret = NO_ERROR;
             break;
         case SIO_ADDRESS_LIST_QUERY:
             Errno = MsafdQueryAddressList(Socket, lpvOutBuffer, cbOutBuffer, &cbRet);
