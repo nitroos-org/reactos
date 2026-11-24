@@ -1097,16 +1097,17 @@ ReplaceFileW(
     )
 {
     HANDLE hReplaced = NULL, hReplacement = NULL;
-    UNICODE_STRING NtReplacedName = { 0, 0, NULL };
-    UNICODE_STRING NtReplacementName = { 0, 0, NULL };
-    DWORD Error = ERROR_SUCCESS;
+    UNICODE_STRING NtName = { 0, 0, NULL };
     NTSTATUS Status;
-    BOOL Ret = FALSE;
     IO_STATUS_BLOCK IoStatusBlock;
     OBJECT_ATTRIBUTES ObjectAttributes;
-    PVOID Buffer = NULL ;
+    FILE_BASIC_INFORMATION OldBasic;
+    PSECURITY_DESCRIPTOR OldSd = NULL;
+    ULONG SdLength = 0, Needed = 0;
+    WCHAR TempFile[MAX_PATH];
 
-    if (dwReplaceFlags)
+    /* REPLACEFILE_IGNORE_ACL_ERRORS (4) is not in the headers of this tree */
+    if (dwReplaceFlags & ~(REPLACEFILE_WRITE_THROUGH | REPLACEFILE_IGNORE_MERGE_ERRORS | 0x4))
         FIXME("Ignoring flags %x\n", dwReplaceFlags);
 
     /* First two arguments are mandatory */
@@ -1116,123 +1117,161 @@ ReplaceFileW(
         return FALSE;
     }
 
-    /* Back it up */
-    if(lpBackupFileName)
+    /* The replaced file must exist and must not be read-only. It may be open or be a running image:
+       it is renamed out of the way below, never written (Windows Server 2022). It is opened to take
+       its attributes and its access control list over to the replacement. */
+    if (!RtlDosPathNameToNtPathName_U(lpReplacedFileName, &NtName, NULL, NULL))
     {
-        if(!CopyFileW(lpReplacedFileName, lpBackupFileName, FALSE))
-        {
-            Error = GetLastError();
-            goto Cleanup ;
-        }
+        SetLastError(ERROR_PATH_NOT_FOUND);
+        return FALSE;
     }
-
-    /* Open the "replaced" file for reading and writing */
-    if (!(RtlDosPathNameToNtPathName_U(lpReplacedFileName, &NtReplacedName, NULL, NULL)))
-    {
-        Error = ERROR_PATH_NOT_FOUND;
-        goto Cleanup;
-    }
-
-    InitializeObjectAttributes(&ObjectAttributes,
-                               &NtReplacedName,
-                               OBJ_CASE_INSENSITIVE,
-                               NULL,
-                               NULL);
-
+    InitializeObjectAttributes(&ObjectAttributes, &NtName, OBJ_CASE_INSENSITIVE, NULL, NULL);
     Status = NtOpenFile(&hReplaced,
-                        GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE | WRITE_DAC,
+                        FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
                         &ObjectAttributes,
                         &IoStatusBlock,
                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                         FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
-
+    RtlFreeHeap(RtlGetProcessHeap(), 0, NtName.Buffer);
     if (!NT_SUCCESS(Status))
     {
-        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
-            Error = ERROR_FILE_NOT_FOUND;
-        else
-            Error = ERROR_UNABLE_TO_REMOVE_REPLACED;
-        goto Cleanup;
+        BaseSetLastNTError(Status);
+        return FALSE;
     }
-
-    /* Blank it */
-    SetEndOfFile(hReplaced) ;
-
-    /*
-     * Open the replacement file for reading, writing, and deleting
-     * (deleting is needed when finished)
-     */
-    if (!(RtlDosPathNameToNtPathName_U(lpReplacementFileName, &NtReplacementName, NULL, NULL)))
+    Status = NtQueryInformationFile(hReplaced, &IoStatusBlock, &OldBasic, sizeof(OldBasic), FileBasicInformation);
+    if (NT_SUCCESS(Status) && (OldBasic.FileAttributes & FILE_ATTRIBUTE_READONLY))
+        Status = STATUS_ACCESS_DENIED;
+    if (!NT_SUCCESS(Status))
     {
-        Error = ERROR_PATH_NOT_FOUND;
-        goto Cleanup;
+        NtClose(hReplaced);
+        BaseSetLastNTError(Status);
+        return FALSE;
     }
+    Status = NtQuerySecurityObject(hReplaced, DACL_SECURITY_INFORMATION, NULL, 0, &Needed);
+    if (Status == STATUS_BUFFER_TOO_SMALL && Needed)
+    {
+        OldSd = RtlAllocateHeap(RtlGetProcessHeap(), 0, Needed);
+        if (OldSd)
+        {
+            SdLength = Needed;
+            if (!NT_SUCCESS(NtQuerySecurityObject(hReplaced, DACL_SECURITY_INFORMATION, OldSd, SdLength, &Needed)))
+            {
+                RtlFreeHeap(RtlGetProcessHeap(), 0, OldSd);
+                OldSd = NULL;
+            }
+        }
+    }
+    NtClose(hReplaced);
 
-    InitializeObjectAttributes(&ObjectAttributes,
-                               &NtReplacementName,
-                               OBJ_CASE_INSENSITIVE,
-                               NULL,
-                               NULL);
-
+    /* Open the replacement exclusively with the access that moving it into place and giving it the
+       old attributes and access control list needs: another open handle makes this fail with a
+       sharing violation, a read-only replacement with access denied. */
+    if (!RtlDosPathNameToNtPathName_U(lpReplacementFileName, &NtName, NULL, NULL))
+    {
+        if (OldSd) RtlFreeHeap(RtlGetProcessHeap(), 0, OldSd);
+        SetLastError(ERROR_PATH_NOT_FOUND);
+        return FALSE;
+    }
+    InitializeObjectAttributes(&ObjectAttributes, &NtName, OBJ_CASE_INSENSITIVE, NULL, NULL);
     Status = NtOpenFile(&hReplacement,
-                        GENERIC_READ | DELETE | SYNCHRONIZE,
+                        GENERIC_READ | GENERIC_WRITE | DELETE | WRITE_DAC | SYNCHRONIZE,
                         &ObjectAttributes,
                         &IoStatusBlock,
                         0,
-                        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE);
-
+                        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, NtName.Buffer);
     if (!NT_SUCCESS(Status))
     {
-        Error = RtlNtStatusToDosError(Status);
-        goto Cleanup;
+        if (OldSd) RtlFreeHeap(RtlGetProcessHeap(), 0, OldSd);
+        BaseSetLastNTError(Status);
+        return FALSE;
     }
 
-    Buffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, 0x10000) ;
-    if (!Buffer)
+    /* The result keeps the attributes and the access control list of the replaced file; those of
+       the replacement are dropped. Failing to set them does not stop the replacement. */
     {
-        Error = ERROR_NOT_ENOUGH_MEMORY;
-        goto Cleanup ;
+        FILE_BASIC_INFORMATION NewBasic;
+
+        RtlZeroMemory(&NewBasic, sizeof(NewBasic));
+        /* Windows Server 2022: a file that was hidden or system stays so, and the result is archived
+           also when the replaced file was not */
+        NewBasic.FileAttributes = (OldBasic.FileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM |
+                                   FILE_ATTRIBUTE_NOT_CONTENT_INDEXED | FILE_ATTRIBUTE_TEMPORARY)) |
+                                  FILE_ATTRIBUTE_ARCHIVE;
+        NtSetInformationFile(hReplacement, &IoStatusBlock, &NewBasic, sizeof(NewBasic), FileBasicInformation);
     }
-    while (Status != STATUS_END_OF_FILE)
+    if (OldSd)
     {
-        Status = NtReadFile(hReplacement, NULL, NULL, NULL, &IoStatusBlock, Buffer, 0x10000, NULL, NULL) ;
-        if (NT_SUCCESS(Status))
+        SECURITY_INFORMATION Info = DACL_SECURITY_INFORMATION;
+        SECURITY_DESCRIPTOR_CONTROL Control;
+        ULONG Revision;
+
+        if (NT_SUCCESS(RtlGetControlSecurityDescriptor(OldSd, &Control, &Revision)))
+            Info |= (Control & SE_DACL_PROTECTED) ? PROTECTED_DACL_SECURITY_INFORMATION
+                                                  : UNPROTECTED_DACL_SECURITY_INFORMATION;
+        NtSetSecurityObject(hReplacement, Info, OldSd);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, OldSd);
+    }
+    NtClose(hReplacement);
+
+    /* Move the replaced file out of the way: to the backup name if there is one, else to a
+       temporary name next to it, which is deleted afterwards. */
+    TempFile[0] = UNICODE_NULL;
+    if (lpBackupFileName)
+    {
+        if (!MoveFileExW(lpReplacedFileName, lpBackupFileName, MOVEFILE_REPLACE_EXISTING))
+            return FALSE;
+    }
+    else
+    {
+        /* The name is the old one with "~RFxxxx.TMP" appended, as on Windows Server 2022, where a
+           running image (it cannot be deleted) stays under this name with its old content. */
+        ULONG Try, Seed = GetTickCount() ^ GetCurrentProcessId();
+        SIZE_T Length = wcslen(lpReplacedFileName);
+
+        if (Length + 12 >= MAX_PATH)
         {
-            Status = NtWriteFile(hReplaced, NULL, NULL, NULL, &IoStatusBlock, Buffer,
-                    IoStatusBlock.Information, NULL, NULL) ;
-            if (!NT_SUCCESS(Status))
+            SetLastError(ERROR_FILENAME_EXCED_RANGE);
+            return FALSE;
+        }
+        for (Try = 0; ; Try++)
+        {
+            static const WCHAR Hex[] = L"0123456789abcdef";
+            ULONG Value = (Seed + Try * 0x9e37) & 0xffff;
+
+            wcscpy(TempFile, lpReplacedFileName);
+            wcscpy(TempFile + Length, L"~RF0000.TMP");
+            TempFile[Length + 3] = Hex[(Value >> 12) & 15];
+            TempFile[Length + 4] = Hex[(Value >> 8) & 15];
+            TempFile[Length + 5] = Hex[(Value >> 4) & 15];
+            TempFile[Length + 6] = Hex[Value & 15];
+            if (MoveFileExW(lpReplacedFileName, TempFile, 0))
+                break;
+            if (Try >= 32 || (GetLastError() != ERROR_ALREADY_EXISTS && GetLastError() != ERROR_FILE_EXISTS))
             {
-                Error = RtlNtStatusToDosError(Status);
-                goto Cleanup;
+                TempFile[0] = UNICODE_NULL;
+                return FALSE;
             }
         }
-        else if (Status != STATUS_END_OF_FILE)
-        {
-            Error = RtlNtStatusToDosError(Status);
-            goto Cleanup;
-        }
     }
 
-    Ret = TRUE;
-
-    /* Perform resource cleanup */
-Cleanup:
-    if (hReplaced) NtClose(hReplaced);
-    if (hReplacement) NtClose(hReplacement);
-    if (Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
-
-    if (NtReplacementName.Buffer)
-        RtlFreeHeap(GetProcessHeap(), 0, NtReplacementName.Buffer);
-    if (NtReplacedName.Buffer)
-        RtlFreeHeap(GetProcessHeap(), 0, NtReplacedName.Buffer);
-
-    /* If there was an error, set the error code */
-    if(!Ret)
+    /* Put the replacement in the place of the replaced file */
+    if (!MoveFileExW(lpReplacementFileName, lpReplacedFileName, 0))
     {
-        TRACE("ReplaceFileW failed (error=%lu)\n", Error);
-        SetLastError(Error);
+        /* Without a backup the replaced file goes back, so that a failure leaves everything as it was */
+        if (!lpBackupFileName)
+        {
+            MoveFileExW(TempFile, lpReplacedFileName, 0);
+            SetLastError(ERROR_UNABLE_TO_MOVE_REPLACEMENT);
+        }
+        else
+            SetLastError(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2);
+        return FALSE;
     }
-    return Ret;
+
+    if (TempFile[0])
+        DeleteFileW(TempFile);
+    return TRUE;
 }
 
 

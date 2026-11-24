@@ -289,6 +289,7 @@ extern void func_Wow64ProgramFiles(void);
 extern void func_Wow64EnvironmentBlock(void);
 extern void func_Wow64ChildEnvironment(void);
 extern void func_ReadFile(void);
+extern void func_ReplaceFile(void);
 extern void func_SetSearchPathMode(void);
 extern void func_WriteFile(void);
 
@@ -579,6 +580,7 @@ const struct test winetest_testlist[] =
     { "SetFileInformationByHandle",  func_SetFileInformationByHandle },
     { "ReOpenFile",                  func_ReOpenFile },
     { "ReadFile",                    func_ReadFile },
+    { "ReplaceFile",                 func_ReplaceFile },
     { "SetSearchPathMode",           func_SetSearchPathMode },
     { "WriteFile",                   func_WriteFile },
     { 0, 0 }

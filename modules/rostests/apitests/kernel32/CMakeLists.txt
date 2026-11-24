@@ -232,6 +232,7 @@ list(APPEND SOURCE
     ReadDirectoryChangesMatrix.c
     ReadDirectoryChangesRename.c
     ReadFile.c
+    ReplaceFile.c
     RegisterWait.c
     ResolveDelayLoadedAPI.c
     ResolveLocaleName.c
