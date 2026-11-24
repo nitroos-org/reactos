@@ -224,7 +224,7 @@ RtlSetThreadIsCritical(IN BOOLEAN NewValue,
                                   sizeof(ULONG));
 }
 
-#ifdef _M_AMD64
+#if defined(_M_AMD64) || defined(_M_IX86)
 /* ntdll's RtlUserThreadStart (a kernel mode user of this library has none: NULL) */
 PVOID NTAPI RtlpGetUserThreadStart(VOID);
 #endif
@@ -267,15 +267,22 @@ RtlCreateUserThread(IN HANDLE ProcessHandle,
                          StartAddress,
                          InitialTeb.StackBase);
 
-#ifdef _M_AMD64
+#if defined(_M_AMD64) || defined(_M_IX86)
     /* The routine has no return address on its stack: start the thread in ntdll!RtlUserThreadStart (the
-     * routine in RCX, its parameter in RDX), which ends the thread with the routine's return value */
+     * routine in RCX, its parameter in RDX; on x86 in EAX and EBX, as kernel32 starts its threads), which
+     * ends the thread with the routine's return value */
     PVOID ThreadStart = RtlpGetUserThreadStart();
     if (ThreadStart)
     {
+#ifdef _M_AMD64
         Context.Rcx = (ULONG64)StartAddress;
         Context.Rdx = (ULONG64)Parameter;
         Context.Rip = (ULONG64)ThreadStart;
+#else
+        Context.Eax = (ULONG)StartAddress;
+        Context.Ebx = (ULONG)Parameter;
+        Context.Eip = (ULONG)ThreadStart;
+#endif
     }
 #endif
 

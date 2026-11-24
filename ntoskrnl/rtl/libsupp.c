@@ -79,7 +79,7 @@ RtlpCheckForActiveDebugger(VOID)
     return FALSE;
 }
 
-#ifdef _M_AMD64
+#if defined(_M_AMD64) || defined(_M_IX86)
 PVOID
 NTAPI
 RtlpGetUserThreadStart(VOID)

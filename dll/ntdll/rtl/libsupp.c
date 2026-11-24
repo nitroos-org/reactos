@@ -29,7 +29,7 @@ RtlpCheckForActiveDebugger(VOID)
     return NtCurrentPeb()->BeingDebugged;
 }
 
-#ifdef _M_AMD64
+#if defined(_M_AMD64) || defined(_M_IX86)
 VOID NTAPI RtlUserThreadStart(VOID);
 
 PVOID
