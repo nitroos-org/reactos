@@ -9,6 +9,12 @@
 
 #define TESTING_SERVICE     L"Spooler"
 
+/* UnlockServiceDatabase and StartService leave the last error as it was on success (measured on Windows Server 2022
+ * with a probe: 0xdeadbeef stays), LockServiceDatabase clears it */
+#define ok_err_kept() \
+    ok(GetLastError() == ERROR_SUCCESS || GetLastError() == 0xdeadbeef, \
+       "GetLastError() = %lu, expected the last error to be kept or cleared\n", GetLastError())
+
 static void Test_LockUnlockServiceDatabase(void)
 {
     BOOL bError = FALSE;
@@ -86,7 +92,7 @@ static void Test_LockUnlockServiceDatabase(void)
         SetLastError(0xdeadbeef);
         bError = UnlockServiceDatabase(hLock);
         ok(bError == TRUE, "bError = %u, expected TRUE\n", bError);
-        ok_err(ERROR_SUCCESS);
+        ok_err_kept();
     }
 
 
@@ -187,13 +193,13 @@ static void Test_LockUnlockServiceDatabaseWithServiceStart(void)
     SetLastError(0xdeadbeef);
     bError = UnlockServiceDatabase(hLock);
     ok(bError == TRUE, "bError = %u, expected TRUE\n", bError);
-    ok_err(ERROR_SUCCESS);
+    ok_err_kept();
 
     /* Try to start again the service, this time the database unlocked */
     SetLastError(0xdeadbeef);
     bError = StartServiceW(hSvc, 0, NULL);
     ok(bError == TRUE, "bError = %u, expected TRUE\n", bError);
-    ok_err(ERROR_SUCCESS);
+    ok_err_kept();
     Sleep(1000); /* Wait 1 second for the service to start */
 
     /* Stop the testing service */
@@ -438,7 +444,7 @@ static void Test_QueryLockStatusW(void)
     SetLastError(0xdeadbeef);
     bError = UnlockServiceDatabase(hLock);
     ok(bError == TRUE, "bError = %u, expected TRUE\n", bError);
-    ok_err(ERROR_SUCCESS);
+    ok_err_kept();
     hLock = NULL;
 
     /* Get the needed size */
@@ -696,7 +702,7 @@ static void Test_QueryLockStatusA(void)
     SetLastError(0xdeadbeef);
     bError = UnlockServiceDatabase(hLock);
     ok(bError == TRUE, "bError = %u, expected TRUE\n", bError);
-    ok_err(ERROR_SUCCESS);
+    ok_err_kept();
     hLock = NULL;
 
     /* Get the needed size */
