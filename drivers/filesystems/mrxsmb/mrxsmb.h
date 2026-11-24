@@ -66,6 +66,11 @@ typedef enum _SMB_REQUEST_STATE
     SmbRequestCompleted
 } SMB_REQUEST_STATE;
 
+struct _SMB_REQUEST;
+/* Called once, at PASSIVE_LEVEL, when an asynchronous request ends (answered, cancelled or the engine
+ * detached); it owns the request's reference and releases it */
+typedef VOID (*PSMB_REQUEST_COMPLETION)(struct _SMB_REQUEST *Request);
+
 typedef struct _SMB_REQUEST
 {
     LIST_ENTRY Link;
@@ -85,6 +90,8 @@ typedef struct _SMB_REQUEST
     ULONG ReplySize;
     ULONG ReservedBytes;            /* counted in SmbEngine.OutstandingBytes */
     PIRP Irp;                       /* the caller's IRP, if the wait may end when it is cancelled */
+    PSMB_REQUEST_COMPLETION Completion; /* asynchronous request (SmbSendRequestAsync), NULL otherwise */
+    PVOID CompletionContext;
 } SMB_REQUEST, *PSMB_REQUEST;
 
 /* Extensions of the rdbss structures */
@@ -138,6 +145,10 @@ NTSTATUS SmbReserveReplyBytes(PSMB_REQUEST Request, ULONG Bytes);
 PVOID SmbRequestFixed(PSMB_REQUEST Request);
 NTSTATUS SmbRequestPutBytes(PSMB_REQUEST Request, ULONG *Cursor, const VOID *Data, ULONG Length, PSMBUP_STRING String);
 NTSTATUS SmbSendRequest(PSMB_REQUEST Request, ULONG TimeoutSeconds);
+ULONGLONG SmbAssignRequestId(PSMB_REQUEST Request);
+NTSTATUS SmbSendRequestAsync(PSMB_REQUEST Request, PSMB_REQUEST_COMPLETION Completion, PVOID Context);
+BOOLEAN SmbCancelRequestById(ULONGLONG RequestId);
+VOID SmbCancelRequestGracefully(ULONGLONG RequestId, ULONG GraceSeconds);
 BOOLEAN SmbIrpCancelled(PIRP Irp);
 VOID SmbSendNotification(PSMB_REQUEST Request);
 VOID SmbReleaseRequest(PSMB_REQUEST Request);

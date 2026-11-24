@@ -3377,6 +3377,20 @@ RxCommonLockControl(
         return RxFsdPostRequest(Context);
     }
 
+    /* A lock that may wait (no fail-immediately) of a synchronous request goes the same way: the
+     * caller then waits for its IRP in the I/O manager, outside this file system's critical region,
+     * where the normal kernel APC of CancelSynchronousIo can run and cancel the IRP (Windows Server
+     * 2022: CancelSynchronousIo ends a waiting LockFileEx at once with 995). Waiting here, in the
+     * caller's thread, nothing but the lock's grant could end the wait */
+    if (Stack->MinorFunction == IRP_MN_LOCK && !BooleanFlagOn(Stack->Flags, SL_FAIL_IMMEDIATELY) &&
+        !BooleanFlagOn(Context->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION) &&
+        !BooleanFlagOn(Context->Flags, RX_CONTEXT_FLAG_IN_FSP))
+    {
+        SetFlag(Context->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+        ClearFlag(Context->Flags, RX_CONTEXT_FLAG_WAIT);
+        return RxFsdPostRequest(Context);
+    }
+
     Exclusive = (Stack->MinorFunction == IRP_MN_UNLOCK_ALL || Stack->MinorFunction == IRP_MN_UNLOCK_ALL_BY_KEY);
     Status = (Exclusive ? RxAcquireExclusiveFcb(Context, Fcb) : RxAcquireSharedFcb(Context, Fcb));
     if (Status == STATUS_LOCK_NOT_GRANTED)

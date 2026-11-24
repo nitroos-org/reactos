@@ -34,7 +34,8 @@
  * closed (it exits or crashes), every queued and pending request completes with
  * STATUS_CONNECTION_DISCONNECTED; new requests fail with
  * STATUS_REDIRECTOR_NOT_STARTED until an engine attaches again. Each request has
- * a time limit (NITRO_SMBRDR_REQUEST_TIMEOUT_SECONDS): nothing waits forever. A
+ * a time limit (NITRO_SMBRDR_REQUEST_TIMEOUT_SECONDS), but for a LOCK that waits at the server
+ * for a range another open holds, which lasts at most as long as its handle (see LOCK). A
  * request sent for a caller's IRP also ends (STATUS_CANCELLED, with a CANCEL
  * notification) when that IRP is cancelled or its thread is terminating.
  * The engine likewise checks every request (it must not trust the sizes either:
@@ -65,7 +66,7 @@
 #define NITRO_SMBRDR_PROVIDER_NAME      L"\\Device\\LanmanRedirector"
 
 #define SMBUP_MAGIC                     0x50554253UL    /* "SBUP" */
-#define SMBUP_VERSION                   2       /* 2: explicit credentials, CONNECT reply flags */
+#define SMBUP_VERSION                   3       /* 2: explicit credentials, CONNECT reply flags; 3: LOCK */
 
 /* Size limits, both sides */
 #define SMBUP_MAX_IO                    (1024 * 1024)   /* READ/WRITE data per request */
@@ -99,7 +100,7 @@ typedef enum _SMBUP_OPCODE
     SmbUpQueryVolume = 10,      /* fs information class */
     SmbUpFlush = 11,
     SmbUpRename = 12,
-    SmbUpLock = 13,             /* M1: not sent; the engine answers STATUS_NOT_SUPPORTED */
+    SmbUpLock = 13,             /* byte-range lock or unlock of one range (SMBUP_LOCK_REQUEST) */
     SmbUpLogoff = 14,           /* notification: the logon session ended, drop its connections */
     SmbUpCancel = 15,           /* notification: give up on RequestId (no reply) */
     SmbUpMaximumOpcode
@@ -305,6 +306,33 @@ typedef struct _SMBUP_RENAME_REQUEST
     SMBUP_STRING NewName;
 } SMBUP_RENAME_REQUEST, *PSMBUP_RENAME_REQUEST;
 
+/*
+ * LOCK: one byte range of an open file ([MS-SMB2] 2.2.26, one SMB2_LOCK_ELEMENT). Flags: exactly one
+ * of SHARED, EXCLUSIVE and UNLOCK; FAIL_IMMEDIATELY only with SHARED or EXCLUSIVE. Any 64-bit
+ * offset and length (zero-length ranges and ranges beyond the end of the file are valid; the server
+ * checks them). The reply is the header only: STATUS_SUCCESS, or why not (STATUS_LOCK_NOT_GRANTED,
+ * STATUS_FILE_LOCK_CONFLICT, STATUS_RANGE_NOT_LOCKED, ...).
+ * A lock without FAIL_IMMEDIATELY waits at the server for as long as the range is held by another
+ * open: the request has no time limit then (neither in the driver nor in the engine). It ends when
+ * the server grants or refuses it, when the driver sends CANCEL for it (the caller gave up: its IRP
+ * was cancelled or its handle closed), or when the connection or the engine goes. A lock the server
+ * grants after the driver gave up on it is released again by the engine (it unlocks the range on
+ * the same open), so that no lock outlives the request that asked for it.
+ */
+#define SMBUP_LOCK_SHARED               0x00000001
+#define SMBUP_LOCK_EXCLUSIVE            0x00000002
+#define SMBUP_LOCK_UNLOCK               0x00000004
+#define SMBUP_LOCK_FAIL_IMMEDIATELY     0x00000010
+typedef struct _SMBUP_LOCK_REQUEST
+{
+    ULONGLONG ConnectionId;
+    ULONGLONG FileId;
+    ULONGLONG Offset;
+    ULONGLONG Length;
+    ULONG Flags;                /* SMBUP_LOCK_* */
+    ULONG Reserved;
+} SMBUP_LOCK_REQUEST, *PSMBUP_LOCK_REQUEST;
+
 /* LOGOFF notification */
 typedef struct _SMBUP_LOGOFF_REQUEST
 {
@@ -353,6 +381,7 @@ SMBUP_STATIC_ASSERT(sizeof(SMBUP_CREATE_REPLY) == 72, create_reply_size);
 SMBUP_STATIC_ASSERT(sizeof(SMBUP_IO_REQUEST) == 32, io_size);
 SMBUP_STATIC_ASSERT(sizeof(SMBUP_DIRECTORY_REQUEST) == 40, dir_size);
 SMBUP_STATIC_ASSERT(sizeof(SMBUP_RENAME_REQUEST) == 32, rename_size);
+SMBUP_STATIC_ASSERT(sizeof(SMBUP_LOCK_REQUEST) == 40, lock_size);
 
 /* Fixed-part sizes, both directions; the driver and the engine use these to check messages */
 #define SMBUP_REQUEST_FIXED_SIZE(op) \
@@ -360,7 +389,8 @@ SMBUP_STATIC_ASSERT(sizeof(SMBUP_RENAME_REQUEST) == 32, rename_size);
      (op) == SmbUpDisconnect ? sizeof(SMBUP_DISCONNECT_REQUEST) : \
      (op) == SmbUpCreate ? sizeof(SMBUP_CREATE_REQUEST) : \
      (op) == SmbUpClose || (op) == SmbUpFlush ? sizeof(SMBUP_HANDLE_REQUEST) : \
-     (op) == SmbUpRead || (op) == SmbUpWrite || (op) == SmbUpLock ? sizeof(SMBUP_IO_REQUEST) : \
+     (op) == SmbUpRead || (op) == SmbUpWrite ? sizeof(SMBUP_IO_REQUEST) : \
+     (op) == SmbUpLock ? sizeof(SMBUP_LOCK_REQUEST) : \
      (op) == SmbUpQueryInfo || (op) == SmbUpQueryVolume ? sizeof(SMBUP_QUERY_REQUEST) : \
      (op) == SmbUpSetInfo ? sizeof(SMBUP_SET_REQUEST) : \
      (op) == SmbUpQueryDirectory ? sizeof(SMBUP_DIRECTORY_REQUEST) : \
