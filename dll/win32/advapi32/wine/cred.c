@@ -274,6 +274,14 @@ static DWORD registry_read_credential(HKEY hkey, PCREDENTIALW credential,
     else if (type != REG_DWORD)
         return ERROR_REGISTRY_CORRUPT;
 
+    /* A domain password is never handed back (measured on Windows Server 2022: advapi32_winetest cred, domain
+     * password: no blob, size 0) */
+    if (credential->Type == CRED_TYPE_DOMAIN_PASSWORD)
+    {
+        credential->CredentialBlob = NULL;
+        credential->CredentialBlobSize = 0;
+    }
+
     count = sizeof(credential->LastWritten);
     ret = RegQueryValueExW(hkey, wszLastWrittenValue, NULL, &type, (LPVOID)&credential->LastWritten,
                            &count);
