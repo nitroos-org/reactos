@@ -68,6 +68,8 @@ UserDerefObjectCo(PVOID obj)
  * window is sent a message): when the thread ends inside one of the callbacks, the frame never runs again
  * and would never free it. Held blocks are listed in the thread (the entry lives in the frame, as for
  * UserRefObjectCo) and freed by the thread's exit cleanup. UserFreePoolCo frees the block and unlists it.
+ * A block of the global USER heap (UserHeapAlloc) is held with the tag USER_HELD_USER_HEAP: the heap is shared
+ * by every process and has a fixed size, so a block lost there is lost for everyone.
  */
 typedef struct _USER_HELD_POOL_ENTRY
 {
@@ -75,6 +77,17 @@ typedef struct _USER_HELD_POOL_ENTRY
    PVOID pv;
    ULONG Tag;
 } USER_HELD_POOL_ENTRY, *PUSER_HELD_POOL_ENTRY;
+
+#define USER_HELD_USER_HEAP 0
+
+static __inline VOID
+UserFreeHeldBlock(_In_ PVOID pv, _In_ ULONG Tag)
+{
+    if (Tag == USER_HELD_USER_HEAP)
+        UserHeapFree(pv);
+    else
+        ExFreePoolWithTag(pv, Tag);
+}
 
 static __inline VOID
 UserHoldPoolCo(_In_ PVOID pv, _In_ ULONG Tag, _Out_ PUSER_HELD_POOL_ENTRY HeldEntry)
@@ -103,7 +116,7 @@ UserFreePoolCo(_Inout_ PUSER_HELD_POOL_ENTRY HeldEntry)
             break;
         }
     }
-    ExFreePoolWithTag(HeldEntry->pv, HeldEntry->Tag);
+    UserFreeHeldBlock(HeldEntry->pv, HeldEntry->Tag);
 }
 
 void FreeProcMarkObject(_In_ PVOID Object);

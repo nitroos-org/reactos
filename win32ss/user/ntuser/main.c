@@ -948,7 +948,7 @@ ExitThreadCallback(PETHREAD Thread)
         {
             PUSER_HELD_POOL_ENTRY Held = CONTAINING_RECORD(psle, USER_HELD_POOL_ENTRY, Entry);
             TRACE_CH(UserThread, "thread clean: free held pool block 0x%p\n", Held->pv);
-            ExFreePoolWithTag(Held->pv, Held->Tag);
+            UserFreeHeldBlock(Held->pv, Held->Tag);
             psle = PopEntryList(&ptiCurrent->HeldPoolList);
         }
     }

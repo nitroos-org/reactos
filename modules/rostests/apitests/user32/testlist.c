@@ -16,12 +16,18 @@ extern void func_LifetimeCaptureWinEvent(void);
 extern void func_LifetimeCbtActivateRecursion(void);
 extern void func_LifetimeEventProcExitThread(void);
 extern void func_LifetimeForegroundWinEvent(void);
+extern void func_LifetimeCreateNameExitLeak(void);
+extern void func_LifetimeDesktopHeldDelete(void);
 extern void func_LifetimeFreeExitClass(void);
 extern void func_LifetimeHookExitLeak(void);
+extern void func_LifetimeHookNamesExitLeak(void);
 extern void func_LifetimeInfoCallbacks(void);
 extern void func_LifetimeKeyboardLayoutWalk(void);
+extern void func_LifetimeLayoutSenderEnds(void);
+extern void func_LifetimeOtherDesktopOwner(void);
 extern void func_LifetimeOwnerDestroyRace(void);
 extern void func_LifetimeSendSenderEnds(void);
+extern void func_LifetimeSentCopyExitLeak(void);
 extern void func_LifetimeSetActiveHookAttach(void);
 extern void func_LifetimeSetFocusTopDestroy(void);
 extern void func_LifetimeWinEventUnhook(void);
@@ -221,12 +227,18 @@ const struct test winetest_testlist[] =
     { "LifetimeCbtActivateRecursion", func_LifetimeCbtActivateRecursion },
     { "LifetimeEventProcExitThread", func_LifetimeEventProcExitThread },
     { "LifetimeForegroundWinEvent", func_LifetimeForegroundWinEvent },
+    { "LifetimeCreateNameExitLeak", func_LifetimeCreateNameExitLeak },
+    { "LifetimeDesktopHeldDelete", func_LifetimeDesktopHeldDelete },
     { "LifetimeFreeExitClass", func_LifetimeFreeExitClass },
     { "LifetimeHookExitLeak", func_LifetimeHookExitLeak },
+    { "LifetimeHookNamesExitLeak", func_LifetimeHookNamesExitLeak },
     { "LifetimeInfoCallbacks", func_LifetimeInfoCallbacks },
     { "LifetimeKeyboardLayoutWalk", func_LifetimeKeyboardLayoutWalk },
+    { "LifetimeLayoutSenderEnds", func_LifetimeLayoutSenderEnds },
+    { "LifetimeOtherDesktopOwner", func_LifetimeOtherDesktopOwner },
     { "LifetimeOwnerDestroyRace", func_LifetimeOwnerDestroyRace },
     { "LifetimeSendSenderEnds", func_LifetimeSendSenderEnds },
+    { "LifetimeSentCopyExitLeak", func_LifetimeSentCopyExitLeak },
     { "LifetimeSetActiveHookAttach", func_LifetimeSetActiveHookAttach },
     { "LifetimeSetFocusTopDestroy", func_LifetimeSetFocusTopDestroy },
     { "LifetimeWinEventUnhook", func_LifetimeWinEventUnhook },

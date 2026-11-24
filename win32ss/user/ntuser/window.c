@@ -1276,6 +1276,16 @@ IntSetOwner(HWND hWnd, HWND hWndNewOwner)
       goto Error;
    }
 
+   /* An owner on another desktop would be referenced from a window of this one: its desktop's heap is freed
+      when that desktop goes, with the owner still referenced (as for a parent, see co_IntSetParent) */
+   if (WndNewOwner && WndNewOwner->head.rpdesk != Wnd->head.rpdesk)
+   {
+      ERR("IntSetOwner: owner %p is on another desktop than %p\n", hWndNewOwner, hWnd);
+      EngSetLastError(ERROR_INVALID_PARAMETER);
+      ret = NULL;
+      goto Error;
+   }
+
    /* if parent belongs to a different thread and the window isn't */
    /* top-level, attach the two threads */
    IntProcessOwnerSwap(Wnd, WndNewOwner, WndOldOwner);
@@ -2485,7 +2495,7 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
    PTHREADINFO pti;
    DWORD dwShowMode = SW_SHOW;
    CREATESTRUCTW *pCsw = NULL;
-   USER_HELD_POOL_ENTRY HeldCsw, HeldCbtCreate;
+   USER_HELD_POOL_ENTRY HeldCsw, HeldCbtCreate, HeldClass, HeldName;
    BOOL bGuiConsoleClass = FALSE;
    PVOID pszClass = NULL, pszName = NULL;
    PWND ret = NULL;
@@ -2568,6 +2578,20 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
     else if (hWndOwner && !OwnerWindow)
     {
         ERR("Got invalid owner window handle for %wZ\n", ClassName);
+        ParentWindow = NULL;
+        goto cleanup;
+    }
+
+    /* The window is made in the heap of this thread's desktop. A parent or an owner on another desktop
+       would reference it from there, and be referenced by it (spwndParent, spwndOwner): the heap of either
+       desktop is freed when that desktop goes, while the other window still references a window in it (the
+       last dereference, or a walk of its owner chain, then reads unmapped memory). As SetParent does for a
+       parent on another desktop: ERROR_INVALID_PARAMETER */
+    if ((ParentWindow && ParentWindow->head.rpdesk != pti->rpdesk) ||
+        (OwnerWindow && OwnerWindow->head.rpdesk != pti->rpdesk))
+    {
+        ERR("The parent or the owner of %wZ is on another desktop\n", ClassName);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
         ParentWindow = NULL;
         goto cleanup;
     }
@@ -2659,6 +2683,12 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
          thread ended inside one of the creation messages */
       UserHoldPoolCo(pCsw, TAG_HOOK, &HeldCsw);
       UserHoldPoolCo(pCbtCreate, TAG_HOOK, &HeldCbtCreate);
+      /* So are the class and window names of the structure, in the global USER heap (a name can be 64 KB:
+         a few threads ending in the hook used to fill the heap, for every process) */
+      if (pszClass)
+         UserHoldPoolCo(pszClass, USER_HELD_USER_HEAP, &HeldClass);
+      if (pszName)
+         UserHoldPoolCo(pszName, USER_HELD_USER_HEAP, &HeldName);
       Result = co_HOOK_CallHooks(WH_CBT, HCBT_CREATEWND, (WPARAM) hWnd, (LPARAM) pCbtCreate);
       if (Result == 0)
       {
@@ -2669,8 +2699,14 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
          Cs->y = pCsw->y;
          hwndInsertAfter = pCbtCreate->hwndInsertAfter;
       }
+      if (pszName)
+         UserFreePoolCo(&HeldName);
+      if (pszClass)
+         UserFreePoolCo(&HeldClass);
       UserFreePoolCo(&HeldCbtCreate);
       UserFreePoolCo(&HeldCsw);
+      pszName = NULL;
+      pszClass = NULL;
       pCbtCreate = NULL;
       pCsw = NULL;
       if (Result != 0)
@@ -3095,6 +3131,8 @@ NtUserCreateWindowEx(
     CREATESTRUCTW Cs;
     HWND hwnd = NULL;
     PWND pwnd;
+    USER_HELD_POOL_ENTRY HeldWindowName, HeldClassName, HeldClsVersion;
+    BOOL bHeld;
 
     lstrWindowName.Buffer = NULL;
     lstrClassName.Buffer = NULL;
@@ -3191,6 +3229,20 @@ NtUserCreateWindowEx(
 
     UserEnterExclusive();
 
+    /* The captured names are held across the creation, which calls the hooks and the window procedure: a thread
+       that ends inside one of them gives them back in its cleanup (a 64 KB title stayed in paged pool for each
+       such thread) */
+    bHeld = (PsGetCurrentThreadWin32Thread() != NULL);
+    if (bHeld)
+    {
+        if (lstrWindowName.Buffer)
+            UserHoldPoolCo(lstrWindowName.Buffer, TAG_STRING, &HeldWindowName);
+        if (lstrClassName.Buffer)
+            UserHoldPoolCo(lstrClassName.Buffer, TAG_STRING, &HeldClassName);
+        if (lstrClsVersion.Buffer)
+            UserHoldPoolCo(lstrClsVersion.Buffer, TAG_STRING, &HeldClsVersion);
+    }
+
     /* Call the internal function */
     pwnd = co_UserCreateWindowEx(&Cs, &ustrClsVersion, plstrWindowName, acbiBuffer, dwFlags);
 
@@ -3199,6 +3251,17 @@ NtUserCreateWindowEx(
         ERR("co_UserCreateWindowEx failed!\n");
     }
     hwnd = pwnd ? UserHMGetHandle(pwnd) : NULL;
+
+    if (bHeld)
+    {
+        if (lstrClsVersion.Buffer)
+            UserFreePoolCo(&HeldClsVersion);
+        if (lstrClassName.Buffer)
+            UserFreePoolCo(&HeldClassName);
+        if (lstrWindowName.Buffer)
+            UserFreePoolCo(&HeldWindowName);
+        lstrWindowName.Buffer = lstrClassName.Buffer = lstrClsVersion.Buffer = NULL;
+    }
 
     UserLeave();
 

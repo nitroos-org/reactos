@@ -1164,6 +1164,7 @@ co_MsqDispatchOneSentMessage(
    else
    {  /* Call the window procedure. */
       LPARAM lParamCopy = 0;
+      USER_HELD_POOL_ENTRY HeldCopy;
 
       /* The sender can be gone when the procedure returns (it ended, or its timeout expired): the window
          procedure writes to a copy, which goes back only to a sender that still waits */
@@ -1172,6 +1173,11 @@ co_MsqDispatchOneSentMessage(
       {
          lParamCopy = IntCopySentMessageLParam(Message->Msg.message, Message->Msg.wParam, Message->Msg.lParam);
       }
+
+      /* The copy is as large as the sender asked for (WM_GETTEXT): held across the window procedure, so that
+         the cleanup of this thread frees it when the thread ends inside the procedure */
+      if (lParamCopy)
+         UserHoldPoolCo((PVOID)lParamCopy, TAG_MSG, &HeldCopy);
 
       Result = co_IntSendMessage( Message->Msg.hwnd,
                                   Message->Msg.message,
@@ -1182,6 +1188,7 @@ co_MsqDispatchOneSentMessage(
       {
          IntReturnSentMessageLParam(Message->Msg.message, Message->Msg.wParam, Message->Msg.lParam, lParamCopy,
                                     !(Message->flags & (SMF_SENDERDIED | SMF_RECEIVERFREE)));
+         UserFreePoolCo(&HeldCopy);
       }
    }
 
