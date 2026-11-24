@@ -20,7 +20,7 @@
  * small block of a notification that is never delivered is lost with the thread.
  *
  * Limits: Windows alternates when one registration is repeated again and again in an unchanged state (measured:
- * queued, not queued, queued, ...); here it is queued once and then waits for a change; the state is polled (100 ms), so a state that lasts less than that
+ * queued, not queued, queued, ...); here it is queued once and then waits for a change; the state is polled (25 ms), so a state that lasts less than that
  * can be missed; the notifications of the service control manager handle
  * (SERVICE_NOTIFY_CREATED, SERVICE_NOTIFY_DELETED) and SERVICE_NOTIFY_DELETE_PENDING
  * report ERROR_CALL_NOT_IMPLEMENTED; a service marked for deletion is not
@@ -34,7 +34,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(advapi);
 #define NOTIFY_STATE_MASK       0x7f    /* SERVICE_NOTIFY_STOPPED .. SERVICE_NOTIFY_PAUSED */
 #define NOTIFY_SCM_MASK         (SERVICE_NOTIFY_CREATED | SERVICE_NOTIFY_DELETED)
 #define NOTIFY_ALL_MASK         0x3ff
-#define NOTIFY_POLL_MS          100
+#define NOTIFY_POLL_MS          25
 
 typedef struct _SVC_NOTIFY_REG
 {
