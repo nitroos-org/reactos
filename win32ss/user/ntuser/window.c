@@ -3131,6 +3131,8 @@ NtUserCreateWindowEx(
     CREATESTRUCTW Cs;
     HWND hwnd = NULL;
     PWND pwnd;
+    USER_HELD_POOL_ENTRY HeldWindowName, HeldClassName, HeldClsVersion;
+    BOOL bHeld;
 
     lstrWindowName.Buffer = NULL;
     lstrClassName.Buffer = NULL;
@@ -3227,6 +3229,20 @@ NtUserCreateWindowEx(
 
     UserEnterExclusive();
 
+    /* The captured names are held across the creation, which calls the hooks and the window procedure: a thread
+       that ends inside one of them gives them back in its cleanup (a 64 KB title stayed in paged pool for each
+       such thread) */
+    bHeld = (PsGetCurrentThreadWin32Thread() != NULL);
+    if (bHeld)
+    {
+        if (lstrWindowName.Buffer)
+            UserHoldPoolCo(lstrWindowName.Buffer, TAG_STRING, &HeldWindowName);
+        if (lstrClassName.Buffer)
+            UserHoldPoolCo(lstrClassName.Buffer, TAG_STRING, &HeldClassName);
+        if (lstrClsVersion.Buffer)
+            UserHoldPoolCo(lstrClsVersion.Buffer, TAG_STRING, &HeldClsVersion);
+    }
+
     /* Call the internal function */
     pwnd = co_UserCreateWindowEx(&Cs, &ustrClsVersion, plstrWindowName, acbiBuffer, dwFlags);
 
@@ -3235,6 +3251,17 @@ NtUserCreateWindowEx(
         ERR("co_UserCreateWindowEx failed!\n");
     }
     hwnd = pwnd ? UserHMGetHandle(pwnd) : NULL;
+
+    if (bHeld)
+    {
+        if (lstrClsVersion.Buffer)
+            UserFreePoolCo(&HeldClsVersion);
+        if (lstrClassName.Buffer)
+            UserFreePoolCo(&HeldClassName);
+        if (lstrWindowName.Buffer)
+            UserFreePoolCo(&HeldWindowName);
+        lstrWindowName.Buffer = lstrClassName.Buffer = lstrClsVersion.Buffer = NULL;
+    }
 
     UserLeave();
 
