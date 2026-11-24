@@ -606,6 +606,187 @@ PartMgrUpdateDiskData(
 
 /**
  * @brief
+ * Two disks that carry the same identity (a copy of an installed disk, a clone: the same MBR disk signature, or
+ * the same GPT disk or partition GUIDs) have the same volume unique IDs, so the mount manager cannot tell their
+ * volumes apart: both want the letter of the one in its database, and the later volume takes it from the disk
+ * the system is running from. The disks are never changed for that: the disk that was started first (the lower
+ * disk number) keeps its identity, a later one that collides with an earlier one reports another identity in its
+ * layout (MBR signature, GPT disk GUID, partition GUIDs: derived from the disk number, so the same slot gets the
+ * same identity at every start and its volumes keep their letters), and its volumes get a letter of their own.
+ * A tool that writes this disk's layout back (diskpart, an extend) writes that identity to the disk: the disk is
+ * a different disk from then on. The disk's own bytes are unchanged until something is written.
+ **/
+static LIST_ENTRY PartMgrDiskList;       // started disk FDOs (FDO_EXTENSION::DiskListEntry)
+static KEVENT PartMgrDiskListLock;       // an event, not a mutex: the I/O below must not run with APCs blocked
+
+static
+CODE_SEG("PAGE")
+NTSTATUS
+PartMgrGetDriveLayout(
+    _In_ PFDO_EXTENSION FdoExtension,
+    _Out_ PDRIVE_LAYOUT_INFORMATION_EX *DriveLayout);
+
+static
+BOOLEAN
+PartMgrGuidIsSet(
+    _In_ const GUID *Guid)
+{
+    static const GUID nullGuid = {0};
+
+    return RtlCompareMemory(Guid, &nullGuid, sizeof(GUID)) != sizeof(GUID);
+}
+
+static
+BOOLEAN
+PartMgrGuidEqual(
+    _In_ const GUID *A,
+    _In_ const GUID *B)
+{
+    return RtlCompareMemory(A, B, sizeof(GUID)) == sizeof(GUID);
+}
+
+/* TRUE when the two layouts name the same disk or the same volume */
+static
+CODE_SEG("PAGE")
+BOOLEAN
+PartMgrIdentitiesCollide(
+    _In_ PDRIVE_LAYOUT_INFORMATION_EX Mine,
+    _In_ PDRIVE_LAYOUT_INFORMATION_EX Other)
+{
+    UINT32 i, j;
+
+    PAGED_CODE();
+
+    if (Mine->PartitionStyle != Other->PartitionStyle)
+        return FALSE;
+
+    if (Mine->PartitionStyle == PARTITION_STYLE_MBR)
+        return Mine->Mbr.Signature != 0 && Mine->Mbr.Signature == Other->Mbr.Signature;
+
+    if (Mine->PartitionStyle != PARTITION_STYLE_GPT)
+        return FALSE;
+
+    if (PartMgrGuidIsSet(&Mine->Gpt.DiskId) && PartMgrGuidEqual(&Mine->Gpt.DiskId, &Other->Gpt.DiskId))
+        return TRUE;
+
+    for (i = 0; i < Mine->PartitionCount; i++)
+    {
+        if (PartMgrIsUnusedLayoutEntry(Mine, &Mine->PartitionEntry[i]) ||
+            !PartMgrGuidIsSet(&Mine->PartitionEntry[i].Gpt.PartitionId))
+            continue;
+        for (j = 0; j < Other->PartitionCount; j++)
+        {
+            if (PartMgrGuidEqual(&Mine->PartitionEntry[i].Gpt.PartitionId, &Other->PartitionEntry[j].Gpt.PartitionId))
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* XOR the identity of the layout with Delta (applied twice it is undone) */
+static
+CODE_SEG("PAGE")
+VOID
+PartMgrXorIdentity(
+    _In_ PDRIVE_LAYOUT_INFORMATION_EX Layout,
+    _In_ UINT32 Delta)
+{
+    UINT32 i;
+
+    PAGED_CODE();
+
+    if (Layout->PartitionStyle == PARTITION_STYLE_MBR)
+    {
+        Layout->Mbr.Signature ^= Delta;
+        return;
+    }
+
+    Layout->Gpt.DiskId.Data1 ^= Delta;
+    Layout->Gpt.DiskId.Data2 ^= (UINT16)(Delta >> 16);
+    for (i = 0; i < Layout->PartitionCount; i++)
+    {
+        if (PartMgrIsUnusedLayoutEntry(Layout, &Layout->PartitionEntry[i]))
+            continue;
+        Layout->PartitionEntry[i].Gpt.PartitionId.Data1 ^= Delta;
+        Layout->PartitionEntry[i].Gpt.PartitionId.Data2 ^= (UINT16)(Delta >> 16);
+    }
+}
+
+/**
+ * @brief
+ * Gives the layout just read from this disk another identity when a disk with a lower number reports the same one.
+ *
+ * @note    Requires the partitioning lock of FdoExtension held. Locks are taken in the order of the disk numbers
+ *          (a disk waits for the lock of a lower one only), so two disks cannot wait for each other.
+ **/
+static
+CODE_SEG("PAGE")
+VOID
+PartMgrResolveIdentityCollision(
+    _In_ PFDO_EXTENSION FdoExtension,
+    _Inout_ PDRIVE_LAYOUT_INFORMATION_EX Layout)
+{
+    PFDO_EXTENSION others[16];
+    UINT32 count = 0, i, mix = 0, attempt;
+    PLIST_ENTRY entry;
+
+    PAGED_CODE();
+
+    if (!FdoExtension->OnDiskList ||
+        (Layout->PartitionStyle != PARTITION_STYLE_MBR && Layout->PartitionStyle != PARTITION_STYLE_GPT))
+        return;
+
+    KeWaitForSingleObject(&PartMgrDiskListLock, Executive, KernelMode, FALSE, NULL);
+    for (entry = PartMgrDiskList.Flink; entry != &PartMgrDiskList && count < RTL_NUMBER_OF(others); entry = entry->Flink)
+    {
+        PFDO_EXTENSION other = CONTAINING_RECORD(entry, FDO_EXTENSION, DiskListEntry);
+
+        if (other == FdoExtension || other->DiskData.DeviceNumber >= FdoExtension->DiskData.DeviceNumber)
+            continue;
+        ObReferenceObject(other->DeviceObject);
+        others[count++] = other;
+    }
+    KeSetEvent(&PartMgrDiskListLock, IO_NO_INCREMENT, FALSE);
+
+    for (attempt = 0; attempt < 8 && count != 0; attempt++)
+    {
+        BOOLEAN collides = FALSE;
+
+        for (i = 0; i < count; i++)
+        {
+            PDRIVE_LAYOUT_INFORMATION_EX otherLayout;
+
+            PartMgrAcquireLayoutLock(others[i]);
+            if (others[i]->OnDiskList &&
+                NT_SUCCESS(PartMgrGetDriveLayout(others[i], &otherLayout)) &&
+                PartMgrIdentitiesCollide(Layout, otherLayout))
+            {
+                collides = TRUE;
+            }
+            PartMgrReleaseLayoutLock(others[i]);
+        }
+        if (!collides)
+            break;
+
+        // another identity, derived from the disk number: the same at every start of this slot
+        UINT32 newMix = mix ? (mix + 0x01000193) : (0x9E3779B1u * (FdoExtension->DiskData.DeviceNumber + 1)) | 1;
+
+        PartMgrXorIdentity(Layout, mix ^ newMix);
+        mix = newMix;
+        FdoExtension->IdentityVirtual = TRUE;
+    }
+    if (mix)
+    {
+        WARN("Disk %u carries the identity of a disk with a lower number: reported with another one\n",
+             FdoExtension->DiskData.DeviceNumber);
+    }
+
+    for (i = 0; i < count; i++)
+        ObDereferenceObject(others[i]->DeviceObject);
+}
+
+/**
+ * @brief
  * Retrieves the disk partition layout from the given disk FDO.
  *
  * If the disk layout cache is valid, just return it; otherwise,
@@ -635,6 +816,9 @@ PartMgrGetDriveLayout(
 
     if (FdoExtension->LayoutCache)
         ExFreePool(FdoExtension->LayoutCache);
+
+    FdoExtension->IdentityVirtual = FALSE;
+    PartMgrResolveIdentityCollision(FdoExtension, layoutEx);
 
     FdoExtension->LayoutCache = layoutEx;
     FdoExtension->LayoutValid = TRUE;
@@ -1488,6 +1672,15 @@ FdoHandleStartDevice(
 
     FdoExtension->DiskData.DeviceNumber = deviceNumber.DeviceNumber;
 
+    // from now on the other disks compare their identity with this one's
+    KeWaitForSingleObject(&PartMgrDiskListLock, Executive, KernelMode, FALSE, NULL);
+    if (!FdoExtension->OnDiskList)
+    {
+        InsertTailList(&PartMgrDiskList, &FdoExtension->DiskListEntry);
+        FdoExtension->OnDiskList = TRUE;
+    }
+    KeSetEvent(&PartMgrDiskListLock, IO_NO_INCREMENT, FALSE);
+
     // Register the disk interface.
     // partmgr.sys from Windows 8.1 also registers a mysterious GUID_DEVINTERFACE_HIDDEN_DISK here.
     UNICODE_STRING interfaceName;
@@ -1652,6 +1845,17 @@ FdoHandleRemoveDevice(
         RtlFreeUnicodeString(&FdoExtension->DiskInterfaceName);
         RtlInitUnicodeString(&FdoExtension->DiskInterfaceName, NULL);
     }
+
+    // the other disks stop comparing with this one (one that holds a reference waits for the layout lock)
+    PartMgrAcquireLayoutLock(FdoExtension);
+    KeWaitForSingleObject(&PartMgrDiskListLock, Executive, KernelMode, FALSE, NULL);
+    if (FdoExtension->OnDiskList)
+    {
+        RemoveEntryList(&FdoExtension->DiskListEntry);
+        FdoExtension->OnDiskList = FALSE;
+    }
+    KeSetEvent(&PartMgrDiskListLock, IO_NO_INCREMENT, FALSE);
+    PartMgrReleaseLayoutLock(FdoExtension);
 
     // Send the IRP down the stack
     IoSkipCurrentIrpStackLocation(Irp);
@@ -2119,6 +2323,9 @@ DriverEntry(
     _In_ PDRIVER_OBJECT DriverObject,
     _In_ PUNICODE_STRING RegistryPath)
 {
+    InitializeListHead(&PartMgrDiskList);
+    KeInitializeEvent(&PartMgrDiskListLock, SynchronizationEvent, TRUE);
+
     DriverObject->DriverUnload = PartMgrUnload;
     DriverObject->DriverExtension->AddDevice = PartMgrAddDevice;
     DriverObject->MajorFunction[IRP_MJ_CREATE]         = ForwardIrpAndForget;

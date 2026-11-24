@@ -11,6 +11,7 @@
 /* INCLUDES *******************************************************************/
 
 #include "vfatlib.h"
+#include <reactos/rosrandom.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -38,6 +39,10 @@ CalcVolumeSerialNumber(VOID)
     TIME_FIELDS TimeFields;
     ULONG Serial;
     PUCHAR Buffer;
+
+    /* The system generator; the clock is only the fall-back when ksecdd is not there */
+    if (RosSystemRandom(&Serial, sizeof(Serial)))
+        return Serial;
 
     NtQuerySystemTime(&SystemTime);
     RtlTimeToTimeFields(&SystemTime, &TimeFields);

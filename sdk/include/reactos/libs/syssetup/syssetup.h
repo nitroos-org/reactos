@@ -67,6 +67,10 @@ typedef struct _SETUPDATA
     UINT uPostNetworkWizardPage;
 
     INSTALLATION_TYPE InstallationType;
+
+    /* The answer file keeps the computer name and Administrator password page interactive while
+       every other page is answered (the first start of a ready-made disk image) */
+    BOOL ShowComputerPage;
 } SETUPDATA, *PSETUPDATA;
 
 
