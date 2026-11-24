@@ -808,14 +808,14 @@ HalpAssignPCISlotResources(IN PBUS_HANDLER BusHandler,
     SIZE_T Address;
     ULONG ResourceCount;
     ULONG Size[PCI_TYPE0_ADDRESSES];
+    BOOLEAN Is64Bit[PCI_TYPE0_ADDRESSES];
+    ULONG High[PCI_TYPE0_ADDRESSES];
     NTSTATUS Status = STATUS_SUCCESS;
     UCHAR Offset;
     PCM_PARTIAL_RESOURCE_DESCRIPTOR Descriptor;
     PCI_SLOT_NUMBER SlotNumber;
-    ULONG WriteBuffer;
+    ULONG WriteBuffer, SizeHigh;
     DPRINT1("WARNING: PCI Slot Resource Assignment is FOOBAR\n");
-
-    /* FIXME: Should handle 64-bit addresses */
 
     /* Read configuration data */
     SlotNumber.u.AsULONG = Slot;
@@ -830,6 +830,9 @@ HalpAssignPCISlotResources(IN PBUS_HANDLER BusHandler,
     ResourceCount = 0;
     for (Address = 0; Address < PCI_TYPE0_ADDRESSES; Address++)
     {
+        Is64Bit[Address] = FALSE;
+        High[Address] = 0;
+
         if (0xffffffff == PciConfig.u.type0.BaseAddresses[Address])
             PciConfig.u.type0.BaseAddresses[Address] = 0;
 
@@ -849,6 +852,40 @@ HalpAssignPCISlotResources(IN PBUS_HANDLER BusHandler,
 
             /* Write back initial value */
             HalpWritePCIConfig(BusHandler, SlotNumber, &PciConfig.u.type0.BaseAddresses[Address], Offset, sizeof(ULONG));
+
+            /*
+             * A 64-bit memory BAR takes the next register for the upper half of its address (PCI Local Bus
+             * Specification 3.0, 6.2.5.1): that register is not a BAR of its own, and the address is both halves.
+             */
+            if (((PciConfig.u.type0.BaseAddresses[Address] & PCI_ADDRESS_IO_SPACE) == PCI_ADDRESS_MEMORY_SPACE) &&
+                ((PciConfig.u.type0.BaseAddresses[Address] & PCI_ADDRESS_MEMORY_TYPE_MASK) == PCI_TYPE_64BIT) &&
+                (Address + 1 < PCI_TYPE0_ADDRESSES))
+            {
+                Offset = (UCHAR)FIELD_OFFSET(PCI_COMMON_CONFIG, u.type0.BaseAddresses[Address + 1]);
+                WriteBuffer = 0xffffffff;
+                HalpWritePCIConfig(BusHandler, SlotNumber, &WriteBuffer, Offset, sizeof(ULONG));
+                HalpReadPCIConfig(BusHandler, SlotNumber, &SizeHigh, Offset, sizeof(ULONG));
+                HalpWritePCIConfig(BusHandler, SlotNumber, &PciConfig.u.type0.BaseAddresses[Address + 1], Offset, sizeof(ULONG));
+
+                if (SizeHigh != 0xffffffff)
+                {
+                    /* 4 GB or more: the length does not fit the descriptor; not reported */
+                    DPRINT1("BAR %Iu of slot 0x%lx decodes 4 GB or more: not assigned\n", Address, Slot);
+                    PciConfig.u.type0.BaseAddresses[Address] = 0;
+                    ResourceCount--;
+                }
+                else
+                {
+                    Is64Bit[Address] = TRUE;
+                    High[Address] = PciConfig.u.type0.BaseAddresses[Address + 1];
+                }
+
+                /* The upper half is no resource of its own */
+                Address++;
+                Is64Bit[Address] = FALSE;
+                High[Address] = 0;
+                PciConfig.u.type0.BaseAddresses[Address] = 0;
+            }
         }
     }
 
@@ -888,6 +925,8 @@ HalpAssignPCISlotResources(IN PBUS_HANDLER BusHandler,
                 Descriptor->ShareDisposition = CmResourceShareDeviceExclusive; /* FIXME I have no idea... */
                 Descriptor->Flags = CM_RESOURCE_MEMORY_READ_WRITE;             /* FIXME Just a guess */
                 Descriptor->u.Memory.Start.QuadPart = (PciConfig.u.type0.BaseAddresses[Address] & PCI_ADDRESS_MEMORY_ADDRESS_MASK);
+                if (Is64Bit[Address])
+                    Descriptor->u.Memory.Start.HighPart = (LONG)High[Address];
                 Descriptor->u.Memory.Length = PciSize(Size[Address], PCI_ADDRESS_MEMORY_ADDRESS_MASK);
             }
             else if (PCI_ADDRESS_IO_SPACE ==
