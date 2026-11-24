@@ -21,6 +21,7 @@ extern void func_LifetimeHookExitLeak(void);
 extern void func_LifetimeHookNamesExitLeak(void);
 extern void func_LifetimeInfoCallbacks(void);
 extern void func_LifetimeKeyboardLayoutWalk(void);
+extern void func_LifetimeLayoutSenderEnds(void);
 extern void func_LifetimeOwnerDestroyRace(void);
 extern void func_LifetimeSendSenderEnds(void);
 extern void func_LifetimeSentCopyExitLeak(void);
@@ -228,6 +229,7 @@ const struct test winetest_testlist[] =
     { "LifetimeHookNamesExitLeak", func_LifetimeHookNamesExitLeak },
     { "LifetimeInfoCallbacks", func_LifetimeInfoCallbacks },
     { "LifetimeKeyboardLayoutWalk", func_LifetimeKeyboardLayoutWalk },
+    { "LifetimeLayoutSenderEnds", func_LifetimeLayoutSenderEnds },
     { "LifetimeOwnerDestroyRace", func_LifetimeOwnerDestroyRace },
     { "LifetimeSendSenderEnds", func_LifetimeSendSenderEnds },
     { "LifetimeSentCopyExitLeak", func_LifetimeSentCopyExitLeak },

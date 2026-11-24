@@ -7,6 +7,7 @@
  */
 
 #include "precomp.h"
+#include <imm.h>
 #include <ndk/exfuncs.h>
 
 #define HB_CLASS L"HeldBlocksClass"
@@ -195,4 +196,110 @@ START_TEST(LifetimeSentCopyExitLeak)
     ok(After < Before + 3000, "paged pool grew from %lu to %lu pages\n", Before, After);
     trace("paged pool: %lu -> %lu pages\n", Before, After);
     VirtualFree(Buffer, 0, MEM_RELEASE);
+}
+
+static struct
+{
+    HANDLE hReady, hQuit;
+    HWND hwnd, hwndIme;
+    HKL hkl;
+} gHbl;
+
+/* Has a window (and so an IME window), then waits without answering messages until it is told to end */
+static DWORD WINAPI HbLayoutTargetThread(LPVOID Param)
+{
+    UNREFERENCED_PARAMETER(Param);
+    gHbl.hwnd = CreateWindowExW(0, HB_CLASS, L"t", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL,
+                                GetModuleHandleW(NULL), NULL);
+    gHbl.hwndIme = gHbl.hwnd ? ImmGetDefaultIMEWnd(gHbl.hwnd) : NULL;
+    SetEvent(gHbl.hReady);
+    WaitForSingleObject(gHbl.hQuit, 20000);
+    if (gHbl.hwnd)
+        DestroyWindow(gHbl.hwnd);
+    return 0;
+}
+
+static DWORD WINAPI HbLayoutCallerThread(LPVOID Param)
+{
+    UNREFERENCED_PARAMETER(Param);
+    /* Sends IMS_ACTIVATELAYOUT to the IME window of every thread of the process and waits for the answer */
+    ActivateKeyboardLayout(gHbl.hkl, KLF_SETFORPROCESS);
+    return 0;
+}
+
+/*
+ * A thread that sets the keyboard layout of its process is terminated while it waits for the IME window of
+ * another thread of the process (which does not answer). Before the fix that thread's THREADINFO was
+ * referenced across the message and the reference was never given back: the thread object of the other
+ * thread stayed after it ended (OpenThread found it). 5 rounds.
+ */
+START_TEST(LifetimeLayoutSenderEnds)
+{
+    HKL hklOld, hklNew;
+    HANDLE hTarget, hCaller, hOpen;
+    DWORD Tid;
+    int Round, Kept = 0, Done = 0;
+
+    HbRegister();
+    if (!GetSystemMetrics(SM_IMMENABLED))
+    {
+        skip("IMM is not enabled\n");
+        return;
+    }
+    hklOld = GetKeyboardLayout(0);
+    hklNew = LoadKeyboardLayoutW(LOWORD(hklOld) == 0x0407 ? L"00000409" : L"00000407", 0);
+    if (!hklNew || hklNew == hklOld)
+    {
+        skip("no second keyboard layout\n");
+        return;
+    }
+
+    for (Round = 0; Round < 5; Round++)
+    {
+        ZeroMemory(&gHbl, sizeof(gHbl));
+        gHbl.hkl = (Round & 1) ? hklOld : hklNew;
+        gHbl.hReady = CreateEventW(NULL, FALSE, FALSE, NULL);
+        gHbl.hQuit = CreateEventW(NULL, TRUE, FALSE, NULL);
+        hTarget = CreateThread(NULL, 0, HbLayoutTargetThread, NULL, 0, &Tid);
+        ok(hTarget != NULL, "CreateThread failed %lu\n", GetLastError());
+        if (!hTarget)
+            break;
+        WaitForSingleObject(gHbl.hReady, 10000);
+        if (!gHbl.hwndIme)
+        {
+            skip("the thread has no IME window\n");
+            SetEvent(gHbl.hQuit);
+            WaitForSingleObject(hTarget, 10000);
+            CloseHandle(hTarget);
+            break;
+        }
+
+        hCaller = CreateThread(NULL, 0, HbLayoutCallerThread, NULL, 0, NULL);
+        ok(hCaller != NULL, "CreateThread failed %lu\n", GetLastError());
+        if (hCaller)
+        {
+            /* The caller is waiting for the target's IME window now */
+            ok(WaitForSingleObject(hCaller, 500) == WAIT_TIMEOUT, "round %d: the caller did not wait\n", Round);
+            TerminateThread(hCaller, 0x55);
+            WaitForSingleObject(hCaller, 10000);
+            CloseHandle(hCaller);
+        }
+
+        SetEvent(gHbl.hQuit);
+        ok(WaitForSingleObject(hTarget, 10000) == WAIT_OBJECT_0, "round %d: the target did not end\n", Round);
+        CloseHandle(hTarget);
+        CloseHandle(gHbl.hReady);
+        CloseHandle(gHbl.hQuit);
+        Sleep(200);
+
+        hOpen = OpenThread(THREAD_QUERY_INFORMATION, FALSE, Tid);
+        if (hOpen)
+        {
+            Kept++;
+            CloseHandle(hOpen);
+        }
+        Done++;
+    }
+    ActivateKeyboardLayout(hklOld, KLF_SETFORPROCESS);
+    ok(Kept == 0, "%d of %d ended threads were kept\n", Kept, Done);
 }
