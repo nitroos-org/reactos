@@ -215,11 +215,13 @@ SepAdjustPrivileges(
  * FALSE is returned. Bear in mind such changes aren't always deterministic.
  * See remarks for further details.
  *
- * @param[out] PreviousGroupsState
- * If requested by the caller, the function will return the previous state
- * of groups in an access token prior taking action on adjusting the token.
- * This is a UM (user mode) pointer and it's prone to raise exceptions
- * if such pointer address is not valid.
+ * @param[out] PreviousGroups
+ * If requested by the caller, a kernel array that receives the previous state
+ * of every group that is (or would be) changed, in token order. The Sid members
+ * point into the token: the caller copies them out while it holds the token lock.
+ *
+ * @param[out] ChangedSidLength
+ * If requested, receives the total length of the SIDs of the changed groups.
  *
  * @param[out] ChangedGroups
  * Returns the total number of changed groups in an access token. This
@@ -261,11 +263,12 @@ SepAdjustGroups(
     _In_ BOOLEAN ApplyChanges,
     _In_ BOOLEAN ResetToDefaultStates,
     _Out_ PBOOLEAN ChangesMade,
-    _Out_opt_ PTOKEN_GROUPS PreviousGroupsState,
+    _Out_opt_ PSID_AND_ATTRIBUTES PreviousGroups,
+    _Out_opt_ PULONG ChangedSidLength,
     _Out_ PULONG ChangedGroups)
 {
     ULONG GroupsInToken, GroupsInList;
-    ULONG ChangeCount, GroupsCount, NewAttributes = 0;
+    ULONG ChangeCount, GroupsCount, SidLength, NewAttributes = 0;
     BOOLEAN Found;
 
     PAGED_CODE();
@@ -273,10 +276,14 @@ SepAdjustGroups(
     /* Ensure that the token we get is valid */
     ASSERT(Token);
 
-    /* Initialize the counters and begin the work */
+    /* Initialize the counters and begin the work; the outputs are valid on every return */
     *ChangesMade = FALSE;
+    *ChangedGroups = 0;
+    if (ChangedSidLength != NULL)
+        *ChangedSidLength = 0;
     GroupsCount = 0;
     ChangeCount = 0;
+    SidLength = 0;
 
     /* Begin looping all the groups in the token */
     for (GroupsInToken = 0; GroupsInToken < Token->UserAndGroupCount; GroupsInToken++)
@@ -371,10 +378,11 @@ SepAdjustGroups(
              * token's groups. Does the caller want the previous states
              * of groups?
              */
-            if (PreviousGroupsState != NULL)
+            if (PreviousGroups != NULL)
             {
-                PreviousGroupsState->Groups[ChangeCount] = Token->UserAndGroups[GroupsInToken];
+                PreviousGroups[ChangeCount] = Token->UserAndGroups[GroupsInToken];
             }
+            SidLength += RtlLengthSid(Token->UserAndGroups[GroupsInToken].Sid);
 
             /* Time to apply the changes now? */
             if (ApplyChanges)
@@ -389,14 +397,10 @@ SepAdjustGroups(
         }
     }
 
-    /* Report the number of previous saved groups */
-    if (PreviousGroupsState != NULL)
-    {
-        PreviousGroupsState->GroupCount = ChangeCount;
-    }
-
-    /* Report the number of changed groups */
+    /* Report the number of changed groups and the length of their SIDs */
     *ChangedGroups = ChangeCount;
+    if (ChangedSidLength != NULL)
+        *ChangedSidLength = SidLength;
 
     /* Did we miss some groups? */
     if (!ResetToDefaultStates && (GroupsCount < NewStateCount))
@@ -588,8 +592,12 @@ NtAdjustPrivilegesToken(
     /* Check if the caller asked for the previous state */
     if (PreviousState != NULL)
     {
-        /* Calculate the required length */
-        RequiredLength = FIELD_OFFSET(TOKEN_PRIVILEGES, Privileges[ChangeCount]);
+        /*
+         * Calculate the required length: never less than a TOKEN_PRIVILEGES of one entry
+         * (measured on Windows Server 2022, 32 and 64 bit: ReturnLength 16 when no privilege
+         * or one changes, 28 for two; a buffer of 15 bytes fails for one change)
+         */
+        RequiredLength = FIELD_OFFSET(TOKEN_PRIVILEGES, Privileges[ChangeCount ? ChangeCount : 1]);
 
         /* Try to return the required buffer length */
         _SEH2_TRY
@@ -713,11 +721,14 @@ NtAdjustGroupsToken(
     PTOKEN Token;
     NTSTATUS Status;
     KPROCESSOR_MODE PreviousMode;
-    ULONG ChangeCount, RequiredLength;
+    ULONG ChangeCount = 0, SidLength = 0, RequiredLength = 0, RemainingLength, i;
     ULONG CapturedCount = 0;
     ULONG CapturedLength = 0;
     ULONG NewStateSize = 0;
     PSID_AND_ATTRIBUTES CapturedGroups = NULL;
+    PSID_AND_ATTRIBUTES ChangedGroups = NULL;
+    PTOKEN_GROUPS PreviousCopy = NULL;
+    PSID RemainingSid;
     BOOLEAN ChangesMade = FALSE;
 
     PAGED_CODE();
@@ -831,7 +842,7 @@ NtAdjustGroupsToken(
     /* Lock the token */
     SepAcquireTokenLockExclusive(Token);
 
-    /* Count the number of groups to be changed */
+    /* Count the groups to be changed and the length of their SIDs; nothing is changed yet */
     Status = SepAdjustGroups(Token,
                              CapturedGroups,
                              CapturedCount,
@@ -839,13 +850,41 @@ NtAdjustGroupsToken(
                              ResetToDefault,
                              &ChangesMade,
                              NULL,
+                             &SidLength,
                              &ChangeCount);
 
-    /* Does the caller want the previous state of groups? */
+    /*
+     * A group that cannot be changed fails the whole call before any group is changed, with a
+     * ReturnLength of 0 (measured on Windows Server 2022: a mandatory group named alone, before
+     * or after a group that could be changed: ERROR_CANT_DISABLE_MANDATORY, ReturnLength 0, no
+     * group changed)
+     */
+    if (Status != STATUS_SUCCESS && Status != STATUS_NOT_ALL_ASSIGNED)
+    {
+        if (PreviousState != NULL)
+        {
+            _SEH2_TRY
+            {
+                *ReturnLength = 0;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+        }
+        goto Quit;
+    }
+
+    /*
+     * The previous state is laid out as a TokenGroups query lays it out: the array, then the
+     * SIDs it points to, all inside the caller's buffer. It is built in a kernel buffer under
+     * the token lock, its pointers rebased to the caller's buffer, and copied out after the
+     * lock is released.
+     */
     if (PreviousState != NULL)
     {
-        /* Calculate the required length */
-        RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups[ChangeCount]);
+        RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups[ChangeCount]) + SidLength;
 
         /* Return the required length to the caller */
         _SEH2_TRY
@@ -866,35 +905,45 @@ NtAdjustGroupsToken(
             Status = STATUS_BUFFER_TOO_SMALL;
             goto Quit;
         }
+
+        PreviousCopy = ExAllocatePoolWithTag(PagedPool, RequiredLength, TAG_SE);
+        if (ChangeCount != 0)
+            ChangedGroups = ExAllocatePoolWithTag(PagedPool, ChangeCount * sizeof(SID_AND_ATTRIBUTES), TAG_SE);
+        if (PreviousCopy == NULL || (ChangeCount != 0 && ChangedGroups == NULL))
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Quit;
+        }
     }
 
-    /*
-     * Now it's time to apply changes. Wrap the code
-     * in SEH as we are returning the old groups state
-     * list to the caller since PreviousState is a
-     * UM pointer.
-     */
-    _SEH2_TRY
-    {
-        Status = SepAdjustGroups(Token,
-                                 CapturedGroups,
-                                 CapturedCount,
-                                 TRUE,
-                                 ResetToDefault,
-                                 &ChangesMade,
-                                 PreviousState,
-                                 &ChangeCount);
-    }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-    {
-        /* Bail out and return the exception code */
-        Status = _SEH2_GetExceptionCode();
+    /* Apply the changes; the same token state under the same lock gives the same groups */
+    Status = SepAdjustGroups(Token,
+                             CapturedGroups,
+                             CapturedCount,
+                             TRUE,
+                             ResetToDefault,
+                             &ChangesMade,
+                             ChangedGroups,
+                             NULL,
+                             &ChangeCount);
 
-        /* Force the write as we touched the token still */
-        ChangesMade = TRUE;
-        _SEH2_YIELD(goto Quit);
+    if (PreviousCopy != NULL)
+    {
+        /* The SIDs behind the array, then the pointers made relative to the caller's buffer */
+        PreviousCopy->GroupCount = ChangeCount;
+        RtlCopySidAndAttributesArray(ChangeCount,
+                                     ChangedGroups,
+                                     SidLength,
+                                     PreviousCopy->Groups,
+                                     (PSID)&PreviousCopy->Groups[ChangeCount],
+                                     &RemainingSid,
+                                     &RemainingLength);
+        for (i = 0; i < ChangeCount; i++)
+        {
+            PreviousCopy->Groups[i].Sid = (PSID)((ULONG_PTR)PreviousState +
+                                                 ((ULONG_PTR)PreviousCopy->Groups[i].Sid - (ULONG_PTR)PreviousCopy));
+        }
     }
-    _SEH2_END;
 
 Quit:
     /* Allocate a new ID for the token as we made changes */
@@ -904,6 +953,30 @@ Quit:
     /* Unlock and dereference the token */
     SepReleaseTokenLock(Token);
     ObDereferenceObject(Token);
+
+    /* The previous state goes to the caller outside the token lock */
+    if (PreviousCopy != NULL && NT_SUCCESS(Status))
+    {
+        NTSTATUS CopyStatus = STATUS_SUCCESS;
+
+        _SEH2_TRY
+        {
+            RtlCopyMemory(PreviousState, PreviousCopy, RequiredLength);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            CopyStatus = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+
+        if (!NT_SUCCESS(CopyStatus))
+            Status = CopyStatus;
+    }
+
+    if (PreviousCopy != NULL)
+        ExFreePoolWithTag(PreviousCopy, TAG_SE);
+    if (ChangedGroups != NULL)
+        ExFreePoolWithTag(ChangedGroups, TAG_SE);
 
     /* Release the captured groups */
     if (CapturedGroups != NULL)
