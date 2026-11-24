@@ -1554,6 +1554,8 @@ AllocInputContextObject(
 
     ObjHead->pSelf = ObjHead;
     ObjHead->rpdesk = pDesk;
+    /* The input context lives in the heap of pDesk: the desktop stays while it does */
+    IntReferenceDesktopForObject(pDesk);
     ObjHead->pti = pti;
     IntReferenceThreadInfo(pti);
     *HandleOwner = pti;
@@ -1585,6 +1587,7 @@ UserFreeInputContext(_In_opt_ PVOID Object)
     }
 
     DesktopHeapFree(pDesk, Object);
+    IntDereferenceDesktopForObject(pDesk, Object);
 
     pti->ppi->UserHandleCount--;
     IntDereferenceThreadInfo(pti);

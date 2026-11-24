@@ -28,6 +28,9 @@ IntFreeDesktopHeap(IN PDESKTOP pdesk);
 static BOOLEAN
 IntOrphanDesktopHeap(_Inout_ PDESKTOP pdesk, _In_ ULONG cWindows);
 
+static BOOLEAN
+IntReferenceDesktopIfAlive(_In_ PDESKTOP pdesk);
+
 /* GLOBALS *******************************************************************/
 
 /* These can be changed via registry settings.
@@ -115,6 +118,15 @@ IntDesktopObjectParse(IN PVOID ParseObject,
         /* Get the current desktop */
         Desktop = CONTAINING_RECORD(NextEntry, DESKTOP, ListEntry);
 
+        /* A desktop whose last reference went is gone, even while its delete is still queued (the last
+           object of its heap gives its reference back with a deferred delete): it is not found any more */
+        if ((Desktop->dwDTFlags & DF_DESTROYED) ||
+            OBJECT_TO_OBJECT_HEADER(Desktop)->PointerCount == 0)
+        {
+            NextEntry = NextEntry->Flink;
+            continue;
+        }
+
         /* Get the desktop name */
         ASSERT(Desktop->pDeskInfo != NULL);
         RtlInitUnicodeString(&DesktopName, Desktop->pDeskInfo->szDesktopName);
@@ -145,8 +157,12 @@ IntDesktopObjectParse(IN PVOID ParseObject,
                 Status = STATUS_SUCCESS;
             }
 
-            /* Reference the desktop and return it */
-            ObReferenceObject(Desktop);
+            /* Reference the desktop and return it (unless its last reference went meanwhile) */
+            if (!IntReferenceDesktopIfAlive(Desktop))
+            {
+                NextEntry = NextEntry->Flink;
+                continue;
+            }
             *Object = Desktop;
             return Status;
         }
@@ -2630,6 +2646,70 @@ IntOrphanDesktopHeap(
 }
 
 /*
+ * Every object allocated in a desktop heap (windows, hooks, menus, call procedures, input contexts) holds a
+ * reference to the desktop object from its allocation to its free: the desktop object, and with it the heap,
+ * outlives every object in it. A thread that sends a message to a window of another desktop and holds it
+ * (UserRefObjectCo) across the wait, or a process that keeps a menu it made on a desktop it has left, keeps
+ * that desktop until the window or the menu goes, instead of reading it in a heap that was unmapped.
+ *
+ * Only the desktop window and the message window do not hold one: the desktop frees them when it is deleted
+ * (IntDesktopObjectDelete); if one of them is still referenced then, the heap is kept for it alone
+ * (IntOrphanDesktopHeap). IntCreateDesktop gives back the reference their allocation took.
+ *
+ * A reference held this way ends with the object, and every such object ends at the latest with its owner:
+ * windows, hooks and input contexts with their thread, menus and call procedures with their process, a
+ * Co reference with the thread that holds it. A program keeps a desktop this way no longer than it could
+ * by keeping a handle to it.
+ *
+ * The last one is given back with ObDereferenceObjectDeferDelete: the free of an object runs anywhere under
+ * the USER lock (in a loop over the windows of that very desktop, for instance), where the delete of the
+ * desktop (the free of its windows, the unmapping of its heap) must not run nested.
+ */
+VOID
+IntReferenceDesktopForObject(
+    _In_ PDESKTOP pdesk)
+{
+    ObReferenceObject(pdesk);
+}
+
+VOID
+IntDereferenceDesktopForObject(
+    _In_ PDESKTOP pdesk,
+    _In_ PVOID Object)
+{
+    /* Object is only compared: it is freed already */
+    if (pdesk->pDeskInfo &&
+        (pdesk->pDeskInfo->spwnd == Object || pdesk->spwndMessage == Object))
+    {
+        return;
+    }
+
+    ObDereferenceObjectDeferDelete(pdesk);
+}
+
+/* A reference to a desktop that is still alive: FALSE when its last reference went already (its delete is
+   queued and runs later, the desktop is still in the list of its window station until then) */
+static BOOLEAN
+IntReferenceDesktopIfAlive(
+    _In_ PDESKTOP pdesk)
+{
+    POBJECT_HEADER Header = OBJECT_TO_OBJECT_HEADER(pdesk);
+    LONG_PTR OldValue, NewValue;
+
+    OldValue = Header->PointerCount;
+    while (OldValue != 0)
+    {
+        NewValue = (LONG_PTR)InterlockedCompareExchangePointer((PVOID*)&Header->PointerCount,
+                                                               (PVOID)(OldValue + 1),
+                                                               (PVOID)OldValue);
+        if (NewValue == OldValue)
+            return TRUE;
+        OldValue = NewValue;
+    }
+    return FALSE;
+}
+
+/*
  * The last reference of a window without a desktop (IntFreeDesktopWindow) went (FreeDeskThreadObject): the
  * heap of its deleted desktop goes with the last such window in it. Object is only compared.
  */
@@ -3422,6 +3502,10 @@ IntCreateDesktop(
     pdesk->DesktopWindow = UserHMGetHandle(pWnd);
     pdesk->pDeskInfo->spwnd = pWnd;
 
+    /* The desktop frees its desktop window itself (IntDesktopObjectDelete): the window gives back the
+       reference to the desktop its allocation took (IntDereferenceDesktopForObject knows it from now on) */
+    ObDereferenceObject(pdesk);
+
     /* IntCreateWindow returns a locked window: the handle keeps it alive, release the
        caller's reference (co_UserCreateWindowEx does the same) or the window, its handle
        entry and its memory in the desktop heap are never freed */
@@ -3455,6 +3539,8 @@ IntCreateDesktop(
 
     /* Assign the message window to the desktop */
     pdesk->spwndMessage = pWnd;
+    /* As for the desktop window above */
+    ObDereferenceObject(pdesk);
     UserDereferenceObject(pWnd);
 
     /* Now...
