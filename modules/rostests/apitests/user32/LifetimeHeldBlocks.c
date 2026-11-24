@@ -241,11 +241,6 @@ START_TEST(LifetimeLayoutSenderEnds)
     int Round, Kept = 0, Done = 0;
 
     HbRegister();
-    if (!GetSystemMetrics(SM_IMMENABLED))
-    {
-        skip("IMM is not enabled\n");
-        return;
-    }
     hklOld = GetKeyboardLayout(0);
     hklNew = LoadKeyboardLayoutW(LOWORD(hklOld) == 0x0407 ? L"00000409" : L"00000407", 0);
     if (!hklNew || hklNew == hklOld)
@@ -257,7 +252,6 @@ START_TEST(LifetimeLayoutSenderEnds)
     for (Round = 0; Round < 5; Round++)
     {
         ZeroMemory(&gHbl, sizeof(gHbl));
-        gHbl.hkl = (Round & 1) ? hklOld : hklNew;
         gHbl.hReady = CreateEventW(NULL, FALSE, FALSE, NULL);
         gHbl.hQuit = CreateEventW(NULL, TRUE, FALSE, NULL);
         hTarget = CreateThread(NULL, 0, HbLayoutTargetThread, NULL, 0, &Tid);
@@ -274,6 +268,8 @@ START_TEST(LifetimeLayoutSenderEnds)
             break;
         }
 
+        /* A layout the target does not have yet, so that it is sent the message */
+        gHbl.hkl = (GetKeyboardLayout(Tid) == hklNew) ? hklOld : hklNew;
         hCaller = CreateThread(NULL, 0, HbLayoutCallerThread, NULL, 0, NULL);
         ok(hCaller != NULL, "CreateThread failed %lu\n", GetLastError());
         if (hCaller)
@@ -320,7 +316,7 @@ static DWORD WINAPI HbDeskThread(LPVOID Param)
     if (!SetThreadDesktop(gHdd.hDesk))
         return 1;
     gHdd.hwndDesktop = GetDesktopWindow();
-    hMsg = CreateWindowExW(0, L"Message", NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, NULL, NULL);
+    hMsg = CreateWindowExW(0, HB_CLASS, NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, GetModuleHandleW(NULL), NULL);
     if (hMsg)
     {
         gHdd.hwndMessageRoot = GetAncestor(hMsg, GA_PARENT);
@@ -336,7 +332,7 @@ static DWORD WINAPI HbDeskSendThread(LPVOID Param)
     DWORD_PTR Result;
 
     while (!gHdd.SendStop)
-        SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_BLOCK, 1000, &Result);
+        SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_BLOCK, 200, &Result);
     return 0;
 }
 
@@ -363,13 +359,14 @@ START_TEST(LifetimeDesktopHeldDelete)
     HWND Roots[400];
     HANDLE hFlood[3], hThread, hSend;
     DWORD Start;
-    int i, Count = 0, Left = 0;
+    int i, Count = 0, Left = 0, Known;
 
+    HbRegister();
     for (i = 0; i < 3; i++)
         hFlood[i] = CreateThread(NULL, 0, HbDeskFloodThread, NULL, 0, NULL);
 
     Start = GetTickCount();
-    while (GetTickCount() - Start < 15000 && Count < (int)ARRAYSIZE(Roots))
+    while (GetTickCount() - Start < 30000 && Count < (int)ARRAYSIZE(Roots))
     {
         WCHAR Name[32];
 
@@ -408,11 +405,19 @@ START_TEST(LifetimeDesktopHeldDelete)
 
     for (i = 0; i < Count; i++)
     {
-        if (Roots[i] && IsWindow(Roots[i]))
+        /* Asked of win32k (the window is not on the desktop of the test: IsWindow and GetWindowThreadProcessId
+           look at it in user mode, through the desktop heap of the caller) */
+        if (Roots[i] && PostMessageW(Roots[i], WM_NULL, 0, 0))
             Left++;
     }
-    trace("%d desktops\n", Count);
+    for (i = 0, Known = 0; i < Count; i++)
+    {
+        if (Roots[i])
+            Known++;
+    }
+    trace("%d desktops, %d message roots known\n", Count, Known);
     ok(Count > 0, "no desktop\n");
+    ok(Known > 0, "no message root\n");
     ok(Left == 0, "the message window of %d of %d deleted desktops is still a window\n", Left, Count);
 
     /* The heaps of those desktops went with their last window: desktops can still be created */
