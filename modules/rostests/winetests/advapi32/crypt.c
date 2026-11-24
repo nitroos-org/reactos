@@ -397,12 +397,6 @@ static void test_incorrect_api_usage(void)
     result = CryptDeriveKey(hProv, CALG_RC4, hHash, 0, &hKey2);
     ok (!result && GetLastError() == ERROR_INVALID_PARAMETER, "%ld\n", GetLastError());
 
-#if defined(__REACTOS__) && defined(_M_AMD64)
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: The following tests normally completes on ReactOS x64, but not after being fuzzed from other tests in our test suite.\n");
-        return;
-    }
-#endif
     result = pCryptDuplicateHash(hHash, NULL, 0, &hHash2);
     ok (!result && GetLastError() == ERROR_INVALID_PARAMETER, "%ld\n", GetLastError());
 
