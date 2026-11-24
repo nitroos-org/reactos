@@ -10,6 +10,7 @@
  */
 
 #include "precomp.h"
+#include <imm.h>
 
 #define LS_CLASS L"LsLifeClass"
 
@@ -442,4 +443,91 @@ START_TEST(LifetimeBeingActivatedExit)
         LsPump();
     }
     ok(Fails == 0, "%d of 3 rounds left w1 not activatable\n", Fails);
+}
+
+/*
+ * ImeWindowGoneInNotify: the default IME window of a thread gets WM_IME_SETCONTEXT and tells the focus window
+ * that its status window opens (WM_IME_NOTIFY); the focus window destroys itself there, the thread's only
+ * top-level window, and the default IME window goes with it. The IME window procedure went on with the data of
+ * the window it had freed (an access violation in user32 in the program). A child process does it, so that a
+ * fault does not end the suite; it must end normally.
+ */
+static HWND gIgnIme;
+static LONG gIgnNotified;
+
+static LRESULT CALLBACK IgnWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (msg == WM_IME_NOTIFY && wParam == IMN_OPENSTATUSWINDOW && !gIgnNotified)
+    {
+        gIgnNotified = 1;
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void IgnChild(void)
+{
+    WNDCLASSW wc = { 0 };
+    HWND hwnd;
+    int Round, Sent = 0;
+
+    wc.lpfnWndProc = IgnWndProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"LsIgnClass";
+    RegisterClassW(&wc);
+    for (Round = 0; Round < 5; Round++)
+    {
+        gIgnNotified = 0;
+        hwnd = CreateWindowExW(0, L"LsIgnClass", L"ign", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 200, 100, NULL,
+                               NULL, wc.hInstance, NULL);
+        if (!hwnd)
+            break;
+        SetForegroundWindow(hwnd);
+        SetFocus(hwnd);
+        LsPump();
+        gIgnIme = ImmGetDefaultIMEWnd(hwnd);
+        if (gIgnIme)
+        {
+            SendMessageW(gIgnIme, WM_IME_SETCONTEXT, TRUE, ISC_SHOWUIALL);
+            Sent++;
+        }
+        LsPump();
+        if (IsWindow(hwnd))
+            DestroyWindow(hwnd);
+        LsPump();
+    }
+    trace("%d rounds sent, the focus window was told %ld times\n", Sent, gIgnNotified);
+}
+
+START_TEST(LifetimeImeWindowGoneInNotify)
+{
+    char **argv;
+    char CmdLine[MAX_PATH * 2];
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi = { 0 };
+    DWORD ExitCode = 0, Wait;
+    int argc;
+
+    argc = winetest_get_mainargs(&argv);
+    if (argc >= 3 && !lstrcmpA(argv[2], "child"))
+    {
+        IgnChild();
+        return;
+    }
+
+    sprintf(CmdLine, "\"%s\" LifetimeImeWindowGoneInNotify child", argv[0]);
+    ok(CreateProcessA(NULL, CmdLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi), "CreateProcessA failed %lu\n",
+       GetLastError());
+    if (!pi.hProcess)
+        return;
+    Wait = WaitForSingleObject(pi.hProcess, 30000);
+    ok(Wait == WAIT_OBJECT_0, "the child did not end (it faulted and is held, or it hangs)\n");
+    if (Wait != WAIT_OBJECT_0)
+        TerminateProcess(pi.hProcess, 0xdead);
+    WaitForSingleObject(pi.hProcess, 10000);
+    GetExitCodeProcess(pi.hProcess, &ExitCode);
+    ok(ExitCode == 0, "the child ended with 0x%lx\n", ExitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
 }
