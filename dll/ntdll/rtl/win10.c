@@ -846,3 +846,64 @@ RtlFreeUserStack(
 
     NtFreeVirtualMemory(NtCurrentProcess(), &AllocationBase, &Size, MEM_RELEASE);
 }
+
+/* LICENSE VALUES ***********************************************************/
+
+/*
+ * The license values that are answered. Windows reads them from the licensing store; the two values of the MUI
+ * language limit are fixed here: the language list is the string "EMPTY" and the number of languages is nonzero
+ * (one here), as measured by ntdll_winetest reg on Windows Server 2022. Any other name is not found.
+ */
+static const WCHAR RtlpLicenseMuiLanguageValue[] = L"EMPTY";
+static const ULONG RtlpLicenseMuiNumberValue = 1;
+
+typedef struct _RTLP_LICENSE_VALUE
+{
+    PCWSTR Name;
+    ULONG Type;
+    const VOID *Data;
+    ULONG Size;
+} RTLP_LICENSE_VALUE;
+
+static const RTLP_LICENSE_VALUE RtlpLicenseValues[] =
+{
+    { L"Kernel-MUI-Language-Allowed", REG_SZ, RtlpLicenseMuiLanguageValue, sizeof(RtlpLicenseMuiLanguageValue) },
+    { L"Kernel-MUI-Number-Allowed", REG_DWORD, &RtlpLicenseMuiNumberValue, sizeof(RtlpLicenseMuiNumberValue) },
+};
+
+NTSTATUS
+NTAPI
+NtQueryLicenseValue(
+    _In_ PUNICODE_STRING ValueName,
+    _Out_opt_ PULONG Type,
+    _Out_writes_bytes_to_opt_(DataSize, *ReturnedLength) PVOID Data,
+    _In_ ULONG DataSize,
+    _Out_ PULONG ReturnedLength)
+{
+    UNICODE_STRING Name;
+    ULONG i;
+
+    /* no name, an empty name or nowhere to report the length: nothing is changed */
+    if (ValueName == NULL || ValueName->Buffer == NULL || ValueName->Length == 0 || ReturnedLength == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    for (i = 0; i < RTL_NUMBER_OF(RtlpLicenseValues); i++)
+    {
+        RtlInitUnicodeString(&Name, RtlpLicenseValues[i].Name);
+        if (!RtlEqualUnicodeString(ValueName, &Name, TRUE))
+            continue;
+
+        if (Type != NULL)
+            *Type = RtlpLicenseValues[i].Type;
+        *ReturnedLength = RtlpLicenseValues[i].Size;
+
+        /* the buffer is not touched when it is too small */
+        if (DataSize < RtlpLicenseValues[i].Size)
+            return STATUS_BUFFER_TOO_SMALL;
+
+        RtlCopyMemory(Data, RtlpLicenseValues[i].Data, RtlpLicenseValues[i].Size);
+        return STATUS_SUCCESS;
+    }
+
+    return STATUS_OBJECT_NAME_NOT_FOUND;
+}
