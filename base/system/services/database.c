@@ -4192,6 +4192,40 @@ done:
 }
 
 
+/*
+ * A service that starts in a shared process that already runs: the token of the process has had its service SID
+ * since the first service of the image started, disabled (0xa); it is enabled now (Windows Server 2022, measured
+ * with two scratch services in one process, LocalSystem and LocalService, a service SID or a privilege list
+ * each: 0xa in the token while only the first one runs, 0xe once the second has started).
+ */
+static VOID
+ScmEnableServiceSidInProcess(
+    _In_ PSERVICE pService)
+{
+    PSERVICE_IMAGE pImage = pService->lpImage;
+    SCM_TOKEN_CONFIG Config;
+    TOKEN_GROUPS Groups;
+    HANDLE hToken;
+
+    if (!pImage->bSharedProcess || pImage->hProcess == NULL || pImage->hProcess == INVALID_HANDLE_VALUE)
+        return;
+    if (ScmReadTokenConfig(pService, FALSE, &Config) != ERROR_SUCCESS)
+        return;
+    if (Config.pServiceSid != NULL && OpenProcessToken(pImage->hProcess, TOKEN_ADJUST_GROUPS, &hToken))
+    {
+        Groups.GroupCount = 1;
+        Groups.Groups[0].Sid = Config.pServiceSid;
+        Groups.Groups[0].Attributes = SE_GROUP_ENABLED;
+        /* ERROR_NOT_ALL_ASSIGNED: the process was started before this service had a service SID; it stays without */
+        if (!AdjustTokenGroups(hToken, FALSE, &Groups, 0, NULL, NULL) || GetLastError() != ERROR_SUCCESS)
+            DPRINT1("Service %S: its SID is not enabled in the token of its process (Error %lu)\n",
+                    pService->lpServiceName, GetLastError());
+        CloseHandle(hToken);
+    }
+    ScmFreeTokenConfig(&Config);
+}
+
+
 static DWORD
 ScmStartUserModeService(PSERVICE Service,
                         DWORD argc,
@@ -4208,7 +4242,10 @@ ScmStartUserModeService(PSERVICE Service,
 
     /* If the image is already running, just send a start command */
     if (Service->lpImage->dwImageRunCount > 1)
+    {
+        ScmEnableServiceSidInProcess(Service);
         goto Quit;
+    }
 
     /* Otherwise start its process */
     ZeroMemory(&StartupInfo, sizeof(StartupInfo));

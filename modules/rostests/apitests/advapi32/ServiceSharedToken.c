@@ -448,10 +448,8 @@ START_TEST(ServiceSharedToken)
     ok(ga >= 0 && gb >= 0, "UNR/UNR: B's token has the SIDs %d, %d\n", ga, gb);
     if (ga >= 0 && gb >= 0)
     {
-        /* Windows enables the SID of a service that joins a running process (0xe 0xe): not done here */
-        todo_ros ok(B.GroupAttrs[ga] == 0xe && B.GroupAttrs[gb] == 0xe, "UNR/UNR: B's token: 0x%lx 0x%lx, expected 0xe 0xe\n",
-                    B.GroupAttrs[ga], B.GroupAttrs[gb]);
-        ok(B.GroupAttrs[ga] == 0xe && B.GroupAttrs[gb] == 0xa, "UNR/UNR: B's token: 0x%lx 0x%lx, expected 0xe 0xa\n",
+        /* the SID of a service that joins a running process is enabled when it starts (0xe 0xe) */
+        ok(B.GroupAttrs[ga] == 0xe && B.GroupAttrs[gb] == 0xe, "UNR/UNR: B's token: 0x%lx 0x%lx, expected 0xe 0xe\n",
            B.GroupAttrs[ga], B.GroupAttrs[gb]);
     }
 
