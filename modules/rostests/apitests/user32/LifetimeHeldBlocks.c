@@ -414,4 +414,13 @@ START_TEST(LifetimeDesktopHeldDelete)
     trace("%d desktops\n", Count);
     ok(Count > 0, "no desktop\n");
     ok(Left == 0, "the message window of %d of %d deleted desktops is still a window\n", Left, Count);
+
+    /* The heaps of those desktops went with their last window: desktops can still be created */
+    for (i = 0; i < 8; i++)
+    {
+        HDESK hDesk = CreateDesktopW(L"HeldDeskAfter", NULL, NULL, 0, DESKTOP_ALL_ACCESS, NULL);
+        ok(hDesk != NULL, "CreateDesktopW %d after the rounds failed %lu\n", i, GetLastError());
+        if (hDesk)
+            CloseDesktop(hDesk);
+    }
 }
