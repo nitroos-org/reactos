@@ -52,6 +52,12 @@
  * the request is retried), and it was not there */
 #define RXP_LOWIO_FLAG_LOCAL_UNLOCKED 0x2000
 #define RXP_LOWIO_FLAG_LOCAL_MISSED 0x1000
+/* RDBSS-private LOWIO_CONTEXT flags: the completion routine runs in RDBSS's
+ * completion worker (RxpLowIoCompletionWorker); a lock the server granted
+ * and the local table refused is to be released at the server
+ * (RxLowIoLockControlShellCompletion) */
+#define RXP_LOWIO_FLAG_IN_COMPLETION_WORKER 0x0800
+#define RXP_LOWIO_FLAG_RELEASE_AT_SERVER 0x0400
 
 typedef
 NTSTATUS
@@ -7392,13 +7398,27 @@ RxFsdCommonDispatch(
         {
             IoAcquireCancelSpinLock(&OldIrql);
             IoSetCancelRoutine(Irp, RxCancelRoutine);
+
+            /* A cancel issued before the routine was in place found none
+             * to call: take it now, as IoCancelIrp would have (the context
+             * is on the active list, RxCancelRoutine marks it cancelled and
+             * releases the cancel spin lock) */
+            if (Irp->Cancel && IoSetCancelRoutine(Irp, NULL) != NULL)
+            {
+                Irp->CancelIrql = OldIrql;
+                RxCancelRoutine((PDEVICE_OBJECT)RxDeviceObject, Irp);
+            }
+            else
+            {
+                IoReleaseCancelSpinLock(OldIrql);
+            }
         }
         else
         {
             IoAcquireCancelSpinLock(&OldIrql);
             IoSetCancelRoutine(Irp, NULL);
+            IoReleaseCancelSpinLock(OldIrql);
         }
-        IoReleaseCancelSpinLock(OldIrql);
 
         ASSERT(MajorFunction <= IRP_MJ_MAXIMUM_FUNCTION);
 
@@ -8378,6 +8398,8 @@ RxpLowIoCompletionWorker(
 
     PAGED_CODE();
 
+    /* A completion routine may wait here (RxLowIoLockControlShellCompletion) */
+    InterlockedOr16((volatile SHORT *)&RxContext->LowIoContext.Flags, (SHORT)RXP_LOWIO_FLAG_IN_COMPLETION_WORKER);
     Status = RxLowIoCompletionTail(RxContext);
     if (Status == STATUS_RETRY)
     {
@@ -8580,6 +8602,67 @@ RxpFreeLowIoLockList(
     RxContext->LowIoContext.ParamsFor.Locks.LockList = NULL;
 }
 
+static
+NTSTATUS
+NTAPI
+RxpRefusedLockUnlockCompletion(
+    PRX_CONTEXT RxContext)
+{
+    PAGED_CODE();
+
+    return RxContext->IoStatusBlock.Status;
+}
+
+/*
+ * A lock the server granted but the local FILE_LOCK refused is not kept: the
+ * caller is told it was not granted, so the server must not hold it either
+ * (it would refuse the range to every other open until the handle is closed
+ * there). The unlock goes to the mini-redirector synchronously, on a context
+ * of its own, from a thread that may wait: the caller's for a synchronous
+ * request, RDBSS's completion worker for an asynchronous one. The request's
+ * FCB, FOBX and SRV_OPEN are alive: its IRP is not completed yet.
+ */
+static
+VOID
+RxpReleaseRefusedLockAtServer(
+    IN PRX_CONTEXT RxContext)
+{
+    PRX_CONTEXT Unlock;
+    PLOWIO_CONTEXT LowIoContext;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    LowIoContext = &RxContext->LowIoContext;
+    Unlock = RxCreateRxContext(NULL, RxContext->RxDeviceObject,
+                               RX_CONTEXT_FLAG_MUST_SUCCEED_NONBLOCKING | RX_CONTEXT_FLAG_WAIT);
+    if (Unlock == NULL)
+    {
+        DPRINT1("No context to release a refused lock at the server: it stays until the handle is closed there\n");
+        return;
+    }
+
+    Unlock->MajorFunction = IRP_MJ_LOCK_CONTROL;
+    Unlock->MinorFunction = IRP_MN_UNLOCK_SINGLE;
+    Unlock->pFcb = RxContext->pFcb;
+    Unlock->NonPagedFcb = RxContext->NonPagedFcb;
+    Unlock->pFobx = RxContext->pFobx;
+    Unlock->pRelevantSrvOpen = RxContext->pRelevantSrvOpen;
+    RxInitializeLowIoContext(&Unlock->LowIoContext, LOWIO_OP_UNLOCK);
+    Unlock->LowIoContext.ParamsFor.Locks.ByteOffset = LowIoContext->ParamsFor.Locks.ByteOffset;
+    Unlock->LowIoContext.ParamsFor.Locks.Length = LowIoContext->ParamsFor.Locks.Length;
+    Unlock->LowIoContext.ParamsFor.Locks.Key = LowIoContext->ParamsFor.Locks.Key;
+    Unlock->LowIoContext.ParamsFor.Locks.Flags = 0;
+
+    Status = RxLowIoSubmit(Unlock, RxpRefusedLockUnlockCompletion);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("The server did not release a lock the local table refused: %lx\n", Status);
+    }
+
+    RxDereferenceAndDeleteRxContext(Unlock);
+}
+
 /*
  * Completion of a lock request the mini-redirector handled: mirror the
  * result in the local FILE_LOCK. FsRtl is called without an IRP, so it never
@@ -8611,7 +8694,14 @@ RxLowIoLockControlShellCompletion(
     {
         case LOWIO_OP_SHAREDLOCK:
         case LOWIO_OP_EXCLUSIVELOCK:
-            if (NT_SUCCESS(Status))
+            if (BooleanFlagOn(LowIoContext->Flags, RXP_LOWIO_FLAG_RELEASE_AT_SERVER))
+            {
+                /* Called again from the completion worker (below): the local
+                 * table refused what the server granted */
+                RxpReleaseRefusedLockAtServer(RxContext);
+                Status = STATUS_LOCK_NOT_GRANTED;
+            }
+            else if (NT_SUCCESS(Status))
             {
                 IO_STATUS_BLOCK IoStatus;
                 LARGE_INTEGER Length;
@@ -8628,6 +8718,21 @@ RxLowIoLockControlShellCompletion(
                 {
                     DPRINT1("Server granted a lock the local table refused: %lx\n", IoStatus.Status);
                     Status = STATUS_LOCK_NOT_GRANTED;
+
+                    /* Not at the server either. An asynchronous request
+                     * completed by the mini-redirector is completed in its
+                     * thread, which must not wait for another request of the
+                     * mini-redirector: then the release is done from the
+                     * completion worker (RxLowIoCompletion posts this routine
+                     * there, the request is completed after it) */
+                    if (BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION) &&
+                        !BooleanFlagOn(LowIoContext->Flags, LOWIO_CONTEXT_FLAG_SYNCCALL) &&
+                        !BooleanFlagOn(LowIoContext->Flags, RXP_LOWIO_FLAG_IN_COMPLETION_WORKER))
+                    {
+                        InterlockedOr16((volatile SHORT *)&LowIoContext->Flags, (SHORT)RXP_LOWIO_FLAG_RELEASE_AT_SERVER);
+                        return STATUS_MORE_PROCESSING_REQUIRED;
+                    }
+                    RxpReleaseRefusedLockAtServer(RxContext);
                 }
                 else if (RxContext->MajorFunction == IRP_MJ_LOCK_CONTROL)
                 {
