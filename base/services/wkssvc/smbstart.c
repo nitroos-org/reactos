@@ -109,6 +109,10 @@ StarterMain(LPVOID Parameter)
         /* Returns when a request needs an engine, after 5 minutes, or when woken for the stop */
         if (DeviceIoControl(Device, IOCTL_SMBRDR_WAIT_ENGINE_NEEDED, NULL, 0, NULL, 0, &Got, NULL))
         {
+            /* The wake-up for the stop ends the wait as a success too: no engine is needed then (starting
+               one during a shutdown costs the stop of the service about a second) */
+            if (StarterStop)
+                break;
             Error = StartNamedService(Manager, L"smbengine");
             TRACE("SMB client: engine started on demand (%lu)\n", Error);
             if (Error != ERROR_SUCCESS)
