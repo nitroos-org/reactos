@@ -11,6 +11,7 @@ list(APPEND SOURCE
     BroadcastHung.c
     ../include/msgtrace.c
     CallbackLifetimes.c
+    LifetimeHeldBlocks.c
     CharFuncs.c
     CloseWindow.c
     CopyImage.c
