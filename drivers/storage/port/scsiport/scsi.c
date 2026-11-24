@@ -653,8 +653,10 @@ SpiProcessCompletedRequest(
     PSCSI_PORT_LUN_EXTENSION LunExtension;
     LONG Result;
     PIRP Irp;
+    ULONG StartDataTransferLength;
 
     Srb = SrbInfo->Srb;
+    StartDataTransferLength = SrbInfo->StartDataTransferLength;
     Irp = Srb->OriginalRequest;
     PIO_STACK_LOCATION IoStack = IoGetCurrentIrpStackLocation(Irp);
 
@@ -734,6 +736,9 @@ SpiProcessCompletedRequest(
     {
         ExFreePoolWithTag(SrbInfo->ScatterGather, TAG_SCSIPORT);
         SrbInfo->ScatterGather = NULL;
+
+        /* The list is gone: a request started again must not free the one of its next start twice (or the embedded list) */
+        Srb->SrbFlags &= ~SRB_FLAGS_SGLIST_FROM_POOL;
     }
 
     /* Free Map Registers */
@@ -866,6 +871,10 @@ SpiProcessCompletedRequest(
     {
 
         DPRINT("Busy SRB status %x\n", Srb->SrbStatus);
+
+        /* The request is started again: the miniport (or ScsiPortCompleteRequest,
+           which zeroes the length) may have changed the transfer length */
+        Srb->DataTransferLength = StartDataTransferLength;
 
         /* Requeue, if needed */
         if (LunExtension->Flags & (LUNEX_FROZEN_QUEUE | LUNEX_BUSY))
@@ -1701,6 +1710,7 @@ ScsiPortStartIo(
     else
     {
         SrbInfo->Srb = Srb;
+        SrbInfo->StartDataTransferLength = Srb->DataTransferLength;
     }
 
     if (Srb->SrbFlags & SRB_FLAGS_UNSPECIFIED_DIRECTION)

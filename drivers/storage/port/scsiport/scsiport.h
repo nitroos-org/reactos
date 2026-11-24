@@ -120,6 +120,10 @@ typedef struct _SCSI_REQUEST_BLOCK_INFO
     PCHAR DataOffset;
     PVOID SaveSenseRequest;
 
+    /* Transfer length of the SRB as it was handed to the miniport; a request
+       completed with BUSY is started again and must carry it again */
+    ULONG StartDataTransferLength;
+
     ULONG SequenceNumber;
 
     /* DMA stuff */
