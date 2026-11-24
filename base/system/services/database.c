@@ -5007,26 +5007,28 @@ ScmAutoStartServices(VOID)
 
 
 /*
- * The preshutdown phase. A running service that accepts SERVICE_ACCEPT_PRESHUTDOWN gets
- * SERVICE_CONTROL_PRESHUTDOWN before any service gets SERVICE_CONTROL_SHUTDOWN, and no SHUTDOWN afterwards
- * (as on Windows, measured). The controls go out to all of them at once, one thread each (the services of one
- * process answer one control at a time, so those are sent in turn). The phase ends for a service when it is
- * STOPPED, when its control could not be delivered, or when its timeout (the PreshutdownTimeout of the
- * service, 10 000 ms when it has none) has passed without a change of its state or check point: a service
- * that reports progress is waited for. The wait is bounded: no service can hold the shutdown longer than
- * SCM_PRESHUTDOWN_MAX_WAIT, and a control that is still unanswered at the end of its wait is cancelled.
+ * The two phases of the shutdown of the services. A running service that accepts SERVICE_ACCEPT_PRESHUTDOWN gets
+ * SERVICE_CONTROL_PRESHUTDOWN before any service gets SERVICE_CONTROL_SHUTDOWN, and no SHUTDOWN afterwards (as on
+ * Windows, measured); the services that only accept SHUTDOWN get it in the second phase. In both phases the
+ * controls go out to all the services of the phase at once, one thread each (the services of one process answer
+ * one control at a time, so those are sent in turn); how long the SCM waits for the answers is the measured
+ * behaviour of Windows (see ScmPreshutdownWaitLimit and the second phase in ScmShutdownPhase). A control that is
+ * still unanswered at the end of the wait is cancelled and the SCM goes on without the service.
  */
 #define SCM_PRESHUTDOWN_DEFAULT_TIMEOUT 10000
 #define SCM_PRESHUTDOWN_MAX_WAIT        300000
+#define SCM_PRESHUTDOWN_SILENT_TIMEOUT_MAX 20000
 #define SCM_PRESHUTDOWN_POLL            50
 #define SCM_PRESHUTDOWN_THREAD_WAIT     10000
+#define SCM_SHUTDOWN_DEFAULT_WAIT       20000
+#define SCM_SHUTDOWN_COUNT_PERIOD       500
 
 /*
  * The console server (csrss) ends this process WaitToKillServiceTimeout after the shutdown event unless it is
  * told that the phase goes on: every sign of progress (the phase begins, a service changes its state or check
  * point, the phase ends so the SHUTDOWN controls get their time) is counted in the volatile value Progress of
  * HKLM\SYSTEM\CurrentControlSet\Control\ScmShutdown, which csrss reads (consrv, ConSrvWaitServiceShutdown).
- * Only the monitor loop below calls it.
+ * The waits of ScmShutdownPhase are bounded, and it counts while they last.
  */
 static
 VOID
@@ -5053,6 +5055,7 @@ typedef struct _SCM_PRESHUTDOWN_ITEM
     PSERVICE Service;
     PSERVICE_IMAGE Image;
     HANDLE hPipe;
+    DWORD dwControl;        /* SERVICE_CONTROL_PRESHUTDOWN or SERVICE_CONTROL_SHUTDOWN */
     DWORD dwTimeout;
     HANDLE hThread;         /* The sender; NULL when it could not be created */
     HANDLE hPrevThread;     /* The sender of the previous service of the same image: this one waits for it */
@@ -5061,12 +5064,67 @@ typedef struct _SCM_PRESHUTDOWN_ITEM
     volatile LONG bFinished;
     DWORD dwSentTick;
     DWORD dwSendError;
-    BOOL bTimed;            /* The monitor has taken the start of the wait */
-    BOOL bDone;
-    DWORD dwProgressTick;
-    DWORD dwLastState;
-    DWORD dwLastCheckPoint;
 } SCM_PRESHUTDOWN_ITEM, *PSCM_PRESHUTDOWN_ITEM;
+
+
+/*
+ * How long the SCM waits for a service that got the preshutdown control, counted from when it begins to wait for that
+ * service (the services are waited for one after the other, so two services that never answer take twice as long).
+ * Measured on Windows Server 2022 with services that never answer and with ones that report STOP_PENDING (with
+ * advancing check points and wait hints), PreshutdownTimeout 1 s to 10 minutes, three runs of each row: the wait
+ * ends 25/16 of the PreshutdownTimeout after it began (1.7, 4.8, 8.0, 15.8, 23.6 and 31.4 s for 1, 3, 5, 10, 15
+ * and 20 s), and a service that has not reported STOP_PENDING is not waited for longer than for a timeout of 20 s
+ * (31.4 s for any longer timeout); the WaitToKillServiceTimeout has no part in it (it times the second phase).
+ */
+static
+DWORD
+ScmPreshutdownWaitLimit(
+    _In_ PSCM_PRESHUTDOWN_ITEM Item,
+    _In_ DWORD dwState)
+{
+    DWORD dwTimeout = Item->dwTimeout;
+    ULONGLONG ullLimit;
+
+    if (dwState != SERVICE_STOP_PENDING && dwTimeout > SCM_PRESHUTDOWN_SILENT_TIMEOUT_MAX)
+        dwTimeout = SCM_PRESHUTDOWN_SILENT_TIMEOUT_MAX;
+
+    ullLimit = (ULONGLONG)dwTimeout * 25 / 16;
+    if (ullLimit > SCM_PRESHUTDOWN_MAX_WAIT)
+        ullLimit = SCM_PRESHUTDOWN_MAX_WAIT;
+    return (DWORD)ullLimit;
+}
+
+
+/* WaitToKillServiceTimeout: how long the SCM waits for the services of the second phase, in milliseconds */
+static
+DWORD
+ScmGetShutdownWait(VOID)
+{
+    WCHAR szValue[16];
+    DWORD dwWait = SCM_SHUTDOWN_DEFAULT_WAIT, dwSize, dwType;
+    HKEY hKey;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control", 0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS)
+    {
+        dwSize = sizeof(szValue) - sizeof(WCHAR);
+        szValue[0] = UNICODE_NULL;
+        if (RegQueryValueExW(hKey, L"WaitToKillServiceTimeout", NULL, &dwType, (LPBYTE)szValue, &dwSize) == ERROR_SUCCESS)
+        {
+            if (dwType == REG_SZ)
+            {
+                szValue[dwSize / sizeof(WCHAR)] = UNICODE_NULL;
+                dwWait = wcstoul(szValue, NULL, 10);
+            }
+            else if (dwType == REG_DWORD && dwSize == sizeof(DWORD))
+            {
+                dwWait = *(PDWORD)szValue;
+            }
+        }
+        RegCloseKey(hKey);
+    }
+
+    return dwWait;
+}
 
 
 static
@@ -5105,7 +5163,7 @@ ScmPreshutdownSender(
     }
 
     ControlPacket->dwSize = PacketSize;
-    ControlPacket->dwControl = SERVICE_CONTROL_PRESHUTDOWN;
+    ControlPacket->dwControl = Item->dwControl;
     ControlPacket->hServiceStatus = Item->Service->dwStatusHandle;
     ControlPacket->dwServiceNameOffset = sizeof(SCM_CONTROL_PACKET);
     wcscpy((PWSTR)((ULONG_PTR)ControlPacket + ControlPacket->dwServiceNameOffset), pszName);
@@ -5151,17 +5209,18 @@ Done:
 }
 
 
+static
 VOID
-ScmPreshutdownServices(VOID)
+ScmShutdownPhase(
+    _In_ DWORD dwControl)
 {
     PLIST_ENTRY ServiceEntry;
     PSERVICE CurrentService;
     PSCM_PRESHUTDOWN_ITEM Items;
-    DWORD Count = 0, i, j, dwNow, dwValue, dwSize, dwType;
-    BOOL bAllDone;
+    DWORD Count = 0, i, j, dwNow, dwValue = 0, dwSize, dwType, dwBegin, dwLastBump;
     HKEY hKey;
 
-    DPRINT("ScmPreshutdownServices() called\n");
+    DPRINT("ScmShutdownPhase(%lu) called\n", dwControl);
 
     ScmLockDatabaseExclusive();
 
@@ -5176,18 +5235,24 @@ ScmPreshutdownServices(VOID)
     if (Items == NULL)
     {
         ScmUnlockDatabase();
-        DPRINT1("ScmPreshutdownServices(): out of memory\n");
+        DPRINT1("ScmShutdownPhase(): out of memory\n");
         return;
     }
 
-    /* Same rules as the SHUTDOWN: reference the service and the image under the lock, send without it */
+    /*
+     * Reference the service and the image under the lock, send without it. A service that accepts the preshutdown
+     * control gets that one in the first phase and no SHUTDOWN in the second (as on Windows, measured).
+     */
     Count = 0;
     ServiceEntry = ServiceListHead.Flink;
     while (ServiceEntry != &ServiceListHead)
     {
         CurrentService = CONTAINING_RECORD(ServiceEntry, SERVICE, ServiceListEntry);
 
-        if ((CurrentService->Status.dwControlsAccepted & SERVICE_ACCEPT_PRESHUTDOWN) &&
+        if ((dwControl == SERVICE_CONTROL_PRESHUTDOWN ?
+             (CurrentService->Status.dwControlsAccepted & SERVICE_ACCEPT_PRESHUTDOWN) != 0 :
+             ((CurrentService->Status.dwControlsAccepted & SERVICE_ACCEPT_SHUTDOWN) != 0 &&
+              !(CurrentService->Status.dwControlsAccepted & SERVICE_ACCEPT_PRESHUTDOWN))) &&
             (CurrentService->Status.dwCurrentState == SERVICE_RUNNING ||
              CurrentService->Status.dwCurrentState == SERVICE_START_PENDING) &&
             CurrentService->lpImage != NULL)
@@ -5195,6 +5260,7 @@ ScmPreshutdownServices(VOID)
             Items[Count].Image = ScmAcquireImageForControl(CurrentService, &Items[Count].hPipe);
             if (Items[Count].Image != NULL)
             {
+                Items[Count].dwControl = dwControl;
                 ScmReferenceService(CurrentService);
                 Items[Count++].Service = CurrentService;
             }
@@ -5211,12 +5277,15 @@ ScmPreshutdownServices(VOID)
         PSCM_PRESHUTDOWN_ITEM Item = &Items[i];
 
         Item->dwTimeout = SCM_PRESHUTDOWN_DEFAULT_TIMEOUT;
-        if (ScmOpenServiceKey(Item->Service->lpServiceName, KEY_READ, &hKey) == ERROR_SUCCESS)
+        if (dwControl == SERVICE_CONTROL_PRESHUTDOWN &&
+            ScmOpenServiceKey(Item->Service->lpServiceName, KEY_READ, &hKey) == ERROR_SUCCESS)
         {
-            dwSize = sizeof(dwValue);
-            if (RegQueryValueExW(hKey, L"PreshutdownTimeout", NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS &&
+            DWORD dwTimeout;
+
+            dwSize = sizeof(dwTimeout);
+            if (RegQueryValueExW(hKey, L"PreshutdownTimeout", NULL, &dwType, (LPBYTE)&dwTimeout, &dwSize) == ERROR_SUCCESS &&
                 dwType == REG_DWORD)
-                Item->dwTimeout = dwValue;
+                Item->dwTimeout = dwTimeout;
             RegCloseKey(hKey);
         }
 
@@ -5239,61 +5308,50 @@ ScmPreshutdownServices(VOID)
         }
     }
 
-    /* Wait while the services make progress */
+    /*
+     * Wait. The controls of the first phase are waited for one service after the other (the senders run side by
+     * side): a service is waited for until it is STOPPED, until its control could not be delivered or until its
+     * limit (ScmPreshutdownWaitLimit) has passed, counted from when the wait for it begins. The controls of the
+     * second phase are waited for all together: until every service is STOPPED or WaitToKillServiceTimeout has
+     * passed. The SCM tells the console server it is still within these bounded waits (ScmCountShutdownProgress).
+     */
+    dwBegin = GetTickCount();
+    dwLastBump = dwBegin;
     if (Count != 0)
-        ScmCountShutdownProgress();
-    for (;;)
     {
-        bAllDone = TRUE;
-        dwNow = GetTickCount();
+        ScmCountShutdownProgress();
+        dwValue = ScmGetShutdownWait();
+    }
+    for (i = 0; i < Count; i++)
+    {
+        PSCM_PRESHUTDOWN_ITEM Item = &Items[i];
 
-        for (i = 0; i < Count; i++)
+        if (dwControl == SERVICE_CONTROL_PRESHUTDOWN)
+            dwBegin = GetTickCount();
+
+        for (;;)
         {
-            PSCM_PRESHUTDOWN_ITEM Item = &Items[i];
             DWORD dwState = Item->Service->Status.dwCurrentState;
-            DWORD dwCheckPoint = Item->Service->Status.dwCheckPoint;
-
-            if (Item->bDone)
-                continue;
 
             if (dwState == SERVICE_STOPPED ||
                 (Item->bFinished && Item->dwSendError != ERROR_SUCCESS))
+                break;
+
+            dwNow = GetTickCount();
+            if (dwNow - dwBegin >= (dwControl == SERVICE_CONTROL_PRESHUTDOWN ? ScmPreshutdownWaitLimit(Item, dwState) : dwValue))
             {
-                Item->bDone = TRUE;
-                continue;
+                DPRINT1("Shutdown control %lu of %S: not answered in time, going on\n", dwControl, Item->Service->lpServiceName);
+                SetEvent(Item->hCancel);
+                break;
             }
 
-            bAllDone = FALSE;
-            if (!Item->bSent)
-                continue;
-
-            if (!Item->bTimed)
+            if (dwNow - dwLastBump >= SCM_SHUTDOWN_COUNT_PERIOD)
             {
-                Item->bTimed = TRUE;
-                Item->dwProgressTick = Item->dwSentTick;
-                Item->dwLastState = dwState;
-                Item->dwLastCheckPoint = dwCheckPoint;
-            }
-            else if (dwState != Item->dwLastState || dwCheckPoint != Item->dwLastCheckPoint)
-            {
-                Item->dwProgressTick = dwNow;
-                Item->dwLastState = dwState;
-                Item->dwLastCheckPoint = dwCheckPoint;
+                dwLastBump = dwNow;
                 ScmCountShutdownProgress();
             }
-
-            if (dwNow - Item->dwProgressTick >= Item->dwTimeout ||
-                dwNow - Item->dwSentTick >= SCM_PRESHUTDOWN_MAX_WAIT)
-            {
-                DPRINT1("Preshutdown of %S: no progress, going on\n", Item->Service->lpServiceName);
-                SetEvent(Item->hCancel);
-                Item->bDone = TRUE;
-            }
+            Sleep(SCM_PRESHUTDOWN_POLL);
         }
-
-        if (bAllDone)
-            break;
-        Sleep(SCM_PRESHUTDOWN_POLL);
     }
 
     /* End every sender that is still waiting for an answer, and wait for the senders */
@@ -5336,99 +5394,23 @@ ScmPreshutdownServices(VOID)
 
     HeapFree(GetProcessHeap(), 0, Items);
 
-    DPRINT("ScmPreshutdownServices() done\n");
+    DPRINT("ScmShutdownPhase(%lu) done\n", dwControl);
 }
 
 
+/* The first phase: the services that accept the preshutdown control */
+VOID
+ScmPreshutdownServices(VOID)
+{
+    ScmShutdownPhase(SERVICE_CONTROL_PRESHUTDOWN);
+}
+
+
+/* The second phase: the services that accept the shutdown control (and not the preshutdown control) */
 VOID
 ScmAutoShutdownServices(VOID)
 {
-    PLIST_ENTRY ServiceEntry;
-    PSERVICE CurrentService;
-    PSERVICE *Services;
-    PSERVICE_IMAGE *Images;
-    HANDLE *Pipes;
-    DWORD Count = 0, i;
-
-    DPRINT("ScmAutoShutdownServices() called\n");
-
-    /*
-     * The order of operations to send a control to a service is: lock, reference the service and take its
-     * image, unlock, send the control, lock, give the image back and dereference the service, unlock (see
-     * ScmReferenceService, ScmAcquireImageForControl). A service that answers the control with
-     * RSetServiceStatus needs the database lock itself, and the control is only sent with the lock released;
-     * the image (with the control pipe) stays valid if the service's process ends meanwhile.
-     */
-    ScmLockDatabaseExclusive();
-
-    ServiceEntry = ServiceListHead.Flink;
-    while (ServiceEntry != &ServiceListHead)
-    {
-        Count++;
-        ServiceEntry = ServiceEntry->Flink;
-    }
-
-    Services = HeapAlloc(GetProcessHeap(), 0,
-                         (SIZE_T)Count * (sizeof(PSERVICE) + sizeof(PSERVICE_IMAGE) + sizeof(HANDLE)));
-    if (Services == NULL)
-    {
-        ScmUnlockDatabase();
-        DPRINT1("ScmAutoShutdownServices(): out of memory\n");
-        return;
-    }
-    Images = (PSERVICE_IMAGE *)&Services[Count];
-    Pipes = (HANDLE *)&Images[Count];
-
-    Count = 0;
-    ServiceEntry = ServiceListHead.Flink;
-    while (ServiceEntry != &ServiceListHead)
-    {
-        CurrentService = CONTAINING_RECORD(ServiceEntry, SERVICE, ServiceListEntry);
-
-        /* A service that accepts the preshutdown control got that one (ScmPreshutdownServices) and gets no SHUTDOWN */
-        if ((CurrentService->Status.dwControlsAccepted & SERVICE_ACCEPT_SHUTDOWN) &&
-            !(CurrentService->Status.dwControlsAccepted & SERVICE_ACCEPT_PRESHUTDOWN) &&
-            (CurrentService->Status.dwCurrentState == SERVICE_RUNNING ||
-             CurrentService->Status.dwCurrentState == SERVICE_START_PENDING) &&
-            CurrentService->lpImage != NULL)
-        {
-            Images[Count] = ScmAcquireImageForControl(CurrentService, &Pipes[Count]);
-            if (Images[Count] != NULL)
-            {
-                ScmReferenceService(CurrentService);
-                Services[Count++] = CurrentService;
-            }
-        }
-
-        ServiceEntry = ServiceEntry->Flink;
-    }
-
-    /* Unlock the service database */
-    ScmUnlockDatabase();
-
-    for (i = 0; i < Count; i++)
-    {
-        CurrentService = Services[i];
-
-        /* Send the shutdown notification */
-        DPRINT("Shutdown service: %S\n", CurrentService->lpServiceName);
-        ScmControlService(Pipes[i],
-                          CurrentService->lpServiceName,
-                          SERVICE_CONTROL_SHUTDOWN,
-                          CurrentService->dwStatusHandle);
-    }
-
-    ScmLockDatabaseExclusive();
-    for (i = 0; i < Count; i++)
-    {
-        ScmReleaseImageAfterControlLocked(Images[i]);
-        ScmDereferenceService(Services[i]);
-    }
-    ScmUnlockDatabase();
-
-    HeapFree(GetProcessHeap(), 0, Services);
-
-    DPRINT("ScmAutoShutdownServices() done\n");
+    ScmShutdownPhase(SERVICE_CONTROL_SHUTDOWN);
 }
 
 
