@@ -1558,6 +1558,12 @@ AfdDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case IOCTL_AFD_WAIT_FOR_LISTEN:
             return AfdWaitForListen( DeviceObject, Irp, IrpSp );
 
+        case IOCTL_AFD_ADDRCHANGE_WAIT:
+            return AfdAddrChangeWait( DeviceObject, Irp, IrpSp );
+
+        case IOCTL_AFD_ADDRCHANGE_COMPLETE:
+            return AfdAddrChangeComplete( DeviceObject, Irp, IrpSp );
+
         case IOCTL_AFD_ACCEPT:
             return AfdAccept( DeviceObject, Irp, IrpSp );
 
@@ -1887,6 +1893,10 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
 
         case IOCTL_AFD_DISCONNECT:
             Function = FUNCTION_DISCONNECT;
+            break;
+
+        case IOCTL_AFD_ADDRCHANGE_WAIT:
+            Function = FUNCTION_ADDRCHANGE;
             break;
 
         default:
