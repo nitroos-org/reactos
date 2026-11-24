@@ -317,13 +317,14 @@ ObpCheckWithinBoundary(
 
     /*
      * A thread impersonating below SecurityImpersonation (identification or anonymous) may not act as its
-     * client: it is not judged by the client's SIDs, it is refused, as SeAccessCheck refuses such a context
-     * (Windows not measured: the stricter choice, to verify)
+     * client: it is not judged by the client's SIDs, it is refused. Measured on Windows Server 2022: a create at
+     * either level fails with ERROR_ACCESS_DENIED, while an open (the access check of the directory) fails with
+     * ERROR_BAD_IMPERSONATION_LEVEL.
      */
     if (SubjectContext.ClientToken != NULL && SubjectContext.ImpersonationLevel < SecurityImpersonation)
     {
         SeReleaseSubjectContext(&SubjectContext);
-        return STATUS_BAD_IMPERSONATION_LEVEL;
+        return STATUS_ACCESS_DENIED;
     }
 
     Token = (PTOKEN)SeQuerySubjectContextToken(&SubjectContext);
