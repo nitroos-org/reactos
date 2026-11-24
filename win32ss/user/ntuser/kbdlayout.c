@@ -658,16 +658,35 @@ static VOID co_IntSetKeyboardLayoutForProcess(PPROCESSINFO ppi, PKL pKL)
         if (bImmMode)
         {
             /* IntImmActivateLayout sends a message to the IME window of the thread, the USER lock is
-               released: the thread can end, and so can the next one of the list. ptiNode is held (not the
-               running thread: one that ends inside the message never gives a reference back), and the next
-               thread is taken after the message, from ptiNode while it is still on the list (a thread
-               leaves it in its exit cleanup, after TIF_INCLEANUP is set), else from the head of the list
-               again (the threads done have pKL and are skipped) */
-            if (ptiNode != ptiCurrent)
+               released: the thread can end, and so can the next one of the list. ptiNode is kept by its
+               IME window, which is held across the message (a window holds the THREADINFO of its thread).
+               Not with a THREADINFO reference: the running thread can be terminated while it waits for
+               the answer, and it would never give that reference back (ptiNode's THREADINFO, queue and
+               thread object stayed for good); the window's Co reference goes with the thread's cleanup.
+               Without an IME window there is no message. The next thread is taken after the message,
+               from ptiNode while it is still on the list (a thread leaves it in its exit cleanup, after
+               TIF_INCLEANUP is set), else from the head of the list again (the threads done have pKL and
+               are skipped) */
+            PWND pImeWnd = (ptiNode != ptiCurrent) ? ptiNode->spwndDefaultIme : NULL;
+            USER_REFERENCE_ENTRY RefIme;
+            BOOL bThreadRef = FALSE;
+
+            if (pImeWnd && pImeWnd->head.pti == ptiNode)
+            {
+                UserRefObjectCo(pImeWnd, &RefIme);
+            }
+            else if (pImeWnd)
+            {
+                /* An IME window of another thread does not keep ptiNode */
+                pImeWnd = NULL;
+                bThreadRef = TRUE;
                 IntReferenceThreadInfo(ptiNode);
+            }
             IntImmActivateLayout(ptiNode, pKL);
             ptiNext = (ptiNode->TIF_flags & TIF_INCLEANUP) ? ppi->ptiList : ptiNode->ptiSibling;
-            if (ptiNode != ptiCurrent)
+            if (pImeWnd)
+                UserDerefObjectCo(pImeWnd);
+            if (bThreadRef)
                 IntDereferenceThreadInfo(ptiNode);
         }
         else
