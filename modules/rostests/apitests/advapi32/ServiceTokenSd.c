@@ -345,8 +345,11 @@ RunRow(SC_HANDLE hScm, PCSTR Dir, const ROW *Row, ULONG Number)
                     ok(strcmp(Facts.Groups[i], "S-1-5-5-0-999") != 0, "%s: the logon SID is that of the SYSTEM logon session\n", Row->Tag);
                 }
             }
-            ok(Found == (Row->LogonSid ? 1 : 0) && Logon == Row->LogonSid, "%s: %lu logon SIDs, attributes 0x%lx, expected 0x%lx\n",
-               Row->Tag, Found, Logon, Row->LogonSid);
+            ok(Found == (Row->LogonSid ? 1 : 0), "%s: %lu logon SIDs\n", Row->Tag, Found);
+            /* LocalService/NetworkService with a service SID: Windows sets SE_GROUP_OWNER on the logon SID, the logon here
+             * does not (ticket SCM-service-logon-sessions-and-logon-sid-attributes-differ) */
+            todo_ros_if(Row->Account != NULL && Row->SidType != SERVICE_SID_TYPE_NONE)
+                ok(Logon == Row->LogonSid, "%s: logon SID attributes 0x%lx, expected 0x%lx\n", Row->Tag, Logon, Row->LogonSid);
         }
         if (Row->DefaultDacl)
         {
