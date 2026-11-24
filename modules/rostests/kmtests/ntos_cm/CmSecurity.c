@@ -463,18 +463,27 @@ static void CmSecurity_Win10(PSID TerminalServerSid)
     static const SID_IDENTIFIER_AUTHORITY AppAuthority = {{0, 0, 0, 0, 0, 15}};
     static const ULONG LpacSubAuthorities[10] =
         { 3, 1024, 1065365936, 1281604716, 3511738428u, 1654721687, 432734479, 3232135806u, 4053264122u, 3456934681u };
-    PSID LpacSid;
+    PSID LpacSid, AppPackagesSid;
     ULONG i;
 
     LpacSid = ExAllocatePoolWithTag(PagedPool, RtlLengthRequiredSid(10), 'iSmK');
-    if (LpacSid == NULL)
+    AppPackagesSid = ExAllocatePoolWithTag(PagedPool, RtlLengthRequiredSid(2), 'iSmK');
+    if (LpacSid == NULL || AppPackagesSid == NULL)
     {
-        skip(FALSE, "No memory for the LPAC capability SID\n");
+        skip(FALSE, "No memory for the application package SIDs\n");
+        if (LpacSid != NULL)
+            ExFreePoolWithTag(LpacSid, 'iSmK');
+        if (AppPackagesSid != NULL)
+            ExFreePoolWithTag(AppPackagesSid, 'iSmK');
         return;
     }
     RtlInitializeSid(LpacSid, (PSID_IDENTIFIER_AUTHORITY)&AppAuthority, 10);
     for (i = 0; i < 10; i++)
         *RtlSubAuthoritySid(LpacSid, i) = LpacSubAuthorities[i];
+    /* ALL APPLICATION PACKAGES, S-1-15-2-1 (the kernel's exports do not carry it on every system) */
+    RtlInitializeSid(AppPackagesSid, (PSID_IDENTIFIER_AUTHORITY)&AppAuthority, 2);
+    *RtlSubAuthoritySid(AppPackagesSid, 0) = 2;
+    *RtlSubAuthoritySid(AppPackagesSid, 1) = 1;
 
     /* The master keys: owner SYSTEM */
     ExpectedKeyOwner = SeExports->SeLocalSystemSid;
@@ -484,7 +493,7 @@ static void CmSecurity_Win10(PSID TerminalServerSid)
                         ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeAliasAdminsSid,    KEY_ALL_ACCESS, \
                         ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeWorldSid,          KEY_READ,       \
                         ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeRestrictedSid,     KEY_READ,       \
-                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeAllAppPackagesSid, KEY_READ,       \
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, AppPackagesSid,                 KEY_READ,       \
                         ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, LpacSid,                        KEY_READ)
     MASTER_KEY_ACES(L"\\REGISTRY");
     MASTER_KEY_ACES(L"\\REGISTRY\\MACHINE");
@@ -500,7 +509,7 @@ static void CmSecurity_Win10(PSID TerminalServerSid)
                         ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeAliasAdminsSid,    KEY_ALL_ACCESS, \
                         ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeLocalSystemSid,    KEY_ALL_ACCESS, \
                         ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeCreatorOwnerSid,   KEY_ALL_ACCESS, \
-                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeAllAppPackagesSid, KEY_READ,       \
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, AppPackagesSid,                 KEY_READ,       \
                         ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, LpacSid,                        KEY_READ)
     HIVE_ROOT_ACES(L"\\REGISTRY\\MACHINE\\SAM");
     HIVE_ROOT_ACES(L"\\REGISTRY\\MACHINE\\SOFTWARE");
@@ -518,7 +527,7 @@ static void CmSecurity_Win10(PSID TerminalServerSid)
                         ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeAliasAdminsSid,    KEY_ALL_ACCESS, \
                         ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeLocalSystemSid,    KEY_ALL_ACCESS, \
                         ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeCreatorOwnerSid,   KEY_ALL_ACCESS, \
-                        ACCESS_ALLOWED_ACE_TYPE,                     0, SeExports->SeAllAppPackagesSid, KEY_READ,       \
+                        ACCESS_ALLOWED_ACE_TYPE,                     0, AppPackagesSid,                 KEY_READ,       \
                         ACCESS_ALLOWED_ACE_TYPE,                     0, LpacSid,                        KEY_READ)
     DEFAULT_USER_ACES(L"\\REGISTRY\\USER\\.DEFAULT");
     DEFAULT_USER_ACES(L"\\REGISTRY\\USER\\S-1-5-18");
@@ -534,9 +543,10 @@ static void CmSecurity_Win10(PSID TerminalServerSid)
                                                  CONTAINER_INHERIT_ACE, SeExports->SeAliasAdminsSid,    KEY_ALL_ACCESS,
                         ACCESS_ALLOWED_ACE_TYPE, OBJECT_INHERIT_ACE |
                                                  CONTAINER_INHERIT_ACE, SeExports->SeRestrictedSid,     KEY_READ,
-                        ACCESS_ALLOWED_ACE_TYPE,                     0, SeExports->SeAllAppPackagesSid, KEY_READ,
+                        ACCESS_ALLOWED_ACE_TYPE,                     0, AppPackagesSid,                 KEY_READ,
                         ACCESS_ALLOWED_ACE_TYPE,                     0, LpacSid,                        KEY_READ);
 
+    ExFreePoolWithTag(AppPackagesSid, 'iSmK');
     ExFreePoolWithTag(LpacSid, 'iSmK');
 }
 
