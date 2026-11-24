@@ -658,6 +658,32 @@ Done:
     KeReleaseSpinLock(&IgmpLock, OldIrql);
 }
 
+ULONG
+IGMPCopyGroups(ULONG IfIndex, PULONG Groups, ULONG Capacity)
+{
+    PIGMP_INTERFACE IF;
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+    ULONG Seen = 0;
+
+    if (!IgmpStarted)
+        return 0;
+    KeAcquireSpinLock(&IgmpLock, &OldIrql);
+    IF = IgmpFindInterface(IfIndex, FALSE);
+    for (Entry = IF ? IF->Groups.Flink : NULL; IF && Entry != &IF->Groups; Entry = Entry->Flink)
+    {
+        PIGMP_GROUP G = CONTAINING_RECORD(Entry, IGMP_GROUP, Entry);
+
+        if (!G->Member)
+            continue;
+        if (Groups && Seen < Capacity)
+            Groups[Seen] = G->Group;
+        Seen++;
+    }
+    KeReleaseSpinLock(&IgmpLock, OldIrql);
+    return Seen;
+}
+
 VOID
 IGMPInterfaceRefresh(ULONG IfIndex)
 {
