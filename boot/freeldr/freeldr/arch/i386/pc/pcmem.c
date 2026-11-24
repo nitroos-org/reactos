@@ -605,6 +605,51 @@ PcMemFinalizeMemoryMap(
 /* FIXME: Abstract things better so we don't need to place define here */
 #if !defined(SARCH_XBOX) && !defined(SARCH_PC98)
 
+/*
+ * With the A20 line enabled, real-mode code reaches 0xFFF0 bytes above
+ * 1 MB (segment FFFFh). The loader calls the BIOS until it starts the
+ * kernel, and a BIOS that writes through a stale segment register lands
+ * there: SeaBIOS' LSI SAS1068 driver built with GCC 15 clears every disk
+ * request block through ES while the block is on its own stack, which
+ * puts 56 zero bytes at about 0x1049AC on each INT 13h read. Keep the
+ * loader's own data (heap, images, loader block) out of that range while
+ * the BIOS is in use. The range stays usable RAM for the kernel
+ * (firmware temporary memory is freed when the kernel takes over).
+ * It is only taken when the firmware reports all of it as free RAM.
+ */
+#define REAL_MODE_HIGH_BASE 0x100000
+#define REAL_MODE_HIGH_SIZE 0x10000
+
+static VOID
+PcMemReserveRealModeHighArea(
+    PFREELDR_MEMORY_DESCRIPTOR MemoryMap)
+{
+    PFN_NUMBER BasePage = REAL_MODE_HIGH_BASE / PAGE_SIZE;
+    PFN_NUMBER EndPage = (REAL_MODE_HIGH_BASE + REAL_MODE_HIGH_SIZE) / PAGE_SIZE;
+    PFN_NUMBER Covered = 0;
+    ULONG i;
+
+    for (i = 0; i < PcMapCount; i++)
+    {
+        PFN_NUMBER First = max(MemoryMap[i].BasePage, BasePage);
+        PFN_NUMBER Last = min(MemoryMap[i].BasePage + MemoryMap[i].PageCount, EndPage);
+
+        if (First >= Last)
+            continue;
+
+        /* Anything other than free RAM in the range: leave the map alone */
+        if (MemoryMap[i].MemoryType != LoaderFree)
+            return;
+
+        Covered += Last - First;
+    }
+
+    if (Covered != EndPage - BasePage)
+        return;
+
+    SetMemory(MemoryMap, REAL_MODE_HIGH_BASE, REAL_MODE_HIGH_SIZE, LoaderFirmwareTemporary);
+}
+
 PFREELDR_MEMORY_DESCRIPTOR
 PcMemGetMemoryMap(ULONG *MemoryMapSize)
 {
@@ -666,6 +711,9 @@ PcMemGetMemoryMap(ULONG *MemoryMapSize)
     SetMemory(PcMemoryMap, 0x0A0000, 0x50000, LoaderFirmwarePermanent); // Video memory
     SetMemory(PcMemoryMap, 0x0F0000, 0x10000, LoaderSpecialMemory); // ROM
     SetMemory(PcMemoryMap, 0xFFF000, 0x01000, LoaderSpecialMemory); // unusable memory (do we really need this?)
+
+    /* Memory real-mode BIOS code can reach above 1 MB */
+    PcMemReserveRealModeHighArea(PcMemoryMap);
 
     *MemoryMapSize = PcMemFinalizeMemoryMap(PcMemoryMap);
     return PcMemoryMap;
