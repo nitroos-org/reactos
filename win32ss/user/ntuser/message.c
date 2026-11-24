@@ -561,7 +561,8 @@ UnpackParam(LPARAM lParamPacked, UINT Msg, WPARAM wParam, LPARAM lParam, BOOL No
    NtUserMessageCall otherwise. The sender can leave while the window procedure runs (its thread ends, or its
    timeout expires), and the write-back after the procedure must not go to that buffer then. The receiver
    works on a copy of its own (NULL: no copy needed, or none possible) and hands the result back only to a
-   sender that still waits. */
+   sender that still waits. The receiver holds the copy across the window procedure and frees it after
+   IntReturnSentMessageLParam (UserHoldPoolCo / UserFreePoolCo). */
 LPARAM FASTCALL
 IntCopySentMessageLParam(UINT Msg, WPARAM wParam, LPARAM lParam)
 {
@@ -639,8 +640,6 @@ IntReturnSentMessageLParam(UINT Msg, WPARAM wParam, LPARAM lParam, LPARAM Copy, 
         }
         _SEH2_END;
     }
-
-    ExFreePoolWithTag((PVOID)Copy, TAG_MSG);
 }
 
 static NTSTATUS FASTCALL
