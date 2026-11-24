@@ -2631,6 +2631,12 @@ void ngc_set_journal_stall(unsigned long ms)
 {
 	kshim_jnl_stall_ms = ms;
 }
+
+void ngc_set_journal_hdr_fail(unsigned long n, unsigned long after)
+{
+	kshim_jnl_hdr_fail_after = after;
+	kshim_jnl_hdr_fail = n;
+}
 #endif
 
 static int ngc_dev_write(struct ngc_vol *v, u64 off, const u8 *buf, u64 len)
