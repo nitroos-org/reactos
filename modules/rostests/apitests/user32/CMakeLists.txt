@@ -64,6 +64,7 @@ list(APPEND SOURCE
     GW_ENABLEDPOPUP.c
     Handle32.c
     HandleQuota.c
+    UserHandleTable.c
     HookInputBatch.c
     UserLowsBatch.c
     HookChainUnhookUaf.c

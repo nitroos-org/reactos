@@ -93,6 +93,7 @@ extern void func_GW_ENABLEDPOPUP(void);
 extern void func_Handle32(void);
 extern void func_HandleQuota(void);
 extern void func_HandleQuotaChild(void);
+extern void func_UserHandleTable(void);
 extern void func_HookInputBatch(void);
 extern void func_UserLowsBatch(void);
 extern void func_HookChainUnhookUaf(void);
@@ -320,6 +321,7 @@ const struct test winetest_testlist[] =
     { "Handle32", func_Handle32 },
     { "HandleQuota", func_HandleQuota },
     { "HandleQuotaChild", func_HandleQuotaChild },
+    { "UserHandleTable", func_UserHandleTable },
     { "HookInputBatch", func_HookInputBatch },
     { "UserLowsBatch", func_UserLowsBatch },
     { "HookChainUnhookUaf", func_HookChainUnhookUaf },

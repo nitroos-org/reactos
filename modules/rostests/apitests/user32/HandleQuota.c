@@ -178,13 +178,7 @@ START_TEST(HandleQuota)
        GetGuiResources(Process, GR_GDIOBJECTS));
 
     /* USER: hooks of the thread for mouse messages (they take no desktop heap: menus, windows and cursors run out of it first).
-       The table of user handles of a session holds 4096 entries here (a quota of 10000 is never reached before it is full;
-       Windows has 65536): the rows run with the lowest values the registry takes, as the test of the quota does after a restart */
-    if (UserQuota > 3000)
-    {
-        skip("the USER quota %lu is above what the handle table of the session holds\n", UserQuota);
-        goto Done;
-    }
+       The table of user handles of a session holds 21162 (amd64) or 32744 (i386) entries, more than a quota (200..18000) lets one process take */
     Start = GetGuiResources(Process, GR_USEROBJECTS);
     Count = 0;
     SetLastError(0);
@@ -216,7 +210,6 @@ START_TEST(HandleQuota)
         UnhookWindowsHookEx(Tables[i]);
     ok(GetGuiResources(Process, GR_USEROBJECTS) == Start, "USER objects are left: %lu\n",
        GetGuiResources(Process, GR_USEROBJECTS));
-Done:
     HeapFree(GetProcessHeap(), 0, Regions);
     HeapFree(GetProcessHeap(), 0, Tables);
 }
