@@ -123,9 +123,14 @@ NtLdrEnumerateBootEntries(
 
 // Question 1: What if config file is optional?
 // Question 2: What if many config files are possible?
+//
+// On an EFI system partition the loader is not freeldr.sys but the file Setup
+// copies to \EFI\NITROOS (see bootsup.c), and the boot entries are in the
+// freeldr.ini next to the EFI directory: without it no boot store of a UEFI
+// computer is ever found and its installations are never offered for upgrade.
 NTOS_BOOT_LOADER_FILES NtosBootLoaders[] =
 {
-    {FreeLdr, L"freeldr.sys\0" L"rosload.exe\0", L"freeldr.ini",
+    {FreeLdr, L"freeldr.sys\0" L"rosload.exe\0" L"EFI\\NITROOS\\BOOTX64.EFI\0" L"EFI\\NITROOS\\BOOTIA32.EFI\0", L"freeldr.ini",
         OpenIniBootLoaderStore, CloseIniBootLoaderStore, (PENUM_BOOT_STORE_ENTRIES)FreeLdrEnumerateBootEntries},
     {NtLdr  , L"ntldr\0" L"osloader.exe\0", L"boot.ini",
         OpenIniBootLoaderStore, CloseIniBootLoaderStore, (PENUM_BOOT_STORE_ENTRIES)NtLdrEnumerateBootEntries  },
