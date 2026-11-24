@@ -844,7 +844,8 @@ SmbReplyStatus(PSMB_REQUEST Request, ULONG MaxDataLength, PVOID *Data, PULONG Da
         !(Status == STATUS_BUFFER_OVERFLOW &&
           (Request->Opcode == SmbUpQueryInfo || Request->Opcode == SmbUpQueryVolume ||
            Request->Opcode == SmbUpQueryDirectory)) &&
-        !(Status == STATUS_NO_MORE_FILES && Request->Opcode == SmbUpQueryDirectory))
+        !(Status == STATUS_NO_MORE_FILES && Request->Opcode == SmbUpQueryDirectory) &&
+        !((Status == STATUS_NOTIFY_ENUM_DIR || Status == STATUS_NOTIFY_CLEANUP) && Request->Opcode == SmbUpNotify))
     {
         DPRINT1("mrxsmb: engine status %lx refused (op %u)\n", Status, Request->Opcode);
         return STATUS_INVALID_NETWORK_RESPONSE;
@@ -861,7 +862,9 @@ SmbReplyStatus(PSMB_REQUEST Request, ULONG MaxDataLength, PVOID *Data, PULONG Da
         return STATUS_INVALID_NETWORK_RESPONSE;
     }
 
-    if (NT_ERROR(Status) || Status == STATUS_NO_MORE_FILES)
+    /* Without data: errors, the end of a directory, and a notification that only says "enumerate again" */
+    if (NT_ERROR(Status) || Status == STATUS_NO_MORE_FILES || Status == STATUS_NOTIFY_ENUM_DIR ||
+        Status == STATUS_NOTIFY_CLEANUP)
         return Status;
 
     /* Success or overflow: the fixed part must be there */

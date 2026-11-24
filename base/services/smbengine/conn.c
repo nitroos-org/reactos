@@ -94,6 +94,8 @@ SmbEngMapStatus(USHORT Opcode, uint32_t Status)
     }
     if (Status == (uint32_t)STATUS_NO_MORE_FILES && Opcode == SmbUpQueryDirectory)
         return STATUS_NO_MORE_FILES;
+    if ((Status == (uint32_t)STATUS_NOTIFY_ENUM_DIR || Status == (uint32_t)STATUS_NOTIFY_CLEANUP) && Opcode == SmbUpNotify)
+        return (NTSTATUS)Status;
     return STATUS_UNEXPECTED_NETWORK_ERROR;
 }
 
@@ -1169,6 +1171,45 @@ IssueHandleOp(PSMBENG_CONN Conn, PSMBENG_OP Op)
             return;
         }
 
+        case SmbUpNotify:
+        {
+            PSMBUP_NOTIFY_REQUEST r = (PSMBUP_NOTIFY_REQUEST)(h + 1);
+            struct smb2_change_notify_request req;
+            struct smb2_pdu *pdu;
+
+            if (r->OutputLength > SMBUP_MAX_INFO || (r->Flags & ~SMBUP_NOTIFY_WATCH_TREE) != 0)
+            {
+                FailOp(Conn, Op, STATUS_INVALID_PARAMETER);
+                return;
+            }
+            if (Conn->LongCount >= SMBENG_MAX_LONG_PER_CONN)
+            {
+                FailOp(Conn, Op, STATUS_INSUFFICIENT_RESOURCES);
+                return;
+            }
+            if (!AllocReply(Op, DATA_OFFSET + r->OutputLength))
+            {
+                FailOp(Conn, Op, STATUS_INSUFFICIENT_RESOURCES);
+                return;
+            }
+            Op->DataOffset = DATA_OFFSET;
+            Op->DataMax = r->OutputLength;
+            memset(&req, 0, sizeof(req));
+            req.flags = (r->Flags & SMBUP_NOTIFY_WATCH_TREE) ? SMB2_CHANGE_NOTIFY_WATCH_TREE : 0;
+            req.output_buffer_length = r->OutputLength;
+            req.completion_filter = r->CompletionFilter;
+            memcpy(req.file_id, File->FileId, SMB2_FD_SIZE);
+            /* Waits at the server until something changes: no time limit (the driver cancels it) */
+            Op->LongWait = TRUE;
+            smb2_set_timeout(Conn->Smb2, 0);
+            pdu = smb2_cmd_change_notify_async(Conn->Smb2, &req, OpCb, Op);
+            smb2_set_timeout(Conn->Smb2, (int)SmbEngConfig.RequestTimeoutSeconds);
+            SmbEngLog(2, "request %I64u notify filter %08lx flags %lx length %lu", h->RequestId, r->CompletionFilter,
+                      r->Flags, r->OutputLength);
+            Track(Conn, Op, pdu);
+            return;
+        }
+
         default:
             FailOp(Conn, Op, STATUS_NOT_SUPPORTED);
             return;
@@ -1570,6 +1611,34 @@ OpCb(struct smb2_context *smb2, int status, void *command_data, void *private_da
             if (qr->output_buffer_length)
                 memcpy(Op->Reply + Op->DataOffset, qr->output_buffer, qr->output_buffer_length);
             Data->Length = qr->output_buffer_length;
+            Data->DataOffset = Op->DataOffset;
+            Op->ReplySize = Op->DataOffset + Data->Length;
+            break;
+        }
+
+        case SmbUpNotify:
+        {
+            const struct smb2_change_notify_reply *nr = command_data;
+
+            /* "Enumerate again" (and the server's own cleanup) carry no entries */
+            if (Status == STATUS_NOTIFY_ENUM_DIR || Status == STATUS_NOTIFY_CLEANUP)
+            {
+                Data->Length = 0;
+                Data->DataOffset = 0;
+                break;
+            }
+            if (!NT_SUCCESS(Status))
+                break;
+            /* The entries as the server sent them, at most what was asked for; the driver checks the chain */
+            if (nr == NULL || nr->output_buffer_length > Op->DataMax ||
+                (nr->output == NULL && nr->output_buffer_length != 0))
+            {
+                Status = STATUS_INVALID_NETWORK_RESPONSE;
+                break;
+            }
+            if (nr->output_buffer_length)
+                memcpy(Op->Reply + Op->DataOffset, nr->output, nr->output_buffer_length);
+            Data->Length = nr->output_buffer_length;
             Data->DataOffset = Op->DataOffset;
             Op->ReplySize = Op->DataOffset + Data->Length;
             break;

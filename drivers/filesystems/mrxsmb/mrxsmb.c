@@ -2108,6 +2108,179 @@ SmbLock(PRX_CONTEXT RxContext)
                        RxContext->CurrentIrp, Async);
 }
 
+/* Change notifications *****************************************************/
+
+/*
+ * The FILE_NOTIFY_INFORMATION chain of a NOTIFY reply, as the server sent it ([MS-FSCC] 2.7.1): every
+ * entry and its name inside the data, NextEntryOffset a multiple of 4 past the entry's name. A last
+ * entry whose NextEntryOffset points exactly at the end of the data gets 0 (as SmbCheckEntryChain).
+ */
+static
+BOOLEAN
+SmbCheckNotifyChain(PUCHAR Data, ULONG Length)
+{
+    const ULONG Fixed = FIELD_OFFSET(FILE_NOTIFY_INFORMATION, FileName);
+    ULONG Offset = 0, Next, NameLength;
+
+    if (Length == 0)
+        return TRUE;
+    if (Data == NULL)
+        return FALSE;
+    for (;;)
+    {
+        if (Length - Offset < Fixed)
+            return FALSE;
+        Next = *(ULONG UNALIGNED *)(Data + Offset);
+        NameLength = *(ULONG UNALIGNED *)(Data + Offset + FIELD_OFFSET(FILE_NOTIFY_INFORMATION, FileNameLength));
+        if (NameLength > Length - Offset - Fixed || (NameLength & 1))
+            return FALSE;
+        if (Next == 0)
+            return TRUE;
+        if (Next < Fixed + NameLength || (Next & 3) != 0 || Next > Length - Offset)
+            return FALSE;
+        if (Next == Length - Offset)
+        {
+            *(ULONG UNALIGNED *)(Data + Offset) = 0;
+            return TRUE;
+        }
+        Offset += Next;
+    }
+}
+
+/* RxContext->MRxContext of a NOTIFY the server has: its request id (as a lock's), and whether the
+ * cleanup of its handle ended it (rather than a cancel of the IRP) */
+#define SmbNotifyRequestId(RxContext) SmbLockRequestId(RxContext)
+#define SmbNotifyClosed(RxContext) ((RxContext)->MRxContext[2])
+
+static
+ULONG
+SmbNotifyOutputLength(PRX_CONTEXT RxContext)
+{
+    return min(RxContext->LowIoContext.ParamsFor.NotifyChangeDirectory.NotificationBufferLength, SMBUP_MAX_INFO);
+}
+
+/* A NOTIFY ended (answered, given up, or the engine went) */
+static
+VOID
+SmbNotifyCompletion(PSMB_REQUEST Request)
+{
+    PRX_CONTEXT RxContext = Request->CompletionContext;
+    PVOID Data;
+    ULONG DataLength;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    RxSetMinirdrCancelRoutine(RxContext, NULL);
+    Status = SmbReplyStatus(Request, SmbNotifyOutputLength(RxContext), &Data, &DataLength);
+    if (Status == STATUS_SUCCESS)
+    {
+        /* The server's entries reach the caller's buffer only as a well-formed chain */
+        if (!SmbCheckNotifyChain(Data, DataLength))
+        {
+            Status = STATUS_INVALID_NETWORK_RESPONSE;
+            DataLength = 0;
+        }
+        else if (DataLength != 0)
+        {
+            RtlCopyMemory(RxContext->LowIoContext.ParamsFor.NotifyChangeDirectory.pNotificationBuffer, Data, DataLength);
+        }
+    }
+    else
+    {
+        DataLength = 0;
+        /* Ended by the cleanup of its handle, not by a cancel of its IRP: as a local directory's
+         * notification at cleanup (FsRtlNotifyCleanup) */
+        if (Status == STATUS_CANCELLED && SmbNotifyClosed(RxContext) != NULL)
+            Status = STATUS_NOTIFY_CLEANUP;
+    }
+    SmbReleaseRequest(Request);
+
+    RxContext->IoStatusBlock.Status = Status;
+    RxContext->IoStatusBlock.Information = DataLength;
+    RxLowIoCompletion(RxContext);
+}
+
+/* rdbss's cancel of a pended NOTIFY: CancelIo of its IRP, or the cleanup of its handle */
+static
+NTSTATUS
+NTAPI
+SmbNotifyCancel(PRX_CONTEXT RxContext)
+{
+    PAGED_CODE();
+
+    if (RxContext->CurrentIrp == NULL || !RxContext->CurrentIrp->Cancel)
+        SmbNotifyClosed(RxContext) = (PVOID)1;
+    SmbCancelRequestById(SmbNotifyRequestId(RxContext));
+    return STATUS_SUCCESS;
+}
+
+/*
+ * LOWIO_OP_NOTIFY_CHANGE_DIRECTORY (always asynchronous in rdbss): the request waits at the server
+ * without a time limit; rdbss's cancel (CancelIo, the cleanup of the handle) ends it. The output is
+ * at most SMBUP_MAX_INFO bytes (a larger buffer is asked for with that much).
+ */
+static
+NTSTATUS
+NTAPI
+SmbNotify(PRX_CONTEXT RxContext)
+{
+    PLOWIO_CONTEXT LowIo = &RxContext->LowIoContext;
+    PSMBUP_NOTIFY_REQUEST Fixed;
+    PSMB_SRVOPEN Handle;
+    PSMB_REQUEST Request;
+    PMRX_V_NET_ROOT VNetRoot;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    RxContext->IoStatusBlock.Information = 0;
+    if (!BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION))
+        return STATUS_INVALID_DEVICE_REQUEST;
+    if (LowIo->ParamsFor.NotifyChangeDirectory.pNotificationBuffer == NULL &&
+        LowIo->ParamsFor.NotifyChangeDirectory.NotificationBufferLength != 0)
+        return STATUS_INVALID_USER_BUFFER;
+
+    Status = SmbGetHandle(RxContext->pRelevantSrvOpen, &Handle);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    VNetRoot = RxContext->pRelevantSrvOpen->pVNetRoot;
+    Status = SmbAllocateRequestForIrp(SmbUpNotify, 0, &VNetRoot->LogonId, RxContext->CurrentIrp, &Request);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Request->Irp = RxContext->CurrentIrp;
+    Fixed = SmbRequestFixed(Request);
+    Fixed->ConnectionId = Handle->ConnectionId;
+    Fixed->FileId = Handle->FileId;
+    Fixed->CompletionFilter = LowIo->ParamsFor.NotifyChangeDirectory.CompletionFilter;
+    Fixed->OutputLength = SmbNotifyOutputLength(RxContext);
+    Fixed->Flags = LowIo->ParamsFor.NotifyChangeDirectory.WatchTree ? SMBUP_NOTIFY_WATCH_TREE : 0;
+
+    /* As a lock of an asynchronous request (SmbSendLock) */
+    SmbNotifyClosed(RxContext) = NULL;
+    SmbNotifyRequestId(RxContext) = SmbAssignRequestId(Request);
+    if (!NT_SUCCESS(RxSetMinirdrCancelRoutine(RxContext, SmbNotifyCancel)))
+    {
+        SmbReleaseRequest(Request);
+        return STATUS_CANCELLED;
+    }
+    InterlockedIncrement((volatile long *)&RxContext->ReferenceCount);
+    Status = SmbSendRequestAsync(Request, SmbNotifyCompletion, RxContext);
+    if (Status != STATUS_PENDING)
+    {
+        RxSetMinirdrCancelRoutine(RxContext, NULL);
+        SmbReleaseRequest(Request);
+    }
+    else if (BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_CANCELLED))
+    {
+        if (RxContext->CurrentIrp == NULL || !RxContext->CurrentIrp->Cancel)
+            SmbNotifyClosed(RxContext) = (PVOID)1;
+        SmbCancelRequestById(SmbNotifyRequestId(RxContext));
+    }
+    RxDereferenceAndDeleteRxContext(RxContext);
+    return Status;
+}
+
 /* LOWIO_OP_UNLOCK_MULTIPLE: unlock-all (by key) and the cleanup of a handle; synchronous (rdbss) */
 static
 NTSTATUS
@@ -2799,6 +2972,7 @@ SmbInitializeDispatch(VOID)
     SmbDispatch.MRxLowIOSubmit[LOWIO_OP_EXCLUSIVELOCK] = SmbLock;
     SmbDispatch.MRxLowIOSubmit[LOWIO_OP_UNLOCK] = SmbLock;
     SmbDispatch.MRxLowIOSubmit[LOWIO_OP_UNLOCK_MULTIPLE] = SmbUnlockMultiple;
+    SmbDispatch.MRxLowIOSubmit[LOWIO_OP_NOTIFY_CHANGE_DIRECTORY] = SmbNotify;
 
     SmbDispatch.MRxTruncate = SmbNotSupported;
     SmbDispatch.MRxZeroExtend = SmbNotSupported;

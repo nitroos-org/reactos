@@ -9220,7 +9220,11 @@ RxNotifyChangeDirectory(
         }
         else
         {
-            Status = STATUS_INVALID_PARAMETER;
+            /* No buffer to report into: a request without a buffer fails as on a Windows redirector
+             * (Windows Server 2022 as a client of Samba and Windows shares: ReadDirectoryChangesW with
+             * a length of 0 fails at once with error 1450, STATUS_INSUFFICIENT_RESOURCES) */
+            Status = (Stack->Parameters.NotifyDirectory.Length == 0) ? STATUS_INSUFFICIENT_RESOURCES :
+                                                                       STATUS_INVALID_PARAMETER;
         }
     }
     _SEH2_FINALLY
