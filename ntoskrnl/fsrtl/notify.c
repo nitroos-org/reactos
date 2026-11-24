@@ -160,6 +160,9 @@ FsRtlCancelNotify(IN PDEVICE_OBJECT DeviceObject,
     /* Get REAL_NOTIFY_SYNC struct */
     RealNotifySync = NotifyChange->NotifySync;
 
+    /* The package takes its mutex unsafely: file systems call it inside a critical region, the I/O manager calls
+     * the cancel routine from any thread (a cancel, the rundown of an exiting thread), so enter one here */
+    KeEnterCriticalRegion();
     FsRtlNotifyAcquireFastMutex(RealNotifySync);
 
    _SEH2_TRY
@@ -324,6 +327,7 @@ FsRtlCancelNotify(IN PDEVICE_OBJECT DeviceObject,
     _SEH2_FINALLY
     {
         FsRtlNotifyReleaseFastMutex(RealNotifySync);
+        KeLeaveCriticalRegion();
 
         /* If the subject security context was captured, release and free it */
         if (SubjectContext)
