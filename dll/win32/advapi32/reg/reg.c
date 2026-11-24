@@ -64,13 +64,16 @@ static NTSTATUS OpenUsersKey (PHANDLE KeyHandle);
 static NTSTATUS OpenCurrentConfigKey(PHANDLE KeyHandle);
 
 #ifndef _ADVAPI32_VISTA_
+/* this system's own open option (no Windows program uses it): the kernel hands out an ordinary handle for a Perflib language key */
+#define PERFLIB_REG_OPTION_DONT_VIRTUALIZE 0x40000000
+
 /* The registry key that holds the counter and help texts the text performance keys stand for */
 static LONG
 OpenPerflibTextKey(OUT PHKEY KeyHandle)
 {
     return RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                          L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Perflib\\009",
-                         0,
+                         PERFLIB_REG_OPTION_DONT_VIRTUALIZE,
                          KEY_READ,
                          KeyHandle);
 }
@@ -4180,18 +4183,32 @@ RegOpenKeyExW(HKEY hKey,
      * SeRestorePrivilege enabled the open gets the backup/restore rights whatever the key's DACL says,
      * which is how backup tools and a caller handing a locked key back open it
      */
-    if (ulOptions & REG_OPTION_BACKUP_RESTORE)
+    if (ulOptions & (REG_OPTION_BACKUP_RESTORE | PERFLIB_REG_OPTION_DONT_VIRTUALIZE))
     {
         Status = NtOpenKeyEx((PHANDLE)phkResult,
                              samDesired,
                              &ObjectAttributes,
-                             REG_OPTION_BACKUP_RESTORE);
+                             ulOptions & (REG_OPTION_BACKUP_RESTORE | PERFLIB_REG_OPTION_DONT_VIRTUALIZE));
     }
     else
     {
         Status = NtOpenKey((PHANDLE)phkResult,
                            samDesired,
                            &ObjectAttributes);
+    }
+
+    /*
+     * The Perflib language keys (Perflib\009, Perflib\CurrentLanguage) are not opened: the kernel answers
+     * STATUS_PREDEFINED_HANDLE and the caller gets the text performance key in the handle's place, the English
+     * one for 009 and the one of the user's language for CurrentLanguage (as Windows does).
+     */
+    if (Status == STATUS_PREDEFINED_HANDLE)
+    {
+        PCWSTR Last = wcsrchr(SubKeyString.Buffer, L'\\');
+
+        NtClose(*phkResult);
+        *phkResult = (Last ? Last + 1 : SubKeyString.Buffer)[0] == L'0' ? HKEY_PERFORMANCE_TEXT : HKEY_PERFORMANCE_NLSTEXT;
+        Status = STATUS_SUCCESS;
     }
 
 Exit:

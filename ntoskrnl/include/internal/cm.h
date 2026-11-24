@@ -251,6 +251,11 @@ typedef struct _CM_KEY_BODY
     /* ReactOS specific -- KeySetHandleTagsInformation: the tags the caller
      * set on this handle (per handle, not per key; nothing here reads them) */
     ULONG HandleTags;
+
+    /* ReactOS specific -- the handle of a Perflib language key (Perflib\009, Perflib\CurrentLanguage) that NtOpenKey
+     * answered with STATUS_PREDEFINED_HANDLE: advapi32 hands out HKEY_PERFORMANCE_TEXT / HKEY_PERFORMANCE_NLSTEXT in
+     * its place, and the registry calls that read or change the key refuse the handle (STATUS_INVALID_HANDLE) */
+    BOOLEAN PerflibText;
 } CM_KEY_BODY, *PCM_KEY_BODY;
 
 //

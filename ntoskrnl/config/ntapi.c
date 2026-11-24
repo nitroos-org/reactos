@@ -407,6 +407,68 @@ NtCreateKey(OUT PHANDLE KeyHandle,
 }
 
 /*
+ * The Perflib language keys. Windows answers an open of
+ * HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib\009 and \CurrentLanguage with STATUS_PREDEFINED_HANDLE
+ * (the handle is a plain one, advapi32 returns HKEY_PERFORMANCE_TEXT / HKEY_PERFORMANCE_NLSTEXT in its place) and
+ * every registry call that reads or changes such a handle fails with STATUS_INVALID_HANDLE (the winetest
+ * advapi32 registry test_perflib_key, which passes on Windows Server 2022; measured there too: the open answers
+ * STATUS_PREDEFINED_HANDLE with every option, REG_OPTION_DONT_VIRTUALIZE included). The code that reads the counter
+ * texts for the text performance keys needs the values themselves: it opens the key with this system's own open
+ * option bit below, which no Windows program uses, and gets an ordinary handle.
+ */
+#define CMP_OPEN_PLAIN_PERFLIB 0x40000000
+
+#define CmpRejectPerflibText(KeyObject)                 \
+    if ((KeyObject)->PerflibText)                       \
+    {                                                   \
+        ObDereferenceObject(KeyObject);                 \
+        return STATUS_INVALID_HANDLE;                   \
+    }
+
+/* Is the last name of the key (the KCB's name block: a compressed name has a byte per character) @Name? */
+static
+BOOLEAN
+CmpKcbNameIs(IN PCM_KEY_CONTROL_BLOCK Kcb,
+             IN PCWSTR Name)
+{
+    PCM_NAME_CONTROL_BLOCK NameBlock = Kcb ? Kcb->NameBlock : NULL;
+    USHORT i, Chars = (USHORT)wcslen(Name);
+
+    if (!NameBlock) return FALSE;
+    if (NameBlock->Compressed)
+    {
+        if (NameBlock->NameLength != Chars) return FALSE;
+        for (i = 0; i < Chars; i++)
+        {
+            if (RtlUpcaseUnicodeChar(((PUCHAR)NameBlock->Name)[i]) != RtlUpcaseUnicodeChar(Name[i])) return FALSE;
+        }
+        return TRUE;
+    }
+    if (NameBlock->NameLength != Chars * sizeof(WCHAR)) return FALSE;
+    for (i = 0; i < Chars; i++)
+    {
+        if (RtlUpcaseUnicodeChar(NameBlock->Name[i]) != RtlUpcaseUnicodeChar(Name[i])) return FALSE;
+    }
+    return TRUE;
+}
+
+static
+BOOLEAN
+CmpIsPerflibTextKey(IN PCM_KEY_CONTROL_BLOCK Kcb)
+{
+    static const PCWSTR Path[] = { L"Perflib", L"CurrentVersion", L"Windows NT", L"Microsoft", L"SOFTWARE", L"MACHINE" };
+    ULONG i;
+
+    if (!CmpKcbNameIs(Kcb, L"009") && !CmpKcbNameIs(Kcb, L"CurrentLanguage")) return FALSE;
+    for (i = 0; i < RTL_NUMBER_OF(Path); i++)
+    {
+        Kcb = Kcb->ParentKcb;
+        if (!Kcb || !CmpKcbNameIs(Kcb, Path[i])) return FALSE;
+    }
+    return TRUE;
+}
+
+/*
  * Legal OpenOptions bits accepted by NtOpenKeyEx. REG_OPTION_OPEN_LINK is
  * honored (open the symbolic-link key itself rather than its target).
  * REG_OPTION_BACKUP_RESTORE and REG_OPTION_DONT_VIRTUALIZE (0x10, Win7+)
@@ -416,7 +478,7 @@ NtCreateKey(OUT PHANDLE KeyHandle,
  * Windows decision; it does not change the open.
  */
 #define CMP_OPEN_LEGAL_OPTIONS \
-    (REG_OPTION_OPEN_LINK | REG_OPTION_BACKUP_RESTORE | 0x00000010)
+    (REG_OPTION_OPEN_LINK | REG_OPTION_BACKUP_RESTORE | 0x00000010 | CMP_OPEN_PLAIN_PERFLIB)
 
 /*
  * Shared open path for NtOpenKey / NtOpenKeyEx. With OpenOptions == 0 this
@@ -495,6 +557,22 @@ CmpOpenKeyInternal(OUT PHANDLE KeyHandle,
     /* Only do this if we succeeded */
     if (NT_SUCCESS(Status))
     {
+        /* A Perflib language key is flagged and answered with STATUS_PREDEFINED_HANDLE (see CmpRejectPerflibText) */
+        if (Status == STATUS_SUCCESS && PreviousMode != KernelMode && !(OpenOptions & CMP_OPEN_PLAIN_PERFLIB))
+        {
+            PCM_KEY_BODY KeyBody;
+
+            if (NT_SUCCESS(ObReferenceObjectByHandle(Handle, 0, CmpKeyObjectType, KernelMode, (PVOID*)&KeyBody, NULL)))
+            {
+                if (KeyBody->KeyControlBlock && CmpIsPerflibTextKey(KeyBody->KeyControlBlock))
+                {
+                    KeyBody->PerflibText = TRUE;
+                    Status = STATUS_PREDEFINED_HANDLE;
+                }
+                ObDereferenceObject(KeyBody);
+            }
+        }
+
         _SEH2_TRY
         {
             /* Return the handle to caller */
@@ -622,6 +700,7 @@ NtDeleteKey(IN HANDLE KeyHandle)
                                        (PVOID*)&KeyObject,
                                        NULL);
     if (!NT_SUCCESS(Status)) return Status;
+    CmpRejectPerflibText(KeyObject);
 
     /* Setup the callback */
     PostOperationInfo.Object = (PVOID)KeyObject;
@@ -687,6 +766,7 @@ NtEnumerateKey(IN HANDLE KeyHandle,
                                        (PVOID*)&KeyObject,
                                        NULL);
     if (!NT_SUCCESS(Status)) return Status;
+    CmpRejectPerflibText(KeyObject);
 
     if (PreviousMode != KernelMode)
     {
@@ -776,6 +856,7 @@ NtEnumerateValueKey(IN HANDLE KeyHandle,
                                        (PVOID*)&KeyObject,
                                        NULL);
     if (!NT_SUCCESS(Status)) return Status;
+    CmpRejectPerflibText(KeyObject);
 
     if (PreviousMode != KernelMode)
     {
@@ -891,6 +972,7 @@ NtQueryKey(IN HANDLE KeyHandle,
 
     /* Quit on failure */
     if (!NT_SUCCESS(Status)) return Status;
+    CmpRejectPerflibText(KeyObject);
 
     if (PreviousMode != KernelMode)
     {
@@ -980,6 +1062,7 @@ NtQueryValueKey(IN HANDLE KeyHandle,
                                        NULL);
     if (!NT_SUCCESS(Status))
         return Status;
+    CmpRejectPerflibText(KeyObject);
 
     if (PreviousMode != KernelMode)
     {
@@ -1083,6 +1166,7 @@ NtSetValueKey(IN HANDLE KeyHandle,
                                        NULL);
     if (!NT_SUCCESS(Status))
         return Status;
+    CmpRejectPerflibText(KeyObject);
 
     if (!DataSize)
         Data = NULL;
@@ -1232,6 +1316,7 @@ NtDeleteValueKey(IN HANDLE KeyHandle,
                                        NULL);
     if (!NT_SUCCESS(Status))
         return Status;
+    CmpRejectPerflibText(KeyObject);
 
     /* Capture the string */
     Status = ProbeAndCaptureUnicodeString(&ValueNameCopy, PreviousMode, ValueName);
