@@ -810,6 +810,42 @@ LsaGetSystemAccessAccount(IN LSA_HANDLE AccountHandle,
 
 
 /*
+ * The stub allocates the string structure and its characters separately: return them as one block
+ * (structure, then characters), which LsaFreeMemory frees in one call.
+ */
+static
+VOID
+LsapPackUnicodeString(
+    _Inout_ PRPC_UNICODE_STRING *String)
+{
+    PRPC_UNICODE_STRING Old = *String;
+    PRPC_UNICODE_STRING New;
+
+    if (Old == NULL)
+        return;
+
+    New = HeapAlloc(GetProcessHeap(), 0, sizeof(*Old) + Old->MaximumLength);
+    if (New == NULL)
+        return;
+
+    *New = *Old;
+    if (Old->Buffer != NULL && Old->MaximumLength != 0)
+    {
+        New->Buffer = (PWSTR)(New + 1);
+        RtlCopyMemory(New->Buffer, Old->Buffer, Old->MaximumLength);
+        MIDL_user_free(Old->Buffer);
+    }
+    else
+    {
+        New->Buffer = NULL;
+    }
+
+    MIDL_user_free(Old);
+    *String = New;
+}
+
+
+/*
  * @implemented
  */
 NTSTATUS
@@ -829,6 +865,12 @@ LsaGetUserName(OUT PUNICODE_STRING *UserName,
         Status = LsarGetUserName(NULL,
                                  &UserNameString,
                                  (DomainName != NULL) ? &DomainNameString : NULL);
+
+        if (NT_SUCCESS(Status))
+        {
+            LsapPackUnicodeString(&UserNameString);
+            LsapPackUnicodeString(&DomainNameString);
+        }
 
         *UserName = (PUNICODE_STRING)UserNameString;
 
