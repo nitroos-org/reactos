@@ -3933,8 +3933,10 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
             LocalFree((HLOCAL)pSid1);
     }
 
-    /* Succeed, if no ACL needs to be allocated */
-    if (SizeInformation.AclBytesInUse == 0)
+    /* Succeed, if no ACL needs to be allocated: with no entries and no old
+       ACL Windows returns no ACL at all (a NULL result, not an empty ACL) */
+    if (SizeInformation.AclBytesInUse == 0 ||
+        (cCountOfExplicitEntries == 0 && OldAcl == NULL))
         goto Cleanup;
 
     /* OK, now create the new ACL */
