@@ -62,6 +62,7 @@ extern void func_DisplayModeCycle(void);
 extern void func_EmptyClipboard(void);
 extern void func_EnumDisplayDevices(void);
 extern void func_EnumDisplaySettings(void);
+extern void func_EnumDisplaySettingsThreads(void);
 extern void func_EndTask(void);
 extern void func_ExitWindowsEx(void);
 extern void func_FrameChangedClient(void);
@@ -273,6 +274,7 @@ const struct test winetest_testlist[] =
     { "EmptyClipboard", func_EmptyClipboard },
     { "EnumDisplayDevices", func_EnumDisplayDevices },
     { "EnumDisplaySettings", func_EnumDisplaySettings },
+    { "EnumDisplaySettingsThreads", func_EnumDisplaySettingsThreads },
     { "EndTask", func_EndTask },
     { "ExitWindowsEx", func_ExitWindowsEx },
     { "FrameChangedClient", func_FrameChangedClient },

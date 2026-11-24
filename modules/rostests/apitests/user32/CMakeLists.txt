@@ -42,6 +42,7 @@ list(APPEND SOURCE
     EndTask.c
     EnumDisplayDevices.c
     EnumDisplaySettings.c
+    EnumDisplaySettingsThreads.c
     ExitWindowsEx.c
     FrameChangedClient.c
     FrameMetrics.c
