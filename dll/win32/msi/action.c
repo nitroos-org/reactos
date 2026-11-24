@@ -8587,6 +8587,40 @@ static UINT msi_check_install_privileges( MSIPACKAGE *package, const WCHAR *acti
     }
     return ERROR_INSTALL_FAILURE;
 }
+
+/* A pure removal (REMOVE=ALL and nothing to add or reinstall: msiexec /x package.msi) of a product that is not
+ * installed ends with ERROR_UNKNOWN_PRODUCT before any action runs (measured on Windows Server 2022 with a package
+ * whose product the vendor's own installer leaves unpublished: return 1605, "Installation failed", no action of the
+ * sequence ran). Running the sequence with REMOVE set would instead run the package's own custom actions again.
+ * A command line that removes some features and installs others on a product that is not there yet is an install. */
+static BOOL msi_removal_of_unknown_product( MSIPACKAGE *package, const WCHAR *action )
+{
+    static const WCHAR *const adds[] = { L"ADDLOCAL", L"ADDSOURCE", L"ADDDEFAULT", L"REINSTALL", L"ADVERTISE",
+                                         L"FILEADDLOCAL", L"FILEADDSOURCE", L"FILEADDDEFAULT" };
+    INSTALLSTATE state;
+    BOOL pure;
+    WCHAR *value;
+    UINT i;
+
+    if (wcscmp( action, L"INSTALL" )) return FALSE;
+
+    value = msi_dup_property( package->db, L"REMOVE" );
+    pure = value && !wcsicmp( value, L"ALL" );
+    free( value );
+    if (!pure) return FALSE;
+
+    for (i = 0; i < ARRAY_SIZE(adds); i++)
+    {
+        value = msi_dup_property( package->db, adds[i] );
+        pure = !value || !value[0];
+        free( value );
+        if (!pure) return FALSE;
+    }
+
+    state = MsiQueryProductStateW( package->ProductCode );
+    TRACE("removal of %s, product state %d\n", debugstr_w(package->ProductCode), state);
+    return state == INSTALLSTATE_UNKNOWN || state == INSTALLSTATE_ABSENT;
+}
 #endif
 
 UINT MSI_InstallPackage( MSIPACKAGE *package, LPCWSTR szPackagePath,
@@ -8698,6 +8732,16 @@ UINT MSI_InstallPackage( MSIPACKAGE *package, LPCWSTR szPackagePath,
     }
 
     msi_rollback_cleanup_stale( package );
+
+#ifdef __REACTOS__
+    if (msi_removal_of_unknown_product( package, action ))
+    {
+        WARN("%s is not installed, nothing to remove\n", debugstr_w(package->ProductCode));
+        free( action );
+        msi_log_stopped( package );
+        return ERROR_UNKNOWN_PRODUCT;
+    }
+#endif
 
     rc = ACTION_PerformAction(package, action);
     /* a top-level action that is neither a standard nor a custom action is a failure */
