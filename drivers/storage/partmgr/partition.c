@@ -903,6 +903,28 @@ PartitionHandleDeviceControl(
         }
         case IOCTL_VOLUME_ONLINE:
         {
+            partExt->Offline = FALSE;
+            status = STATUS_SUCCESS;
+            break;
+        }
+        case IOCTL_VOLUME_OFFLINE:
+        {
+            // reads and writes to the volume fail while no file system is mounted on it (PartMgrReadWrite),
+            // so that nothing mounts it again until it is brought online
+            partExt->Offline = TRUE;
+            status = STATUS_SUCCESS;
+            break;
+        }
+        case IOCTL_VOLUME_IS_OFFLINE:
+        {
+            // success = offline; an online volume answers with a failure (ERROR_GEN_FAILURE, 31, as Windows does)
+            status = partExt->Offline ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+            break;
+        }
+        case IOCTL_VOLUME_SUPPORTS_ONLINE_OFFLINE:
+        case IOCTL_VOLUME_IS_IO_CAPABLE:
+        {
+            // both succeed on Windows whether the volume is online or offline
             status = STATUS_SUCCESS;
             break;
         }

@@ -3,7 +3,8 @@ list(APPEND SOURCE
     GptVolumes.c
     ExtendVolume.c
     GrowPartition.c
-    StorDeviceNumber.c)
+    StorDeviceNumber.c
+    VolumeOffline.c)
 
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)
