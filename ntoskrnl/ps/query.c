@@ -2563,6 +2563,38 @@ NtSetInformationProcess(
     PETHREAD Thread;
     PAGED_CODE();
 
+    /* The ReactOS-private class is outside the table; its input is that of ProcessAccessToken */
+    if (ProcessInformationClass == ProcessRosAccessTokenCopy)
+    {
+        if (ProcessInformationLength != sizeof(PROCESS_ACCESS_TOKEN))
+            return STATUS_INFO_LENGTH_MISMATCH;
+
+        /* Capture the token handle once */
+        _SEH2_TRY
+        {
+            if (PreviousMode != KernelMode)
+                ProbeForRead(ProcessInformation, sizeof(PROCESS_ACCESS_TOKEN), sizeof(ULONG));
+            TokenHandle = ((PPROCESS_ACCESS_TOKEN)ProcessInformation)->Token;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+
+        Status = ObReferenceObjectByHandle(ProcessHandle,
+                                           PROCESS_SET_INFORMATION,
+                                           PsProcessType,
+                                           PreviousMode,
+                                           (PVOID*)&Process,
+                                           NULL);
+        if (!NT_SUCCESS(Status)) return Status;
+
+        Status = PspSetPrimaryToken(Process, TokenHandle, NULL, TRUE);
+        ObDereferenceObject(Process);
+        return Status;
+    }
+
     /* Validate the information class */
     Status = DefaultSetInfoBufferCheck(ProcessInformationClass,
                                        PsProcessInfoClass,
@@ -2725,7 +2757,7 @@ NtSetInformationProcess(
             _SEH2_END;
 
             /* Assign the actual token */
-            Status = PspSetPrimaryToken(Process, TokenHandle, NULL);
+            Status = PspSetPrimaryToken(Process, TokenHandle, NULL, FALSE);
             break;
 
         /* Hard error processing */

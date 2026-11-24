@@ -233,21 +233,38 @@ PspAssignPrimaryToken(IN PEPROCESS Process,
     return Status;
 }
 
+/*
+ * Gives a process its primary token. Measured on Windows Server 2022 (ProcessAccessToken
+ * on a suspended child, and CreateProcessAsUser), in this order: the handle needs
+ * TOKEN_ASSIGN_PRIMARY; an impersonation token below SecurityImpersonation fails with
+ * STATUS_BAD_IMPERSONATION_LEVEL; a token that is not a child or sibling of the caller's
+ * (or is above its integrity level) needs SeAssignPrimaryTokenPrivilege enabled.
+ * Then, for ProcessAccessToken (MakeCopy FALSE): the token object itself is assigned, so it
+ * must be a primary token (else STATUS_BAD_TOKEN_TYPE) that no process uses (else
+ * STATUS_TOKEN_ALREADY_IN_USE). For process creation with a token (MakeCopy TRUE, the
+ * ReactOS-private ProcessRosAccessTokenCopy that CreateProcessAsUser uses): the process
+ * gets a new primary copy of the token, primary or impersonation, which is what Windows
+ * gives a process created with a token.
+ */
 NTSTATUS
 NTAPI
 PspSetPrimaryToken(IN PEPROCESS Process,
                    IN HANDLE TokenHandle OPTIONAL,
-                   IN PACCESS_TOKEN Token OPTIONAL)
+                   IN PACCESS_TOKEN Token OPTIONAL,
+                   IN BOOLEAN MakeCopy)
 {
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     BOOLEAN IsChildOrSibling;
-    PACCESS_TOKEN NewToken = Token;
+    PACCESS_TOKEN NewToken = Token, PrimaryCopy = NULL;
     NTSTATUS Status, AccessStatus;
     BOOLEAN Result, SdAllocated;
     PSECURITY_DESCRIPTOR SecurityDescriptor = NULL;
     SECURITY_SUBJECT_CONTEXT SubjectContext;
 
     PSTRACE(PS_SECURITY_DEBUG, "Process: %p Token: %p\n", Process, Token);
+
+    /* The copy is made of a token taken by handle only */
+    ASSERT(!MakeCopy || !Token);
 
     /* Reference the token by handle if we don't already have a token object */
     if (!Token)
@@ -259,6 +276,14 @@ PspSetPrimaryToken(IN PEPROCESS Process,
                                            (PVOID*)&NewToken,
                                            NULL);
         if (!NT_SUCCESS(Status)) return Status;
+    }
+
+    /* The level comes before the privilege; a primary copy needs SecurityImpersonation */
+    if (SeTokenType(NewToken) == TokenImpersonation &&
+        SeTokenImpersonationLevel(NewToken) < SecurityImpersonation)
+    {
+        if (!Token) ObDereferenceObject(NewToken);
+        return STATUS_BAD_IMPERSONATION_LEVEL;
     }
 
     /*
@@ -303,6 +328,20 @@ PspSetPrimaryToken(IN PEPROCESS Process,
             if (!Token) ObDereferenceObject(NewToken);
             return STATUS_PRIVILEGE_NOT_HELD;
         }
+    }
+
+    /*
+     * Every check has passed (they hold for the copy, which has the token's user, groups,
+     * logon session, parent token id and integrity level). The reference of the handle's
+     * token goes; the copy comes with one reference of its own, which the common
+     * dereference at the end releases.
+     */
+    if (MakeCopy)
+    {
+        Status = SeCopyTokenForNewProcess(NewToken, &PrimaryCopy);
+        ObDereferenceObject(NewToken);
+        if (!NT_SUCCESS(Status)) return Status;
+        NewToken = PrimaryCopy;
     }
 
     /* Assign the token */

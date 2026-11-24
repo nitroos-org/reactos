@@ -3760,6 +3760,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
                  * its child and by SetProcessMitigationPolicy; the request is 8 bytes in both widths */:
             return NtSetInformationProcess(H(0), a[1], P(2), a[3]);
         case ProcessAccessToken:
+        case ProcessRosAccessTokenCopy:
         {
             /* PROCESS_ACCESS_TOKEN: the primary token and the initial thread of a
              * suspended child (CreateProcessAsUser), two guest handles */

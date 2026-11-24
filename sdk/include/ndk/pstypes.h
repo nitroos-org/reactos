@@ -56,6 +56,12 @@ extern POBJECT_TYPE NTSYSAPI PsJobType;
  * creator's needs SeTcbPrivilege (or a kernel-mode caller) */
 #define ROS_PS_ATTRIBUTE_SESSION_ID  0x00020101
 #define ROS_PS_MAX_ATTRIBUTES 2
+/* ReactOS-private NtSetInformationProcess class, input PROCESS_ACCESS_TOKEN: the process is given a
+ * new primary copy of the token, which may be a primary or an impersonation token (level
+ * SecurityImpersonation or above) whose handle grants TOKEN_ASSIGN_PRIMARY, with the checks of
+ * ProcessAccessToken. This is what process creation with a token does on Windows (CreateProcessAsUser);
+ * ProcessAccessToken itself keeps the Windows behaviour (the primary token object itself). */
+#define ProcessRosAccessTokenCopy ((PROCESSINFOCLASS)0x00010009)
 typedef struct _ROS_PS_ATTRIBUTE
 {
     ULONG_PTR Attribute;

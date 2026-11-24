@@ -672,6 +672,12 @@ SeSubProcessToken(
 
 NTSTATUS
 NTAPI
+SeCopyTokenForNewProcess(
+    _In_ PACCESS_TOKEN Token,
+    _Out_ PACCESS_TOKEN *PrimaryToken);
+
+NTSTATUS
+NTAPI
 SeIsTokenChild(
     _In_ PTOKEN Token,
     _Out_ PBOOLEAN IsChild);
