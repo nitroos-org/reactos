@@ -315,11 +315,7 @@ Test_Folder(PCWSTR Volume)
         }
         goto Cleanup;
     }
-    /* the mount manager of ReactOS rejects the notice of a new folder mount, so it does not list the path */
-    if (!VolumeHasPath(Volume, Folder) && IsReactOS())
-        skip("the mount manager lists no folder mount points\n");
-    else
-        ok(VolumeHasPath(Volume, Folder), "the volume has no path %ls\n", Folder);
+    ok(VolumeHasPath(Volume, Folder), "the volume has no path %ls\n", Folder);
     ok(GetVolumeNameForVolumeMountPointW(Folder, Name, ARRAYSIZE(Name)), "no volume name for %ls\n", Folder);
     ok(_wcsicmp(Name, Volume) == 0, "volume of %ls is %ls\n", Folder, Name);
 

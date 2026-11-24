@@ -2190,6 +2190,23 @@ PartMgrReadWrite(
             IoCompleteRequest(Irp, IO_NO_INCREMENT);
             return STATUS_DEVICE_DOES_NOT_EXIST;
         }
+
+        // an offline volume cannot be read or written (ERROR_NOT_READY, as on Windows) unless a file system
+        // is mounted on it: that file system goes on with what it has until it is dismounted. The RAW file
+        // system, which takes a volume no other one could mount, is not one of them
+        if (partExt->Offline)
+        {
+            static const UNICODE_STRING rawName = RTL_CONSTANT_STRING(L"\\FileSystem\\RAW");
+            PVPB vpb = DeviceObject->Vpb;
+
+            if (!vpb || !(vpb->Flags & VPB_MOUNTED) || !vpb->DeviceObject || !vpb->DeviceObject->DriverObject ||
+                RtlEqualUnicodeString(&vpb->DeviceObject->DriverObject->DriverName, &rawName, TRUE))
+            {
+                Irp->IoStatus.Status = STATUS_DEVICE_NOT_READY;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                return STATUS_DEVICE_NOT_READY;
+            }
+        }
         stats = &partExt->IoStats;
     }
     else
