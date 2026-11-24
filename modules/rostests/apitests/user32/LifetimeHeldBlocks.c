@@ -59,7 +59,8 @@ static LRESULT CALLBACK HbCbtCheckProc(int nCode, WPARAM wParam, LPARAM lParam)
     if (nCode == HCBT_CREATEWND)
     {
         CBT_CREATEWNDW *cbt = (CBT_CREATEWNDW *)lParam;
-        if (cbt->lpcs && cbt->lpcs->lpszName)
+        /* The longest name: the hook also sees the windows the system creates for the thread (its IME window) */
+        if (cbt->lpcs && cbt->lpcs->lpszName && lstrlenW(cbt->lpcs->lpszName) > HbHookNameLength)
             HbHookNameLength = lstrlenW(cbt->lpcs->lpszName);
     }
     return CallNextHookEx(NULL, nCode, wParam, lParam);
