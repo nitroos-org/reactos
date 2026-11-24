@@ -803,19 +803,27 @@ QueryTokenSessionIdTests(
     NTSTATUS Status;
     ULONG SessionId;
     ULONG BufferLength;
+    PROCESS_SESSION_INFORMATION ProcessSession;
 
     /*
-     * Query the session ID. Generally the current
-     * process token is not under any terminal service
-     * so the ID must be 0.
+     * Query the session ID. The token of the current process carries the
+     * session the process runs in: 0 for a service, the console session
+     * (1) for the logged-on user.
      */
+    Status = NtQueryInformationProcess(NtCurrentProcess(),
+                                       ProcessSessionInformation,
+                                       &ProcessSession,
+                                       sizeof(ProcessSession),
+                                       NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
     Status = NtQueryInformationToken(Token,
                                      TokenSessionId,
                                      &SessionId,
                                      sizeof(ULONG),
                                      &BufferLength);
     ok_ntstatus(Status, STATUS_SUCCESS);
-    ok(SessionId == 0, "The session ID of current token must be 0 (current session %lu)!\n", SessionId);
+    ok(SessionId == ProcessSession.SessionId, "The session ID of current token must be the process's %lu (current session %lu)!\n",
+       ProcessSession.SessionId, SessionId);
 }
 
 static
