@@ -284,20 +284,55 @@ SeCaptureObjectTypeList(
      */
     if (ObjectTypeListLength > MAXULONG_PTR / sizeof(OBJECT_TYPE_LIST_INTERNAL))
     {
+        /* As Windows Server 2022 x86 answers such counts (measured) */
         DPRINT1("The object type list is too big (%lu entries)\n", ObjectTypeListLength);
-        return STATUS_INVALID_PARAMETER;
+        return STATUS_NO_MEMORY;
     }
 
-    /* Ensure the list is in user memory before allocating room for it */
+    /*
+     * Ensure the list is in user memory, and read every entry once, before
+     * allocating room for it: the allocation is then no larger than what the
+     * caller has readable memory for, and a count beyond the caller's list is
+     * an access violation (as on Windows Server 2022 x64, measured), not a
+     * transient allocation of the size of that count. The copy below reads and
+     * checks every entry again.
+     */
     _SEH2_TRY
     {
         ProbeForRead(ObjectTypeList, ObjectTypeListLength * sizeof(OBJECT_TYPE_LIST), sizeof(ULONG));
+
+        Status = STATUS_SUCCESS;
+        for (ObjectTypeIndex = 0;
+             ObjectTypeIndex < ObjectTypeListLength;
+             ObjectTypeIndex++)
+        {
+            Level = ObjectTypeList[ObjectTypeIndex].Level;
+            Status = SepCheckObjectTypeLevel(ObjectTypeIndex, Level, PrevLevel);
+            if (!NT_SUCCESS(Status))
+            {
+                break;
+            }
+
+            ObjectTypeGuid = ObjectTypeList[ObjectTypeIndex].ObjectType;
+            ProbeForRead(ObjectTypeGuid, sizeof(GUID), sizeof(ULONG));
+            (VOID)*(volatile UCHAR *)ObjectTypeGuid;
+            (VOID)*((volatile UCHAR *)ObjectTypeGuid + sizeof(GUID) - 1);
+
+            PrevLevel = Level;
+        }
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
         _SEH2_YIELD(return _SEH2_GetExceptionCode());
     }
     _SEH2_END;
+
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Failed to capture the object type list (Status 0x%08lx)\n", Status);
+        return Status;
+    }
+    PrevLevel = 0;
 
     /* Allocate a new list */
     Size = ObjectTypeListLength * sizeof(OBJECT_TYPE_LIST_INTERNAL);

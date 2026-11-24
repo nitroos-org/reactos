@@ -589,6 +589,44 @@ SepAccessCheckAndAuditAlarmWorker(
     return STATUS_SUCCESS;
 }
 
+/*
+ * The name arguments of the access check and audit alarm services, as Windows
+ * Server 2022 checks them (measured): an odd length, and a length and maximum
+ * length of 0xFFFE (no room for a terminator), are STATUS_INVALID_PARAMETER; a
+ * NULL buffer with a length is an access violation. A length beyond a short
+ * maximum length stays what the capture finds (the read of the buffer). This
+ * looks at a copy taken before the capture: a string that another thread changes
+ * in between is captured as before.
+ */
+static
+NTSTATUS
+SepCheckAuditAlarmName(
+    _In_ PCUNICODE_STRING UserName)
+{
+    UNICODE_STRING Name;
+
+    _SEH2_TRY
+    {
+        Name = ProbeForReadUnicodeString(UserName);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    if ((Name.Length & 1) != 0 ||
+        (Name.Length >= MAXUSHORT - 1 && Name.MaximumLength >= MAXUSHORT - 1))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (Name.Buffer == NULL && Name.Length != 0)
+        return STATUS_ACCESS_VIOLATION;
+
+    return STATUS_SUCCESS;
+}
+
 /**
  * @brief
  * Performs security auditing, if the specific object can be granted
@@ -815,9 +853,11 @@ SepAccessCheckAndAuditAlarm(
         ProbeForWrite(AccessStatusList,
                       ResultListLength * sizeof(*AccessStatusList),
                       sizeof(*AccessStatusList));
+        /* The single result may be misaligned: Windows Server 2022 writes it
+         * there (measured); the result list must be aligned */
         ProbeForWrite(GrantedAccessList,
                       ResultListLength * sizeof(*GrantedAccessList),
-                      sizeof(*GrantedAccessList));
+                      UseResultList ? sizeof(*GrantedAccessList) : sizeof(UCHAR));
 
         /* Probe generic mapping and make a local copy */
         ProbeForRead(GenericMapping, sizeof(*GenericMapping), sizeof(ULONG));
@@ -939,9 +979,13 @@ SepAccessCheckAndAuditAlarm(
     }
 
     /* Probe and capture the subsystem name */
-    Status = ProbeAndCaptureUnicodeString(&CapturedSubsystemName,
-                                          UserMode,
-                                          SubsystemName);
+    Status = SepCheckAuditAlarmName(SubsystemName);
+    if (NT_SUCCESS(Status))
+    {
+        Status = ProbeAndCaptureUnicodeString(&CapturedSubsystemName,
+                                              UserMode,
+                                              SubsystemName);
+    }
     if (!NT_SUCCESS(Status))
     {
         DPRINT("Failed to capture subsystem name!\n");
@@ -949,9 +993,13 @@ SepAccessCheckAndAuditAlarm(
     }
 
     /* Probe and capture the object type name */
-    Status = ProbeAndCaptureUnicodeString(&CapturedObjectTypeName,
-                                          UserMode,
-                                          ObjectTypeName);
+    Status = SepCheckAuditAlarmName(ObjectTypeName);
+    if (NT_SUCCESS(Status))
+    {
+        Status = ProbeAndCaptureUnicodeString(&CapturedObjectTypeName,
+                                              UserMode,
+                                              ObjectTypeName);
+    }
     if (!NT_SUCCESS(Status))
     {
         DPRINT("Failed to capture object type name!\n");
@@ -959,9 +1007,13 @@ SepAccessCheckAndAuditAlarm(
     }
 
     /* Probe and capture the object name */
-    Status = ProbeAndCaptureUnicodeString(&CapturedObjectName,
-                                          UserMode,
-                                          ObjectName);
+    Status = SepCheckAuditAlarmName(ObjectName);
+    if (NT_SUCCESS(Status))
+    {
+        Status = ProbeAndCaptureUnicodeString(&CapturedObjectName,
+                                              UserMode,
+                                              ObjectName);
+    }
     if (!NT_SUCCESS(Status))
     {
         DPRINT("Failed to capture object name!\n");
