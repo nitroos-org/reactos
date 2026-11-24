@@ -637,30 +637,6 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
     DeviceInformation->NoDatabase = TRUE;
     FailedFinding = FALSE;
 
-    /* Remove any associated device that refers to the DB to reconcile */
-    for (Entry = DeviceExtension->DeviceListHead.Flink;
-         Entry != &DeviceExtension->DeviceListHead;
-         Entry = Entry->Flink)
-    {
-        ListDeviceInfo = CONTAINING_RECORD(Entry, DEVICE_INFORMATION, DeviceListEntry);
-
-        EntryInfo = ListDeviceInfo->AssociatedDevicesHead.Flink;
-        while (EntryInfo != &ListDeviceInfo->AssociatedDevicesHead)
-        {
-            AssociatedDevice = CONTAINING_RECORD(EntryInfo, ASSOCIATED_DEVICE_ENTRY, AssociatedDevicesEntry);
-            NextEntry = EntryInfo->Flink;
-
-            if (AssociatedDevice->DeviceInformation == DeviceInformation)
-            {
-                RemoveEntryList(&AssociatedDevice->AssociatedDevicesEntry);
-                FreePool(AssociatedDevice->String.Buffer);
-                FreePool(AssociatedDevice);
-            }
-
-            EntryInfo = NextEntry;
-        }
-    }
-
     /* Open the remote database */
     DatabaseHandle = OpenRemoteDatabase(DeviceInformation, FALSE);
 
@@ -704,13 +680,38 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
 
     if (!NT_SUCCESS(Status))
     {
+        /* A file system that cannot list its reparse points (NTFS here) tells nothing about the mount points
+         * of the volume: what the mount manager knows of them, in memory and in the database, stays as it is */
         if (DatabaseHandle != 0)
         {
-            TruncateRemoteDatabase(DatabaseHandle, 0);
             CloseRemoteDatabase(DatabaseHandle);
         }
         KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
         goto ReleaseRDS;
+    }
+
+    /* The index can be read: the associated devices of this volume are made again from it */
+    for (Entry = DeviceExtension->DeviceListHead.Flink;
+         Entry != &DeviceExtension->DeviceListHead;
+         Entry = Entry->Flink)
+    {
+        ListDeviceInfo = CONTAINING_RECORD(Entry, DEVICE_INFORMATION, DeviceListEntry);
+
+        EntryInfo = ListDeviceInfo->AssociatedDevicesHead.Flink;
+        while (EntryInfo != &ListDeviceInfo->AssociatedDevicesHead)
+        {
+            AssociatedDevice = CONTAINING_RECORD(EntryInfo, ASSOCIATED_DEVICE_ENTRY, AssociatedDevicesEntry);
+            NextEntry = EntryInfo->Flink;
+
+            if (AssociatedDevice->DeviceInformation == DeviceInformation)
+            {
+                RemoveEntryList(&AssociatedDevice->AssociatedDevicesEntry);
+                FreePool(AssociatedDevice->String.Buffer);
+                FreePool(AssociatedDevice);
+            }
+
+            EntryInfo = NextEntry;
+        }
     }
 
     /* Query reparse point information
