@@ -2227,6 +2227,15 @@ WSPAccept(
         }
         else
         {
+            /* Deferred: the connection stays in the listen queue and a later accept takes it
+             * up again; WSAAccept fails with WSATRY_AGAIN, as on Windows Server 2022 */
+            if (CallBack == CF_DEFER)
+            {
+                NtClose(SockEvent);
+                if (lpErrno) *lpErrno = WSATRY_AGAIN;
+                return INVALID_SOCKET;
+            }
+
             /* Callback rejected. Build Defer Structure */
             DeferData.SequenceNumber = ListenReceiveData->SequenceNumber;
             DeferData.RejectConnection = (CallBack == CF_REJECT);
