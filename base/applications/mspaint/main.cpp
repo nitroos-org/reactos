@@ -31,6 +31,59 @@ static FN_HtmlHelpW s_pHtmlHelpW = NULL;
 
 /* FUNCTIONS ********************************************************/
 
+/* Print the image as one page: 1 image pixel = 1/96 inch, made smaller to fit the page */
+static BOOL PrintImage(HDC hdcPrinter, HDC hdcImage, int cxImage, int cyImage, LPCWSTR pszDocName, BOOL bToFile)
+{
+    DOCINFOW di;
+    int cxPage = ::GetDeviceCaps(hdcPrinter, HORZRES);
+    int cyPage = ::GetDeviceCaps(hdcPrinter, VERTRES);
+    int dpiX = ::GetDeviceCaps(hdcPrinter, LOGPIXELSX);
+    int dpiY = ::GetDeviceCaps(hdcPrinter, LOGPIXELSY);
+
+    if (cxPage <= 0 || cyPage <= 0 || dpiX <= 0 || dpiY <= 0 || cxImage <= 0 || cyImage <= 0)
+        return FALSE;
+
+    int cxDest = ::MulDiv(cxImage, dpiX, 96);
+    int cyDest = ::MulDiv(cyImage, dpiY, 96);
+    if (cxDest > cxPage)
+    {
+        cyDest = ::MulDiv(cyDest, cxPage, cxDest);
+        cxDest = cxPage;
+    }
+    if (cyDest > cyPage)
+    {
+        cxDest = ::MulDiv(cxDest, cyPage, cyDest);
+        cyDest = cyPage;
+    }
+
+    ZeroMemory(&di, sizeof(di));
+    di.cbSize = sizeof(di);
+    di.lpszDocName = pszDocName;
+    if (bToFile)
+        di.lpszOutput = L"FILE:";  // the spooler asks for the file name
+
+    if (::StartDocW(hdcPrinter, &di) <= 0)
+        return FALSE;
+
+    if (::StartPage(hdcPrinter) <= 0)
+    {
+        ::AbortDoc(hdcPrinter);
+        return FALSE;
+    }
+
+    ::SetStretchBltMode(hdcPrinter, HALFTONE);
+    BOOL ret = ::StretchBlt(hdcPrinter, 0, 0, max(cxDest, 1), max(cyDest, 1),
+                            hdcImage, 0, 0, cxImage, cyImage, SRCCOPY);
+
+    if (::EndPage(hdcPrinter) <= 0 || !ret)
+    {
+        ::AbortDoc(hdcPrinter);
+        return FALSE;
+    }
+
+    return ::EndDoc(hdcPrinter) > 0;
+}
+
 void ShowOutOfMemory(void)
 {
     WCHAR szText[256];
@@ -890,7 +943,6 @@ LRESULT CMainWindow::OnCommand(UINT nMsg, WPARAM wParam, LPARAM lParam, BOOL& bH
             PageSetupDlg(&psd);
             break;
         case IDM_FILEPRINT:
-            // TODO: Test whether it actually works
             PRINTDLG pd;
             ZeroMemory(&pd, sizeof(pd));
             pd.lStructSize = sizeof(pd);
@@ -905,7 +957,9 @@ LRESULT CMainWindow::OnCommand(UINT nMsg, WPARAM wParam, LPARAM lParam, BOOL& bH
             pd.nMaxPage = 0xffff;
             if (PrintDlg(&pd) == TRUE)
             {
-                ::BitBlt(pd.hDC, 0, 0, imageModel.GetWidth(), imageModel.GetHeight(), imageModel.GetDC(), 0, 0, SRCCOPY);
+                // A document that the user cancelled (the file name dialog) or that the spooler refused is not reported
+                PrintImage(pd.hDC, imageModel.GetDC(), imageModel.GetWidth(), imageModel.GetHeight(),
+                           PathFindFileNameW(g_szFileName), !!(pd.Flags & PD_PRINTTOFILE));
                 DeleteDC(pd.hDC);
             }
             if (pd.hDevMode)
