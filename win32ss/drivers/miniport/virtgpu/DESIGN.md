@@ -79,8 +79,12 @@ HwInitialize -> VgpuCreate (core):
 4. `virtio_device_ready` (DRIVER_OK).
 5. Read config (`virtio_gpu_config.num_scanouts`). GET_DISPLAY_INFO for the
    host's preferred size (logged; used to pick a sensible default mode).
-6. Build the mode list (bochs-style resolution table, capped to <= 1920x1080
-   and <= 8 MB so the per-mode contiguous backing allocation is safe).
+6. Allocate the frame buffer: one contiguous allocation for the largest
+   candidate mode within 8 MB (1920x1080), or the largest the system can give.
+   It is the backing of every mode and stays in place until the device is
+   reset (see section 5).
+7. Build the mode list (bochs-style resolution table, only the modes that fit
+   the frame buffer).
 
 ### VgpuSystemOps (VirtIOSystemOps) mapping
 - register r/w (`vdev_*`): VideoPortRead/WriteRegister{Uchar,Ushort,Ulong} on the
@@ -97,38 +101,50 @@ HwInitialize -> VgpuCreate (core):
 
 ## 5. Mode set (IOCTL_VIDEO_SET_CURRENT_MODE -> VgpuSetModeByIndex)
 
-Teardown previous (if any): SET_SCANOUT(res=0) disable, RESOURCE_UNREF,
-free old backing. Then:
-1. w,h from the mode; stride = w*4; size = stride*h. Allocate contiguous backing
-   (MmAllocateContiguousMemory), zeroed. resource_id = ++counter.
-2. RESOURCE_CREATE_2D(res, FORMAT_B8G8R8X8_UNORM, w, h)  — matches Windows 32bpp
-   BGRX in-memory byte order.
-3. RESOURCE_ATTACH_BACKING(res, 1 entry = {backingPhys, size})  (contiguous =>
-   single mem entry; SG/non-contiguous backing is a documented future step).
-4. SET_SCANOUT(scanout 0, res, {0,0,w,h}).
-5. Initial TRANSFER_TO_HOST_2D + RESOURCE_FLUSH (shows the cleared screen).
-6. Start/enable the flush thread.
+The frame buffer never moves: framebuf maps it once (DrvEnableSurface) and
+draws into that view until DrvDisableSurface, and a mode change sets the mode
+twice (DrvEnableSurface on the new device, DrvAssertMode when win32k enables the
+device that stays). Freeing or moving the backing on a mode set left framebuf
+drawing into freed pool (fixed 2026-11; see the commit history). So a mode set
+only changes the host resource:
+1. w,h from the mode; stride = w*4; size = stride*h (fits the frame buffer).
+   The mode that is already set: TRANSFER_TO_HOST_2D + RESOURCE_FLUSH, done.
+2. resource_id = ++counter; RESOURCE_CREATE_2D(res, FORMAT_B8G8R8X8_UNORM, w, h)
+   — matches Windows 32bpp BGRX in-memory byte order.
+3. RESOURCE_ATTACH_BACKING(res, 1 entry = {frame buffer PA, size})  (contiguous
+   => single mem entry; SG/non-contiguous backing is a documented future step).
+4. SET_SCANOUT(scanout 0, res, {0,0,w,h}), then RESOURCE_UNREF of the old
+   resource (the flip of VIRTIO 1.2 cs01 5.7.6.3). A failure before this point
+   leaves the old resource on the screen.
+5. Clear the mode's part of the frame buffer; TRANSFER_TO_HOST_2D +
+   RESOURCE_FLUSH; enable the flush thread.
 
 `IOCTL_VIDEO_MAP_VIDEO_MEMORY` (framebuf calls it after set-mode): the miniport
-`VideoPortMapMemory`s the backing's physical range into the caller (win32k) so
-GDI renders straight into the scanout backing (cached; x86 keeps it coherent for
-QEMU's RAM reads).
+`VideoPortMapMemory`s the whole frame buffer into the caller (win32k) so
+GDI renders straight into the scanout backing (x86 keeps it coherent for
+QEMU's RAM reads). The view stays valid across mode sets.
 
 ## 6. Command submission (controlq, polled)
 
 One reused command buffer + one response buffer (contiguous, PA known). Per cmd:
 `sg[0]={cmdPA,cmdLen}` (device-readable), `sg[1]={respPA,respLen}` (device-
 writable); `virtqueue_add_buf(vq,sg,1,1,tok,NULL,0)`; `virtqueue_kick`; poll
-`virtqueue_get_buf` with a bounded VideoPortStallExecution timeout; verify the
-response type is `VIRTIO_GPU_RESP_OK_*`. A KMUTEX serialises controlq between the
+`virtqueue_get_buf` (a short spin, then 1 ms sleeps); the completion must be the
+submitted buffer with a used length that covers a header and fits the response
+buffer (cleared before each command); verify the response type is
+`VIRTIO_GPU_RESP_OK_*`. A command not completed within 5 s resets the device and
+the driver stops using it, so the reused buffers are never handed out again
+while the device may still write them. A KMUTEX serialises controlq between the
 flush thread and mode changes.
 
 ## 7. Flush thread
 
 `KeDelayExecutionThread(~16 ms)` loop; on each tick, if a scanout is active:
 TRANSFER_TO_HOST_2D(rect) + RESOURCE_FLUSH(rect), where rect = accumulated dirty
-rect from the private IOCTL if present, else the full screen. Signalled to stop
-via a KEVENT at teardown.
+rect from the private IOCTL if present (only inside the current mode), else the
+full screen. Each tick also reads the ISR status (without MSI-X the device holds
+INTx asserted until it is read) and clears reported display events
+(`events_clear`). Signalled to stop via a KEVENT at teardown.
 
 ## 8. Cursor
 
