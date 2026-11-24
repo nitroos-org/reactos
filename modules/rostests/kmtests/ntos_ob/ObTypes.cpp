@@ -27,19 +27,21 @@ const UCHAR TypeIndex_Semaphore[] = { 13, 13, 14 };
 const UCHAR TypeIndex_Timer[] = { 14, 14, 15 };
 const UCHAR TypeIndex_Profile[] = { 15, 15, 17 };
 const UCHAR TypeIndex_KeyedEvent[] = { 16, 16, 18 };
-const UCHAR TypeIndex_WindowStation[] = { 17, 17, 19 };
-const UCHAR TypeIndex_Desktop[] = { 18, 18, 20 };
-const UCHAR TypeIndex_Section[] = { 19, 30, 21 };
-const UCHAR TypeIndex_Key[] = { 20, 32, 22 };
+/* ReactOS column: IoCompletionReserve and UserApcReserve (3186cc96bed) and WaitCompletionPacket (d162234177f) are
+ * created before the window station, so the types from WindowStation on are three higher than they were */
+const UCHAR TypeIndex_WindowStation[] = { 17, 17, 22 };
+const UCHAR TypeIndex_Desktop[] = { 18, 18, 23 };
+const UCHAR TypeIndex_Section[] = { 19, 30, 24 };
+const UCHAR TypeIndex_Key[] = { 20, 32, 25 };
 const UCHAR TypeIndex_Port[] = { 21, 21, 21 };
 const UCHAR TypeIndex_WaitablePort[] = { 22, 22, 22 };
-const UCHAR TypeIndex_Adapter[] = { 23, 20, 25 };
-const UCHAR TypeIndex_Controller[] = { 24, 21, 26 };
-const UCHAR TypeIndex_Device[] = { 25, 22, 27 };
-const UCHAR TypeIndex_Driver[] = { 26, 23, 28 };
-const UCHAR TypeIndex_IoCompletion[] = { 27, 24, 29 };
-const UCHAR TypeIndex_File[] = { 28, 25, 30 };
-const UCHAR TypeIndex_WmiGuid[] = { 29, 34, 31 };
+const UCHAR TypeIndex_Adapter[] = { 23, 20, 28 };
+const UCHAR TypeIndex_Controller[] = { 24, 21, 29 };
+const UCHAR TypeIndex_Device[] = { 25, 22, 30 };
+const UCHAR TypeIndex_Driver[] = { 26, 23, 31 };
+const UCHAR TypeIndex_IoCompletion[] = { 27, 24, 32 };
+const UCHAR TypeIndex_File[] = { 28, 25, 33 };
+const UCHAR TypeIndex_WmiGuid[] = { 29, 34, 34 };
 const UCHAR TypeIndex_FilterConnectionPort[] = { 30, 36, 30 };
 const UCHAR TypeIndex_FilterCommunicationPort[] = { 31, 37, 31 };
 
@@ -69,6 +71,25 @@ GetNtDdiIndex(ULONG NtDdiVersion)
 
 #define GetTypeIndex(TypeName, NtDdiVersion) \
     (TypeIndex_ ## TypeName[GetNtDdiIndex(NtDdiVersion)])
+
+/* Whether an object type is there at all, without a failure being reported */
+static
+BOOLEAN
+ObjectTypeExists(
+    IN PCWSTR TypeName)
+{
+    NTSTATUS Status;
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Handle;
+
+    RtlInitUnicodeString(&Name, TypeName);
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = ObOpenObjectByName(&ObjectAttributes, NULL, KernelMode, NULL, 0, NULL, &Handle);
+    if (NT_SUCCESS(Status))
+        ZwClose(Handle);
+    return NT_SUCCESS(Status);
+}
 
 static
 POBJECT_TYPE
@@ -306,8 +327,17 @@ TestObjectTypes(VOID)
                                                                                                             0x130,  0x120089, 0x120116, 0x1200a0, 0x1f01ff, 0x1f01ff);
     CheckObjectType(WmiGuid, WmipGuidObjectType,                OBT_NO_DEFAULT | OBT_CUSTOM_SECURITY_PROC | OBT_SECURITY_REQUIRED,
                                                                                                             0x100,  0x000001, 0x000002, 0x000010, 0x120fff, 0x1f0fff);
-    CheckObjectType(FilterConnectionPort, NULL,                 OBT_NO_DEFAULT | OBT_SECURITY_REQUIRED,     0x100,  0x020001, 0x010001, 0x000000, 0x1f0001, 0x1f0001);
-    CheckObjectType(FilterCommunicationPort, NULL,              OBT_NO_DEFAULT,                             0x100,  0x020001, 0x010001, 0x000000, 0x1f0001, 0x1f0001);
+    /* fltmgr creates these two types when it is loaded; it is a demand-start driver on ReactOS and is not
+     * loaded in the test system */
+    if (!is_reactos() || ObjectTypeExists(L"\\ObjectTypes\\FilterConnectionPort"))
+    {
+        CheckObjectType(FilterConnectionPort, NULL,                 OBT_NO_DEFAULT | OBT_SECURITY_REQUIRED,     0x100,  0x020001, 0x010001, 0x000000, 0x1f0001, 0x1f0001);
+        CheckObjectType(FilterCommunicationPort, NULL,              OBT_NO_DEFAULT,                             0x100,  0x020001, 0x010001, 0x000000, 0x1f0001, 0x1f0001);
+    }
+    else
+    {
+        skip(FALSE, "fltmgr is not loaded: no filter port object types\n");
+    }
 
     // exported but not created
     ok_eq_pointer(IoDeviceHandlerObjectType, NULL);

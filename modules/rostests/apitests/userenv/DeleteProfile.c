@@ -527,9 +527,8 @@ START_TEST(DeleteProfile)
     ok(CreateTestProfile(pSid, pszSid, szUser), "Cannot create the profile: %lu\n", GetLastError());
     ok(ProfileKeyExists(pszSid), "No profile list entry for %S\n", pszSid);
     bHive = HiveLoaded(pszSid);
-    /* CreateUserProfileExW() cannot unload the new hive: RegUnLoadKeyW() fails with ERROR_ACCESS_DENIED */
-    /* Not todo_ros: the test system does not set WINETEST_PLATFORM, so winetest_platform stays "windows" */
-    todo_if(is_reactos()) ok(!bHive, "The hive of %S is still loaded\n", pszSid);
+    /* RegUnLoadKeyW() used to fail with ERROR_ACCESS_DENIED here and the row was a todo; it unloads the new hive now */
+    ok(!bHive, "The hive of %S is still loaded\n", pszSid);
     if (GetProfilePath(pszSid, szRealProfile, ARRAYSIZE(szRealProfile)))
         TestProfileInUse(pszSid, szRealProfile, !bHive);
     else
