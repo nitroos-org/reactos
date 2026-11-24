@@ -122,6 +122,8 @@ static union ra_options nd6_ra_buffer;
 static s8_t nd6_find_neighbor_cache_entry(const ip6_addr_t *ip6addr);
 static s8_t nd6_new_neighbor_cache_entry(void);
 static void nd6_free_neighbor_cache_entry(s8_t i);
+/* NitroOS: echo6.c */
+extern void NitroNd6ResolutionFailed(const ip6_addr_t *addr, struct netif *netif);
 static s16_t nd6_find_destination_cache_entry(const ip6_addr_t *ip6addr);
 static s16_t nd6_new_destination_cache_entry(void);
 static int nd6_is_prefix_in_netif(const ip6_addr_t *ip6addr, struct netif *netif);
@@ -1146,6 +1148,8 @@ nd6_tmr(void)
       if ((neighbor_cache[i].counter.probes_sent >= LWIP_ND6_MAX_MULTICAST_SOLICIT) &&
           (!neighbor_cache[i].isrouter)) {
         /* Retries exceeded. */
+        /* NitroOS: an ICMPv6 echo request waiting for this neighbour is answered "destination host unreachable" */
+        NitroNd6ResolutionFailed(&neighbor_cache[i].next_hop_address, neighbor_cache[i].netif);
         nd6_free_neighbor_cache_entry(i);
       } else {
         /* Send a NS for this entry. */

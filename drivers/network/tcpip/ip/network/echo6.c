@@ -92,6 +92,8 @@ struct netif *Udp6NetifOfIndex(ULONG IfIndex);
 struct netif *Udp6DefaultMulticastNetif(VOID);
 struct netif *Udp6Route(const ip6_addr_t *Src, const ip6_addr_t *Dest);
 
+VOID Echo6CompleteDone(VOID);
+
 #define ECHO6_BUCKET(Seq)       (&Echo6Pending[(USHORT)(Seq) % ECHO6_BUCKETS])
 
 /* Takes a request off the pending buckets (Echo6Lock held; it is on them) */
@@ -416,6 +418,71 @@ Echo6Input(struct pbuf *p, struct netif *inp)
         return 0;
     pbuf_free(p);
     return 1;
+}
+
+/*
+ * The neighbour of an on-link destination could not be resolved (lwIP's neighbour discovery gave up, from nd6_tmr with
+ * the core lock held, after about three seconds): the requests waiting for it get what Windows gives them, a reply
+ * with the status IP_DEST_HOST_UNREACHABLE from the address of the interface (measured on Windows Server 2022: a
+ * request with a longer time limit than the discovery takes; one with a shorter limit times out first as before).
+ * They are completed from a work item, not here: Echo6Complete may not run under the core lock.
+ */
+static WORK_QUEUE_ITEM Echo6FailItem;
+static volatile LONG Echo6FailQueued;
+
+static
+VOID
+NTAPI
+Echo6FailWorker(PVOID Context)
+{
+    UNREFERENCED_PARAMETER(Context);
+    InterlockedExchange(&Echo6FailQueued, 0);
+    Echo6CompleteDone();
+}
+
+VOID
+NitroNd6ResolutionFailed(const ip6_addr_t *Addr, struct netif *netif)
+{
+    const ip_addr_t *Selected;
+    PIP_INTERFACE IF = netif ? netif->state : NULL;
+    BOOLEAN Any = FALSE;
+    KIRQL OldIrql;
+    ULONG i;
+
+    if (Echo6Count == 0 || !Addr)
+        return;
+
+    Selected = netif ? ip6_select_source_address(netif, Addr) : NULL;
+
+    KeAcquireSpinLock(&Echo6Lock, &OldIrql);
+    for (i = 0; i < ECHO6_BUCKETS; i++)
+    {
+        PLIST_ENTRY Entry = Echo6Pending[i].Flink, Next;
+
+        for (; Entry != &Echo6Pending[i]; Entry = Next)
+        {
+            PECHO6 E = CONTAINING_RECORD(Entry, ECHO6, Entry);
+
+            Next = Entry->Flink;
+            if (E->State != ECHO6_PENDING || RtlCompareMemory(E->Dst, Addr->addr, 16) != 16)
+                continue;
+            E->State = ECHO6_ANSWERED;
+            Echo6Unlink(E);
+            RtlCopyMemory(E->From, Selected ? ip_2_ip6(Selected)->addr : Addr->addr, 16);
+            E->FromScope = (Selected && ip6_addr_islinklocal(ip_2_ip6(Selected)) && IF) ? IF->Index : 0;
+            E->Status = IP_DEST_HOST_UNREACHABLE;
+            E->DataLen = 0;
+            InsertTailList(&Echo6Done, &E->Entry);
+            Any = TRUE;
+        }
+    }
+    KeReleaseSpinLock(&Echo6Lock, OldIrql);
+
+    if (Any && InterlockedExchange(&Echo6FailQueued, 1) == 0)
+    {
+        ExInitializeWorkItem(&Echo6FailItem, Echo6FailWorker, NULL);
+        ExQueueWorkItem(&Echo6FailItem, DelayedWorkQueue);
+    }
 }
 
 /* Completes the requests Echo6Input answered (no lock held, PASSIVE_LEVEL) */

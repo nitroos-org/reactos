@@ -9,6 +9,7 @@
  */
 
 #include "precomp.h"
+#include <icmp.h>
 #include <nitrofwk.h>
 
 NTSTATUS AddGenericHeaderIPv4(
@@ -187,6 +188,141 @@ RawIpUnprivilegedMaySend(PADDRESS_FILE AddrFile, PCHAR Data, ULONG Size)
     return Type == 8;   /* ICMP echo request */
 }
 
+/*
+ * An echo request to a neighbour whose link address is not known yet does not make its sender wait for the resolution
+ * (IPSendDatagram does, and gave up with ERROR_HOST_UNREACHABLE after the resolution failed, whatever time limit the
+ * request had). It waits on the neighbour like a TCP segment does, and the request runs on its own time limit
+ * (IP_REQ_TIMED_OUT). When the resolution fails first, the sender gets what Windows gives it (measured on Windows
+ * Server 2022, IPv4 and IPv6): a reply with the status IP_DEST_HOST_UNREACHABLE from the address of its own interface,
+ * which is an ICMP "host unreachable" message made here and delivered to the ICMP address files like one from a
+ * router. The message is delivered from a work item: the neighbour completes the packet at DISPATCH_LEVEL under its
+ * bucket lock (which the address file locks are taken before elsewhere), and the receive handler of an echo request
+ * needs PASSIVE_LEVEL.
+ */
+#define RAW_ECHO_QUOTE_MAX (60 + 8)
+
+typedef struct _RAW_ECHO_FAILURE
+{
+    WORK_QUEUE_ITEM WorkItem;
+    PIP_INTERFACE Interface;        /* referenced */
+    IP_ADDRESS Local;
+    UINT QuoteSize;
+    UCHAR Quote[RAW_ECHO_QUOTE_MAX];    /* the IP header of the request and the first 8 bytes of its ICMP message */
+} RAW_ECHO_FAILURE, *PRAW_ECHO_FAILURE;
+
+static
+VOID
+NTAPI
+RawIpEchoFailureWorker(PVOID Context)
+{
+    PRAW_ECHO_FAILURE Failure = Context;
+    UCHAR Buffer[8 + RAW_ECHO_QUOTE_MAX];
+    ADDRESS_FILE FakeAddrFile;
+    IP_PACKET NewPacket;
+    UINT Size = 8 + Failure->QuoteSize;
+
+    RtlZeroMemory(Buffer, 8);
+    Buffer[0] = ICMP_TYPE_DEST_UNREACH;
+    Buffer[1] = ICMP_CODE_DU_HOST_UNREACH;
+    RtlCopyMemory(Buffer + 8, Failure->Quote, Failure->QuoteSize);
+
+    RtlZeroMemory(&FakeAddrFile, sizeof(FakeAddrFile));
+    FakeAddrFile.Protocol = IPPROTO_ICMP;
+    FakeAddrFile.TTL = 128;
+
+    if (NT_SUCCESS(BuildRawIpPacket(&FakeAddrFile, &NewPacket, &Failure->Local, 0, &Failure->Local, 0,
+                                    (PCHAR)Buffer, Size)))
+    {
+        ((PICMP_HEADER)NewPacket.Data)->Checksum = 0;
+        ((PICMP_HEADER)NewPacket.Data)->Checksum = (USHORT)IPv4Checksum(NewPacket.Data, Size, 0);
+        /* a received packet carries its addresses (BuildRawIpPacket fills the header only) */
+        NewPacket.SrcAddr = Failure->Local;
+        NewPacket.DstAddr = Failure->Local;
+        RawIpReceive(Failure->Interface, &NewPacket);
+        NewPacket.Free(&NewPacket);
+    }
+
+    IPDereferenceInterface(Failure->Interface);
+    ExFreePoolWithTag(Failure, OUT_DATA_TAG);
+}
+
+/* Called by the neighbour cache (at DISPATCH_LEVEL, under a bucket lock) when the packet has left or the neighbour
+   could not be resolved */
+static
+VOID
+RawIpEchoComplete(PVOID Context, PNDIS_PACKET NdisPacket, NDIS_STATUS NdisStatus)
+{
+    PRAW_ECHO_FAILURE Failure = Context;
+
+    FreeNdisPacket(NdisPacket);
+    if (NdisStatus == NDIS_STATUS_HOST_UNREACHABLE)
+    {
+        ExInitializeWorkItem(&Failure->WorkItem, RawIpEchoFailureWorker, Failure);
+        ExQueueWorkItem(&Failure->WorkItem, DelayedWorkQueue);
+        return;
+    }
+    IPDereferenceInterface(Failure->Interface);
+    ExFreePoolWithTag(Failure, OUT_DATA_TAG);
+}
+
+/* Queues the datagram (one fragment, within the interface's MTU) on its neighbour and returns at once. Takes the packet */
+static
+NTSTATUS
+RawIpQueueEchoOnNeighbour(PIP_PACKET Packet, PNEIGHBOR_CACHE_ENTRY NCE, PIP_ADDRESS Local)
+{
+    PRAW_ECHO_FAILURE Failure;
+    PNDIS_PACKET NdisPacket;
+    PIPv4_HEADER Header;
+    PCHAR Data;
+    UINT InSize;
+    NDIS_STATUS NdisStatus;
+
+    if (Packet->HeaderSize < sizeof(IPv4_HEADER) || Packet->HeaderSize > 60 ||
+        Packet->TotalSize < Packet->HeaderSize + 8)
+    {
+        Packet->Free(Packet);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Failure = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Failure), OUT_DATA_TAG);
+    if (!Failure)
+    {
+        Packet->Free(Packet);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    Failure->Interface = NCE->Interface;
+    Failure->Local = *Local;
+    Failure->QuoteSize = Packet->HeaderSize + 8;
+    RtlCopyMemory(Failure->Quote, Packet->Header, Packet->HeaderSize);
+    RtlCopyMemory(Failure->Quote + Packet->HeaderSize, (PUCHAR)Packet->Header + Packet->HeaderSize, 8);
+
+    NdisStatus = AllocatePacketWithBuffer(&NdisPacket, NULL, Packet->TotalSize);
+    if (!NT_SUCCESS(NdisStatus))
+    {
+        ExFreePoolWithTag(Failure, OUT_DATA_TAG);
+        Packet->Free(Packet);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    GetDataPtr(NdisPacket, 0, &Data, &InSize);
+    RtlCopyMemory(Data, Packet->Header, Packet->TotalSize);
+    Header = (PIPv4_HEADER)Data;
+    Header->FlagsFragOfs = 0;
+    Header->TotalLength = WH2N((USHORT)Packet->TotalSize);
+    Header->Checksum = 0;
+    Header->Checksum = (USHORT)IPv4Checksum(Header, Packet->HeaderSize, 0);
+    Packet->Free(Packet);
+
+    IPReferenceInterface(NCE->Interface);
+    if (!NBQueuePacket(NCE, NdisPacket, RawIpEchoComplete, Failure))
+    {
+        IPDereferenceInterface(NCE->Interface);
+        FreeNdisPacket(NdisPacket);
+        ExFreePoolWithTag(Failure, OUT_DATA_TAG);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS RawIPSendDatagram(
     PADDRESS_FILE AddrFile,
     PTDI_CONNECTION_INFORMATION ConnInfo,
@@ -309,7 +445,12 @@ NTSTATUS RawIPSendDatagram(
     if (AddrFile->Protocol == IPPROTO_ICMP)
         NITROFW_NOTE_ICMP_SEND(&RemoteAddress, (PUCHAR)BufferData, DataSize);
 
-    Status = IPSendDatagram(&Packet, NCE);
+    /* an echo request to a neighbour that is not resolved yet is queued on it, not waited for */
+    if (AddrFile->Protocol == IPPROTO_ICMP && !Multicast && DataSize >= 8 && *(PUCHAR)BufferData == ICMP_TYPE_ECHO_REQUEST &&
+        (NCE->State & NUD_INCOMPLETE) && NCE->Interface->MTU != 0 && Packet.TotalSize <= NCE->Interface->MTU)
+        Status = RawIpQueueEchoOnNeighbour(&Packet, NCE, &LocalAddress);
+    else
+        Status = IPSendDatagram(&Packet, NCE);
     NBDereferenceNeighbor(NCE);
     if (!NT_SUCCESS(Status))
         return Status;
