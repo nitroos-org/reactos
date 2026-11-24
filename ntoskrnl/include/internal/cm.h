@@ -238,6 +238,12 @@ typedef struct _CM_KEY_BODY
     /* ReactOS specific -- boolean flag to avoid recursive locking of the KCB */
     BOOLEAN KcbLocked;
 
+    /* ReactOS specific -- what the first NtNotifyChangeKey on this handle asked for (completion filter and tree
+     * flag) decides which changes complete every request made on the handle afterwards (measured on Windows) */
+    BOOLEAN NotifySet;
+    BOOLEAN NotifyWatchTree;
+    ULONG NotifyFilter;
+
     /* ReactOS specific -- the WoW64 view (KEY_WOW64_32KEY, KEY_WOW64_64KEY or 0)
      * the key was opened in. A relative open that names no view uses it. */
     ULONG Wow64View;
