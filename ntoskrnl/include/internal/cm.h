@@ -704,6 +704,12 @@ CmpFlushNotify(
     IN BOOLEAN LockHeld
 );
 
+VOID
+NTAPI
+CmNotifyRunDown(
+    _In_ PETHREAD Thread
+);
+
 NTSTATUS
 NTAPI
 CmpNotifyChangeKey(

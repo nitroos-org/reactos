@@ -799,8 +799,8 @@ PspExitThread(IN NTSTATUS ExitStatus)
     /* Rundown Timers */
     ExTimerRundown();
 
-    /* FIXME: Rundown Registry Notifications (NtChangeNotify)
-    CmNotifyRunDown(Thread); */
+    /* Rundown Registry Notifications (NtNotifyChangeKey) */
+    CmNotifyRunDown(Thread);
 
     /* Rundown Mutexes */
     KeRundownThread();

@@ -530,6 +530,43 @@ CmpReportNotifyRename(IN PCM_KEY_CONTROL_BLOCK Kcb)
 
 VOID
 NTAPI
+CmNotifyRunDown(_In_ PETHREAD Thread)
+{
+    LIST_ENTRY Matched;
+    PLIST_ENTRY Entry, Next;
+    PCM_NOTIFY_REQUEST Request;
+    KIRQL OldIrql;
+
+    /* The thread exits: what it still has pending can never be completed in
+     * its context. As on Windows the events are signaled (a request made
+     * without REG_NOTIFY_THREAD_AGNOSTIC does not outlive its thread). */
+    if (IsListEmpty(&CmpNotifyList))
+        return;
+
+    InitializeListHead(&Matched);
+
+    KeAcquireSpinLock(&CmpNotifyLock, &OldIrql);
+    for (Entry = CmpNotifyList.Flink; Entry != &CmpNotifyList; Entry = Next)
+    {
+        Next = Entry->Flink;
+        Request = CONTAINING_RECORD(Entry, CM_NOTIFY_REQUEST, Link);
+        if (Request->Thread == Thread)
+        {
+            RemoveEntryList(&Request->Link);
+            InsertTailList(&Matched, &Request->Link);
+        }
+    }
+    KeReleaseSpinLock(&CmpNotifyLock, OldIrql);
+
+    while (!IsListEmpty(&Matched))
+    {
+        Request = CONTAINING_RECORD(RemoveHeadList(&Matched), CM_NOTIFY_REQUEST, Link);
+        CmpNotifyCancelWithThread(Request);
+    }
+}
+
+VOID
+NTAPI
 CmpFlushNotify(IN PCM_KEY_BODY KeyBody,
                IN BOOLEAN LockHeld)
 {
