@@ -6,38 +6,39 @@
  */
 
 /*
- * With the machine switch on (smbconn.h: smbengine\Parameters\ClientEnabled = 1) this service loads
- * the SMB mini-redirector (mrxsmb) when it starts, then waits on the engine device for the
- * redirector to need an engine (a user's first UNC path or net use) and starts the engine service
- * then. Users need no right to start services (Windows grants interactive users no SERVICE_START
- * on LanmanWorkstation either): the starting is done here, as SYSTEM, and only the two services
- * named in the code are started. With the switch off nothing of the SMB client is loaded.
+ * This service loads the SMB mini-redirector (mrxsmb) when it starts, so that MUP can hand UNC
+ * paths to it, then waits on the engine device for the redirector to need an engine (a user's
+ * first UNC path or net use) and starts the engine service then. Nothing of the client connects
+ * or listens before that. Users need no right to start services (Windows grants interactive users
+ * no SERVICE_START on LanmanWorkstation either): the starting is done here, as SYSTEM, and only
+ * the two services named in the code are started.
  */
 
 #include "precomp.h"
 #include <winioctl.h>
 #include <drivers/smbrdr/smbupcall.h>
-#include <drivers/smbrdr/smbconn.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(wkssvc);
 
 static HANDLE StarterThread;
 static volatile LONG StarterStop;
 
+/*
+ * Earlier builds kept the client off unless smbengine\Parameters\ClientEnabled was 1. The client
+ * is always available now; an installation that still has the value (whatever it says) loses it.
+ */
 static
-BOOL
-ClientEnabled(VOID)
+VOID
+RemoveObsoleteSwitch(VOID)
 {
-    DWORD Value = 0, Size = sizeof(Value), Type;
     HKEY Key;
 
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, SMBCONN_SWITCH_KEY, 0, KEY_READ, &Key) != ERROR_SUCCESS)
-        return FALSE;
-    if (RegQueryValueExW(Key, SMBCONN_SWITCH_VALUE, NULL, &Type, (LPBYTE)&Value, &Size) != ERROR_SUCCESS ||
-        Type != REG_DWORD)
-        Value = 0;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SYSTEM\\CurrentControlSet\\Services\\smbengine\\Parameters",
+                      0, KEY_SET_VALUE, &Key) != ERROR_SUCCESS)
+        return;
+    RegDeleteValueW(Key, L"ClientEnabled");
     RegCloseKey(Key);
-    return Value == 1;
 }
 
 static
@@ -141,8 +142,7 @@ StarterMain(LPVOID Parameter)
 VOID
 StartSmbClientStarter(VOID)
 {
-    if (!ClientEnabled())
-        return;
+    RemoveObsoleteSwitch();
     InterlockedExchange(&StarterStop, 0);
     StarterThread = CreateThread(NULL, 0, StarterMain, NULL, 0, NULL);
     if (StarterThread == NULL)

@@ -143,7 +143,7 @@ SmbConnect(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext, PIRP Irp, PSMB_CREDENTIA
     if (!Ext->ClientContextValid)
         return STATUS_NO_TOKEN;
 
-    /* No engine yet: the starter (Workstation service) starts one when the client is switched on */
+    /* No engine yet: the starter (Workstation service) starts one */
     Status = SmbEnsureEngine(Irp);
     if (!NT_SUCCESS(Status))
         return Status;
@@ -2055,7 +2055,7 @@ SmbQueryPathEx(PIRP Irp, PIO_STACK_LOCATION Stack)
     }
 
     /* Without an engine nothing can be claimed: do not make rdbss build connections. The starter
-     * (when the client is switched on) is asked for one first. */
+     * (the Workstation service) is asked for one first. */
     if (SmbRdrDeviceFileObject == NULL ||
         RequestEx->PathName.Length == 0 || RequestEx->PathName.Length >= MAXUSHORT - sizeof(WCHAR) ||
         SmbIsEngineProcess(IoGetCurrentProcess()) ||

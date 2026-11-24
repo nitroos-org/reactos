@@ -108,7 +108,7 @@ ServiceInit(VOID)
 
     StartRpcServer();
 
-    /* The SMB client, when the machine switch has it on */
+    /* The SMB client: the redirector now, the engine on demand */
     StartSmbClientStarter();
 
     /* Report a running workstation service */
