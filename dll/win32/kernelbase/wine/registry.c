@@ -191,7 +191,11 @@ static HKEY get_perflib_key( HANDLE key )
 {
     static const WCHAR performance_text[] =
             L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Perflib\\009";
+#ifdef __REACTOS__
+    char buffer[300];
+#else
     char buffer[200];
+#endif
     OBJECT_NAME_INFORMATION *info = (OBJECT_NAME_INFORMATION *)buffer;
 
     if (!NtQueryObject( key, ObjectNameInformation, buffer, sizeof(buffer), NULL ))
@@ -201,6 +205,14 @@ static HKEY get_perflib_key( HANDLE key )
             NtClose( key );
             return HKEY_PERFORMANCE_TEXT;
         }
+#ifdef __REACTOS__
+        /* the kernel flags both Perflib language keys: CurrentLanguage is the user's language text */
+        if (!wcsicmp( info->Name.Buffer, L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Perflib\\CurrentLanguage" ))
+        {
+            NtClose( key );
+            return HKEY_PERFORMANCE_NLSTEXT;
+        }
+#endif
     }
 
     return key;
@@ -1350,6 +1362,62 @@ LONG WINAPI RegSetKeyValueA( HKEY hkey, LPCSTR subkey, LPCSTR name, DWORD type, 
     return ret;
 }
 
+#ifdef __REACTOS__
+/*
+ * The text of the performance text key is the Perflib\009 value @name (Counter or Help), read through an ordinary
+ * handle (the kernel hands out a flagged one for Perflib\009, see STATUS_PREDEFINED_HANDLE in open_key). NULL when the
+ * registry has none; the caller then uses its built-in table. The caller frees it with RtlFreeHeap.
+ */
+static WCHAR *read_perflib_text( const WCHAR *name, DWORD *bytes )
+{
+    static const WCHAR path[] = L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Perflib\\009";
+    KEY_VALUE_PARTIAL_INFORMATION *info = NULL;
+    UNICODE_STRING key_name, value_name;
+    OBJECT_ATTRIBUTES attr;
+    WCHAR *text = NULL;
+    HANDLE key;
+    ULONG size = 0;
+
+    RtlInitUnicodeString( &key_name, path );
+    InitializeObjectAttributes( &attr, &key_name, OBJ_CASE_INSENSITIVE, NULL, NULL );
+    if (NtOpenKeyEx( &key, KEY_QUERY_VALUE, &attr, 0x40000000 /* this system's own open option: an ordinary handle for a Perflib language key */ )) return NULL;
+    RtlInitUnicodeString( &value_name, name );
+    if (NtQueryValueKey( key, &value_name, KeyValuePartialInformation, NULL, 0, &size ) == STATUS_BUFFER_TOO_SMALL
+        && size > sizeof(*info) && (info = RtlAllocateHeap( GetProcessHeap(), 0, size )) &&
+        !NtQueryValueKey( key, &value_name, KeyValuePartialInformation, info, size, &size ) &&
+        info->Type == REG_MULTI_SZ && info->DataLength >= sizeof(WCHAR) &&
+        (text = RtlAllocateHeap( GetProcessHeap(), 0, info->DataLength + 2 * sizeof(WCHAR) )))
+    {
+        memcpy( text, info->Data, info->DataLength );
+        text[info->DataLength / sizeof(WCHAR)] = 0;        /* the list ends with two nulls */
+        text[info->DataLength / sizeof(WCHAR) + 1] = 0;
+        *bytes = info->DataLength + 2 * sizeof(WCHAR);
+    }
+    if (info) RtlFreeHeap( GetProcessHeap(), 0, info );
+    NtClose( key );
+    return text;
+}
+
+static DWORD query_perflib_text( const WCHAR *value, const WCHAR *builtin, DWORD builtin_bytes,
+                                 DWORD *type, void *data, DWORD *ret_size, BOOL unicode )
+{
+    DWORD size = *ret_size, bytes = builtin_bytes, ret = ERROR_SUCCESS;
+    WCHAR *text = read_perflib_text( value, &bytes );
+    const WCHAR *names = text ? text : builtin;
+
+    if (type) *type = REG_MULTI_SZ;
+    *ret_size = unicode ? bytes : bytes / sizeof(WCHAR);
+    if (data)
+    {
+        if (size < *ret_size) ret = ERROR_MORE_DATA;
+        else if (unicode) memcpy( data, names, bytes );
+        else RtlUnicodeToMultiByteN( data, size, NULL, names, bytes );
+    }
+    if (text) RtlFreeHeap( GetProcessHeap(), 0, text );
+    return ret;
+}
+#endif
+
 /* FIXME: we should read data from system32/perf009c.dat (or perf###c depending
  * on locale) instead */
 static DWORD query_perf_names( DWORD *type, void *data, DWORD *ret_size, BOOL unicode )
@@ -1357,6 +1425,9 @@ static DWORD query_perf_names( DWORD *type, void *data, DWORD *ret_size, BOOL un
     static const WCHAR names[] = L"1\0" "1847\0" "1846\0End Marker\0";
     DWORD size = *ret_size;
 
+#ifdef __REACTOS__
+    return query_perflib_text( L"Counter", names, sizeof(names), type, data, ret_size, unicode );
+#endif
     if (type) *type = REG_MULTI_SZ;
     *ret_size = sizeof(names);
     if (!unicode) *ret_size /= sizeof(WCHAR);
@@ -1378,6 +1449,9 @@ static DWORD query_perf_help( DWORD *type, void *data, DWORD *ret_size, BOOL uni
     static const WCHAR names[] = L"1847\0End Marker\0";
     DWORD size = *ret_size;
 
+#ifdef __REACTOS__
+    return query_perflib_text( L"Help", names, sizeof(names), type, data, ret_size, unicode );
+#endif
     if (type) *type = REG_MULTI_SZ;
     *ret_size = sizeof(names);
     if (!unicode) *ret_size /= sizeof(WCHAR);

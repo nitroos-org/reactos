@@ -4472,6 +4472,55 @@ int ngc_delete_reparse(ngc_vol *v, ngc_node *n, unsigned int tag)
 	return err;
 }
 
+/*
+ * The entries of $Extend\$Reparse:$R in key order (reparse tag, then the file reference as two 32-bit numbers: the index's own
+ * collation): the first entry at or after the key (@tag, @ref), or after it when @after.  Read-only.  0 with the entry's key in
+ * *otag / *oref; -ENOENT when there is none; -EIO when the volume has no reparse index.
+ */
+int ngc_reparse_next(ngc_vol *v, unsigned int tag, unsigned long long ref, int after,
+		     unsigned int *otag, unsigned long long *oref)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct ntfs_index_context *xr;
+	struct ntfs_inode *xrni;
+	struct reparse_index_key key;
+	struct index_entry *ie;
+	struct inode *xri;
+	int err;
+
+	if (vol->major_ver < 3)
+		return -EOPNOTSUPP;
+	xr = ngc_reparse_index(vol);
+	if (!xr)
+		return -EIO;
+	xrni = xr->idx_ni;
+	xri = VFS_I(xrni);
+	key.reparse_tag = cpu_to_le32(tag);
+	key.file_id = cpu_to_le64(ref);
+	mutex_lock_nested(&xrni->mrec_lock, NTFS_EXTEND_MUTEX_PARENT);
+	err = ntfs_index_lookup(&key, sizeof(key), xr);
+	if (err && err != -ENOENT)
+		goto out;
+	ie = xr->entry;
+	if (ie && ((!err && after) || (ie->flags & INDEX_ENTRY_END)))
+		ie = ntfs_index_next(ie, xr);
+	if (IS_ERR(ie)) {
+		err = PTR_ERR(ie);
+	} else if (!ie || le16_to_cpu(ie->key_length) < sizeof(key)) {
+		err = -ENOENT;
+	} else {
+		memcpy(&key, &ie->key, sizeof(key));
+		*otag = le32_to_cpu(key.reparse_tag);
+		*oref = le64_to_cpu(key.file_id);
+		err = 0;
+	}
+out:
+	mutex_unlock(&xrni->mrec_lock);
+	ntfs_index_ctx_put(xr);
+	iput(xri);
+	return err;
+}
+
 /* ------------------------------------------------------------- short (8.3) names */
 
 /* The value of the $FILE_NAME attribute the search context stands on. */

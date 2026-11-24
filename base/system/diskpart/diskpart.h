@@ -84,6 +84,8 @@ typedef enum _EXIT_CODE
     EXIT_CMD_FAILED = -2147024809,
     /* 0x8004240F, a range given by offset= that cannot be had (the Virtual Disk Service error "not enough usable space") */
     EXIT_CMD_NO_SPACE = -2147212273,
+    /* 0x8004245E, the Virtual Disk Service error "The volume still has access path to it" (offline volume) */
+    EXIT_CMD_HAS_PATH = -2147212194,
     /* 0x80042416, the Virtual Disk Service error "The path is not found" (remove letter= of a letter the volume does not have) */
     EXIT_CMD_NOT_FOUND = -2147212266,
     /* 0x80042565, the Virtual Disk Service error "The specified partition type is not valid for this operation" (set id=42) */
@@ -685,17 +687,33 @@ BOOL
 DeleteDriveLetter(
     _In_ WCHAR DriveLetter);
 
-/* offline.c */
+/* online.c: ONLINE / OFFLINE alone */
 EXIT_CODE
-offline_main(
+OnlineObject(
+    _In_ INT argc,
+    _In_ PWSTR *argv);
+
+EXIT_CODE
+OfflineObject(
+    _In_ INT argc,
+    _In_ PWSTR *argv);
+
+/* online.c: OFFLINE VOLUME */
+EXIT_CODE
+OfflineVolume(
     _In_ INT argc,
     _In_ PWSTR *argv);
 
 /* online.c */
 EXIT_CODE
-online_main(
+OnlineVolume(
     _In_ INT argc,
     _In_ PWSTR *argv);
+
+/* True when the partition manager reports the volume offline (IOCTL_VOLUME_IS_OFFLINE succeeds) */
+BOOL
+IsVolumeOffline(
+    _In_ PCWSTR pszVolumeName);
 
 /* partlist.c */
 #ifdef DUMP_PARTITION_TABLE

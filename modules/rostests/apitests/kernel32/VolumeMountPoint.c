@@ -100,6 +100,38 @@ Test_Arguments(VOID)
     ok(Ret == FALSE, "DeleteVolumeMountPointW(NULL) succeeded\n");
     ok_lasterr(ERROR_INVALID_PARAMETER);
 
+    /* the search functions (measured on Windows Server 2022) */
+    {
+        WCHAR Found[MAX_PATH];
+        HANDLE Find;
+
+        SetLastError(0xDEADBEEF);
+        Find = FindFirstVolumeMountPointW(NULL, Found, ARRAYSIZE(Found));
+        ok(Find == INVALID_HANDLE_VALUE, "FindFirstVolumeMountPointW(NULL) gave %p\n", Find);
+        ok_lasterr(ERROR_INVALID_PARAMETER);
+        SetLastError(0xDEADBEEF);
+        Find = FindFirstVolumeMountPointW(L"C:\\", Found, 0);
+        ok(Find == INVALID_HANDLE_VALUE, "a buffer of 0 characters gave %p\n", Find);
+        ok_lasterr(ERROR_INVALID_PARAMETER);
+        SetLastError(0xDEADBEEF);
+        Find = FindFirstVolumeMountPointW(L"C:\\", Found, 1);
+        ok(Find == INVALID_HANDLE_VALUE, "a buffer of 1 character gave %p\n", Find);
+        ok_lasterr(ERROR_BAD_LENGTH);
+        SetLastError(0xDEADBEEF);
+        Find = FindFirstVolumeMountPointW(L"C:", Found, ARRAYSIZE(Found));
+        ok(Find == INVALID_HANDLE_VALUE, "a root without the backslash gave %p\n", Find);
+        ok_lasterr(ERROR_INVALID_NAME);
+        SetLastError(0xDEADBEEF);
+        Find = FindFirstVolumeMountPointW(L"", Found, ARRAYSIZE(Found));
+        ok(Find == INVALID_HANDLE_VALUE, "an empty root gave %p\n", Find);
+        ok_lasterr(ERROR_INVALID_NAME);
+        SetLastError(0xDEADBEEF);
+        ok(!FindNextVolumeMountPointW(INVALID_HANDLE_VALUE, Found, ARRAYSIZE(Found)), "FindNext(INVALID_HANDLE_VALUE)\n");
+        ok(!FindNextVolumeMountPointW(NULL, Found, ARRAYSIZE(Found)), "FindNext(NULL)\n");
+        ok(!FindVolumeMountPointClose(INVALID_HANDLE_VALUE), "Close(INVALID_HANDLE_VALUE)\n");
+        ok(!FindVolumeMountPointClose(NULL), "Close(NULL)\n");
+    }
+
     if (Letter == 0)
     {
         skip("no free drive letter\n");
@@ -262,6 +294,29 @@ Test_Letters(PCWSTR Volume)
     ok_int(VolumePathCount(Volume), 0);
 }
 
+/* How many entries of the folder mount point search of the volume root @Root equal @Relative; -1 when the search
+ * fails other than at its end (ERROR_NO_MORE_FILES, which Windows also gives for a volume with no mount point at all). */
+static int
+CountFoundMountPoint(PCWSTR Root, PCWSTR Relative)
+{
+    WCHAR Name[MAX_PATH];
+    HANDLE Find = FindFirstVolumeMountPointW(Root, Name, ARRAYSIZE(Name));
+    int Count = 0;
+
+    if (Find == INVALID_HANDLE_VALUE)
+        return GetLastError() == ERROR_NO_MORE_FILES ? 0 : -1;
+    do
+    {
+        if (_wcsicmp(Name, Relative) == 0)
+            Count++;
+    } while (FindNextVolumeMountPointW(Find, Name, ARRAYSIZE(Name)));
+    ok_lasterr(ERROR_NO_MORE_FILES);
+    ok(!FindNextVolumeMountPointW(Find, Name, ARRAYSIZE(Name)), "a search that ended went on\n");
+    ok(FindVolumeMountPointClose(Find), "FindVolumeMountPointClose failed: %lu\n", GetLastError());
+    ok(!FindVolumeMountPointClose(Find), "a search closed twice\n");
+    return Count;
+}
+
 static VOID
 Test_Folder(PCWSTR Volume)
 {
@@ -319,6 +374,25 @@ Test_Folder(PCWSTR Volume)
     ok(GetVolumeNameForVolumeMountPointW(Folder, Name, ARRAYSIZE(Name)), "no volume name for %ls\n", Folder);
     ok(_wcsicmp(Name, Volume) == 0, "volume of %ls is %ls\n", Folder, Name);
 
+    /* the search of the host volume lists the folder, by its path from the root, and not the folder that is no mount point */
+    {
+        WCHAR HostRoot[MAX_PATH], LongFolder[MAX_PATH], LongFull[MAX_PATH];
+
+        /* the search gives the names the file system has, not the 8.3 forms the temporary path may use */
+        if (!GetLongPathNameW(Folder, LongFolder, ARRAYSIZE(LongFolder)))
+            StringCchCopyW(LongFolder, ARRAYSIZE(LongFolder), Folder);
+        if (!GetLongPathNameW(Full, LongFull, ARRAYSIZE(LongFull)))
+            StringCchCopyW(LongFull, ARRAYSIZE(LongFull), Full);
+        if (GetVolumePathNameW(Root, HostRoot, ARRAYSIZE(HostRoot)) && !_wcsnicmp(LongFolder, HostRoot, wcslen(HostRoot)))
+        {
+            PCWSTR Relative = LongFolder + wcslen(HostRoot);
+            ok_int(CountFoundMountPoint(HostRoot, Relative), 1);
+            ok_int(CountFoundMountPoint(HostRoot, LongFull + wcslen(HostRoot)), 0);
+            SetLastError(0xDEADBEEF);
+            ok_int(CountFoundMountPoint(Volume, L"x\\"), 0);   /* the mounted volume has no mount point folder */
+        }
+    }
+
     SetLastError(0xDEADBEEF);
     ok(!SetVolumeMountPointW(Folder, Volume), "a mount point mounted twice\n");
     ok_lasterr(ERROR_DIR_NOT_EMPTY);
@@ -329,6 +403,15 @@ Test_Folder(PCWSTR Volume)
     ok(!SetVolumeMountPointW(Folder, L"\\\\?\\Volume{00000000-0000-0000-0000-000000000000}\\"), "a volume that is not there\n");
 
     ok(DeleteVolumeMountPointW(Folder), "DeleteVolumeMountPointW(%ls) failed: %lu\n", Folder, GetLastError());
+    {
+        WCHAR HostRoot[MAX_PATH];
+
+        /* the folder is still there: its long name is what the search would have given */
+        if (!GetLongPathNameW(Folder, Name, ARRAYSIZE(Name)))
+            StringCchCopyW(Name, ARRAYSIZE(Name), Folder);
+        if (GetVolumePathNameW(Root, HostRoot, ARRAYSIZE(HostRoot)) && !_wcsnicmp(Name, HostRoot, wcslen(HostRoot)))
+            ok_int(CountFoundMountPoint(HostRoot, Name + wcslen(HostRoot)), 0);
+    }
     ok_int(VolumePathCount(Volume), 0);
     ok_int(GetFileAttributesW(Folder) != INVALID_FILE_ATTRIBUTES, TRUE);
     SetLastError(0xDEADBEEF);

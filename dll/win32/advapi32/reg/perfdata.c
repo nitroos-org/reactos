@@ -465,9 +465,10 @@ PerfGetTextTable(BOOLEAN Help, PBYTE *Result, ULONG *ResultSize)
     PWSTR Buffer = NULL;
     ULONG Chars;
 
+    /* 0x40000000: this system's own open option, the kernel gives an ordinary handle for a Perflib language key then */
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                       L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Perflib\\009",
-                      0,
+                      0x40000000,
                       KEY_QUERY_VALUE,
                       &Key) == ERROR_SUCCESS)
     {

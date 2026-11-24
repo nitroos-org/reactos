@@ -978,7 +978,154 @@ DeleteVolumeMountPointW(IN LPCWSTR lpszVolumeMountPoint)
 }
 
 /*
- * @unimplemented
+ * The state of a FindFirstVolumeMountPoint search: the root directory of the volume (the related file of the
+ * opens by file ID) and the handle of its reparse point index, "$Extend\$Reparse:$R:$INDEX_ALLOCATION", whose
+ * FileReparsePointInformation entries (reparse tag, file reference) are read in tag order: the mount point
+ * tag comes first of the tags a folder mount point can have, so the search ends at the first other tag.
+ */
+#define VOLUME_MOUNT_POINT_FIND_MAGIC 0x504d5656   /* 'VVMP' */
+#define VOLUME_MOUNT_POINT_INDEX_NAME L"$Extend\\$Reparse:$R:$INDEX_ALLOCATION"
+
+typedef struct _VOLUME_MOUNT_POINT_FIND
+{
+    ULONG Magic;
+    BOOLEAN Started;
+    BOOLEAN Done;
+    HANDLE Root;
+    HANDLE Index;
+} VOLUME_MOUNT_POINT_FIND, *PVOLUME_MOUNT_POINT_FIND;
+
+static VOID
+BasepFreeVolumeMountPointFind(IN PVOLUME_MOUNT_POINT_FIND Find)
+{
+    Find->Magic = 0;
+    if (Find->Index != NULL)
+        NtClose(Find->Index);
+    if (Find->Root != NULL)
+        NtClose(Find->Root);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Find);
+}
+
+/*
+ * Reads the mount points of the volume until one points at a volume (not a junction to a folder); copies its path
+ * from the root, without the leading backslash and with a closing one ("dir\mnt\"), to the buffer.  Last error:
+ * ERROR_NO_MORE_FILES at the end, ERROR_MORE_DATA when the path does not fit (the search is over then).
+ */
+static BOOL
+BasepNextVolumeMountPoint(IN PVOLUME_MOUNT_POINT_FIND Find, OUT LPWSTR Buffer, IN DWORD cchBuffer)
+{
+    static const WCHAR VolumePrefix[] = L"\\??\\Volume{";
+    ULONG Key[3] = { IO_REPARSE_TAG_MOUNT_POINT, 0, 0 };
+    UNICODE_STRING KeyName, FileId;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    struct
+    {
+        LONGLONG FileReference;
+        ULONG Tag;
+    } Entry;   /* FILE_REPARSE_POINT_INFORMATION */
+    PREPARSE_DATA_BUFFER Reparse;
+    PFILE_NAME_INFORMATION NameInfo;
+    NTSTATUS Status;
+    HANDLE File;
+    BOOL Ret = FALSE;
+
+    Reparse = RtlAllocateHeap(RtlGetProcessHeap(), 0, MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+    NameInfo = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(FILE_NAME_INFORMATION) + 0xFFFF);
+    if (Reparse == NULL || NameInfo == NULL)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        goto Done;
+    }
+    KeyName.Buffer = (PWSTR)Key;
+    KeyName.Length = KeyName.MaximumLength = sizeof(Key);
+
+    for (;;)
+    {
+        BOOLEAN First = !Find->Started;
+
+        Status = NtQueryDirectoryFile(Find->Index, NULL, NULL, NULL, &IoStatusBlock, &Entry, sizeof(Entry),
+                                      FileReparsePointInformation, TRUE, First ? &KeyName : NULL, First);
+        Find->Started = TRUE;
+        if (!NT_SUCCESS(Status) || Entry.Tag != IO_REPARSE_TAG_MOUNT_POINT)
+        {
+            if (NT_SUCCESS(Status) || Status == STATUS_NO_MORE_FILES || Status == STATUS_NO_SUCH_FILE)
+                SetLastError(ERROR_NO_MORE_FILES);
+            else
+                BaseSetLastNTError(Status);
+            goto Done;
+        }
+
+        /* The file the entry names, opened by its reference below the root, as itself and not what it points to */
+        FileId.Buffer = (PWSTR)&Entry.FileReference;
+        FileId.Length = FileId.MaximumLength = sizeof(Entry.FileReference);
+        InitializeObjectAttributes(&ObjectAttributes, &FileId, 0, Find->Root, NULL);
+        Status = NtOpenFile(&File, SYNCHRONIZE | FILE_READ_ATTRIBUTES, &ObjectAttributes, &IoStatusBlock,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            FILE_OPEN_BY_FILE_ID | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT);
+        if (!NT_SUCCESS(Status))
+            continue;   /* removed since the index entry was read */
+
+        Status = NtFsControlFile(File, NULL, NULL, NULL, &IoStatusBlock, FSCTL_GET_REPARSE_POINT, NULL, 0,
+                                 Reparse, MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+        if (NT_SUCCESS(Status) &&
+            Reparse->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT &&
+            IoStatusBlock.Information >= FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer))
+        {
+            /* the data is read from the volume: its offsets are checked */
+            ULONG Offset = Reparse->MountPointReparseBuffer.SubstituteNameOffset;
+            ULONG Length = Reparse->MountPointReparseBuffer.SubstituteNameLength;
+            ULONG Available = (ULONG)IoStatusBlock.Information -
+                              FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer);
+            BOOLEAN IsVolume = Offset <= Available && Length <= Available - Offset &&
+                               Length >= sizeof(VolumePrefix) - sizeof(WCHAR) &&
+                               !_wcsnicmp((PWSTR)((PUCHAR)Reparse->MountPointReparseBuffer.PathBuffer + Offset),
+                                          VolumePrefix, (sizeof(VolumePrefix) - sizeof(WCHAR)) / sizeof(WCHAR));
+            if (IsVolume)
+            {
+                Status = NtQueryInformationFile(File, &IoStatusBlock, NameInfo, sizeof(FILE_NAME_INFORMATION) + 0xFFFF,
+                                                FileNameInformation);
+                if (NT_SUCCESS(Status))
+                {
+                    PWSTR Name = NameInfo->FileName;
+                    ULONG Chars = NameInfo->FileNameLength / sizeof(WCHAR);
+
+                    if (Chars != 0 && Name[0] == L'\\')
+                    {
+                        Name++;
+                        Chars--;
+                    }
+                    NtClose(File);
+                    if (Chars + 2 > cchBuffer)
+                    {
+                        SetLastError(ERROR_MORE_DATA);
+                        goto Done;
+                    }
+                    RtlCopyMemory(Buffer, Name, Chars * sizeof(WCHAR));
+                    Buffer[Chars] = L'\\';
+                    Buffer[Chars + 1] = UNICODE_NULL;
+                    Ret = TRUE;
+                    goto Done;
+                }
+            }
+        }
+        NtClose(File);
+    }
+
+Done:
+    if (Reparse != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Reparse);
+    if (NameInfo != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, NameInfo);
+    return Ret;
+}
+
+/**
+ * @name FindFirstVolumeMountPointW
+ * @implemented
+ *
+ * Starts the search for the folder mount points of the volume whose root is named ("X:\" or a volume name with
+ * its closing backslash); the paths are given from that root.  Close the handle with FindVolumeMountPointClose.
  */
 HANDLE
 WINAPI
@@ -986,38 +1133,96 @@ FindFirstVolumeMountPointW(IN LPCWSTR lpszRootPathName,
                            IN LPWSTR lpszVolumeMountPoint,
                            IN DWORD cchBufferLength)
 {
-    STUB;
-    return 0;
+    SIZE_T Length;
+    ULONG NtLength;
+    UNICODE_STRING NtRoot, NtIndex;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    PVOLUME_MOUNT_POINT_FIND Find;
+    NTSTATUS Status;
+
+    if (lpszRootPathName == NULL || lpszVolumeMountPoint == NULL || cchBufferLength == 0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return INVALID_HANDLE_VALUE;
+    }
+    if (cchBufferLength == 1)
+    {
+        SetLastError(ERROR_BAD_LENGTH);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    /* the root is named with its closing backslash */
+    Length = wcslen(lpszRootPathName);
+    if (Length == 0 || lpszRootPathName[Length - 1] != L'\\')
+    {
+        SetLastError(ERROR_INVALID_NAME);
+        return INVALID_HANDLE_VALUE;
+    }
+    if (!RtlDosPathNameToNtPathName_U(lpszRootPathName, &NtRoot, NULL, NULL))
+    {
+        SetLastError(ERROR_PATH_NOT_FOUND);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    Find = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Find));
+    NtIndex.Buffer = NULL;
+    NtLength = NtRoot.Length + sizeof(VOLUME_MOUNT_POINT_INDEX_NAME);
+    if (Find != NULL && NtLength <= MAXUSHORT)
+    {
+        NtIndex.Length = 0;
+        NtIndex.MaximumLength = (USHORT)NtLength;
+        NtIndex.Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, NtLength);
+    }
+    if (Find == NULL || NtIndex.Buffer == NULL)
+    {
+        if (Find != NULL)
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Find);
+        RtlFreeUnicodeString(&NtRoot);
+        SetLastError(Find != NULL ? ERROR_FILENAME_EXCED_RANGE : ERROR_NOT_ENOUGH_MEMORY);
+        return INVALID_HANDLE_VALUE;
+    }
+    Find->Magic = VOLUME_MOUNT_POINT_FIND_MAGIC;
+
+    InitializeObjectAttributes(&ObjectAttributes, &NtRoot, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&Find->Root, SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY, &ObjectAttributes,
+                        &IoStatusBlock, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    if (NT_SUCCESS(Status))
+    {
+        RtlCopyUnicodeString(&NtIndex, &NtRoot);
+        RtlAppendUnicodeToString(&NtIndex, VOLUME_MOUNT_POINT_INDEX_NAME);
+        InitializeObjectAttributes(&ObjectAttributes, &NtIndex, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        Status = NtOpenFile(&Find->Index, SYNCHRONIZE | FILE_GENERIC_READ, &ObjectAttributes, &IoStatusBlock,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT);
+    }
+    RtlFreeHeap(RtlGetProcessHeap(), 0, NtIndex.Buffer);
+    RtlFreeUnicodeString(&NtRoot);
+    if (!NT_SUCCESS(Status))
+    {
+        /* a file system without the index (FAT) or a name that is no root has no such path */
+        if (Status == STATUS_OBJECT_NAME_INVALID || Status == STATUS_OBJECT_NAME_NOT_FOUND ||
+            Status == STATUS_NOT_SUPPORTED || Status == STATUS_INVALID_PARAMETER)
+            Status = STATUS_OBJECT_PATH_NOT_FOUND;
+        BaseSetLastNTError(Status);
+        BasepFreeVolumeMountPointFind(Find);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    if (!BasepNextVolumeMountPoint(Find, lpszVolumeMountPoint, cchBufferLength))
+    {
+        BasepFreeVolumeMountPointFind(Find);
+        return INVALID_HANDLE_VALUE;
+    }
+    return Find;
 }
 
-/*
- * @unimplemented
- */
-HANDLE
-WINAPI
-FindFirstVolumeMountPointA(IN LPCSTR lpszRootPathName,
-                           IN LPSTR lpszVolumeMountPoint,
-                           IN DWORD cchBufferLength)
-{
-    STUB;
-    return 0;
-}
-
-/*
- * @unimplemented
- */
-BOOL
-WINAPI
-FindNextVolumeMountPointA(IN HANDLE hFindVolumeMountPoint,
-                          IN LPSTR lpszVolumeMountPoint,
-                          DWORD cchBufferLength)
-{
-    STUB;
-    return 0;
-}
-
-/*
- * @unimplemented
+/**
+ * @name FindNextVolumeMountPointW
+ * @implemented
+ *
+ * The next folder mount point of the search; ERROR_NO_MORE_FILES when there is none, ERROR_MORE_DATA when its path
+ * does not fit the buffer (the search ends there).  A handle that is not a search is refused without an error code.
  */
 BOOL
 WINAPI
@@ -1025,19 +1230,52 @@ FindNextVolumeMountPointW(IN HANDLE hFindVolumeMountPoint,
                           IN LPWSTR lpszVolumeMountPoint,
                           DWORD cchBufferLength)
 {
-    STUB;
-    return 0;
+    PVOLUME_MOUNT_POINT_FIND Find = hFindVolumeMountPoint;
+    BOOL Ret = FALSE;
+
+    if (Find == NULL || Find == INVALID_HANDLE_VALUE)
+        return FALSE;
+    _SEH2_TRY
+    {
+        if (Find->Magic != VOLUME_MOUNT_POINT_FIND_MAGIC || Find->Done || lpszVolumeMountPoint == NULL)
+            _SEH2_YIELD(return FALSE);
+        Ret = BasepNextVolumeMountPoint(Find, lpszVolumeMountPoint, cchBufferLength);
+        if (!Ret)
+            Find->Done = TRUE;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        Ret = FALSE;
+    }
+    _SEH2_END;
+    return Ret;
 }
 
-/*
- * @unimplemented
+/**
+ * @name FindVolumeMountPointClose
+ * @implemented
  */
 BOOL
 WINAPI
 FindVolumeMountPointClose(IN HANDLE hFindVolumeMountPoint)
 {
-    STUB;
-    return 0;
+    PVOLUME_MOUNT_POINT_FIND Find = hFindVolumeMountPoint;
+
+    if (Find == NULL || Find == INVALID_HANDLE_VALUE)
+        return FALSE;
+    _SEH2_TRY
+    {
+        if (Find->Magic != VOLUME_MOUNT_POINT_FIND_MAGIC)
+            _SEH2_YIELD(return FALSE);
+        BasepFreeVolumeMountPointFind(Find);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        return FALSE;
+    }
+    _SEH2_END;
+    return TRUE;
 }
 
 /* EOF */

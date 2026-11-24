@@ -32,7 +32,6 @@ list(APPEND SOURCE
     merge.c
     misc.c
     mountmgr.c
-    offline.c
     online.c
     partlist.c
     recover.c

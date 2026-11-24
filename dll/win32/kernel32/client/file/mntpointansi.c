@@ -130,3 +130,92 @@ DeleteVolumeMountPointA(IN LPCSTR lpszVolumeMountPoint)
     RtlFreeUnicodeString(&MountPointU);
     return Ret;
 }
+
+/* The path found, converted for the ANSI caller; FALSE (and the last error) when it does not fit. */
+static BOOL
+BasepVolumeMountPointToAnsi(IN LPCWSTR Path, OUT LPSTR Buffer, IN DWORD cchBuffer)
+{
+    UNICODE_STRING PathU;
+    ANSI_STRING PathA;
+    NTSTATUS Status;
+
+    RtlInitUnicodeString(&PathU, Path);
+    PathA.Buffer = Buffer;
+    PathA.Length = 0;
+    PathA.MaximumLength = (USHORT)min(cchBuffer, MAXUSHORT);
+    Status = RtlUnicodeStringToAnsiString(&PathA, &PathU, FALSE);
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastError(Status == STATUS_BUFFER_OVERFLOW ? ERROR_MORE_DATA : RtlNtStatusToDosError(Status));
+        return FALSE;
+    }
+    Buffer[PathA.Length] = ANSI_NULL;
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+FindFirstVolumeMountPointA(IN LPCSTR lpszRootPathName,
+                           IN LPSTR lpszVolumeMountPoint,
+                           IN DWORD cchBufferLength)
+{
+    UNICODE_STRING RootU;
+    LPWSTR PathW;
+    HANDLE Find = INVALID_HANDLE_VALUE;
+
+    if (lpszRootPathName == NULL || lpszVolumeMountPoint == NULL || cchBufferLength == 0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return INVALID_HANDLE_VALUE;
+    }
+    if (!Basep8BitStringToDynamicUnicodeString(&RootU, lpszRootPathName))
+        return INVALID_HANDLE_VALUE;
+    PathW = RtlAllocateHeap(RtlGetProcessHeap(), 0, cchBufferLength * sizeof(WCHAR));
+    if (PathW == NULL)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+    }
+    else
+    {
+        Find = FindFirstVolumeMountPointW(RootU.Buffer, PathW, cchBufferLength);
+        if (Find != INVALID_HANDLE_VALUE && !BasepVolumeMountPointToAnsi(PathW, lpszVolumeMountPoint, cchBufferLength))
+        {
+            FindVolumeMountPointClose(Find);
+            Find = INVALID_HANDLE_VALUE;
+        }
+        RtlFreeHeap(RtlGetProcessHeap(), 0, PathW);
+    }
+    RtlFreeUnicodeString(&RootU);
+    return Find;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+FindNextVolumeMountPointA(IN HANDLE hFindVolumeMountPoint,
+                          IN LPSTR lpszVolumeMountPoint,
+                          DWORD cchBufferLength)
+{
+    LPWSTR PathW;
+    BOOL Ret;
+
+    if (hFindVolumeMountPoint == NULL || hFindVolumeMountPoint == INVALID_HANDLE_VALUE ||
+        lpszVolumeMountPoint == NULL || cchBufferLength == 0)
+        return FALSE;
+    PathW = RtlAllocateHeap(RtlGetProcessHeap(), 0, cchBufferLength * sizeof(WCHAR));
+    if (PathW == NULL)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    Ret = FindNextVolumeMountPointW(hFindVolumeMountPoint, PathW, cchBufferLength);
+    if (Ret)
+        Ret = BasepVolumeMountPointToAnsi(PathW, lpszVolumeMountPoint, cchBufferLength);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, PathW);
+    return Ret;
+}
