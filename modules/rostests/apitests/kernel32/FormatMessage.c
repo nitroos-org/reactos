@@ -48,4 +48,24 @@ START_TEST(FormatMessage)
     ok(Written == 0, "Unexpected success: %ld\n", Written);
     ok(Buffer == NULL, "Unexpected success: %p\n", Buffer);
     ok(GetLastError() == 0x13d, "Unexpected error: %lx\n", GetLastError());
+
+    /* The system message table has no text for the 12000-12999 range (the Internet errors of
+       wininet.dll, ERROR_FLT_* are HRESULTs), measured on Windows Server 2022: return 0, error 317.
+       The IPsec errors from 13000 on are in the table. */
+    {
+        char Out[256];
+        DWORD Id;
+
+        for (Id = 12000; Id <= 12030; Id++)
+        {
+            SetLastError(0);
+            Written = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                     NULL, Id, 0, Out, sizeof(Out), NULL);
+            ok(Written == 0, "%lu: FormatMessageA returned %lu\n", Id, Written);
+            ok(GetLastError() == ERROR_MR_MID_NOT_FOUND, "%lu: error %lu\n", Id, GetLastError());
+        }
+        Written = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                 NULL, 13000, 0, Out, sizeof(Out), NULL);
+        ok(Written != 0, "13000: FormatMessageA returned 0, error %lu\n", GetLastError());
+    }
 }
