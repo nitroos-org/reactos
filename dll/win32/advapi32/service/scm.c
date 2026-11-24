@@ -2523,6 +2523,9 @@ LockServiceDatabase(SC_HANDLE hSCManager)
 
     TRACE("hLock = %p\n", hLock);
 
+    /* A successful lock sets the last error to ERROR_SUCCESS (measured on Windows Server 2022: UnlockServiceDatabase
+     * and StartService leave the last error alone, LockServiceDatabase clears it) */
+    SetLastError(ERROR_SUCCESS);
     return hLock;
 }
 
