@@ -559,6 +559,13 @@ PDEVOBJ_vRefreshModeList(
 
     pGraphicsDevice = ppdev->pGraphicsDevice;
 
+    /* The meta PDEV of several displays has no graphics device */
+    if (!pGraphicsDevice)
+    {
+        EngReleaseSemaphore(ppdev->hsemDevLock);
+        return;
+    }
+
     /* Clear out the modes */
     for (pdminfo = pGraphicsDevice->pdevmodeInfo;
          pdminfo;
@@ -568,7 +575,10 @@ PDEVOBJ_vRefreshModeList(
         ExFreePoolWithTag(pdminfo, GDITAG_DEVMODE);
     }
     pGraphicsDevice->pdevmodeInfo = NULL;
-    ExFreePoolWithTag(pGraphicsDevice->pDevModeList, GDITAG_GDEVICE);
+    /* The list is gone, and so is what counts it; a failed rebuild below must not leave a count */
+    pGraphicsDevice->cDevModes = 0;
+    if (pGraphicsDevice->pDevModeList)
+        ExFreePoolWithTag(pGraphicsDevice->pDevModeList, GDITAG_GDEVICE);
     pGraphicsDevice->pDevModeList = NULL;
 
     /* Update available display mode list */
@@ -965,6 +975,48 @@ EngpGetPDEV(
     }
 
     /* Release PDEV lock */
+    EngReleaseSemaphore(ghsemPDEV);
+
+    return ppdev;
+}
+
+/*
+ * The PDEV of a graphics device, referenced. EngpGetPDEV without a name returns the meta PDEV when
+ * there are several displays, and that one has neither a graphics device nor a current mode.
+ * Without a name, or when the device has no PDEV of its own, this is the PDEV of the first display.
+ */
+PPDEVOBJ
+NTAPI
+EngpGetPDEVOfGraphicsDevice(
+    _In_opt_ PUNICODE_STRING pustrDeviceName,
+    _In_ PGRAPHICS_DEVICE pGraphicsDevice)
+{
+    PPDEVOBJ ppdev = NULL;
+    ULONG i;
+
+    if (pustrDeviceName)
+        return EngpGetPDEV(pustrDeviceName);
+
+    EngAcquireSemaphoreShared(ghsemPDEV);
+
+    if (gpmdev)
+    {
+        for (i = 0; i < gpmdev->cDev; i++)
+        {
+            if (gpmdev->dev[i].ppdev && gpmdev->dev[i].ppdev->pGraphicsDevice == pGraphicsDevice)
+            {
+                ppdev = gpmdev->dev[i].ppdev;
+                break;
+            }
+        }
+
+        if (!ppdev && gpmdev->cDev != 0)
+            ppdev = gpmdev->dev[0].ppdev;
+    }
+
+    if (ppdev)
+        PDEVOBJ_vReference(ppdev);
+
     EngReleaseSemaphore(ghsemPDEV);
 
     return ppdev;

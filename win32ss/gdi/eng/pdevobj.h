@@ -166,6 +166,12 @@ NTAPI
 EngpGetPDEV(
     _In_opt_ PUNICODE_STRING pustrDevice);
 
+PPDEVOBJ
+NTAPI
+EngpGetPDEVOfGraphicsDevice(
+    _In_opt_ PUNICODE_STRING pustrDeviceName,
+    _In_ PGRAPHICS_DEVICE pGraphicsDevice);
+
 FORCEINLINE
 VOID
 PDEVOBJ_vReference(
