@@ -549,7 +549,7 @@ IntDesktopObjectDelete(
 {
     PWIN32_DELETEMETHOD_PARAMETERS DeleteParameters = Parameters;
     PDESKTOP pdesk = (PDESKTOP)DeleteParameters->Object;
-    BOOLEAN bLeakHeap = FALSE;
+    BOOLEAN bLeakHeap = FALSE, bNoFree = FALSE;
 
     TRACE("Deleting desktop object 0x%p\n", pdesk);
 
@@ -581,11 +581,22 @@ IntDesktopObjectDelete(
     if (pdesk->pDeskInfo &&
         pdesk->pDeskInfo->spwnd)
     {
-        if (!IntFreeDesktopWindow(pdesk->pDeskInfo->spwnd))
+        PWND pwndDesktop = pdesk->pDeskInfo->spwnd;
+
+        if (!IntFreeDesktopWindow(pwndDesktop))
+        {
             bLeakHeap = TRUE;
+            /* Freed but still referenced (its storage went, the object stays): the message window can and
+               must be freed all the same. Not freed at all (no desktop thread or no Win32 process to free it
+               with): neither can the message window be */
+            if (!(pwndDesktop->state & WNDS_DESTROYED))
+                bNoFree = TRUE;
+        }
     }
 
-    if (pdesk->spwndMessage && !bLeakHeap)
+    /* Left alone, the message window would stay a live window (its handle valid, not destroyed) naming the
+       desktop object freed after this */
+    if (pdesk->spwndMessage && !bNoFree)
     {
         if (!IntFreeDesktopWindow(pdesk->spwndMessage))
             bLeakHeap = TRUE;
