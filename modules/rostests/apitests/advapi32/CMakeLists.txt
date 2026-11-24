@@ -91,6 +91,7 @@ list(APPEND SOURCE
     MandatoryLabelOpen.c
     TokenDuplicateLimit.c
     ProcessThreadLabel.c
+    ProcessTokenCopy.c
     QueryServiceConfig.c
     QueryServiceConfig2.c
     QueryServiceObjectSecurity.c

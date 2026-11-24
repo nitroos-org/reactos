@@ -91,6 +91,7 @@ extern void func_NetUserChangePassword(void);
 extern void func_MandatoryLabelOpen(void);
 extern void func_TokenDuplicateLimit(void);
 extern void func_ProcessThreadLabel(void);
+extern void func_ProcessTokenCopy(void);
 extern void func_QueryServiceConfig(void);
 extern void func_QueryServiceConfig2(void);
 extern void func_QueryServiceObjectSecurity(void);
@@ -310,6 +311,7 @@ const struct test winetest_testlist[] =
     { "MandatoryLabelOpen", func_MandatoryLabelOpen },
     { "TokenDuplicateLimit", func_TokenDuplicateLimit },
     { "ProcessThreadLabel", func_ProcessThreadLabel },
+    { "ProcessTokenCopy", func_ProcessTokenCopy },
     { "QueryServiceConfig", func_QueryServiceConfig },
     { "QueryServiceConfig2", func_QueryServiceConfig2 },
     { "QueryServiceObjectSecurity", func_QueryServiceObjectSecurity },
