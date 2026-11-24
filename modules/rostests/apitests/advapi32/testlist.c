@@ -11,6 +11,7 @@ extern void func_AccessCheckNoAccess(void);
 extern void func_AccessCheckGenericAce(void);
 extern void func_AccessCheckMalformedAcl(void);
 extern void func_AccessCheckAppContainer(void);
+extern void func_AccessCheckAppContainerLabel(void);
 extern void func_AppContainerNamespace(void);
 extern void func_AdjustTokenGroupsRows(void);
 extern void func_AccessCheckObjectTypeList(void);
@@ -216,6 +217,7 @@ const struct test winetest_testlist[] =
     { "AccessCheckGenericAce", func_AccessCheckGenericAce },
     { "AccessCheckMalformedAcl", func_AccessCheckMalformedAcl },
     { "AccessCheckAppContainer", func_AccessCheckAppContainer },
+    { "AccessCheckAppContainerLabel", func_AccessCheckAppContainerLabel },
     { "AppContainerNamespace", func_AppContainerNamespace },
     { "AdjustTokenGroupsRows", func_AdjustTokenGroupsRows },
     { "AccessCheckObjectTypeList", func_AccessCheckObjectTypeList },
