@@ -3577,6 +3577,26 @@ Cleanup:
     return Ret;
 }
 
+/* The DACL of the object is protected from inheritance now; TRUE too when that cannot be read (nothing is merged then) */
+static BOOLEAN
+AccpObjectDaclProtected(IN LPWSTR pObjectName,
+                        IN SE_OBJECT_TYPE ObjectType)
+{
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    SECURITY_DESCRIPTOR_CONTROL Control = 0;
+    DWORD Revision;
+    BOOLEAN Protected = TRUE;
+
+    if (AccRewriteGetNamedRights(pObjectName, ObjectType, DACL_SECURITY_INFORMATION,
+                                 NULL, NULL, NULL, NULL, &Sd) == ERROR_SUCCESS)
+    {
+        if (GetSecurityDescriptorControl(Sd, &Control, &Revision))
+            Protected = (Control & SE_DACL_PROTECTED) != 0;
+        LocalFree(Sd);
+    }
+    return Protected;
+}
+
 /**********************************************************************
  * AccRewriteSetNamedRights				EXPORTED
  *
@@ -3596,11 +3616,17 @@ AccRewriteSetNamedRights(LPWSTR pObjectName,
     /* save the last error code */
     LastErr = GetLastError();
 
-    /* an unprotected DACL inherits the parent's inheritable ACEs */
+    /*
+     * An unprotected DACL inherits the parent's inheritable ACEs. So does a DACL set without either protection flag
+     * on an object whose DACL is not protected (measured on Windows Server 2022: an empty DACL leaves the inherited
+     * entries and the object readable; only PROTECTED_DACL_SECURITY_INFORMATION, or an object that is already
+     * protected, gives an empty DACL).
+     */
     if (ObjectType == SE_FILE_OBJECT &&
         (SecurityInfo & DACL_SECURITY_INFORMATION) &&
-        (SecurityInfo & UNPROTECTED_DACL_SECURITY_INFORMATION) &&
-        !(SecurityInfo & PROTECTED_DACL_SECURITY_INFORMATION))
+        !(SecurityInfo & PROTECTED_DACL_SECURITY_INFORMATION) &&
+        ((SecurityInfo & UNPROTECTED_DACL_SECURITY_INFORMATION) ||
+         !AccpObjectDaclProtected(pObjectName, ObjectType)))
     {
         SECURITY_DESCRIPTOR InheritedSd;
         SECURITY_DESCRIPTOR_CONTROL Control;
