@@ -401,8 +401,9 @@ CcSetFileSizes (
          * A map that is being deleted still has dirty views to write (CcRosDeleteFileCache clears the map
          * first, writes them, with none of the file system's locks).  This call comes after the file
          * system cut the file, and a regrow can follow at once: what the old views hold past the new end
-         * of file must not be written then, over the new data.  Zero it (the writer then writes zeros,
-         * the right content for a range that grew back), as is done below for a file with a map.
+         * of file must not be written then, over the new data.  Zero it (the pages wholly past the end
+         * are left clean, and are not written at all; a regrown range lies past the valid data length
+         * and reads as zeros), as is done below for a file with a map.
          */
         if (CcRosIsDeleteFlushPending(FileObject->SectionObjectPointer))
         {

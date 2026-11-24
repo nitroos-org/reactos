@@ -6813,6 +6813,21 @@ restart:
             Address = MiMapPageInHyperSpace(Process, PFN_FROM_SSE(Entry), &Irql);
             RtlZeroMemory(Address + (ZeroStart - PageOffset), (SIZE_T)(ZeroEnd - ZeroStart));
             MiUnmapPageInHyperSpace(Process, Address, Irql);
+
+            /*
+             * A page wholly in the range lies past the end of the file: its data is dead, and the page stays only
+             * because something maps it (a cache view that straddles the new end of file and is kept by the purge
+             * while it has dirty data below it).  It must not stay dirty: once the file grows again, a flush of
+             * that view would write these zeros as if they were data, over whatever a non-cached write has put
+             * there meanwhile, and the file system would take such a write past the valid data length for an
+             * extension of it.  Zero and clean is what the file holds there (nothing).  A page another thread is
+             * writing keeps its state: the writer's completion decides.
+             */
+            if ((ZeroStart == PageOffset) && (ZeroEnd == PageOffset + PAGE_SIZE) &&
+                IS_DIRTY_SSE(Entry) && !IS_WRITE_SSE(Entry))
+            {
+                MmSetPageEntrySectionSegment(Segment, &PageOff, CLEAN_SSE(Entry));
+            }
         }
     }
 
