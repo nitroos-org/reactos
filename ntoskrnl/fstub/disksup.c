@@ -336,6 +336,14 @@ IopComputeHarddiskDerangements(
         return NULL;
     }
 
+    /* A disk without an ARC name (a GPT disk, for one) is not looked up below:
+     * its entry must read "unknown", not whatever the pool block held, or the
+     * disk is left out of the order in which drive letters are assigned */
+    for (i = 0; i < DiskCount; ++i)
+    {
+        Devices[i] = (ULONG)-1;
+    }
+
     /* Now, we'll query all the disks */
     for (i = 0; i < DiskCount; ++i)
     {

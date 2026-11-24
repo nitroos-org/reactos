@@ -585,21 +585,10 @@ BasepSetDriveLetter(IN WCHAR Letter, IN LPCWSTR VolumeName)
     DWORD Returned;
     BOOL Ret;
 
-    if (!BasepVolumeNameToNtName(VolumeName, NtName, ARRAYSIZE(NtName), FALSE))
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    /* the volume has to exist; a letter that is taken (by this volume or another) is refused */
+    /* a letter that is taken (by this volume or another) is refused first: Windows Server 2022 answers
+     * "directory not empty" even when the volume name is not a volume name; then the volume has to exist */
     {
         WCHAR LetterName[3], Target[MAX_PATH];
-
-        if (!BasepVolumeExists(VolumeName))
-        {
-            SetLastError(ERROR_INVALID_PARAMETER);
-            return FALSE;
-        }
 
         LetterName[0] = towupper(Letter);
         LetterName[1] = L':';
@@ -607,6 +596,13 @@ BasepSetDriveLetter(IN WCHAR Letter, IN LPCWSTR VolumeName)
         if (QueryDosDeviceW(LetterName, Target, ARRAYSIZE(Target)) != 0)
         {
             SetLastError(ERROR_DIR_NOT_EMPTY);
+            return FALSE;
+        }
+
+        if (!BasepVolumeNameToNtName(VolumeName, NtName, ARRAYSIZE(NtName), FALSE) ||
+            !BasepVolumeExists(VolumeName))
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
             return FALSE;
         }
     }
@@ -813,10 +809,9 @@ BasepSetFolderMountPoint(IN LPCWSTR Folder, IN LPCWSTR VolumeName)
     {
         DWORD Error = GetLastError();
 
+        /* a folder that is not there: the error of opening it (Windows Server 2022: file not found) */
         RtlFreeHeap(RtlGetProcessHeap(), 0, Reparse);
-        /* a folder that is not there is a bad parameter */
-        if (Error == ERROR_FILE_NOT_FOUND || Error == ERROR_PATH_NOT_FOUND)
-            SetLastError(ERROR_INVALID_PARAMETER);
+        SetLastError(Error);
         return FALSE;
     }
 
