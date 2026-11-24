@@ -13,6 +13,7 @@ extern void func_AccessCheckMalformedAcl(void);
 extern void func_AccessCheckAppContainer(void);
 extern void func_AppContainerNamespace(void);
 extern void func_AdjustTokenGroupsRows(void);
+extern void func_AdjustTokenPreviousState(void);
 extern void func_AccessCheckObjectTypeList(void);
 extern void func_AddMandatoryAce(void);
 extern void func_RegSaveKeyExFormat(void);
@@ -218,6 +219,7 @@ const struct test winetest_testlist[] =
     { "AccessCheckAppContainer", func_AccessCheckAppContainer },
     { "AppContainerNamespace", func_AppContainerNamespace },
     { "AdjustTokenGroupsRows", func_AdjustTokenGroupsRows },
+    { "AdjustTokenPreviousState", func_AdjustTokenPreviousState },
     { "AccessCheckObjectTypeList", func_AccessCheckObjectTypeList },
     { "AddMandatoryAce", func_AddMandatoryAce },
     { "RegSaveKeyExFormat", func_RegSaveKeyExFormat },

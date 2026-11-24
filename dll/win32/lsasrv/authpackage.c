@@ -1066,6 +1066,74 @@ LsapAddLocalGroups(
     return STATUS_SUCCESS;
 }
 
+/*
+ * The logon SID of a logon whose caller gave none (Windows Server 2022, measured: an S4U network logon of a local
+ * user with no LocalGroups, through a trusted and an untrusted connection, gets a logon SID S-1-5-5-0-<n> of its own
+ * with the attributes 0xc0000007; a logon SID the caller gives in LocalGroups is kept instead, so no second one
+ * is added). A new LUID: not the logon session's id, so that the SID of one logon cannot be derived from another's.
+ */
+static
+NTSTATUS
+LsapAddLogonSid(
+    IN PVOID TokenInformation,
+    IN LSA_TOKEN_INFORMATION_TYPE TokenInformationType)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PLSA_TOKEN_INFORMATION_V1 TokenInfo1;
+    PTOKEN_GROUPS Groups;
+    PSID LogonSid = NULL, Sid;
+    ULONG Count, i, Length;
+    LUID Luid;
+    NTSTATUS Status;
+
+    if (TokenInformationType != LsaTokenInformationV1)
+        return STATUS_SUCCESS;
+
+    TokenInfo1 = (PLSA_TOKEN_INFORMATION_V1)TokenInformation;
+    Count = (TokenInfo1->Groups != NULL) ? TokenInfo1->Groups->GroupCount : 0;
+    for (i = 0; i < Count; i++)
+    {
+        if ((TokenInfo1->Groups->Groups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
+            return STATUS_SUCCESS;
+    }
+
+    Status = NtAllocateLocallyUniqueId(&Luid);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Status = RtlAllocateAndInitializeSid(&NtAuthority, SECURITY_LOGON_IDS_RID_COUNT, SECURITY_LOGON_IDS_RID,
+                                         (ULONG)Luid.HighPart, Luid.LowPart, 0, 0, 0, 0, 0, &LogonSid);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* The SIDs of the token information live in the process heap, as those of the other groups */
+    Length = RtlLengthSid(LogonSid);
+    Sid = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+    Groups = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY,
+                             FIELD_OFFSET(TOKEN_GROUPS, Groups[Count + 1]));
+    if (Sid == NULL || Groups == NULL)
+    {
+        if (Sid != NULL)
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Sid);
+        if (Groups != NULL)
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Groups);
+        RtlFreeSid(LogonSid);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopySid(Length, Sid, LogonSid);
+    RtlFreeSid(LogonSid);
+
+    for (i = 0; i < Count; i++)
+        Groups->Groups[i] = TokenInfo1->Groups->Groups[i];
+    Groups->Groups[Count].Sid = Sid;
+    Groups->Groups[Count].Attributes = SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED |
+                                       SE_GROUP_LOGON_ID;
+    Groups->GroupCount = Count + 1;
+    if (TokenInfo1->Groups != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, TokenInfo1->Groups);
+    TokenInfo1->Groups = Groups;
+    return STATUS_SUCCESS;
+}
+
 static
 NTSTATUS
 LsapAddDefaultGroups(
@@ -2424,6 +2492,14 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
             ERR("LsapAddLocalGroupsToTokenInfo() failed (Status 0x%08lx)\n", Status);
             goto done;
         }
+    }
+
+    /* A logon the caller gave no logon SID for gets one (before the default DACL, which names it) */
+    Status = LsapAddLogonSid(TokenInformation, TokenInformationType);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("LsapAddLogonSid() failed (Status 0x%08lx)\n", Status);
+        goto done;
     }
 
     Status = LsapAddDefaultGroups(TokenInformation,

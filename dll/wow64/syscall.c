@@ -877,6 +877,79 @@ static NTSTATUS TokenGroups32(HANDLE Token, TOKEN_INFORMATION_CLASS Class, ULONG
     return STATUS_SUCCESS;
 }
 
+/* NtAdjustGroupsToken: TOKEN_GROUPS in and out has 4-byte SID pointers. NewState is widened; the
+ * previous state comes back as a TokenGroups query lays it out (the array, then the SIDs behind it,
+ * inside the caller's buffer) in the 32-bit form. Measured on Windows Server 2022 (a 32-bit service
+ * disabling and enabling its service SID): the native call gets the caller's length, so the buffer
+ * must hold the NATIVE previous state (56 bytes for one group whose SID has 32 bytes; 44 bytes, the
+ * 32-bit size, fail with ERROR_INSUFFICIENT_BUFFER and the native length 56 as ReturnLength, and
+ * nothing is changed); a call that succeeds returns the 32-bit length (44). */
+#define ADJUST_GROUPS_NATIVE_MAX 0x20000
+static NTSTATUS AdjustGroupsToken32(HANDLE Token, BOOLEAN Reset, ULONG NewState32, ULONG Length,
+                                    ULONG Previous32, ULONG ReturnLength32, WOW64_CLEANUP *Cleanup)
+{
+    PTOKEN_GROUPS NewState = NULL, Previous;
+    ULONG Count = 0, NewSize = 0, Native, NativeLength, Needed, SidBytes, Offset, Sid, i;
+    UCHAR *Guest, *Block;
+    NTSTATUS Status;
+
+    if (!Reset)
+    {
+        if (!NewState32 || !GuestSpan(NewState32, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+        Count = *(ULONG UNALIGNED *)PTR32(NewState32);
+        if (Count > 0xffff) return STATUS_INVALID_PARAMETER;
+        if (!GuestSpan(NewState32, sizeof(ULONG) + (ULONG64)Count * 2 * sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+        NewSize = FIELD_OFFSET(TOKEN_GROUPS, Groups[Count]);
+    }
+    if (Previous32 && (!ReturnLength32 || !GuestSpan(ReturnLength32, sizeof(ULONG)) || !GuestSpan(Previous32, Length)))
+        return STATUS_ACCESS_VIOLATION;
+    /* The native previous state of a token is far below the cap; a larger guest buffer is not needed in full */
+    NativeLength = Previous32 ? min(Length, ADJUST_GROUPS_NATIVE_MAX) : 0;
+    NewSize = (NewSize + 7) & ~7;
+    Block = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, NewSize + NativeLength + sizeof(ULONG));
+    if (!Block) return STATUS_NO_MEMORY;
+    if (!Reset)
+    {
+        UCHAR *In = PTR32(NewState32);
+        NewState = (PTOKEN_GROUPS)Block;
+        NewState->GroupCount = Count;
+        for (i = 0; i < Count; ++i)
+        {
+            NewState->Groups[i].Sid = PTR32(*(ULONG UNALIGNED *)(In + 4 + 8 * i));
+            NewState->Groups[i].Attributes = *(ULONG UNALIGNED *)(In + 8 + 8 * i);
+        }
+    }
+    if (!Previous32)
+        return NtAdjustGroupsToken(Token, Reset, NewState, 0, NULL, NULL);
+
+    /* the native call with the caller's length; the native ReturnLength goes to the caller as it is */
+    Previous = (PTOKEN_GROUPS)(Block + NewSize);
+    Native = *(ULONG UNALIGNED *)PTR32(ReturnLength32);
+    Status = NtAdjustGroupsToken(Token, Reset, NewState, NativeLength, NativeLength ? Previous : (PTOKEN_GROUPS)Block,
+                                 &Native);
+    *(ULONG UNALIGNED *)PTR32(ReturnLength32) = Native;
+    if (!NT_SUCCESS(Status)) return Status;
+
+    /* the 32-bit form of the result, shorter than the native one, which fitted */
+    SidBytes = 0;
+    for (i = 0; i < Previous->GroupCount; ++i)
+        SidBytes += RtlLengthSid(Previous->Groups[i].Sid);
+    Needed = sizeof(ULONG) + Previous->GroupCount * 2 * sizeof(ULONG) + SidBytes;
+    *(ULONG UNALIGNED *)PTR32(ReturnLength32) = Needed;
+    Guest = PTR32(Previous32);
+    *(ULONG UNALIGNED *)Guest = Previous->GroupCount;
+    Offset = sizeof(ULONG) + Previous->GroupCount * 2 * sizeof(ULONG);
+    for (i = 0; i < Previous->GroupCount; ++i)
+    {
+        Sid = RtlLengthSid(Previous->Groups[i].Sid);
+        *(ULONG UNALIGNED *)(Guest + 4 + 8 * i) = Previous32 + Offset;
+        *(ULONG UNALIGNED *)(Guest + 8 + 8 * i) = Previous->Groups[i].Attributes;
+        RtlCopyMemory(Guest + Offset, Previous->Groups[i].Sid, Sid);
+        Offset += Sid;
+    }
+    return Status;
+}
+
 /* TokenDefaultDacl: TOKEN_DEFAULT_DACL is one ACL pointer followed by the ACL, which has
  * no pointers. Same order as TokenGroups32. */
 static NTSTATUS TokenDefaultDacl32(HANDLE Token, ULONG Buffer, ULONG Length, ULONG ReturnLength,
@@ -3378,7 +3451,10 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         RETURN_HANDLE();
     }
     case W64_NtAdjustPrivilegesToken:
+        /* TOKEN_PRIVILEGES holds no pointer: the same layout in both widths */
         return NtAdjustPrivilegesToken(H(0), a[1], P(2), a[3], P(4), P(5));
+    case W64_NtAdjustGroupsToken:
+        return AdjustGroupsToken32(H(0), (BOOLEAN)a[1], a[2], a[3], a[4], a[5], Cleanup);
     case W64_NtDuplicateToken:
         PROBE(5); ATTR(2);
         Status = NtDuplicateToken(H(0), a[1], OA(2), a[3], a[4], &Cleanup->Handle);

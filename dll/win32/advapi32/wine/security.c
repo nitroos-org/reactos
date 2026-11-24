@@ -440,8 +440,12 @@ AdjustTokenGroups(HANDLE TokenHandle,
        return FALSE;
     }
 
-    /* the last error of a call that worked is ERROR_SUCCESS (measured on Windows Server 2022: a stale error is gone) */
-    SetLastError(ERROR_SUCCESS);
+    /*
+     * the last error of a call that worked is ERROR_SUCCESS (measured on Windows Server 2022: a stale error is gone),
+     * or ERROR_NOT_ALL_ASSIGNED when a SID of the list is not in the token (measured: the other groups are changed,
+     * the call returns TRUE and the last error is 1300, as AdjustTokenPrivileges does)
+     */
+    SetLastError(Status == STATUS_NOT_ALL_ASSIGNED ? ERROR_NOT_ALL_ASSIGNED : ERROR_SUCCESS);
     return TRUE;
 }
 
