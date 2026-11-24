@@ -137,15 +137,39 @@ static VOID GroupRows(HANDLE Token, PSID ServiceSid, PSID MandatorySid)
     Check(Ret && ((PTOKEN_GROUPS)Buffer)->GroupCount == 0 && Length == FIELD_OFFSET(TOKEN_GROUPS, Groups[0]),
           "no change: %d, %lu groups, ReturnLength %lu", Ret, ((PTOKEN_GROUPS)Buffer)->GroupCount, Length);
 
-    /* reset to the defaults after a disable */
+    /*
+     * reset to the defaults after a disable: the service SID comes back (on Windows the only group that changes;
+     * here the controller's token also has LOCAL enabled but not enabled by default, which the reset disables: the
+     * layout is checked for every entry)
+     */
     One.Groups[0].Attributes = 0;
     AdjustTokenGroups(Token, FALSE, &One, 0, NULL, NULL);
     memset(Buffer, 0xcc, sizeof(Buffer));
     Length = 0xdeadbeef;
     Ret = AdjustTokenGroups(Token, TRUE, NULL, sizeof(Buffer), (PTOKEN_GROUPS)Buffer, &Length);
-    Check(Ret && Length == Own, "reset: %d, ReturnLength %lu, expected %lu", Ret, Length, Own);
+    Check(Ret, "reset: %d, error %lu", Ret, GetLastError());
     if (Ret)
-        CheckPrevious("reset", Buffer, sizeof(Buffer), ServiceSid, 0xa);
+    {
+        PTOKEN_GROUPS Previous = (PTOKEN_GROUPS)Buffer;
+        PUCHAR Next = Buffer + FIELD_OFFSET(TOKEN_GROUPS, Groups[Previous->GroupCount]);
+        BOOL Found = FALSE;
+
+        Check(Previous->GroupCount >= 1, "reset: %lu groups in the previous state", Previous->GroupCount);
+        for (i = 0; i < Previous->GroupCount && i < 16; i++)
+        {
+            /* every SID right after the one before, behind the array, inside the buffer */
+            Check((PUCHAR)Previous->Groups[i].Sid == Next, "reset: SID %lu is not where the layout puts it (%s)", i,
+                  ((PUCHAR)Previous->Groups[i].Sid >= Buffer && (PUCHAR)Previous->Groups[i].Sid < Buffer + sizeof(Buffer)) ?
+                  "inside" : "outside");
+            if ((PUCHAR)Previous->Groups[i].Sid != Next)
+                break;
+            if (EqualSid(Next, ServiceSid))
+                Found = Previous->Groups[i].Attributes == 0xa;
+            Next += GetLengthSid(Next);
+        }
+        Check(Found, "reset: the service SID (0xa) is not in the previous state");
+        Check(Length == (DWORD)(Next - Buffer), "reset: ReturnLength %lu, the layout %lu", Length, (DWORD)(Next - Buffer));
+    }
 
     /* a mandatory group in the list fails the whole call, in either order */
     if (MandatorySid)
@@ -211,9 +235,11 @@ static VOID PrivilegeRows(HANDLE Token)
           "privilege, 15 bytes: %d, error %lu, ReturnLength %lu", Ret, Error, Length);
     Length = 0xdeadbeef;
     Ret = AdjustTokenPrivileges(Token, FALSE, &One, sizeof(TOKEN_PRIVILEGES), Previous, &Length);
+    /* the previous state: disabled (Windows: 0x1, enabled by default, for SeTimeZonePrivilege of SYSTEM) */
     Check(Ret && Length == sizeof(TOKEN_PRIVILEGES) && Previous->PrivilegeCount == 1 &&
-          Previous->Privileges[0].Attributes == 0, "privilege, 16 bytes: %d, ReturnLength %lu, %lu entries", Ret,
-          Length, Previous->PrivilegeCount);
+          !(Previous->Privileges[0].Attributes & SE_PRIVILEGE_ENABLED),
+          "privilege, 16 bytes: %d, ReturnLength %lu, %lu entries, attributes 0x%lx", Ret, Length,
+          Previous->PrivilegeCount, Previous->Privileges[0].Attributes);
 
     /* no change: still the length of one entry */
     Length = 0xdeadbeef;
