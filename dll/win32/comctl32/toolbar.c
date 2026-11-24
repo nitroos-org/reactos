@@ -276,6 +276,10 @@ static inline int default_top_margin(const TOOLBAR_INFO *infoPtr)
 }
 
 #ifdef __REACTOS__
+#ifndef TBCDRF_USECDCOLORS
+#define TBCDRF_USECDCOLORS 0x00800000 /* custom draw: use the colours of the notification (SDK value) */
+#endif
+
 /* the theme of the button text and drop down arrows (only the v6 toolbar has one) */
 static inline HTHEME TOOLBAR_GetTheme(const TOOLBAR_INFO *infoPtr)
 {
@@ -687,6 +691,17 @@ TOOLBAR_DrawString (const TOOLBAR_INFO *infoPtr, RECT *rcText, LPCWSTR lpText,
         else if (state & CDIS_HOT)
             stateId = TS_HOT;
 
+        if ((dwItemCDFlag & TBCDRF_USECDCOLORS) && !(state & CDIS_DISABLED))
+        {
+            /* The custom draw handler asked for its own text colour (the task bar's buttons are drawn
+               over the bar, not over a light button face): the style's colour is not used */
+            clrOld = SetTextColor(hdc, tbcd->clrText);
+            oldBkMode = SetBkMode(hdc, TRANSPARENT);
+            DrawTextW(hdc, lpText, -1, rcText, dwDTFlags);
+            SetBkMode(hdc, oldBkMode);
+            SetTextColor(hdc, clrOld);
+        }
+        else
         DrawThemeText(theme, hdc, partId, stateId, lpText, -1, dwDTFlags, dwDTFlags2, rcText);
         SelectObject (hdc, hOldFont);
         return;
