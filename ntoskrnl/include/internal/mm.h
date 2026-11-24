@@ -2309,7 +2309,8 @@ NTAPI
 MmPurgeSegment(
     _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer,
     _In_opt_ PLARGE_INTEGER Offset,
-    _In_ ULONG Length);
+    _In_ ULONG Length,
+    _In_ BOOLEAN SystemViewsTransient);
 
 VOID
 NTAPI

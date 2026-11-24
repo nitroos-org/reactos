@@ -82,6 +82,11 @@ static ULONG CcDeferredVacbs = 0;
 #define CC_MAX_DEFERRED_VACBS 512
 #endif
 
+static
+VOID
+CcRosFreeTrimmedVacbs(
+    _Inout_ PLIST_ENTRY FreeList);
+
 #if DBG
 ULONG CcRosVacbIncRefCount_(PROS_VACB vacb, PCSTR file, INT line)
 {
@@ -454,6 +459,7 @@ CcRosDeleteFileCache (
  */
 {
     LIST_ENTRY LocalVacbList;
+    LIST_ENTRY RetiredList;
     PCACHE_UNINITIALIZE_EVENT Events;
     BOOLEAN Discard;
 
@@ -463,6 +469,7 @@ CcRosDeleteFileCache (
     ASSERT(IsListEmpty(&SharedCacheMap->PrivateList));
 
     InitializeListHead(&LocalVacbList);
+    InitializeListHead(&RetiredList);
 
     /*
      * Remove all VACBs from the global lists while holding the lock. By also
@@ -499,6 +506,9 @@ CcRosDeleteFileCache (
         InsertTailList(&LocalVacbList, &Vacb->CacheMapVacbListEntry);
     }
     SharedCacheMap->LastVacb = NULL;
+
+    /* Views a trim took off and has not unmapped yet, all of them: unmapped here, below (nothing new can join, see the wait) */
+    CcRosTakeRetiringViewsLocked(SharedCacheMap, 0, MAXLONGLONG, &RetiredList);
 
     /* Make sure there is no trace anymore of this map */
     FileObject->SectionObjectPointer->SharedCacheMap = NULL;
@@ -580,6 +590,17 @@ CcRosDeleteFileCache (
         (void)RefCount;
 #endif
     }
+
+    /*
+     * Views of the map on their way out: those taken over above are unmapped now; the others are being unmapped by the
+     * thread that took them (a trim) or parked them (a close), which then counts them off on the map (CcRosEndRetire):
+     * the map stays until the last of them is done.  No view can start on its way out any more (the map is on no list
+     * and no SectionObjectPointers).  That thread only unmaps (no file system lock, nothing this thread holds), so the
+     * wait ends; it is not bounded, the map must not be freed under it.
+     */
+    CcRosFreeRetiredVacbs(&RetiredList);
+    while (!CcRosWaitForRetiringViews(SharedCacheMap))
+        NOTHING;
 
     /* Written (or dropped): a cut no longer has anything to order itself against.  Before the file object goes. */
     {
@@ -1417,9 +1438,17 @@ retry:
             if (current->SharedCacheMap->LastVacb == current)
                 current->SharedCacheMap->LastVacb = NULL;
             RemoveEntryList(&current->CacheMapVacbListEntry);
+            InitializeListHead(&current->CacheMapVacbListEntry);
             RemoveEntryList(&current->VacbLruListEntry);
-            InitializeListHead(&current->VacbLruListEntry);
-            InsertHeadList(&FreeList, &current->CacheMapVacbListEntry);
+
+            /*
+             * Taken off the map, to be unmapped below (FreeList is linked through the LRU entry).  Its pages stay
+             * shared until then: a mapped view stays reachable from its map meanwhile (the retiring list), so that a
+             * purge of the file can take it over and unmap it itself.
+             */
+            InsertTailList(&FreeList, &current->VacbLruListEntry);
+            if (current->BaseAddress != NULL)
+                InsertTailList(&current->SharedCacheMap->RetiringVacbListHead, &current->CacheMapVacbListEntry);
 
             /* Calculate how many pages we freed for Mm */
             PagesFreed = min(VACB_MAPPING_GRANULARITY / PAGE_SIZE, Target);
@@ -1431,6 +1460,9 @@ retry:
     }
 
     KeReleaseQueuedSpinLock(LockQueueMasterLock, oldIrql);
+
+    /* Unmap what was taken at once, before the flush below, which writes to the disk */
+    CcRosFreeTrimmedVacbs(&FreeList);
 
     /* Try flushing pages if we haven't met our target */
     if ((Target > 0) && !FlushedPages)
@@ -1449,19 +1481,6 @@ retry:
             DPRINT("Flushed %lu dirty cache pages to disk\n", PagesFreed);
             goto retry;
         }
-    }
-
-    while (!IsListEmpty(&FreeList))
-    {
-        ULONG Refs;
-
-        current_entry = RemoveHeadList(&FreeList);
-        current = CONTAINING_RECORD(current_entry,
-                                    ROS_VACB,
-                                    CacheMapVacbListEntry);
-        InitializeListHead(&current->CacheMapVacbListEntry);
-        Refs = CcRosVacbDecRefCount(current);
-        ASSERT(Refs == 0);
     }
 
     DPRINT("Evicted %lu cache pages\n", (*NrFreed));
@@ -1779,6 +1798,9 @@ CcRosFreeOneUnusedVacb(
     KIRQL oldIrql;
     PLIST_ENTRY current_entry;
     PROS_VACB to_free = NULL;
+    LIST_ENTRY FreeList;
+
+    InitializeListHead(&FreeList);
 
     oldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
 
@@ -1803,15 +1825,19 @@ CcRosFreeOneUnusedVacb(
             ASSERT(!current->MappedCount);
             ASSERT(Refs == 1);
 
-            /* Reset it, this is the one we want to free */
+            /* Reset it, this is the one we want to free (taken off as CcRosTrimCache does) */
             if (current->SharedCacheMap->LastVacb == current)
                 current->SharedCacheMap->LastVacb = NULL;
             RemoveEntryList(&current->CacheMapVacbListEntry);
             InitializeListHead(&current->CacheMapVacbListEntry);
             RemoveEntryList(&current->VacbLruListEntry);
-            InitializeListHead(&current->VacbLruListEntry);
+            InsertTailList(&FreeList, &current->VacbLruListEntry);
+            if (current->BaseAddress != NULL)
+                InsertTailList(&current->SharedCacheMap->RetiringVacbListHead, &current->CacheMapVacbListEntry);
 
             to_free = current;
+            KeReleaseSpinLockFromDpcLevel(&current->SharedCacheMap->CacheMapLock);
+            break;
         }
 
         KeReleaseSpinLockFromDpcLevel(&current->SharedCacheMap->CacheMapLock);
@@ -1827,8 +1853,8 @@ CcRosFreeOneUnusedVacb(
         return FALSE;
     }
 
-    /* This must be its last ref */
-    NT_VERIFY(CcRosVacbDecRefCount(to_free) == 0);
+    /* Its last reference (unless a purge of its file took it over meanwhile) */
+    CcRosFreeTrimmedVacbs(&FreeList);
 
     return TRUE;
 }
@@ -2188,6 +2214,212 @@ CcpPostFlushDereference(
 }
 
 /*
+ * Views on their way out (see RetiringVacbs in ROS_SHARED_CACHE_MAP).  The life of such a view, all transitions under the
+ * master lock except the unmap itself:
+ *   1. it leaves CacheMapVacbListHead holding only the reference of whoever took it.  A trim (or CcRosFreeOneUnusedVacb)
+ *      queues a mapped one on the map's RetiringVacbListHead; a purge keeps its own; a close parks views (they stay on
+ *      CacheMapVacbListHead, mapping cleared).
+ *   2. a thread claims its unmap, which counts it (CcRosBeginRetire): the thread that took it, taking it off
+ *      RetiringVacbListHead (CcRosFreeTrimmedVacbs), or a purge or deletion of the map, taking it over
+ *      (CcRosTakeRetiringViewsLocked); a purge claims its own views and a close the views it parks at once.
+ *   3. that thread drops the last reference, which unmaps the view, and then counts it off (CcRosEndRetire).
+ * So a view that maps pages of the file is always on CacheMapVacbListHead, on RetiringVacbListHead, or counted and being
+ * unmapped by a thread that waits for nothing.  A purge takes the views of its range off the first two lists and waits only
+ * for the counted ones; a deletion takes every view off and waits for the counted ones.
+ */
+
+/* A thread claims the unmap of a mapped view of the map (step 2).  Master lock held. */
+VOID
+CcRosBeginRetire(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap)
+{
+    if (SharedCacheMap->RetiringVacbs++ == 0)
+        KeClearEvent(&SharedCacheMap->RetireEvent);
+}
+
+/*
+ * The view counted by CcRosBeginRetire is unmapped (step 3: its pages hold no share for it any more, or, unmapped lazily,
+ * are on Mm's lazy list, which a purge flushes).  The last one wakes the waiters.  Master lock not held; the map is alive
+ * until the lock is released here (CcRosDeleteFileCache does not free it while RetiringVacbs is not 0).
+ */
+VOID
+CcRosEndRetire(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap)
+{
+    KIRQL OldIrql;
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    ASSERT(SharedCacheMap->RetiringVacbs != 0);
+    if (--SharedCacheMap->RetiringVacbs == 0)
+        KeSetEvent(&SharedCacheMap->RetireEvent, IO_NO_INCREMENT, FALSE);
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+}
+
+/*
+ * Takes over the views of the map that wait to be unmapped by the thread that took them and that overlap [Start, End)
+ * (step 2): they leave that thread's list (linked through VacbLruListEntry) and go on FreeList (linked through
+ * CacheMapVacbListEntry), counted, for the caller to unmap with CcRosFreeRetiredVacbs.  A view outside the range maps no page
+ * of it and is left to its thread.  Master lock held.
+ */
+VOID
+CcRosTakeRetiringViewsLocked(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap,
+    _In_ LONGLONG Start,
+    _In_ LONGLONG End,
+    _Inout_ PLIST_ENTRY FreeList)
+{
+    PLIST_ENTRY Entry, Next;
+
+    for (Entry = SharedCacheMap->RetiringVacbListHead.Flink; Entry != &SharedCacheMap->RetiringVacbListHead; Entry = Next)
+    {
+        PROS_VACB Vacb = CONTAINING_RECORD(Entry, ROS_VACB, CacheMapVacbListEntry);
+
+        Next = Entry->Flink;
+        if (Vacb->FileOffset.QuadPart >= End || Vacb->FileOffset.QuadPart + VACB_MAPPING_GRANULARITY <= Start)
+            continue;
+
+        RemoveEntryList(&Vacb->CacheMapVacbListEntry);
+        RemoveEntryList(&Vacb->VacbLruListEntry);
+        InitializeListHead(&Vacb->VacbLruListEntry);
+        InsertTailList(FreeList, &Vacb->CacheMapVacbListEntry);
+        CcRosBeginRetire(SharedCacheMap);
+    }
+}
+
+/*
+ * Unmaps the views a trim (or CcRosFreeOneUnusedVacb) took off their maps: FreeList is linked through VacbLruListEntry
+ * and may lose views to a purge or a deletion of their map meanwhile (CcRosTakeRetiringViewsLocked), so it is only looked
+ * at under the master lock.  Each view holds only the reference of its map; dropping it unmaps the view.  No lock held.
+ */
+static
+VOID
+CcRosFreeTrimmedVacbs(
+    _Inout_ PLIST_ENTRY FreeList)
+{
+    for (;;)
+    {
+        PROS_VACB Vacb;
+        PROS_SHARED_CACHE_MAP SharedCacheMap;
+        BOOLEAN Mapped;
+        KIRQL OldIrql;
+        ULONG Refs;
+
+        OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+        if (IsListEmpty(FreeList))
+        {
+            KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+            break;
+        }
+        Vacb = CONTAINING_RECORD(RemoveHeadList(FreeList), ROS_VACB, VacbLruListEntry);
+        InitializeListHead(&Vacb->VacbLruListEntry);
+        SharedCacheMap = Vacb->SharedCacheMap;
+        /* A mapped one is on the map's retiring list (the map is alive: its deletion would have taken it over): claim it */
+        Mapped = (Vacb->BaseAddress != NULL);
+        if (Mapped)
+        {
+            RemoveEntryList(&Vacb->CacheMapVacbListEntry);
+            InitializeListHead(&Vacb->CacheMapVacbListEntry);
+            CcRosBeginRetire(SharedCacheMap);
+        }
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+
+        Refs = CcRosVacbDecRefCount(Vacb);
+        ASSERT(Refs == 0);
+        (void)Refs;
+        if (Mapped)
+            CcRosEndRetire(SharedCacheMap);
+    }
+}
+
+/*
+ * How long a purge waits for the unmaps of views of its map that other threads claimed: an unmap each (no I/O, no file
+ * system lock), or views a close is parking.  The bound only keeps an unforeseen holder from blocking the caller for ever.
+ */
+#define CC_RETIRE_WAIT_MS 1000
+
+/*
+ * Waits until every unmap of a view of the map that was claimed when this was called is done: the count reaching 0 once
+ * after the call is enough (a later claim is a later one).  PASSIVE_LEVEL or APC_LEVEL, no Cc lock held.  FALSE if the wait
+ * timed out.
+ */
+BOOLEAN
+CcRosWaitForRetiringViews(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap)
+{
+    LARGE_INTEGER Timeout;
+    KIRQL OldIrql;
+    ULONG Retiring;
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    Retiring = SharedCacheMap->RetiringVacbs;
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+    if (Retiring == 0)
+        return TRUE;
+
+    Timeout.QuadPart = -(LONGLONG)CC_RETIRE_WAIT_MS * 10000;
+    if (KeWaitForSingleObject(&SharedCacheMap->RetireEvent, Executive, KernelMode, FALSE, &Timeout) == STATUS_SUCCESS)
+        return TRUE;
+
+    DPRINT1("CC: %lu view(s) of map %p still not unmapped after %u ms\n", SharedCacheMap->RetiringVacbs, SharedCacheMap,
+            CC_RETIRE_WAIT_MS);
+    return FALSE;
+}
+
+/*
+ * For a purge of [Start, End) of the map: unmaps the queued views on their way out that overlap the range (taken over), and
+ * waits for the unmaps other threads claimed (one view each) and the views a close is parking.  Afterwards no view that left
+ * the map before the call maps a page of the range.  One lock round trip when there is nothing to do.  No Cc lock held;
+ * FALSE if the wait timed out.
+ */
+BOOLEAN
+CcRosRetireViewsForPurge(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap,
+    _In_ LONGLONG Start,
+    _In_ LONGLONG End)
+{
+    LIST_ENTRY FreeList;
+    KIRQL OldIrql;
+
+    InitializeListHead(&FreeList);
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    CcRosTakeRetiringViewsLocked(SharedCacheMap, Start, End, &FreeList);
+    if (IsListEmpty(&FreeList) && SharedCacheMap->RetiringVacbs == 0)
+    {
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+        return TRUE;
+    }
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+
+    CcRosFreeRetiredVacbs(&FreeList);
+    return CcRosWaitForRetiringViews(SharedCacheMap);
+}
+
+/*
+ * Frees views taken off their maps by this thread (a purge's own, or taken over with CcRosTakeRetiringViewsLocked):
+ * FreeList is linked through CacheMapVacbListEntry and private to the caller; each view holds only the reference of its
+ * map, and a mapped one is counted (CcRosBeginRetire).  The last reference unmaps the view.  No lock held.
+ */
+VOID
+CcRosFreeRetiredVacbs(
+    _Inout_ PLIST_ENTRY FreeList)
+{
+    while (!IsListEmpty(FreeList))
+    {
+        PROS_VACB Vacb = CONTAINING_RECORD(RemoveHeadList(FreeList), ROS_VACB, CacheMapVacbListEntry);
+        PROS_SHARED_CACHE_MAP SharedCacheMap = Vacb->SharedCacheMap;
+        BOOLEAN Mapped = (Vacb->BaseAddress != NULL);
+        ULONG Refs;
+
+        InitializeListHead(&Vacb->CacheMapVacbListEntry);
+        Refs = CcRosVacbDecRefCount(Vacb);
+        ASSERT(Refs == 0);
+        (void)Refs;
+        if (Mapped)
+            CcRosEndRetire(SharedCacheMap);
+    }
+}
+
+/*
  * A temporary reference on the shared cache map of a section, for a Cc call on a file object that may
  * hold no private cache map (a flush, purge, size change or zeroing through any handle): a map nobody
  * has open stays alive until the lazy writer wrote its dirty data, and is then deleted by the lazy writer
@@ -2416,6 +2648,8 @@ CcRosParkViews(
         BaseAddresses[Count] = Vacb->BaseAddress;
         Vacb->BaseAddress = NULL;
         CcRosVacbIncRefCount(Vacb);
+        /* Mapped until CcRosUnparkViews, held by the reference just taken: a purge waits for that */
+        CcRosBeginRetire(SharedCacheMap);
         Vacbs[Count++] = Vacb;
     }
     KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
@@ -2439,9 +2673,13 @@ CcRosUnparkViews(
 
     for (i = 0; i < Count; i++)
     {
-        /* Nobody uses the view any more: its TB flush is batched, and its pages stay held until then */
+        PROS_SHARED_CACHE_MAP SharedCacheMap = Vacbs[i]->SharedCacheMap;
+
+        /* Nobody uses the view any more: its TB flush is batched, and its pages stay held until then (a purge flushes it) */
         MmUnmapViewInSystemSpaceLazy(BaseAddresses[i]);
+        /* The view itself stays on its map (parked); the map outlives this (CcRosDeleteFileCache waits for the count) */
         CcRosVacbDecRefCount(Vacbs[i]);
+        CcRosEndRetire(SharedCacheMap);
     }
 
     /* The lazy writer's scan flushes the batch (CcLazyWriteScan) */
@@ -2650,6 +2888,9 @@ CcRosInitializeFileCache (
         InitializeListHead(&SharedCacheMap->CacheMapVacbListHead);
         InitializeListHead(&SharedCacheMap->BcbList);
         KeInitializeGuardedMutex(&SharedCacheMap->FlushCacheLock);
+        /* No view on its way out: set */
+        KeInitializeEvent(&SharedCacheMap->RetireEvent, NotificationEvent, TRUE);
+        InitializeListHead(&SharedCacheMap->RetiringVacbListHead);
 
         SharedCacheMap->Flags = SHARED_CACHE_MAP_IN_CREATION;
 

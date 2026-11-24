@@ -384,23 +384,13 @@ MiShutdownSystem(VOID)
     /* Views unmapped lazily give their pages and segments back (their TB flush first) */
     MmFlushLazyMemoryAreas(NULL);
 
-    /* Loop through all the paging files */
-    for (i = 0; i < MmNumberOfPagingFiles; i++)
-    {
-        /* Nothing uses the file any more: clear it before it is closed (the close deletes it) when the registry asks for it */
-        if (MmZeroPageFile)
-            MiClearPagingFile(MmPagingFile[i]);
-
-        /* Free page file name */
-        ASSERT(MmPagingFile[i]->PageFileName.Buffer != NULL);
-        ExFreePoolWithTag(MmPagingFile[i]->PageFileName.Buffer, TAG_MM);
-        MmPagingFile[i]->PageFileName.Buffer = NULL;
-
-        /* And close them */
-        ZwClose(MmPagingFile[i]->FileHandle);
-    }
-
-    /* Loop through all the pages owned by the legacy Mm and page them out, if needed. */
+    /*
+     * Loop through all the pages owned by the legacy Mm and page them out, if needed.  This runs while the paging files
+     * are still open: writing a page of a data file goes through its file system, which may touch pageable code or
+     * paged pool that lives in a paging file; a paging file is created delete-on-close, so once it is closed its
+     * file system has given its clusters back and such a page-in finds nothing to read (fastfat: FAT_FILE_SYSTEM in
+     * FatPagingFileIo).
+     */
     /* We do it as long as there are dirty pages, since flushing can cause the FS to dirtify new ones. */
     /* A page that cannot be written is tried again a limited number of times, then given up (see above). */
     do
@@ -493,6 +483,21 @@ MiShutdownSystem(VOID)
                 MiShutdownGivenUpPages);
     }
 
+    /* The data files are written: now the paging files can go */
+    for (i = 0; i < MmNumberOfPagingFiles; i++)
+    {
+        /* Nothing uses the file any more: clear it before it is closed (the close deletes it) when the registry asks for it */
+        if (MmZeroPageFile)
+            MiClearPagingFile(MmPagingFile[i]);
+
+        /* Free page file name */
+        ASSERT(MmPagingFile[i]->PageFileName.Buffer != NULL);
+        ExFreePoolWithTag(MmPagingFile[i]->PageFileName.Buffer, TAG_MM);
+        MmPagingFile[i]->PageFileName.Buffer = NULL;
+
+        /* And close them */
+        ZwClose(MmPagingFile[i]->FileHandle);
+    }
 }
 
 VOID

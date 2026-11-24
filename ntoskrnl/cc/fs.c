@@ -175,6 +175,10 @@ CcPurgeCacheSection (
     PROS_VACB Vacb;
     LONGLONG ViewEnd;
     BOOLEAN Success;
+    /* No map, or no view of it left in the range: a share by a system-space view is transient (see below) */
+    BOOLEAN SystemViewsTransient = TRUE;
+    /* A view of the map that overlaps the range was left on it */
+    BOOLEAN KeepsViews = FALSE;
 
     CCTRACE(CC_API_DEBUG, "SectionObjectPointer=%p\n FileOffset=%p Length=%lu UninitializeCacheMaps=%d",
         SectionObjectPointer, FileOffset, Length, UninitializeCacheMaps);
@@ -265,6 +269,12 @@ CcPurgeCacheSection (
     /* Assume success */
     Success = TRUE;
 
+    /*
+     * A view that a close is parking holds a reference until its mapping is gone (CcRosParkViews): let that finish,
+     * or the view would look in use below.  (Views a trim took off are unmapped here as well.)
+     */
+    CcRosRetireViewsForPurge(SharedCacheMap, StartOffset, EndOffset);
+
     OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
     KeAcquireSpinLockAtDpcLevel(&SharedCacheMap->CacheMapLock);
     ListEntry = SharedCacheMap->CacheMapVacbListHead.Flink;
@@ -294,9 +304,11 @@ CcPurgeCacheSection (
         {
             /* Only partly in range: release it only when clean and idle, as
              * its dirty data outside the range would leave the lazy writer's
-             * list. Otherwise MmPurgeSegment checks the pages it maps */
+             * list. Otherwise MmPurgeSegment checks the pages it maps (and
+             * must not wait for them: this view stays) */
             if (Vacb->Dirty || Refs > 1)
             {
+                KeepsViews = TRUE;
                 continue;
             }
         }
@@ -322,26 +334,28 @@ CcPurgeCacheSection (
             SharedCacheMap->LastVacb = NULL;
         RemoveEntryList(&Vacb->CacheMapVacbListEntry);
         InsertHeadList(&FreeList, &Vacb->CacheMapVacbListEntry);
+        if (Vacb->BaseAddress != NULL)
+            CcRosBeginRetire(SharedCacheMap);
     }
     KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
     KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
 
-    while (!IsListEmpty(&FreeList))
-    {
-        ULONG Refs;
+    /* Unmap them (the last reference) */
+    CcRosFreeRetiredVacbs(&FreeList);
 
-        Vacb = CONTAINING_RECORD(RemoveHeadList(&FreeList),
-                                 ROS_VACB,
-                                 CacheMapVacbListEntry);
-        InitializeListHead(&Vacb->CacheMapVacbListEntry);
-        Refs = CcRosVacbDecRefCount(Vacb);
-        ASSERT(Refs == 0);
-    }
+    /*
+     * The views in the range are gone from the map, but views that another thread took off it (a trim on another
+     * processor, CcRosTrimCache) may still be mapped, and their pages shared: Mm would find them in use and keep the
+     * pages.  Unmap those here, and wait for the unmaps already in progress (they wait for nothing).  Then every
+     * system-space share left in the range belongs to a view that is on its way out without being one of this map's
+     * (a map being deleted, a view unmapped lazily), which Mm waits for itself.
+     */
+    SystemViewsTransient = CcRosRetireViewsForPurge(SharedCacheMap, StartOffset, EndOffset) && !KeepsViews;
 
     /* Now make sure that Mm doesn't hold some pages here. */
 purgeMm:
     if (Success)
-        Success = MmPurgeSegment(SectionObjectPointer, FileOffset, Length);
+        Success = MmPurgeSegment(SectionObjectPointer, FileOffset, Length, SystemViewsTransient);
 
     /* A map that nobody has open and that the purge left clean is deleted by this (in a worker) */
     if (SharedCacheMap)

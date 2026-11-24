@@ -7092,19 +7092,51 @@ done:
 /* How long MmPurgeSegment waits for a page that another thread is writing (as MmFlushSegment, MI_FLUSH_WRITE_WAIT_100NS) */
 #define MI_PURGE_WRITE_WAIT_100NS (30LL * 10000000LL)
 
-/* Like CcPurgeCache but for the in-memory segment */
+/*
+ * How long one MmPurgeSegment waits, in all, for pages that only views in system space hold, when its caller has no view
+ * of its own left in the range (SystemViewsTransient): such a view is on its way out (the views of a cache map that is
+ * being deleted, a view unmapped lazily after the purge flushed those) and goes without waiting for the caller.
+ */
+#define MI_PURGE_SHARE_WAIT_100NS (1LL * 10000000LL)
+
+/*
+ * No process maps the file and every section of it is the cache manager's: each mapping of its pages is a view of the
+ * cache in system space.  Unlocked reads (UserMapCount is raised before a process view can map a page): a hint for how
+ * long to wait, never for what is purged.
+ */
+static
+BOOLEAN
+MiIsSegmentMappedByCacheOnly(
+    _In_ PMM_SECTION_SEGMENT Segment)
+{
+    return (*(volatile LONG *)&Segment->UserMapCount == 0) &&
+           (*(volatile ULONG *)&Segment->SectionCount == *(volatile ULONG *)&Segment->CacheSectionCount);
+}
+
+/*
+ * Like CcPurgeCache but for the in-memory segment: drops every page of the range that nothing maps.  A page that is
+ * mapped, being read, or dirty and only partly in the range is kept, and the purge goes on with the rest of the range
+ * (FALSE is returned): a caller that ignores the result, as file systems do before a non-cached write, then keeps only
+ * the pages that could not be dropped, not everything after the first one.  Pages mapped only by system-space views are
+ * waited for (MI_PURGE_SHARE_WAIT_100NS in all) when the caller says such views are transient: the cache manager, once
+ * it took its own views of the range off and waited for those of other threads (CcPurgeCacheSection).  A page mapped by
+ * a process view is not waited for: purging a range a process maps fails, as documented.
+ */
 BOOLEAN
 NTAPI
 MmPurgeSegment(
     _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer,
     _In_opt_ PLARGE_INTEGER Offset,
-    _In_ ULONG Length)
+    _In_ ULONG Length,
+    _In_ BOOLEAN SystemViewsTransient)
 {
     LARGE_INTEGER PurgeStart, PurgeEnd;
     LONGLONG RangeStart;
     PMM_SECTION_SEGMENT Segment;
     BOOLEAN Success = TRUE;
     ULONGLONG WriteWaitStart = 0;
+    BOOLEAN WriteWaitGaveUp = FALSE;
+    ULONGLONG ShareWaitStart = 0;
 
     PurgeStart.QuadPart = Offset ? Offset->QuadPart : 0LL;
     if (Length && Offset)
@@ -7158,10 +7190,14 @@ MmPurgeSegment(
         if (IS_SWAP_FROM_SSE(Entry))
         {
             ASSERT(SWAPENTRY_FROM_SSE(Entry) == MM_WAIT_ENTRY);
-            /* The page is currently being read. Meaning someone will need it soon. Bad luck */
-            MmUnlockSectionSegment(Segment);
-            MmDereferenceSegment(Segment);
-            return FALSE;
+            /*
+             * The page is being read: nothing of it is resident yet.  Whether the read can see data older than the
+             * caller's next write is the file system's to order (fastfat holds the paging I/O resource exclusive across
+             * the purge and the write, which the paging read needs).  Not purged; go on with the rest.
+             */
+            Success = FALSE;
+            PurgeStart.QuadPart += PAGE_SIZE;
+            continue;
         }
 
         if (IS_WRITE_SSE(Entry))
@@ -7182,8 +7218,15 @@ MmPurgeSegment(
 
             /*
              * Being written by another thread: wait for that write, but not for ever (as MmFlushSegment): a writer
-             * that waits for something this thread holds would never end.  Then fail as for a page in use.
+             * that waits for something this thread holds would never end.  Then keep it as a page in use, and do not
+             * wait for another write in this call.
              */
+            if (WriteWaitGaveUp)
+            {
+                Success = FALSE;
+                PurgeStart.QuadPart += PAGE_SIZE;
+                continue;
+            }
             if (!WriteWaitStart)
             {
                 WriteWaitStart = KeQueryInterruptTime();
@@ -7192,9 +7235,11 @@ MmPurgeSegment(
             {
                 DPRINT1("Purge of segment %p gives up on the page at 0x%I64x, still being written by another thread\n",
                         Segment, PurgeStart.QuadPart);
-                MmUnlockSectionSegment(Segment);
-                MmDereferenceSegment(Segment);
-                return FALSE;
+                WriteWaitGaveUp = TRUE;
+                WriteWaitStart = 0;
+                Success = FALSE;
+                PurgeStart.QuadPart += PAGE_SIZE;
+                continue;
             }
             MmUnlockSectionSegment(Segment);
             KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
@@ -7218,10 +7263,32 @@ MmPurgeSegment(
 
         if (SHARE_COUNT_FROM_SSE(Entry) > 0)
         {
-            /* This page is currently in use. Bad luck */
-            MmUnlockSectionSegment(Segment);
-            MmDereferenceSegment(Segment);
-            return FALSE;
+            /*
+             * Mapped.  Only by views of the cache that are on their way out: wait for them (a view unmapped lazily is
+             * released by MmFlushLazyMemoryAreas), up to the bound for the whole call.
+             */
+            if (SystemViewsTransient && MiIsSegmentMappedByCacheOnly(Segment))
+            {
+                if (!ShareWaitStart)
+                    ShareWaitStart = KeQueryInterruptTime();
+                if (KeQueryInterruptTime() - ShareWaitStart < (ULONGLONG)MI_PURGE_SHARE_WAIT_100NS)
+                {
+                    MmUnlockSectionSegment(Segment);
+                    MmFlushLazyMemoryAreas(Segment);
+                    KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+                    MmLockSectionSegment(Segment);
+                    /* The same page again */
+                    continue;
+                }
+                DPRINT1("Purge of segment %p gives up on the page at 0x%I64x, still mapped in system space\n",
+                        Segment, PurgeStart.QuadPart);
+                SystemViewsTransient = FALSE;
+            }
+
+            /* In use: keep it, and purge the rest */
+            Success = FALSE;
+            PurgeStart.QuadPart += PAGE_SIZE;
+            continue;
         }
 
         /* We can let this page go */
