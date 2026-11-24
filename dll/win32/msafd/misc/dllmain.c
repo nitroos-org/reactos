@@ -5511,7 +5511,33 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
     /* Check we were manually called b/c of a failure */
     if (!NT_SUCCESS(IoStatusBlock->Status))
     {
-        /* FIXME: Perform Upcall */
+        /*
+         * The poll was cancelled because the socket handle was closed with CloseHandle or NtClose, not through
+         * closesocket (which marks the socket closed first and posts nothing): the connection is over and the
+         * window gets FD_CLOSE, as on Windows (sock.c rows 11331-11335).
+         */
+        if (IoStatusBlock->Status == STATUS_CANCELLED &&
+            Socket->SharedData->State != SocketClosed)
+        {
+            BOOLEAN Post = FALSE;
+            HWND hWndClose = NULL;
+            UINT wMsgClose = 0;
+
+            EnterCriticalSection(&AsyncSelectLock);
+            if (AsyncData->SequenceNumber == Socket->SharedData->SequenceNumber &&
+                0 != (Socket->SharedData->AsyncEvents & FD_CLOSE) &&
+                0 == (Socket->SharedData->AsyncDisabledEvents & FD_CLOSE))
+            {
+                Socket->SharedData->AsyncDisabledEvents |= FD_CLOSE;
+                hWndClose = Socket->SharedData->hWnd;
+                wMsgClose = Socket->SharedData->wMsg;
+                Post = TRUE;
+            }
+            LeaveCriticalSection(&AsyncSelectLock);
+
+            if (Post)
+                (Upcalls.lpWPUPostMessage)(hWndClose, wMsgClose, Socket->Handle, WSAMAKESELECTREPLY(FD_CLOSE, 0));
+        }
         return;
     }
 
