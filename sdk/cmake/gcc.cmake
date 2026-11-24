@@ -354,16 +354,20 @@ set(CMAKE_RC_CREATE_SHARED_MODULE ${CMAKE_RC_CREATE_SHARED_LIBRARY})
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS_INIT} -Wl,--disable-stdcall-fixup,--gc-sections")
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS_INIT} -Wl,--disable-stdcall-fixup")
 set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS_INIT} -Wl,--disable-stdcall-fixup")
-if(NITRO_REPRODUCIBLE_BUILD)
-    # __DATE__ / __TIME__ (ntoskrnl xipdisp.c, ext2fs, ACPICA ...) become the build time given by SOURCE_DATE_EPOCH
-    string(TIMESTAMP _nitro_date "%b %d %Y" UTC)
-    string(TIMESTAMP _nitro_time "%H:%M:%S" UTC)
-    string(REGEX REPLACE " 0([0-9]) " "  \\1 " _nitro_date "${_nitro_date}")
-    add_compile_options(-Wno-builtin-macro-redefined "-D__DATE__=\"${_nitro_date}\"" "-D__TIME__=\"${_nitro_time}\"")
-    # the source and build directories are not part of the output (generated parsers carry their #line path, assertions their __FILE__);
-    # the build directory comes second because it lies inside the source tree in the usual layout
-    add_compile_options("-ffile-prefix-map=${REACTOS_SOURCE_DIR}=/ros-src" "-ffile-prefix-map=${REACTOS_BINARY_DIR}=/ros-bin")
-endif()
+# __DATE__ / __TIME__ (ntoskrnl xipdisp.c, ext2fs, ACPICA ...) become the build time given by SOURCE_DATE_EPOCH
+string(TIMESTAMP _nitro_date "%b %d %Y" UTC)
+string(TIMESTAMP _nitro_time "%H:%M:%S" UTC)
+string(REGEX REPLACE " 0([0-9]) " "  \\1 " _nitro_date "${_nitro_date}")
+add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX,ASM>:-Wno-builtin-macro-redefined>"
+                    "$<$<COMPILE_LANGUAGE:C,CXX,ASM>:-D__DATE__=\"${_nitro_date}\">"
+                    "$<$<COMPILE_LANGUAGE:C,CXX,ASM>:-D__TIME__=\"${_nitro_time}\">")
+# the source and build directories are not part of the output (generated parsers carry their #line path, assertions their __FILE__);
+# the build directory comes second because it lies inside the source tree in the usual layout
+add_compile_options("-ffile-prefix-map=${REACTOS_SOURCE_DIR}=/ros-src" "-ffile-prefix-map=${REACTOS_BINARY_DIR}=/ros-bin")
+# ld would write the link time into every PE header (and its debug directory): 0 instead
+foreach(_nitro_lf CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS CMAKE_MODULE_LINKER_FLAGS)
+    set(${_nitro_lf} "${${_nitro_lf}} -Wl,--no-insert-timestamp")
+endforeach()
 if(NITRO_PDB_PUBLICS)
     # ld --pdb exists since binutils 2.40: refuse to configure with a linker that would silently ignore or reject it
     execute_process(COMMAND ${CMAKE_C_COMPILER} -print-prog-name=ld
@@ -404,13 +408,6 @@ if(NITRO_PDB_PUBLICS)
         message(FATAL_ERROR "NITRO_PDB_PUBLICS=ON needs a time stamp for the images: set -DNITRO_PDB_TIMESTAMP=<seconds since the epoch> or SOURCE_DATE_EPOCH, or build from a git checkout")
     endif()
     set(NITRO_PDB_TIMESTAMP_VALUE "${_nitro_pdb_stamp}")
-    # The linker writes no time (the PDB info stream and the PE header would carry it, and the GUID is a hash of the image).
-    foreach(_nitro_lf CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS CMAKE_MODULE_LINKER_FLAGS)
-        if(NOT ${_nitro_lf} MATCHES "--no-insert-timestamp")
-            set(${_nitro_lf} "${${_nitro_lf}} -Wl,--no-insert-timestamp")
-        endif()
-    endforeach()
-
     # Paths of the build host in the PDB files: the build and source directories become fixed prefixes, other absolute paths
     # (the linker) lose their directory (pdbfix). The toolchain directory must not remain anywhere.
     get_filename_component(_nitro_cc_dir "${CMAKE_C_COMPILER}" DIRECTORY)
@@ -436,13 +433,6 @@ if(NITRO_PDB_PUBLICS)
     endif()
     message(STATUS "NITRO_PDB_PUBLICS: PDB publics for kernel-mode images, linker ${_nitro_ld_version}, image time stamp ${NITRO_PDB_TIMESTAMP_VALUE}, user-mode: ${NITRO_PDB_USER_MODULES}")
     file(MAKE_DIRECTORY ${REACTOS_BINARY_DIR}/pdb)
-endif()
-
-if(NITRO_REPRODUCIBLE_BUILD)
-    # ld would write the link time into every PE header (and its debug directory): 0 instead
-    foreach(_nitro_lf CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS CMAKE_MODULE_LINKER_FLAGS)
-        set(${_nitro_lf} "${${_nitro_lf}} -Wl,--no-insert-timestamp")
-    endforeach()
 endif()
 
 set(CMAKE_C_COMPILE_OBJECT "<CMAKE_C_COMPILER> <DEFINES> ${_compress_debug_sections_flag} <INCLUDES> <FLAGS> -o <OBJECT> -c <SOURCE>")
