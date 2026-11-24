@@ -2097,6 +2097,40 @@ AccpCheckRegistryKeyHandle(IN HANDLE Handle)
 }
 
 
+/*
+ * The SACL of a key through GetSecurityInfo: as measured on Windows Server 2022 the key is opened again by its name
+ * with ACCESS_SYSTEM_SECURITY, so the privilege is checked when the SACL is read. A handle opened without the right
+ * works while the caller holds SeSecurityPrivilege enabled, and a handle opened with it stops working once the
+ * privilege is disabled (the kernel itself only looks at the right of the handle: NtQuerySecurityObject, measured
+ * the same way). The caller closes the handle that is returned.
+ */
+static DWORD
+AccpReopenKeyForSacl(IN HANDLE Handle,
+                     OUT PHANDLE Reopened)
+{
+    BYTE Buffer[sizeof(OBJECT_NAME_INFORMATION) + 520 * sizeof(WCHAR)];
+    POBJECT_NAME_INFORMATION Name = (POBJECT_NAME_INFORMATION)Buffer;
+    OBJECT_ATTRIBUTES Oa;
+    NTSTATUS Status;
+
+    *Reopened = NULL;
+
+    Status = NtQueryObject(Handle, ObjectNameInformation, Buffer, sizeof(Buffer), NULL);
+    if (!NT_SUCCESS(Status) || Name->Name.Length == 0)
+        return ERROR_INVALID_HANDLE;
+
+    InitializeObjectAttributes(&Oa, &Name->Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenKey(Reopened, READ_CONTROL | ACCESS_SYSTEM_SECURITY, &Oa);
+    if (!NT_SUCCESS(Status))
+    {
+        *Reopened = NULL;
+        return RtlNtStatusToDosError(Status);
+    }
+
+    return ERROR_SUCCESS;
+}
+
+
 /**********************************************************************
  * AccRewriteGetHandleRights				EXPORTED
  *
@@ -2155,14 +2189,29 @@ AccRewriteGetHandleRights(HANDLE handle,
         {
             case SE_REGISTRY_KEY:
             {
+                HANDLE KeyHandle = handle;
+                HANDLE Reopened = NULL;
+
                 Ret = AccpCheckRegistryKeyHandle(handle);
                 if (Ret != ERROR_SUCCESS)
                     break;
 
-                Ret = (DWORD)RegGetKeySecurity((HKEY)handle,
+                /* the SACL: the key is opened again with ACCESS_SYSTEM_SECURITY (a predefined key has no handle to ask) */
+                if ((SecurityInfo & SACL_SECURITY_INFORMATION) &&
+                    ((ULONG_PTR)handle & 0xF0000000) != 0x80000000)
+                {
+                    Ret = AccpReopenKeyForSacl(handle, &Reopened);
+                    if (Ret != ERROR_SUCCESS)
+                        break;
+                    KeyHandle = Reopened;
+                }
+
+                Ret = (DWORD)RegGetKeySecurity((HKEY)KeyHandle,
                                                SecurityInfo,
                                                pSD,
                                                &SDSize);
+                if (Reopened != NULL)
+                    NtClose(Reopened);
                 break;
             }
 

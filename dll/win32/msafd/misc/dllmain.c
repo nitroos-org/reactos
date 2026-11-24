@@ -3611,10 +3611,10 @@ WSPIoctl(IN  SOCKET Handle,
                 break;
             }
 
-            /* FIXME: Return false if OOBINLINE is true for now
-               We should MSG_PEEK|MSG_OOB check with driver
-            */
-            *(BOOL*)lpvOutBuffer = !Socket->SharedData->OobInline;
+            /* There is no urgent data apart from the normal data in this stack, so the socket is always
+               at the mark: with SO_OOBINLINE (Windows: always TRUE) and without it (no urgent data waiting:
+               non-zero, sock.c row 5386). We should MSG_PEEK|MSG_OOB check with the driver. */
+            *(BOOL*)lpvOutBuffer = TRUE;
 
             cbRet = sizeof(BOOL);
             Errno = NO_ERROR;

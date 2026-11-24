@@ -428,7 +428,10 @@ DWORD Ipv4GetRouteRows(PMIB_IPFORWARD_ROW2 *Rows, ULONG *Count)
     New->DestinationPrefix.Prefix.Ipv4.sin_addr.s_addr = Row->dwForwardDest;
     New->DestinationPrefix.PrefixLength = mask_length_of(Row->dwForwardMask);
     New->NextHop.Ipv4.sin_family = AF_INET;
-    New->NextHop.Ipv4.sin_addr.s_addr = Row->dwForwardNextHop;
+    /* The legacy table shows the address of the interface as the next hop of a route to a destination on the link;
+       the next hop of the new table is empty then (Windows Server 2022: GetIpForwardTable2) */
+    New->NextHop.Ipv4.sin_addr.s_addr = (Row->dwForwardNextHop == getInterfaceIPAddrByIndex(Row->dwForwardIfIndex)) ?
+                                        0 : Row->dwForwardNextHop;
     New->ValidLifetime = 0xffffffff;
     New->PreferredLifetime = 0xffffffff;
     New->Metric = Row->dwForwardMetric1 > LastMetric ? Row->dwForwardMetric1 - LastMetric : 0;

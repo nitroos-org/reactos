@@ -661,6 +661,11 @@ PspInitPhase0(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     PspCidTable = ExCreateHandleTable(NULL);
     if (!PspCidTable) return FALSE;
 
+    /* Process and thread ids are handed out first in, first out: an id is not given again while the others of the
+     * free list are in use. Windows does the same (ExSetHandleTableStrictFIFO); with the last-freed-first list a
+     * process that is started right after another one ended got the id of the one that ended. */
+    PspCidTable->StrictFIFO = TRUE;
+
     /* FIXME: Initialize LDT/VDM support */
 
     /* Setup the reaper */

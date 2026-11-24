@@ -431,6 +431,14 @@ WSPRecv(SOCKET Handle,
             *lpErrno = WSAEINVAL;
         return SOCKET_ERROR;
     }
+    /* No urgent data is kept apart from the normal data here: a non-blocking receive of it has none to return
+     * (WSAEWOULDBLOCK, sock.c rows 5489-5497) and does not take normal data for it */
+    if (Socket->SharedData->NonBlocking && ReceiveFlags && (*ReceiveFlags & MSG_OOB) != 0)
+    {
+        if (lpErrno)
+            *lpErrno = WSAEWOULDBLOCK;
+        return SOCKET_ERROR;
+    }
     if (Socket->SharedData->ReceiveShutdown)
     {
         /* After shutdown(SD_RECEIVE) a new receive fails, as on Windows, which leaves the

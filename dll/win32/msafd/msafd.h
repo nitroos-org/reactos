@@ -592,15 +592,16 @@ MsafdReturnWithErrno(
     {
         *Errno = TranslateNtStatusError(Status);
 
-        if (ReturnedBytes)
-            *ReturnedBytes = (*Errno == 0) ? Received : 0;
+        /* A failed call leaves the caller's byte count as it was (Windows Server 2022: WSARecv after a reset) */
+        if (ReturnedBytes && *Errno == 0)
+            *ReturnedBytes = Received;
 
         return (*Errno == 0) ? 0 : SOCKET_ERROR;
     }
     else
     {
-        if (ReturnedBytes)
-            *ReturnedBytes = (Status == STATUS_SUCCESS) ? Received : 0;
+        if (ReturnedBytes && Status == STATUS_SUCCESS)
+            *ReturnedBytes = Received;
 
         return (Status == STATUS_SUCCESS) ? 0 : SOCKET_ERROR;
     }
