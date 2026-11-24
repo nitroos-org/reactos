@@ -296,7 +296,8 @@ RtlpSysVolCheckOwnerAndSecurity(IN HANDLE DirectoryHandle,
            size of a self-relative security descriptor */
         ASSERT(AbsSDSize > DescriptorSize);
 
-        AbsSD = RtlpAllocateMemory(DescriptorSize,
+        /* the conversion happens in place and needs the larger size it just reported */
+        AbsSD = RtlpAllocateMemory(AbsSDSize,
                                    'dSeS');
         if (AbsSD == NULL)
         {
@@ -307,6 +308,8 @@ RtlpSysVolCheckOwnerAndSecurity(IN HANDLE DirectoryHandle,
         AbsSDAllocated = TRUE;
 
         /* make a raw copy of the self-relative descriptor */
+        RtlZeroMemory(AbsSD,
+                      AbsSDSize);
         RtlCopyMemory(AbsSD,
                       RelSD,
                       DescriptorSize);
