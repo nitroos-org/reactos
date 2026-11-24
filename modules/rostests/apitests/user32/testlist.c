@@ -82,6 +82,8 @@ extern void func_GetUserObjectInformation(void);
 extern void func_GetWindowPlacement(void);
 extern void func_GW_ENABLEDPOPUP(void);
 extern void func_Handle32(void);
+extern void func_HandleQuota(void);
+extern void func_HandleQuotaChild(void);
 extern void func_HookInputBatch(void);
 extern void func_UserLowsBatch(void);
 extern void func_HookChainUnhookUaf(void);
@@ -295,6 +297,8 @@ const struct test winetest_testlist[] =
     { "GetWindowPlacement", func_GetWindowPlacement },
     { "GW_ENABLEDPOPUP", func_GW_ENABLEDPOPUP },
     { "Handle32", func_Handle32 },
+    { "HandleQuota", func_HandleQuota },
+    { "HandleQuotaChild", func_HandleQuotaChild },
     { "HookInputBatch", func_HookInputBatch },
     { "UserLowsBatch", func_UserLowsBatch },
     { "HookChainUnhookUaf", func_HookChainUnhookUaf },

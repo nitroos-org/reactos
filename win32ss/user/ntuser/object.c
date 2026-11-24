@@ -641,6 +641,14 @@ UserCreateObject( PUSER_HANDLE_TABLE ht,
    ASSERT(type != TYPE_FREE);
    ASSERT(ht != NULL);
 
+   /* A process holds at most USERProcessHandleQuota user objects (measured on Windows Server 2022:
+      10000, then the call fails with ERROR_NO_MORE_USER_HANDLES; other processes are not affected) */
+   if (pti && pti->ppi && pti->ppi->UserHandleCount >= (LONG)gUserProcessHandleQuota)
+   {
+       EngSetLastError(ERROR_NO_MORE_USER_HANDLES);
+       return NULL;
+   }
+
    /* Allocate the object */
    ASSERT(ObjectCallbacks[type].ObjectAlloc != NULL);
    Object = ObjectCallbacks[type].ObjectAlloc(pDesktop, pti, size, &ObjectOwner);

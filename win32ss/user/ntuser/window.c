@@ -2379,7 +2379,9 @@ PWND FASTCALL IntCreateWindow(CREATESTRUCTW* Cs,
 
 AllocError:
    ERR("IntCreateWindow Allocation Error.\n");
-   SetLastNtError(STATUS_INSUFFICIENT_RESOURCES);
+   /* the process holds its quota of user objects: that error (ERROR_NO_MORE_USER_HANDLES) stays */
+   if (EngGetLastError() != ERROR_NO_MORE_USER_HANDLES)
+      SetLastNtError(STATUS_INSUFFICIENT_RESOURCES);
 Error:
    if(pWnd)
       UserDereferenceObject(pWnd);

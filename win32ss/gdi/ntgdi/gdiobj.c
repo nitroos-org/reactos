@@ -1007,6 +1007,18 @@ GDIOBJ_hInsertObject(
     ASSERT(pobj->cExclusiveLock == 0);
     ASSERT(pobj->ulShareCount == 1);
 
+    /* A process holds at most GDIProcessHandleQuota GDI objects (measured on Windows Server 2022: 10000, then
+       the creating call returns NULL and leaves the last error alone; other processes are not affected) */
+    if (ulOwner == GDI_OBJ_HMGR_POWNED)
+    {
+        PPROCESSINFO ppi = PsGetCurrentProcessWin32Process();
+        if (ppi && ppi->GDIHandleCount >= (LONG)gGdiProcessHandleQuota)
+        {
+            DPRINT("GDIOBJ: the process holds %ld GDI handles (quota %lu)\n", ppi->GDIHandleCount, gGdiProcessHandleQuota);
+            return NULL;
+        }
+    }
+
     /* Get a free handle entry */
     pentry = ENTRY_pentPopFreeEntry();
     if (!pentry)
