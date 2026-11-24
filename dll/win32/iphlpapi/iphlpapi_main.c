@@ -672,23 +672,7 @@ DWORD WINAPI FlushIpNetTable(DWORD dwIfIndex)
 }
 
 
-/******************************************************************
- *    GetAdapterIndex (IPHLPAPI.@)
- *
- * PARAMS
- *  AdapterName [In/Out]
- *  IfIndex [In/Out]
- *
- * RETURNS
- *  DWORD
- */
-DWORD WINAPI GetAdapterIndex(LPWSTR AdapterName, PULONG IfIndex)
-{
-  TRACE("AdapterName %p, IfIndex %p\n", AdapterName, IfIndex);
-  FIXME(":stub\n");
-  /* marking Win2K+ functions not supported */
-  return ERROR_NOT_SUPPORTED;
-}
+/* GetAdapterIndex (IPHLPAPI.@) is in netio.c, which knows the interface guids */
 
 
 /******************************************************************
@@ -1772,6 +1756,8 @@ DWORD WINAPI GetIfEntry(PMIB_IFROW pIfRow)
     ret = getInterfaceEntryByIndex(pIfRow->dwIndex, pIfRow);
     if (ret == NO_ERROR)
       ret = getInterfaceStatsByName(name, pIfRow);
+    if (ret == NO_ERROR)
+      setLegacyIfRowNames(pIfRow);
     consumeInterfaceName(name);
   }
   else
@@ -2001,7 +1987,7 @@ DWORD WINAPI GetIpAddrTable(PMIB_IPADDRTABLE pIpAddrTable, PULONG pdwSize, BOOL 
             /* FIXME: hardcoded reasm size, not sure where to get it */
             pIpAddrTable->table[row].dwReasmSize = 65535;
             pIpAddrTable->table[row].unused1 = 0;
-            pIpAddrTable->table[row].wType = 0; /* aka unused2 */
+            pIpAddrTable->table[row].wType = MIB_IPADDR_PRIMARY; /* aka unused2 */
             pIpAddrTable->dwNumEntries++;
             row++;
             for (k = 0; k < extraCount[ndx] && row < total; k++) {
@@ -2012,7 +1998,7 @@ DWORD WINAPI GetIpAddrTable(PMIB_IPADDRTABLE pIpAddrTable, PULONG pdwSize, BOOL 
                (extra[ndx][k].iae_bcastaddr & extra[ndx][k].iae_mask) ? 1 : 0;
               pIpAddrTable->table[row].dwReasmSize = 65535;
               pIpAddrTable->table[row].unused1 = 0;
-              pIpAddrTable->table[row].wType = 0;
+              pIpAddrTable->table[row].wType = MIB_IPADDR_PRIMARY;
               pIpAddrTable->dwNumEntries++;
               row++;
             }
@@ -2113,9 +2099,15 @@ DWORD WINAPI GetIpForwardTable(PMIB_IPFORWARDTABLE pIpForwardTable, PULONG pdwSi
             pIpForwardTable->table[ndx].dwForwardPolicy = 0;
             pIpForwardTable->table[ndx].dwForwardNextHop =
              table->routes[ndx].gateway;
-            /* FIXME: this type is appropriate for local interfaces; may not
-               always be appropriate */
-            pIpForwardTable->table[ndx].dwForwardType = MIB_IPROUTE_TYPE_DIRECT;
+            /* A route through a gateway is indirect; one to a destination on the link (no gateway, or
+               the address of the interface itself) is direct, as GetIpForwardTable2 reports it */
+            {
+              DWORD gateway = table->routes[ndx].gateway;
+
+              pIpForwardTable->table[ndx].dwForwardType =
+               (gateway && gateway != getInterfaceIPAddrByIndex(table->routes[ndx].ifIndex)) ?
+               MIB_IPROUTE_TYPE_INDIRECT : MIB_IPROUTE_TYPE_DIRECT;
+            }
             /* FIXME: other protos might be appropriate, e.g. the default route
                is typically set with MIB_IPPROTO_NETMGMT instead */
             pIpForwardTable->table[ndx].dwForwardProto = MIB_IPPROTO_LOCAL;
