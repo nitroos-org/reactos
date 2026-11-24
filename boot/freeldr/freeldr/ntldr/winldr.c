@@ -23,6 +23,114 @@ PARC_DISK_SIGNATURE_EX ArcGetDiskInfo(ULONG Index);
 
 BOOLEAN IsAcpiPresent(VOID);
 
+#ifndef UEFIBOOT
+/* The record of where the firmware found a disk (ARC_DISK_POSITION), if the entry has one */
+static BOOLEAN
+WinLdrGetDiskPosition(
+    _In_ PARC_DISK_SIGNATURE_EX Entry,
+    _Out_ PARC_DISK_POSITION Position)
+{
+    SIZE_T NameLength = strlen(Entry->ArcName) + 1;
+
+    if (NameLength + sizeof(*Position) > sizeof(Entry->ArcName))
+        return FALSE;
+    RtlCopyMemory(Position, &Entry->ArcName[NameLength], sizeof(*Position));
+    return Position->Magic == ARC_DISK_POSITION_MAGIC && Position->Version == 1 &&
+           Position->Kind == ARC_DISK_POSITION_EDD && Position->Length >= 0x24 &&
+           Position->Length <= ARC_DISK_POSITION_DATA;
+}
+
+/* Position of a PCI host bus + ATA or SCSI interface: host bus type, interface type, interface path, device path */
+static BOOLEAN
+WinLdrPositionIsUsable(_In_ const ARC_DISK_POSITION* Position)
+{
+    /* Data[0..1] key, [2] length, [3..5] reserved, [6..9] host bus, [10..17] interface, [18..25] interface path, [26..33] device path */
+    if (RtlCompareMemory(&Position->Data[6], "PCI ", 4) != 4)
+        return FALSE;
+    return RtlCompareMemory(&Position->Data[10], "ATA     ", 8) == 8 ||
+           RtlCompareMemory(&Position->Data[10], "SCSI    ", 8) == 8;
+}
+
+/*
+ * Two disks with the same disk signature (MBR) or disk GUID (GPT) and the same first sector are byte-identical
+ * copies of one disk: the kernel finds the disk it runs from by signature and checksum (the ARC names, see
+ * IopCreateArcNamesDisk) and only the position the BIOS reports for the drives (INT 13h AH=48h device path,
+ * ARC_DISK_POSITION) tells which NT disk is which ARC disk. The kernel uses that position when it is there.
+ * Where it is not (the BIOS gives none for the drive, none that tells the copies apart: SeaBIOS gives none for AHCI
+ * and NVMe and the same one for two disks of one virtio-scsi controller) nothing can tell, and the system starts
+ * exactly as it did before (the first disk that matches): this function only says so in the debug log.
+ * BootPath names the system partition by "multi(0)disk(0)rdisk(N)partition(M)"; another form (a CD-ROM, a RAM
+ * disk) is not on a hard disk and is not looked at. Disks without a signature are not compared.
+ * Returns FALSE when the system disk has a copy that cannot be told apart.
+ */
+static BOOLEAN
+WinLdrNoteAmbiguousDisk(
+    _In_ PCSTR BootPath)
+{
+    ULONG Disk, Count, i, j;
+    PCSTR Rdisk;
+    CHAR Name[40];
+    PARC_DISK_SIGNATURE_EX This = NULL;
+    ARC_DISK_POSITION ThisPosition;
+    BOOLEAN ThisHasPosition;
+
+    if (_strnicmp(BootPath, "multi(0)disk(0)rdisk(", 21) != 0)
+        return TRUE;
+    Disk = strtoul(BootPath + 21, (PCHAR*)&Rdisk, 10);
+    if (Rdisk == BootPath + 21 || *Rdisk != ')')
+        return TRUE;
+
+    RtlStringCbPrintfA(Name, sizeof(Name), "multi(0)disk(0)rdisk(%lu)", Disk);
+    Count = ArcGetDiskCount();
+    for (i = 0; i < Count; i++)
+    {
+        PARC_DISK_SIGNATURE_EX Entry = ArcGetDiskInfo(i);
+        if (Entry && !_stricmp(Entry->ArcName, Name))
+        {
+            This = Entry;
+            break;
+        }
+    }
+    if (!This || !This->DiskSignature.ValidPartitionTable)
+        return TRUE;
+    if (!This->DiskSignature.IsGpt && This->DiskSignature.Signature == 0)
+        return TRUE;
+    ThisHasPosition = WinLdrGetDiskPosition(This, &ThisPosition) && WinLdrPositionIsUsable(&ThisPosition);
+
+    for (j = 0; j < Count; j++)
+    {
+        PARC_DISK_SIGNATURE_EX Other = ArcGetDiskInfo(j);
+        ARC_DISK_POSITION OtherPosition;
+        BOOLEAN Same, Tells;
+
+        if (!Other || Other == This || !Other->DiskSignature.ValidPartitionTable)
+            continue;
+        if (Other->DiskSignature.IsGpt != This->DiskSignature.IsGpt)
+            continue;
+        if (This->DiskSignature.IsGpt)
+            Same = RtlEqualMemory(&Other->DiskSignature.GptSignature, &This->DiskSignature.GptSignature, sizeof(GUID));
+        else
+            Same = Other->DiskSignature.Signature == This->DiskSignature.Signature;
+        if (!Same || Other->DiskSignature.CheckSum != This->DiskSignature.CheckSum)
+            continue;
+
+        /* A copy: the two positions must be there, usable and different */
+        Tells = ThisHasPosition && WinLdrGetDiskPosition(Other, &OtherPosition) &&
+                WinLdrPositionIsUsable(&OtherPosition) &&
+                (RtlCompareMemory(&ThisPosition.Data[6], &OtherPosition.Data[6], 28) != 28 ||
+                 ThisPosition.IoBase != OtherPosition.IoBase);
+        if (!Tells)
+        {
+            /* The system starts as it always did (the kernel takes the first disk that matches); only noted */
+            WARN("%s and %s are copies of one disk and the firmware does not tell them apart\n",
+                 This->ArcName, Other->ArcName);
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+#endif
+
 extern HEADLESS_LOADER_BLOCK LoaderRedirectionInformation;
 extern BOOLEAN WinLdrTerminalConnected;
 extern VOID WinLdrSetupEms(_In_ PCSTR BootOptions);
@@ -1292,6 +1400,9 @@ LoadAndBootWindows(
             return ENOENT;
         }
     }
+#else
+    /* Copies of the system disk that the firmware does not tell apart are only noted in the debug log */
+    (VOID)WinLdrNoteAmbiguousDisk(BootPath);
 #endif
 
     TRACE("BootPath: '%s'\n", BootPath);

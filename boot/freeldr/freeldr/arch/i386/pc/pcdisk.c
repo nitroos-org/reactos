@@ -831,6 +831,75 @@ PcDiskGetDriveGeometry(UCHAR DriveNumber, PGEOMETRY Geometry)
     return TRUE;
 }
 
+/*
+ * Where the BIOS says the drive is: the "device path information" of the EDD result of INT 13h AH=48h
+ * (BIOS Enhanced Disk Drive Specification 3.0, T13 project 1572-D: the key 0xBEDD at offset 1Eh, the length
+ * of the information at 20h, then host bus type, interface type, interface path and device path).
+ * The call is made with a buffer of 52h bytes (the size EDD 4 returns; an EDD 3.0 BIOS returns 42h and
+ * says so in the first word). Returns the number of bytes of path information copied to Data (from the key on),
+ * 0 when the BIOS has none (no extensions, an older table, a key other than BEDDh, a length that does not fit).
+ */
+ULONG
+PcDiskGetDevicePathInfo(
+    _In_ UCHAR DriveNumber,
+    _Out_writes_bytes_(DataSize) PUCHAR Data,
+    _In_ ULONG DataSize,
+    _Out_ PUSHORT IoBase)
+{
+    PPC_DISK_DRIVE DiskDrive;
+    PUCHAR Ptr = (PUCHAR)BIOSCALLBUFFER;
+    REGS RegsIn, RegsOut;
+    ULONG Length;
+
+    DiskDrive = PcDiskDriveNumberToDrive(DriveNumber);
+    if (!DiskDrive || !DiskDrive->Int13ExtensionsSupported)
+        return 0;
+
+    RtlZeroMemory(Ptr, 0x52);
+    *(PUSHORT)Ptr = 0x52;
+
+    RegsIn.b.ah = 0x48;
+    RegsIn.b.dl = DriveNumber;
+    RegsIn.x.ds = BIOSCALLBUFSEGMENT;
+    RegsIn.w.si = BIOSCALLBUFOFFSET;
+    Int386(0x13, &RegsIn, &RegsOut);
+    if (!INT386_SUCCESS(RegsOut))
+        return 0;
+
+    /*
+     * The key tells whether the BIOS wrote the path information: the buffer was zeroed, and SeaBIOS leaves the
+     * size word of the result at 1Ah or 1Eh also when it has written the path information (measured), so the size
+     * word is not trusted.
+     */
+    if (*(PUSHORT)&Ptr[0x1E] != 0xBEDD)
+        return 0;
+    Length = Ptr[0x20];
+    if (Length < 0x24 || 0x1E + Length > 0x52 || Length > DataSize)
+        return 0;
+
+    RtlCopyMemory(Data, &Ptr[0x1E], Length);
+
+    /*
+     * An ATA drive: the BIOS also gives the EDD configuration parameters (DPTE, far pointer at 1Ah), whose first word is
+     * the I/O port base of the drive's channel. SeaBIOS gives the same PCI function and channel number for the drives of
+     * two channels (measured), the port base tells them apart.
+     */
+    *IoBase = 0;
+    if (RtlCompareMemory(&Ptr[0x28], "ATA     ", 8) == 8)
+    {
+        ULONG Dpte = *(PULONG)&Ptr[0x1A];
+
+        if (Dpte != 0xFFFFFFFF && Dpte != 0)
+        {
+            ULONG Linear = ((Dpte >> 16) << 4) + (Dpte & 0xFFFF);
+
+            if (Linear < 0xFFFF0)
+                *IoBase = *(PUSHORT)(ULONG_PTR)Linear;
+        }
+    }
+    return Length;
+}
+
 ULONG
 PcDiskGetCacheableBlockCount(UCHAR DriveNumber)
 {

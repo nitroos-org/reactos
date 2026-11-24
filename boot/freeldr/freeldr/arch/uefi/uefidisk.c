@@ -774,6 +774,40 @@ GetHarddiskInformation(
         return;
     }
 
+    /* Where the firmware found the disk: the device path of its Block I/O handle, for the kernel to tell disks that
+     * have the same contents apart (ARC_DISK_POSITION) */
+    {
+        EFI_GUID DevicePathGuid = EFI_DEVICE_PATH_PROTOCOL_GUID;
+        EFI_DEVICE_PATH_PROTOCOL* Path = NULL;
+        EFI_DEVICE_PATH_PROTOCOL* Node;
+        ULONG Length = 0;
+
+        if (!EFI_ERROR(GlobalSystemTable->BootServices->HandleProtocol(InternalUefiDisk[ArcDriveIndex].Handle,
+                                                                       &DevicePathGuid, (VOID**)&Path)) && Path)
+        {
+            for (Node = Path; !IsDevicePathEnd(Node); Node = NextDevicePathNode(Node))
+            {
+                if (DevicePathNodeLength(Node) < sizeof(EFI_DEVICE_PATH_PROTOCOL) ||
+                    Length + DevicePathNodeLength(Node) + sizeof(EFI_DEVICE_PATH_PROTOCOL) > ARC_DISK_POSITION_DATA)
+                {
+                    Length = 0;
+                    break;
+                }
+                Length += DevicePathNodeLength(Node);
+            }
+            /* the end node is part of the path, so the kernel can tell where it ends */
+            if (Length != 0 && Length + sizeof(EFI_DEVICE_PATH_PROTOCOL) <= ARC_DISK_POSITION_DATA)
+            {
+                UCHAR Copy[ARC_DISK_POSITION_DATA];
+
+                RtlCopyMemory(Copy, Path, Length);
+                RtlCopyMemory(&Copy[Length], Node, sizeof(EFI_DEVICE_PATH_PROTOCOL));
+                SetLastReactOSArcDiskPosition(ARC_DISK_POSITION_UEFI, DriveNumber, 0, Copy,
+                                              Length + sizeof(EFI_DEVICE_PATH_PROTOCOL));
+            }
+        }
+    }
+
     /* Convert checksum and signature to identifier string */
     Identifier[0] = Hex[(Checksum >> 28) & 0x0F];
     Identifier[1] = Hex[(Checksum >> 24) & 0x0F];

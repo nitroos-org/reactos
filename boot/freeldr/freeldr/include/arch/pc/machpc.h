@@ -72,6 +72,7 @@ BOOLEAN DiskResetController(UCHAR DriveNumber);
 BOOLEAN PcDiskReadLogicalSectors(UCHAR DriveNumber, ULONGLONG SectorNumber, ULONG SectorCount, PVOID Buffer);
 BOOLEAN PcDiskGetDriveGeometry(UCHAR DriveNumber, PGEOMETRY DriveGeometry);
 ULONG PcDiskGetCacheableBlockCount(UCHAR DriveNumber);
+ULONG PcDiskGetDevicePathInfo(UCHAR DriveNumber, PUCHAR Data, ULONG DataSize, PUSHORT IoBase);
 
 TIMEINFO* PcGetTime(VOID);
 

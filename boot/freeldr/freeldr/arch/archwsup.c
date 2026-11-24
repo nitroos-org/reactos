@@ -108,6 +108,41 @@ AddReactOSArcDiskInfo(
     ++reactos_disk_count;
 }
 
+/*
+ * Records where the firmware found the disk that was added last (see ARC_DISK_POSITION in arc.h): the record is
+ * written after the NUL of the entry's ArcName, inside the ArcName buffer. Nothing is written when it does not fit.
+ */
+VOID
+SetLastReactOSArcDiskPosition(
+    _In_ USHORT Kind,
+    _In_ ULONG BiosDrive,
+    _In_ USHORT IoBase,
+    _In_reads_bytes_(Length) const VOID* Data,
+    _In_ ULONG Length)
+{
+    PARC_DISK_SIGNATURE_EX Entry;
+    ARC_DISK_POSITION Position;
+    SIZE_T NameLength;
+
+    if (reactos_disk_count == 0 || Length == 0 || Length > ARC_DISK_POSITION_DATA)
+        return;
+
+    Entry = &reactos_arc_disk_info[reactos_disk_count - 1];
+    NameLength = strlen(Entry->ArcName) + 1;
+    if (NameLength + sizeof(Position) > sizeof(Entry->ArcName))
+        return;
+
+    RtlZeroMemory(&Position, sizeof(Position));
+    Position.Magic = ARC_DISK_POSITION_MAGIC;
+    Position.Version = 1;
+    Position.Kind = Kind;
+    Position.BiosDrive = BiosDrive;
+    Position.Length = Length;
+    Position.IoBase = IoBase;
+    RtlCopyMemory(Position.Data, Data, Length);
+    RtlCopyMemory(&Entry->ArcName[NameLength], &Position, sizeof(Position));
+}
+
 ULONG ArcGetDiskCount(VOID)
 {
     return reactos_disk_count;
