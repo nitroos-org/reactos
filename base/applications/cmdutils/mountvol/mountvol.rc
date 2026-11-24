@@ -1,0 +1,6 @@
+#include <windef.h>
+
+#define REACTOS_STR_FILE_DESCRIPTION    "Volume mount point utility\0"
+#define REACTOS_STR_INTERNAL_NAME       "mountvol\0"
+#define REACTOS_STR_ORIGINAL_FILENAME   "mountvol.exe\0"
+#include <reactos/version.rc>
