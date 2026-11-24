@@ -6,6 +6,7 @@ extern void func_CertChainEngine(void);
 extern void func_CertEnumSystemStore(void);
 extern void func_CertEnumSystemStoreLocation(void);
 extern void func_ChainCaEku(void);
+extern void func_ChainInfoStatus(void);
 extern void func_ChainRootAdded(void);
 extern void func_ChainTrust(void);
 extern void func_RootStoreSeed(void);
@@ -19,6 +20,7 @@ const struct test winetest_testlist[] =
     { "CertEnumSystemStore", func_CertEnumSystemStore },
     { "CertEnumSystemStoreLocation", func_CertEnumSystemStoreLocation },
     { "ChainCaEku", func_ChainCaEku },
+    { "ChainInfoStatus", func_ChainInfoStatus },
     { "ChainRootAdded", func_ChainRootAdded },
     { "ChainTrust", func_ChainTrust },
     { "RootStoreSeed", func_RootStoreSeed },

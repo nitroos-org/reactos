@@ -190,3 +190,86 @@ START_TEST(ChainRootAdded)
     CertFreeCertificateContext(Leaf);
     CertFreeCertificateContext(Root);
 }
+
+/* The information status of a chain (measured on Windows Server 2022 with a chain of a throw-away root and leaf like
+ * these, and with chains of the system stores): an element whose issuer was found and whose signature verified, a
+ * self-signed element included, has CERT_TRUST_HAS_PREFERRED_ISSUER, and so has the chain; a leaf without its issuer
+ * has none, and neither has its chain. Nothing is written to a store: the root is given in an additional store. */
+START_TEST(ChainInfoStatus)
+{
+    PCCERT_CONTEXT Root, Leaf;
+    HCERTSTORE Extra;
+    PCCERT_CHAIN_CONTEXT Chain = NULL;
+    CERT_CHAIN_PARA Para;
+    BOOL Ret;
+
+    Root = CertCreateCertificateContext(X509_ASN_ENCODING, RootDer, sizeof(RootDer));
+    Leaf = CertCreateCertificateContext(X509_ASN_ENCODING, LeafDer, sizeof(LeafDer));
+    ok(Root && Leaf, "CertCreateCertificateContext failed: %lu\n", GetLastError());
+    if (!Root || !Leaf)
+        return;
+    Extra = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, NULL);
+    ok(Extra != NULL, "CertOpenStore failed: %lu\n", GetLastError());
+    if (!Extra)
+        return;
+    Ret = CertAddCertificateContextToStore(Extra, Root, CERT_STORE_ADD_ALWAYS, NULL);
+    ok(Ret, "CertAddCertificateContextToStore failed: %lu\n", GetLastError());
+
+    memset(&Para, 0, sizeof(Para));
+    Para.cbSize = sizeof(Para);
+
+    /* the issuer is found: leaf and root */
+    Ret = CertGetCertificateChain(NULL, Leaf, NULL, Extra, &Para, 0, NULL, &Chain);
+    ok(Ret, "CertGetCertificateChain failed: %lu\n", GetLastError());
+    if (Ret)
+    {
+        PCERT_SIMPLE_CHAIN Simple = Chain->rgpChain[0];
+
+        ok(Simple->cElement == 2, "%lu elements\n", Simple->cElement);
+        ok(Chain->TrustStatus.dwInfoStatus == CERT_TRUST_HAS_PREFERRED_ISSUER,
+           "chain info status %08lx\n", Chain->TrustStatus.dwInfoStatus);
+        ok(Simple->TrustStatus.dwInfoStatus == CERT_TRUST_HAS_PREFERRED_ISSUER,
+           "simple chain info status %08lx\n", Simple->TrustStatus.dwInfoStatus);
+        if (Simple->cElement == 2)
+        {
+            ok(Simple->rgpElement[0]->TrustStatus.dwInfoStatus & CERT_TRUST_HAS_PREFERRED_ISSUER,
+               "leaf info status %08lx\n", Simple->rgpElement[0]->TrustStatus.dwInfoStatus);
+            ok((Simple->rgpElement[1]->TrustStatus.dwInfoStatus &
+                (CERT_TRUST_HAS_PREFERRED_ISSUER | CERT_TRUST_IS_SELF_SIGNED)) ==
+               (CERT_TRUST_HAS_PREFERRED_ISSUER | CERT_TRUST_IS_SELF_SIGNED),
+               "root info status %08lx\n", Simple->rgpElement[1]->TrustStatus.dwInfoStatus);
+        }
+        CertFreeCertificateChain(Chain);
+    }
+
+    /* the leaf without its issuer */
+    Chain = NULL;
+    Ret = CertGetCertificateChain(NULL, Leaf, NULL, NULL, &Para, 0, NULL, &Chain);
+    ok(Ret, "CertGetCertificateChain failed: %lu\n", GetLastError());
+    if (Ret)
+    {
+        ok(Chain->rgpChain[0]->cElement == 1, "%lu elements\n", Chain->rgpChain[0]->cElement);
+        ok(!(Chain->TrustStatus.dwInfoStatus & CERT_TRUST_HAS_PREFERRED_ISSUER),
+           "chain info status %08lx\n", Chain->TrustStatus.dwInfoStatus);
+        ok(!(Chain->rgpChain[0]->rgpElement[0]->TrustStatus.dwInfoStatus & CERT_TRUST_HAS_PREFERRED_ISSUER),
+           "leaf info status %08lx\n", Chain->rgpChain[0]->rgpElement[0]->TrustStatus.dwInfoStatus);
+        CertFreeCertificateChain(Chain);
+    }
+
+    /* the self-signed root alone is its own issuer */
+    Chain = NULL;
+    Ret = CertGetCertificateChain(NULL, Root, NULL, NULL, &Para, 0, NULL, &Chain);
+    ok(Ret, "CertGetCertificateChain failed: %lu\n", GetLastError());
+    if (Ret)
+    {
+        ok((Chain->rgpChain[0]->rgpElement[0]->TrustStatus.dwInfoStatus &
+            (CERT_TRUST_HAS_PREFERRED_ISSUER | CERT_TRUST_IS_SELF_SIGNED)) ==
+           (CERT_TRUST_HAS_PREFERRED_ISSUER | CERT_TRUST_IS_SELF_SIGNED),
+           "root info status %08lx\n", Chain->rgpChain[0]->rgpElement[0]->TrustStatus.dwInfoStatus);
+        CertFreeCertificateChain(Chain);
+    }
+
+    CertCloseStore(Extra, 0);
+    CertFreeCertificateContext(Leaf);
+    CertFreeCertificateContext(Root);
+}
