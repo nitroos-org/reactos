@@ -41,6 +41,7 @@ BOOL WINAPI
 AddJobW(HANDLE hPrinter, DWORD Level, PBYTE pData, DWORD cbBuf, PDWORD pcbNeeded)
 {
     DWORD dwErrorCode;
+    WOW64_INFO Wow64;
     PSPOOLER_HANDLE pHandle = (PSPOOLER_HANDLE)hPrinter;
 
     FIXME("AddJobW(%p, %lu, %p, %lu, %p)\n", hPrinter, Level, pData, cbBuf, pcbNeeded);
@@ -51,19 +52,27 @@ AddJobW(HANDLE hPrinter, DWORD Level, PBYTE pData, DWORD cbBuf, PDWORD pcbNeeded
         goto Cleanup;
     }
 
-    // Do the RPC call
-    RpcTryExcept
-    {
-        dwErrorCode = _RpcAddJob(pHandle->hPrinter, Level, pData, cbBuf, pcbNeeded);
-    }
-    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
-    {
-        dwErrorCode = RpcExceptionCode();
-        ERR("_RpcAddJob failed with exception code %lu!\n", dwErrorCode);
-    }
-    RpcEndExcept;
+    Wow64InfoBegin(&Wow64, WOW64_KIND_ADDJOB, Level, pData, cbBuf);
 
-    if (dwErrorCode == ERROR_SUCCESS)
+    for (;;)
+    {
+        // Do the RPC call
+        RpcTryExcept
+        {
+            dwErrorCode = _RpcAddJob(pHandle->hPrinter, Level, Wow64.pRpc, Wow64.cbRpc, pcbNeeded);
+        }
+        RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+        {
+            dwErrorCode = RpcExceptionCode();
+            ERR("_RpcAddJob failed with exception code %lu!\n", dwErrorCode);
+        }
+        RpcEndExcept;
+
+        if (!Wow64InfoRetry(&Wow64, dwErrorCode, pcbNeeded))
+            break;
+    }
+
+    if (dwErrorCode == ERROR_SUCCESS && !Wow64.bWow64)
     {
         JOB_INFO_1W* pji1w = (JOB_INFO_1W*)pData;
 
@@ -72,6 +81,8 @@ AddJobW(HANDLE hPrinter, DWORD Level, PBYTE pData, DWORD cbBuf, PDWORD pcbNeeded
         pHandle->bJob = TRUE;
         UpdateTrayIcon( hPrinter, pji1w->JobId );
     }
+
+    dwErrorCode = Wow64InfoEnd(&Wow64, dwErrorCode, pcbNeeded, NULL);
 
 Cleanup:
     SetLastError(dwErrorCode);
@@ -200,6 +211,7 @@ BOOL WINAPI
 EnumJobsW(HANDLE hPrinter, DWORD FirstJob, DWORD NoJobs, DWORD Level, PBYTE pJob, DWORD cbBuf, PDWORD pcbNeeded, PDWORD pcReturned)
 {
     DWORD dwErrorCode;
+    WOW64_INFO Wow64;
     PSPOOLER_HANDLE pHandle = (PSPOOLER_HANDLE)hPrinter;
 
     TRACE("EnumJobsW(%p, %lu, %lu, %lu, %p, %lu, %p, %p)\n", hPrinter, FirstJob, NoJobs, Level, pJob, cbBuf, pcbNeeded, pcReturned);
@@ -210,19 +222,27 @@ EnumJobsW(HANDLE hPrinter, DWORD FirstJob, DWORD NoJobs, DWORD Level, PBYTE pJob
         goto Cleanup;
     }
 
-    // Do the RPC call
-    RpcTryExcept
-    {
-        dwErrorCode = _RpcEnumJobs(pHandle->hPrinter, FirstJob, NoJobs, Level, pJob, cbBuf, pcbNeeded, pcReturned);
-    }
-    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
-    {
-        dwErrorCode = RpcExceptionCode();
-        ERR("_RpcEnumJobs failed with exception code %lu!\n", dwErrorCode);
-    }
-    RpcEndExcept;
+    Wow64InfoBegin(&Wow64, WOW64_KIND_JOB, Level, pJob, cbBuf);
 
-    if (dwErrorCode == ERROR_SUCCESS)
+    for (;;)
+    {
+        // Do the RPC call
+        RpcTryExcept
+        {
+            dwErrorCode = _RpcEnumJobs(pHandle->hPrinter, FirstJob, NoJobs, Level, Wow64.pRpc, Wow64.cbRpc, pcbNeeded, pcReturned);
+        }
+        RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+        {
+            dwErrorCode = RpcExceptionCode();
+            ERR("_RpcEnumJobs failed with exception code %lu!\n", dwErrorCode);
+        }
+        RpcEndExcept;
+
+        if (!Wow64InfoRetry(&Wow64, dwErrorCode, pcbNeeded))
+            break;
+    }
+
+    if (dwErrorCode == ERROR_SUCCESS && !Wow64.bWow64)
     {
         // Replace relative offset addresses in the output by absolute pointers for JOB_INFO_1W and JOB_INFO_2W.
         if (Level <= 2)
@@ -231,6 +251,8 @@ EnumJobsW(HANDLE hPrinter, DWORD FirstJob, DWORD NoJobs, DWORD Level, PBYTE pJob
             MarshallUpStructuresArray(cbBuf, pJob, *pcReturned, pJobInfoMarshalling[Level]->pInfo, pJobInfoMarshalling[Level]->cbStructureSize, TRUE);
         }
     }
+
+    dwErrorCode = Wow64InfoEnd(&Wow64, dwErrorCode, pcbNeeded, pcReturned);
 
 Cleanup:
     SetLastError(dwErrorCode);
@@ -349,6 +371,7 @@ BOOL WINAPI
 GetJobW(HANDLE hPrinter, DWORD JobId, DWORD Level, PBYTE pJob, DWORD cbBuf, PDWORD pcbNeeded)
 {
     DWORD dwErrorCode;
+    WOW64_INFO Wow64;
     PSPOOLER_HANDLE pHandle = (PSPOOLER_HANDLE)hPrinter;
 
     FIXME("GetJobW(%p, %lu, %lu, %p, %lu, %p)\n", hPrinter, JobId, Level, pJob, cbBuf, pcbNeeded);
@@ -359,24 +382,34 @@ GetJobW(HANDLE hPrinter, DWORD JobId, DWORD Level, PBYTE pJob, DWORD cbBuf, PDWO
         goto Cleanup;
     }
 
-    // Do the RPC call
-    RpcTryExcept
-    {
-        dwErrorCode = _RpcGetJob(pHandle->hPrinter, JobId, Level, pJob, cbBuf, pcbNeeded);
-    }
-    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
-    {
-        dwErrorCode = RpcExceptionCode();
-        ERR("_RpcGetJob failed with exception code %lu!\n", dwErrorCode);
-    }
-    RpcEndExcept;
+    Wow64InfoBegin(&Wow64, WOW64_KIND_JOB, Level, pJob, cbBuf);
 
-    if (dwErrorCode == ERROR_SUCCESS)
+    for (;;)
+    {
+        // Do the RPC call
+        RpcTryExcept
+        {
+            dwErrorCode = _RpcGetJob(pHandle->hPrinter, JobId, Level, Wow64.pRpc, Wow64.cbRpc, pcbNeeded);
+        }
+        RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+        {
+            dwErrorCode = RpcExceptionCode();
+            ERR("_RpcGetJob failed with exception code %lu!\n", dwErrorCode);
+        }
+        RpcEndExcept;
+
+        if (!Wow64InfoRetry(&Wow64, dwErrorCode, pcbNeeded))
+            break;
+    }
+
+    if (dwErrorCode == ERROR_SUCCESS && !Wow64.bWow64)
     {
         // Replace relative offset addresses in the output by absolute pointers.
         ASSERT(Level >= 1 && Level <= 2);
         MarshallUpStructure(cbBuf, pJob, pJobInfoMarshalling[Level]->pInfo, pJobInfoMarshalling[Level]->cbStructureSize, TRUE);
     }
+
+    dwErrorCode = Wow64InfoEnd(&Wow64, dwErrorCode, pcbNeeded, NULL);
 
 Cleanup:
     SetLastError(dwErrorCode);

@@ -918,6 +918,7 @@ BOOL WINAPI
 EnumPortsW(PWSTR pName, DWORD Level, PBYTE pPorts, DWORD cbBuf, PDWORD pcbNeeded, PDWORD pcReturned)
 {
     DWORD dwErrorCode;
+    WOW64_INFO Wow64;
 
     TRACE("EnumPortsW(%S, %lu, %p, %lu, %p, %p)\n", pName, Level, pPorts, cbBuf, pcbNeeded, pcReturned);
 
@@ -928,24 +929,34 @@ EnumPortsW(PWSTR pName, DWORD Level, PBYTE pPorts, DWORD cbBuf, PDWORD pcbNeeded
         return FALSE;
     }
 
-    // Do the RPC call
-    RpcTryExcept
-    {
-        dwErrorCode = _RpcEnumPorts(pName, Level, pPorts, cbBuf, pcbNeeded, pcReturned);
-    }
-    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
-    {
-        dwErrorCode = RpcExceptionCode();
-        ERR("_RpcEnumPorts failed with exception code %lu!\n", dwErrorCode);
-    }
-    RpcEndExcept;
+    Wow64InfoBegin(&Wow64, WOW64_KIND_PORT, Level, pPorts, cbBuf);
 
-    if (dwErrorCode == ERROR_SUCCESS)
+    for (;;)
+    {
+        // Do the RPC call
+        RpcTryExcept
+        {
+            dwErrorCode = _RpcEnumPorts(pName, Level, Wow64.pRpc, Wow64.cbRpc, pcbNeeded, pcReturned);
+        }
+        RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+        {
+            dwErrorCode = RpcExceptionCode();
+            ERR("_RpcEnumPorts failed with exception code %lu!\n", dwErrorCode);
+        }
+        RpcEndExcept;
+
+        if (!Wow64InfoRetry(&Wow64, dwErrorCode, pcbNeeded))
+            break;
+    }
+
+    if (dwErrorCode == ERROR_SUCCESS && !Wow64.bWow64)
     {
         // Replace relative offset addresses in the output by absolute pointers.
         ASSERT(Level >= 1 && Level <= 2);
         MarshallUpStructuresArray(cbBuf, pPorts, *pcReturned, pPortInfoMarshalling[Level]->pInfo, pPortInfoMarshalling[Level]->cbStructureSize, TRUE);
     }
+
+    dwErrorCode = Wow64InfoEnd(&Wow64, dwErrorCode, pcbNeeded, pcReturned);
 
     SetLastError(dwErrorCode);
     return (dwErrorCode == ERROR_SUCCESS);

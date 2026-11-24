@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     AbortPrinter.c
+    ClientStructures.c
     ClosePrinter.c
     DeletePrinter.c
     EnumPrinters.c
