@@ -5,7 +5,8 @@
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * The expected error codes were measured on Windows Server 2008 R2 with a probe that called both functions
- * on two scratch NTFS volumes and a FAT32 volume. The first part needs no scratch volume. The second part
+ * on two scratch NTFS volumes and a FAT32 volume; the folder that is not there and the letter in use with a
+ * bad volume name were measured again on Windows Server 2022 (they differ).The first part needs no scratch volume. The second part
  * changes drive letters of a volume and runs only when the environment names a scratch volume that has no
  * drive letter and no path: KERNEL32_TEST_VOLUME is its name ("\\?\Volume{GUID}\"), or KERNEL32_TEST_LABEL
  * is the label to look for. KERNEL32_TEST_HOST, the root of an NTFS volume ("Q:\"), is where the mount
@@ -173,7 +174,12 @@ Test_Arguments(VOID)
     ok_lasterr(ERROR_FILE_NOT_FOUND);
     SetLastError(0xDEADBEEF);
     ok(!SetVolumeMountPointW(Missing, SystemVolume), "a mount point folder that is not there\n");
-    ok_lasterr(ERROR_INVALID_PARAMETER);
+    ok_lasterr(ERROR_FILE_NOT_FOUND);   /* Windows Server 2022; Server 2008 R2 answered ERROR_INVALID_PARAMETER */
+
+    /* a drive letter that is in use is refused before the volume name is looked at (Windows Server 2022) */
+    SetLastError(0xDEADBEEF);
+    ok(!SetVolumeMountPointW(SystemRoot, L"Y:\\"), "the system drive letter with a bad volume name\n");
+    ok_lasterr(ERROR_DIR_NOT_EMPTY);
 
     /* the ANSI forms */
     SetLastError(0xDEADBEEF);
