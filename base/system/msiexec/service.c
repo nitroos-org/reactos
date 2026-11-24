@@ -161,17 +161,44 @@ static BOOL IsElevatedAdministrator(HANDLE pipe)
     return ok;
 }
 
+/* A string of the request: exactly `chars` characters, the last one the terminator and no other */
 static WCHAR *DupString(const WCHAR *base, DWORD chars)
 {
     WCHAR *s;
 
-    if (chars == 0 || chars > MSI_LAUNCH_MAX_STRING || base[chars - 1] != 0)
+    if (chars == 0 || chars > MSI_LAUNCH_MAX_STRING || base[chars - 1] != 0 || lstrlenW(base) != chars - 1)
         return NULL;
     s = HeapAlloc(GetProcessHeap(), 0, chars * sizeof(WCHAR));
     if (s) memcpy(s, base, chars * sizeof(WCHAR));
     return s;
 }
 
+/* A path the service may use without searching: "X:\..." in its full form (no relative part, no "." or ".."
+ * components, no device or \\?\ prefix), naming an existing file or directory as asked */
+static BOOL IsFullyQualifiedPath(const WCHAR *path, BOOL directory)
+{
+    WCHAR full[MAX_PATH * 2];
+    DWORD len, attributes;
+
+    if (!(((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')) && path[1] == L':' &&
+          path[2] == L'\\'))
+        return FALSE;
+    len = GetFullPathNameW(path, ARRAY_SIZE(full), full, NULL);
+    if (!len || len >= ARRAY_SIZE(full) || lstrcmpiW(full, path))
+        return FALSE;
+    attributes = GetFileAttributesW(path);
+    if (attributes == INVALID_FILE_ATTRIBUTES)
+        return FALSE;
+    return directory ? (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 : (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+/*
+ * What the service starts: a program named by its full path (CreateProcessW does not search for it, so nothing is
+ * taken from the service's directories, its PATH or a directory the request names before the program runs), in a
+ * fully qualified existing directory (the system directory when none is given), with the service's own LocalSystem
+ * environment (the request cannot name one), and no handle of the service: nothing is inherited and no standard handles
+ * are passed (a console program gets a console of its own, measured by msi_apitest LaunchPipe).
+ */
 static DWORD LaunchProgram(const MSI_LAUNCH_REQUEST *req, DWORD client_pid, HANDLE *process, DWORD *pid)
 {
     STARTUPINFOW si;
@@ -185,7 +212,7 @@ static DWORD LaunchProgram(const MSI_LAUNCH_REQUEST *req, DWORD client_pid, HAND
 
     if (req->Kind == MSI_LAUNCH_CA_SERVER)
     {
-        if (req->Arch != 32 && req->Arch != 64)
+        if ((req->Arch != 32 && req->Arch != 64) || req->ApplicationChars || req->CommandLineChars || req->DirectoryChars)
             return ERROR_INVALID_PARAMETER;
         /* the custom action server of the architecture: msiexec.exe -Embedding <the client's process id> */
 #ifdef _WIN64
@@ -209,13 +236,19 @@ static DWORD LaunchProgram(const MSI_LAUNCH_REQUEST *req, DWORD client_pid, HAND
     {
         DWORD a = req->ApplicationChars, c = req->CommandLineChars, d = req->DirectoryChars;
 
-        if (c == 0 || c > MSI_LAUNCH_MAX_STRING || a > MSI_LAUNCH_MAX_STRING || d > MSI_LAUNCH_MAX_STRING)
+        if (a == 0 || c == 0 || a > MSI_LAUNCH_MAX_STRING || c > MSI_LAUNCH_MAX_STRING || d > MSI_LAUNCH_MAX_STRING)
             return ERROR_INVALID_PARAMETER;
-        if (a && !(app = DupString(strings, a))) return ERROR_INVALID_PARAMETER;
+        if (!(app = DupString(strings, a))) return ERROR_INVALID_PARAMETER;
         if (!(cmd = DupString(strings + a, c))) { HeapFree(GetProcessHeap(), 0, app); return ERROR_INVALID_PARAMETER; }
         if (d && !(cwd = DupString(strings + a + c, d))) { HeapFree(GetProcessHeap(), 0, app); HeapFree(GetProcessHeap(), 0, cmd); return ERROR_INVALID_PARAMETER; }
-        if (!CreateProcessW(app, cmd, NULL, NULL, FALSE, 0, NULL, cwd, &si, &pi))
-            error = GetLastError();
+        if (!IsFullyQualifiedPath(app, FALSE) || (cwd && !IsFullyQualifiedPath(cwd, TRUE)))
+            error = ERROR_BAD_PATHNAME;
+        else
+        {
+            if (!cwd) GetSystemDirectoryW(dir, MAX_PATH);
+            if (!CreateProcessW(app, cmd, NULL, NULL, FALSE, 0, NULL, cwd ? cwd : dir, &si, &pi))
+                error = GetLastError();
+        }
         HeapFree(GetProcessHeap(), 0, app);
         HeapFree(GetProcessHeap(), 0, cmd);
         HeapFree(GetProcessHeap(), 0, cwd);
@@ -230,6 +263,23 @@ static DWORD LaunchProgram(const MSI_LAUNCH_REQUEST *req, DWORD client_pid, HAND
     return ERROR_SUCCESS;
 }
 
+/* Completes an overlapped operation on the pipe within 10 s, or cancels it and waits for the cancellation (the
+ * buffer is not used any more when this returns). One client is served at a time, so a client is held up by the
+ * one before it for 20 s at most (10 s for its request, 10 s for it to take the reply). */
+static BOOL WaitPipeIo(HANDLE pipe, OVERLAPPED *ov, BOOL started, DWORD *size)
+{
+    *size = 0;
+    if (!started && GetLastError() != ERROR_IO_PENDING)
+        return FALSE;
+    if (WaitForSingleObject(ov->hEvent, 10000) != WAIT_OBJECT_0)
+    {
+        CancelIo(pipe);
+        GetOverlappedResult(pipe, ov, size, TRUE);
+        return FALSE;
+    }
+    return GetOverlappedResult(pipe, ov, size, FALSE);
+}
+
 static void HandleLaunchClient(HANDLE pipe)
 {
     BYTE *buffer;
@@ -237,7 +287,7 @@ static void HandleLaunchClient(HANDLE pipe)
     MSI_LAUNCH_REPLY reply;
     MSI_LAUNCH_REQUEST *req;
     OVERLAPPED ov;
-    DWORD size = 0, client_pid = 0, error;
+    DWORD size = 0, client_pid = 0, check_pid = 0, error;
     HANDLE process = NULL, client = NULL, dup = NULL;
     ULONG64 total;
 
@@ -251,19 +301,14 @@ static void HandleLaunchClient(HANDLE pipe)
     memset(&ov, 0, sizeof(ov));
     ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!ov.hEvent) { HeapFree(GetProcessHeap(), 0, buffer); return; }
-    if (!ReadFile(pipe, buffer, buffer_size, NULL, &ov) && GetLastError() == ERROR_IO_PENDING)
-    {
-        if (WaitForSingleObject(ov.hEvent, 10000) != WAIT_OBJECT_0)
-        {
-            CancelIo(pipe);
-            goto done;  /* a client that does not send its request is dropped */
-        }
-    }
-    if (!GetOverlappedResult(pipe, &ov, &size, FALSE) || size < sizeof(*req))
+    /* The request is one message no larger than the buffer (a larger one fails with ERROR_MORE_DATA and is dropped).
+     * A client that does not send it within 10 s is dropped. */
+    if (!WaitPipeIo(pipe, &ov, ReadFile(pipe, buffer, buffer_size, NULL, &ov), &size) || size < sizeof(*req))
         goto done;
 
+    /* the three strings fill the rest of the message exactly; each is checked for its terminator when it is read */
     total = (ULONG64)sizeof(*req) + ((ULONG64)req->ApplicationChars + req->CommandLineChars + req->DirectoryChars) * sizeof(WCHAR);
-    if (req->Magic != MSI_LAUNCH_MAGIC || total > size)
+    if (req->Magic != MSI_LAUNCH_MAGIC || total != size)
         error = ERROR_INVALID_PARAMETER;
     else if (!GetNamedPipeClientProcessId(pipe, &client_pid) || client_pid != req->ClientPid)
         error = ERROR_ACCESS_DENIED;
@@ -271,9 +316,18 @@ static void HandleLaunchClient(HANDLE pipe)
         error = ERROR_ACCESS_DENIED;
     else if (!(client = OpenProcess(PROCESS_DUP_HANDLE, FALSE, client_pid)))
         error = GetLastError();
+    /* the process opened is the client: it still holds its end (a process id of a client that has gone may be
+     * another process's by now) */
+    else if (!PeekNamedPipe(pipe, NULL, 0, NULL, NULL, NULL) ||
+             !GetNamedPipeClientProcessId(pipe, &check_pid) || check_pid != client_pid)
+        error = ERROR_BROKEN_PIPE;
     else if ((error = LaunchProgram(req, client_pid, &process, &reply.ProcessId)) == ERROR_SUCCESS)
     {
-        if (DuplicateHandle(GetCurrentProcess(), process, client, &dup, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        /* what msi.dll does with it: wait, read the exit code, terminate it on failure, and take the thread handles
+         * of a custom action server */
+        if (DuplicateHandle(GetCurrentProcess(), process, client, &dup,
+                            SYNCHRONIZE | PROCESS_QUERY_INFORMATION | PROCESS_TERMINATE |
+                            (req->Kind == MSI_LAUNCH_CA_SERVER ? PROCESS_DUP_HANDLE : 0), FALSE, 0))
             reply.ProcessHandle = (ULONG64)(ULONG_PTR)dup;
         else
         {
@@ -285,11 +339,15 @@ static void HandleLaunchClient(HANDLE pipe)
     if (client) CloseHandle(client);
     reply.Error = error;
 
-    memset(&ov, 0, sizeof(ov) - sizeof(ov.hEvent));
+    /* Write the reply, then wait (10 s at most) for the client to read it and close its end: disconnecting at once
+     * would throw the reply away, and FlushFileBuffers() would wait for ever for a client that does not read */
     ResetEvent(ov.hEvent);
-    if (!WriteFile(pipe, &reply, sizeof(reply), NULL, &ov) && GetLastError() == ERROR_IO_PENDING)
-        WaitForSingleObject(ov.hEvent, 10000);
-    FlushFileBuffers(pipe);
+    if (WaitPipeIo(pipe, &ov, WriteFile(pipe, &reply, sizeof(reply), NULL, &ov), &size))
+    {
+        BYTE byte;
+        ResetEvent(ov.hEvent);
+        WaitPipeIo(pipe, &ov, ReadFile(pipe, &byte, 1, NULL, &ov), &size);
+    }
 
 done:
     CloseHandle(ov.hEvent);

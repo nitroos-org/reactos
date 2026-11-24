@@ -832,6 +832,56 @@ static DWORD custom_server_pipe_descriptor(PSECURITY_DESCRIPTOR *sd)
     return ERROR_SUCCESS;
 }
 
+/* The full path of the program a command line starts, found as CreateProcessW finds it when it is given no
+ * application name: the quoted first token, or else the shortest run of space-separated tokens that names a file;
+ * ".exe" is added to a name without an extension. Returns a malloc'ed path or NULL. */
+static WCHAR *resolve_command_application( const WCHAR *cmdline )
+{
+    WCHAR *name, *path, *end;
+    const WCHAR *start;
+    DWORD len, attributes;
+    BOOL quoted;
+
+    if (!cmdline) return NULL;
+    while (*cmdline == ' ' || *cmdline == '\t') cmdline++;
+    quoted = (*cmdline == '"');
+    start = quoted ? cmdline + 1 : cmdline;
+    if (!(name = wcsdup( start ))) return NULL;
+    if (!(path = malloc( MAX_PATH * sizeof(WCHAR) ))) { free( name ); return NULL; }
+
+    if (quoted)
+    {
+        if ((end = wcschr( name, '"' ))) *end = 0;
+        end = NULL;
+    }
+    else
+        end = name;
+    for (;;)
+    {
+        WCHAR saved = 0;
+
+        if (end)
+        {
+            /* the next candidate ends at the next blank */
+            while (*end && *end != ' ' && *end != '\t') end++;
+            saved = *end;
+            *end = 0;
+        }
+        len = SearchPathW( NULL, name, L".exe", MAX_PATH, path, NULL );
+        if (len && len < MAX_PATH && (attributes = GetFileAttributesW( path )) != INVALID_FILE_ATTRIBUTES &&
+            !(attributes & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            free( name );
+            return path;
+        }
+        if (!end || !saved) break;
+        *end++ = saved;
+    }
+    free( name );
+    free( path );
+    return NULL;
+}
+
 struct connect_guard
 {
     HANDLE process;     /* the server */
@@ -1453,8 +1503,17 @@ static HANDLE execute_command( const WCHAR *app, WCHAR *arg, const WCHAR *dir, I
      * anyone else (the service would refuse them) runs it under their own token, as before. */
     if (custom_action_runs_as_system( type ) && get_system_caller() == SYSTEM_CALLER_ADMIN)
     {
-        DWORD err = launch_through_installer_service( MSI_LAUNCH_PROGRAM, 0, exe, exe ? cmd : arg, dir,
-                                                      &system_process, NULL );
+        DWORD err;
+
+        /* The service starts a program by its full path only. A command line without one (a type 34 action) is
+         * resolved here, as the administrator, the way CreateProcessW would have resolved it in this process. */
+        if (!exe && !(exe = resolve_command_application( arg )))
+        {
+            ERR("no program found for %s\n", debugstr_w( arg ));
+            return INVALID_HANDLE_VALUE;
+        }
+        err = launch_through_installer_service( MSI_LAUNCH_PROGRAM, 0, exe, cmd ? cmd : arg, dir,
+                                                &system_process, NULL );
         free( cmd );
         free( exe );
         if (err)
