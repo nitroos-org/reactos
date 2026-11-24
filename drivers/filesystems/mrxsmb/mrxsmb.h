@@ -131,6 +131,9 @@ extern SMB_ENGINE SmbEngine;
 extern PDEVICE_OBJECT SmbEngineDevice;
 extern PRDBSS_DEVICE_OBJECT SmbRdrDevice;
 
+/* mrxsmb.c */
+BOOLEAN SmbQueryCallerGaveUp(VOID);
+
 /* upcall.c */
 VOID SmbEngineInitialize(VOID);
 NTSTATUS SmbEngineDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp);

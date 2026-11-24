@@ -2213,13 +2213,61 @@ SmbLogonTerminated(PLUID LogonId)
 }
 
 /*
+ * Prefix claims are answered from a thread of their own. MUP asks the providers from inside the
+ * caller's NtCreateFile, in its own critical region (FsRtlEnterFileSystem), with an IRP of its own;
+ * a claim of a server that does not answer takes up to the engine's connect limit (20 s). Done in
+ * the caller's thread, nothing could end that wait: CancelSynchronousIo cancels from a normal kernel
+ * APC, which the critical region holds back. Pended to MUP, the caller waits for its create in the
+ * I/O manager, where the APC runs; MUP then cancels its query IRPs (MupCancelCreate), and the wait
+ * here (SmbIrpCancelled: the query IRP, the caller's thread) ends within 250 ms.
+ */
+typedef struct _SMB_QUERY_WORK
+{
+    LIST_ENTRY Link;                /* SmbQueryWorkList */
+    PETHREAD Worker;                /* the thread doing it */
+    PIRP Irp;                       /* MUP's IOCTL_REDIR_QUERY_PATH_EX, pended */
+    PETHREAD Caller;                /* the thread of the open, referenced */
+} SMB_QUERY_WORK, *PSMB_QUERY_WORK;
+
+static KSPIN_LOCK SmbQueryWorkLock;
+static LIST_ENTRY SmbQueryWorkList;
+
+/* Whether the current thread answers a claim whose caller gave up (its open cancelled, its thread ending) */
+BOOLEAN
+SmbQueryCallerGaveUp(VOID)
+{
+    PETHREAD Self = PsGetCurrentThread();
+    PLIST_ENTRY Entry;
+    BOOLEAN Gave = FALSE;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&SmbQueryWorkLock, &OldIrql);
+    for (Entry = SmbQueryWorkList.Flink; Entry != &SmbQueryWorkList; Entry = Entry->Flink)
+    {
+        PSMB_QUERY_WORK Work = CONTAINING_RECORD(Entry, SMB_QUERY_WORK, Link);
+
+        /* Only the worker removes its own entry: the caller stays valid here, and the IRP until the
+         * worker completes it (it is cleared first: MUP frees it in its completion routine and may hand
+         * the create to us, in this thread, right after) */
+        if (Work->Worker == Self)
+        {
+            Gave = (Work->Irp != NULL && Work->Irp->Cancel) || PsIsThreadTerminating(Work->Caller);
+            break;
+        }
+    }
+    KeReleaseSpinLock(&SmbQueryWorkLock, OldIrql);
+    return Gave;
+}
+
+/*
  * MUP asks providers registered by device object with IOCTL_REDIR_QUERY_PATH_EX;
  * rdbss understands IOCTL_REDIR_QUERY_PATH only. Ask rdbss with that on its
- * device FCB, and answer MUP with what it accepted.
+ * device FCB, and answer MUP with what it accepted. Returns the status for Irp
+ * (the caller completes it).
  */
 static
 NTSTATUS
-SmbQueryPathEx(PIRP Irp, PIO_STACK_LOCATION Stack)
+SmbQueryPathExWork(PIRP Irp, PIO_STACK_LOCATION Stack)
 {
     PQUERY_PATH_REQUEST_EX RequestEx = Stack->Parameters.DeviceIoControl.Type3InputBuffer;
     PQUERY_PATH_RESPONSE Response = Irp->UserBuffer;
@@ -2233,22 +2281,13 @@ SmbQueryPathEx(PIRP Irp, PIO_STACK_LOCATION Stack)
 
     PAGED_CODE();
 
-    if (Irp->RequestorMode != KernelMode || RequestEx == NULL || Response == NULL ||
-        Stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(QUERY_PATH_REQUEST_EX) ||
-        Stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(QUERY_PATH_RESPONSE))
-    {
-        Status = STATUS_INVALID_DEVICE_REQUEST;
-        goto Complete;
-    }
-
     /* Without an engine nothing can be claimed: do not make rdbss build connections. The starter
      * (the Workstation service) is asked for one first. */
-    if (SmbRdrDeviceFileObject == NULL ||
-        RequestEx->PathName.Length == 0 || RequestEx->PathName.Length >= MAXUSHORT - sizeof(WCHAR) ||
-        SmbIsEngineProcess(IoGetCurrentProcess()) ||
-        !NT_SUCCESS(SmbEnsureEngine(Irp)))
+    Status = SmbEnsureEngine(Irp);
+    if (!NT_SUCCESS(Status))
     {
-        Status = STATUS_BAD_NETWORK_PATH;
+        if (Status != STATUS_CANCELLED)
+            Status = STATUS_BAD_NETWORK_PATH;
         goto Complete;
     }
 
@@ -2297,6 +2336,110 @@ SmbQueryPathEx(PIRP Irp, PIO_STACK_LOCATION Stack)
         Status = STATUS_SUCCESS;
     }
     ExFreePoolWithTag(Request, TAG_SMB_MISC);
+
+Complete:
+    return Status;
+}
+
+/* Completes MUP's query IRP; MUP's completion routine takes its resources (and may hand the create to
+ * us right here) as it does inside its own dispatch routine: in a critical region */
+static
+VOID
+SmbCompleteQuery(PIRP Irp, NTSTATUS Status)
+{
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = 0;
+    FsRtlEnterFileSystem();
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    FsRtlExitFileSystem();
+}
+
+static
+VOID
+NTAPI
+SmbQueryWorker(PVOID Context)
+{
+    PSMB_QUERY_WORK Work = Context;
+    PIRP Irp = Work->Irp;
+    NTSTATUS Status;
+    KIRQL OldIrql;
+
+    PAGED_CODE();
+
+    Work->Worker = PsGetCurrentThread();
+    KeAcquireSpinLock(&SmbQueryWorkLock, &OldIrql);
+    InsertTailList(&SmbQueryWorkList, &Work->Link);
+    KeReleaseSpinLock(&SmbQueryWorkLock, OldIrql);
+
+    Status = SmbQueryPathExWork(Irp, IoGetCurrentIrpStackLocation(Irp));
+
+    /* From here on only the caller's thread tells whether it gave up (see SmbQueryCallerGaveUp) */
+    KeAcquireSpinLock(&SmbQueryWorkLock, &OldIrql);
+    Work->Irp = NULL;
+    KeReleaseSpinLock(&SmbQueryWorkLock, OldIrql);
+    SmbCompleteQuery(Irp, Status);
+
+    KeAcquireSpinLock(&SmbQueryWorkLock, &OldIrql);
+    RemoveEntryList(&Work->Link);
+    KeReleaseSpinLock(&SmbQueryWorkLock, OldIrql);
+    ObDereferenceObject(Work->Caller);
+    ExFreePoolWithTag(Work, TAG_SMB_MISC);
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+static
+NTSTATUS
+SmbQueryPathEx(PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    PQUERY_PATH_REQUEST_EX RequestEx = Stack->Parameters.DeviceIoControl.Type3InputBuffer;
+    PSMB_QUERY_WORK Work;
+    HANDLE Thread;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (Irp->RequestorMode != KernelMode || RequestEx == NULL || Irp->UserBuffer == NULL ||
+        Stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(QUERY_PATH_REQUEST_EX) ||
+        Stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(QUERY_PATH_RESPONSE))
+    {
+        Status = STATUS_INVALID_DEVICE_REQUEST;
+        goto Complete;
+    }
+
+    /* Nothing to claim (and the engine's own opens of a share would wait for the engine): at once,
+     * in the caller's thread; so also when no engine can be had (SmbEnsureEngine answers at once then) */
+    if (SmbRdrDeviceFileObject == NULL ||
+        RequestEx->PathName.Length == 0 || RequestEx->PathName.Length >= MAXUSHORT - sizeof(WCHAR) ||
+        SmbIsEngineProcess(IoGetCurrentProcess()))
+    {
+        Status = STATUS_BAD_NETWORK_PATH;
+        goto Complete;
+    }
+
+    Work = ExAllocatePoolZero(NonPagedPool, sizeof(*Work), TAG_SMB_MISC);
+    if (Work == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Complete;
+    }
+    Work->Irp = Irp;
+    Work->Caller = Irp->Tail.Overlay.Thread != NULL ? Irp->Tail.Overlay.Thread : PsGetCurrentThread();
+    ObReferenceObject(Work->Caller);
+
+    IoMarkIrpPending(Irp);
+    Status = PsCreateSystemThread(&Thread, THREAD_ALL_ACCESS, NULL, NULL, NULL, SmbQueryWorker, Work);
+    if (NT_SUCCESS(Status))
+    {
+        ZwClose(Thread);
+        return STATUS_PENDING;
+    }
+
+    /* No thread: in the caller's (uncancellable) as before */
+    DPRINT1("mrxsmb: no thread for a prefix claim (0x%08lx)\n", Status);
+    ObDereferenceObject(Work->Caller);
+    ExFreePoolWithTag(Work, TAG_SMB_MISC);
+    SmbCompleteQuery(Irp, SmbQueryPathExWork(Irp, Stack));
+    return STATUS_PENDING;
 
 Complete:
     Irp->IoStatus.Status = Status;
@@ -2753,6 +2896,8 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     SmbEngineInitialize();
     ExInitializeFastMutex(&SmbConnLock);
     InitializeListHead(&SmbConnList);
+    KeInitializeSpinLock(&SmbQueryWorkLock);
+    InitializeListHead(&SmbQueryWorkList);
 #if DBG
     SmbReadDebugParameters(RegistryPath);
 #endif

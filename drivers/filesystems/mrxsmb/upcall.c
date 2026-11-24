@@ -530,7 +530,8 @@ SmbQueueRequest(PSMB_REQUEST Request)
     return STATUS_SUCCESS;
 }
 
-/* The caller gave up: its IRP was cancelled, or the thread that sent it is terminating */
+/* The caller gave up: its IRP was cancelled, or the thread that sent it is terminating, or (in the
+ * thread that answers a prefix claim for a UNC open) the open was cancelled or its thread is ending */
 BOOLEAN
 SmbIrpCancelled(PIRP Irp)
 {
@@ -538,7 +539,9 @@ SmbIrpCancelled(PIRP Irp)
         return FALSE;
     if (Irp->Cancel)
         return TRUE;
-    return Irp->Tail.Overlay.Thread != NULL && PsIsThreadTerminating(Irp->Tail.Overlay.Thread);
+    if (Irp->Tail.Overlay.Thread != NULL && PsIsThreadTerminating(Irp->Tail.Overlay.Thread))
+        return TRUE;
+    return SmbQueryCallerGaveUp();
 }
 
 /* A notification (LOGOFF, CANCEL): queued, no reply; the queue owns it */

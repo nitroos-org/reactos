@@ -396,6 +396,13 @@ ConnectFailed(PSMBENG_CONN Conn, NTSTATUS Status, ULONG Win32)
         return;
     }
     Conn->State = ConnDown;
+    /* Abandoned because nobody waited for it any more: not a failure of the server (no back-off, the
+     * next request connects at once); a request that came meanwhile gets a new connect */
+    if (Status == STATUS_CANCELLED)
+    {
+        Conn->QuickRetries = 0;
+        return;
+    }
     /* A connect refused at once as unreachable (seen for the first connects after boot, while
      * the stack resolves the neighbour) is tried again shortly, before the waiting requests fail */
     /* Only for a server that did not answer: a share the server refused (STATUS_BAD_NETWORK_NAME,
@@ -1651,6 +1658,15 @@ ConnTake(PSMBENG_CONN Conn, PSMBENG_OP Op, BOOLEAN FromBacklog)
                 if (Target->Opcode == SmbUpConnect)
                     SmbEngRemoveBinding(Target->BindingId, Target);
                 SmbEngFreeOp(Target);
+                /* The last request that waited for a connect in progress was given up (a UNC open
+                 * cancelled): the connect is abandoned, without a back-off, so that it neither keeps
+                 * a socket to a server that does not answer nor holds up the next open */
+                if (Conn->State == ConnConnecting && IsListEmpty(&Conn->Pending))
+                {
+                    SmbEngLog(1, "connect %S\\%S logon %08lx:%08lx abandoned: nobody waits for it",
+                              Conn->Server, Conn->Share, Conn->LogonId.HighPart, Conn->LogonId.LowPart);
+                    TearDown(Conn, STATUS_CANCELLED, ERROR_OPERATION_ABORTED);
+                }
                 return;
             }
             /* At the server: ask it to give up (its reply still comes, and is dropped by the driver) */
@@ -2010,7 +2026,16 @@ ConnThread(LPVOID Parameter)
             TimeReached(Now, Conn->ConnectStart,
                         min(SmbEngConfig.RequestTimeoutSeconds, SMBENG_CONNECT_SECONDS) * 1000))
         {
-            TearDown(Conn, STATUS_BAD_NETWORK_PATH, ERROR_BAD_NETPATH);
+            struct nitro_smb2_auth_info Info;
+
+            /* A server that took the TCP connection and then did not answer: the time-out (Windows Server
+             * 2022 as a client: error 121 after 20.7 s); one that never answered the TCP connect: no path */
+            memset(&Info, 0, sizeof(Info));
+            Info.size = sizeof(Info);
+            if (Conn->Smb2 != NULL && NitroSmb2GetAuthInfo(Conn->Smb2, &Info) == 0 && Info.tcp_connected)
+                TearDown(Conn, STATUS_IO_TIMEOUT, ERROR_SEM_TIMEOUT);
+            else
+                TearDown(Conn, STATUS_BAD_NETWORK_PATH, ERROR_BAD_NETPATH);
         }
 
         /* Idle: no open file, nothing at the server, nothing waiting. A key with explicit
