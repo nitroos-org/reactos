@@ -110,8 +110,8 @@ SmbNoteStartFailed(VOID)
  * An engine for a user's request: at once if one is attached; otherwise, if a starter is
  * there, ask it for one and wait (NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS at most, in slices
  * that end early when the starter reports that it could not start one, and when Irp is
- * given up: cancelled, or its thread terminating). Without a starter (the client is switched
- * off, the Workstation service is stopped, or the engine was started by hand) or after a
+ * given up: cancelled, or its thread terminating). Without a starter (the Workstation service
+ * is stopped, or the driver and the engine were started by hand) or after a
  * failed start (for NITRO_SMBRDR_ENGINE_FAIL_CACHE_SECONDS) there is nothing to wait for:
  * the request fails at once, so that a UNC open of any other provider is not held up.
  */

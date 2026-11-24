@@ -44,6 +44,10 @@
 
 /* Engine-side bounds (the driver bounds what it sends; these bound what we hold) */
 #define SMBENG_MAX_GET_THREADS  16
+/* Making a connection (TCP connect, negotiate, session setup, tree connect) to a server that accepts the
+ * TCP connection and then does not answer ends after this many seconds (Windows Server 2022 as a client
+ * measured: 20.7-20.9 s); the requests of a connection that is up keep RequestTimeoutSeconds */
+#define SMBENG_CONNECT_SECONDS  20
 #define SMBENG_BINDING_BUCKETS  256
 #define SMBENG_FILE_BUCKETS     256
 #define SMBENG_MAX_FILES_PER_CONN 16384
