@@ -2183,7 +2183,11 @@ DWORD WINAPI GetIpNetTable(PMIB_IPNETTABLE pIpNetTable, PULONG pdwSize, BOOL bOr
 
     if (numEntries > 1)
       size += (numEntries - 1) * sizeof(MIB_IPNETROW);
-    if (!pIpNetTable || *pdwSize < size) {
+    if (numEntries == 0) {
+      /* an empty table is ERROR_NO_DATA, not a table with no rows (measured on Windows Server 2022) */
+      ret = ERROR_NO_DATA;
+    }
+    else if (!pIpNetTable || *pdwSize < size) {
       *pdwSize = size;
       ret = ERROR_INSUFFICIENT_BUFFER;
     }
@@ -2193,7 +2197,10 @@ DWORD WINAPI GetIpNetTable(PMIB_IPNETTABLE pIpNetTable, PULONG pdwSize, BOOL bOr
         size = sizeof(MIB_IPNETTABLE);
         if (table->dwNumEntries > 1)
           size += (table->dwNumEntries - 1) * sizeof(MIB_IPNETROW);
-        if (*pdwSize < size) {
+        if (table->dwNumEntries == 0) {
+          ret = ERROR_NO_DATA;
+        }
+        else if (*pdwSize < size) {
           *pdwSize = size;
           ret = ERROR_INSUFFICIENT_BUFFER;
         }
