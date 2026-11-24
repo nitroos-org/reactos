@@ -164,6 +164,8 @@ typedef struct _THREADINFO
     SINGLE_LIST_ENTRY  HeldPoolList;
     /* Hardware message list walks of this thread, innermost first (msgqueue.c) */
     struct _MSQ_HW_WALK *pHwWalks;
+    /* Activations (co_IntSetActiveWindow) this thread is inside, innermost first (focus.c) */
+    struct _USER_ACTIVATION_FRAME *pActivationFrames;
     ULONG cExclusiveLocks;
 #if DBG
     USHORT acExclusiveLockCount[GDIObjTypeTotal + 1];

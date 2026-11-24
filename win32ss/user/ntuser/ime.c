@@ -1554,6 +1554,8 @@ AllocInputContextObject(
 
     ObjHead->pSelf = ObjHead;
     ObjHead->rpdesk = pDesk;
+    /* The input context lives in the heap of pDesk: the desktop stays while it does */
+    IntReferenceDesktopForObject(pDesk);
     ObjHead->pti = pti;
     IntReferenceThreadInfo(pti);
     *HandleOwner = pti;
@@ -1585,6 +1587,7 @@ UserFreeInputContext(_In_opt_ PVOID Object)
     }
 
     DesktopHeapFree(pDesk, Object);
+    IntDereferenceDesktopForObject(pDesk, Object);
 
     pti->ppi->UserHandleCount--;
     IntDereferenceThreadInfo(pti);
@@ -2236,6 +2239,8 @@ IntImeCanDestroyDefIME(
         {
             if (pwndNode == pwndTarget)
                 break;
+            if (pwndNode->state & WNDS_DESTROYED) /* see below */
+                return FALSE;
         }
 
         if (!pwndNode)
@@ -2245,6 +2250,11 @@ IntImeCanDestroyDefIME(
     // Any ancestor of pwndTarget is IME-like?
     for (pwndNode = pwndTarget; pwndNode; pwndNode = pwndNode->spwndOwner)
     {
+        /* A freed window has no class any more: co_UserFreeWindow takes every owned window away from
+           it before it marks it destroyed, so the chain is not expected to reach one; if it does, the
+           IME window stays */
+        if (pwndNode->state & WNDS_DESTROYED)
+            return FALSE;
         if (IS_WND_IMELIKE(pwndNode))
             return FALSE;
     }
@@ -2282,6 +2292,12 @@ IntCheckImeShowStatus(
     IMEUI SafeImeUI;
 
     if (pwndIme->state2 & WNDS2_INDESTROY)
+        return FALSE;
+
+    /* An IME window that is not linked has no siblings to look at: freed (WNDS_DESTROYED, co_UserFreeWindow
+       unlinked it; the caller holds it, or a callback of IntNotifyImeShowStatus freed it), or not linked yet
+       (another thread of the process reached it by handle during its creation messages) */
+    if ((pwndIme->state & WNDS_DESTROYED) || !pwndIme->spwndParent)
         return FALSE;
 
     // Build a window list

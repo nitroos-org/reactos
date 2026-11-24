@@ -834,6 +834,10 @@ ExitThreadCallback(PETHREAD Thread)
     /* Walks of a peek that called out and never came back (the thread ends inside a hook) */
     MsqRundownHardwareWalks(ptiCurrent);
 
+    /* Activations that called out and never came back: the windows they marked (possibly of another
+       thread of the queue) can be activated again */
+    IntRundownActivations(ptiCurrent);
+
     MsqWithdrawSentMessagesOf(ptiCurrent);
 
     IsRemoveAttachThread(ptiCurrent);

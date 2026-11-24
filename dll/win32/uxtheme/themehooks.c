@@ -79,38 +79,55 @@ PWND_DATA ThemeFindWndData(HWND hWnd)
 static ULONG g_cWndDataMade;
 static void ThemeFreeWndData(HWND hWnd, PWND_DATA pwndData);
 
+static PWND_DATA ThemeUnlinkWndData(HWND hWnd);
+
+/*
+ * No call outside uxtheme while g_WndDataLock is held: user32 runs the hooks of uxtheme under an exception
+ * handler that resumes the thread behind the hook, so a fault with the lock held left it owned by a thread that
+ * had left uxtheme, and every later hook of the process waited for it. IsWindow can fault: it reads the window
+ * through the desktop heap mapping of the process, which can be gone for a window of another desktop. The
+ * handles are copied out of the table under the lock, IsWindow is called without it, and the dead contexts are
+ * taken out by handle afterwards.
+ */
 static void ThemeSweepWndData(void)
 {
-    UINT i;
-    PWND_DATA *pp, pwndData;
-    PWND_DATA pDead = NULL;
+    UINT i, cHandles = 0, cMax = 0;
+    PWND_DATA pwndData;
+    HWND *phWnd;
 
     EnterCriticalSection(&g_WndDataLock);
     for (i = 0; i < WND_DATA_BUCKETS; i++)
     {
-        pp = &g_WndDataTable[i];
-        while ((pwndData = *pp) != NULL)
-        {
-            if (!IsWindow(pwndData->hWnd))
-            {
-                *pp = pwndData->pNext;
-                pwndData->pNext = pDead;
-                pDead = pwndData;
-            }
-            else
-            {
-                pp = &pwndData->pNext;
-            }
-        }
+        for (pwndData = g_WndDataTable[i]; pwndData; pwndData = pwndData->pNext)
+            cMax++;
     }
     LeaveCriticalSection(&g_WndDataLock);
 
-    while (pDead)
+    if (cMax == 0)
+        return;
+    phWnd = HeapAlloc(GetProcessHeap(), 0, cMax * sizeof(HWND));
+    if (!phWnd)
+        return;
+
+    /* Contexts made meanwhile are left for the next sweep */
+    EnterCriticalSection(&g_WndDataLock);
+    for (i = 0; i < WND_DATA_BUCKETS && cHandles < cMax; i++)
     {
-        pwndData = pDead;
-        pDead = pwndData->pNext;
-        ThemeFreeWndData(pwndData->hWnd, pwndData);
+        for (pwndData = g_WndDataTable[i]; pwndData && cHandles < cMax; pwndData = pwndData->pNext)
+            phWnd[cHandles++] = pwndData->hWnd;
     }
+    LeaveCriticalSection(&g_WndDataLock);
+
+    for (i = 0; i < cHandles; i++)
+    {
+        if (IsWindow(phWnd[i]))
+            continue;
+        pwndData = ThemeUnlinkWndData(phWnd[i]);
+        if (pwndData)
+            ThemeFreeWndData(phWnd[i], pwndData);
+    }
+
+    HeapFree(GetProcessHeap(), 0, phWnd);
 }
 
 PWND_DATA ThemeGetWndData(HWND hWnd)

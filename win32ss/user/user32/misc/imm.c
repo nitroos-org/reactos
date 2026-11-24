@@ -170,8 +170,7 @@ User32SendImeUIMessage(PIMEUI pimeui, UINT uMsg, WPARAM wParam, LPARAM lParam, B
     HWND hwndUI = pimeui->hwndUI;
     PWND pwnd, pwndUI;
 
-    ASSERT(pimeui->spwnd != NULL);
-
+    /* pwnd is NULL when the IME window went in an earlier send of the caller (checked below) */
     pwnd = pimeui->spwnd;
     pwndUI = ValidateHwnd(hwndUI);
     if (!pwnd || (pwnd->state & WNDS_DESTROYED) || (pwnd->state2 & WNDS2_INDESTROY) ||
@@ -196,7 +195,9 @@ static VOID User32NotifyOpenStatus(PIMEUI pimeui, HWND hwndIMC, BOOL bOpen)
 {
     WPARAM wParam = (bOpen ? IMN_OPENSTATUSWINDOW : IMN_CLOSESTATUSWINDOW);
 
-    ASSERT(pimeui->spwnd != NULL);
+    /* The IME window went in an earlier send of the caller (the caller's frame keeps the IMEUI) */
+    if (!pimeui->spwnd)
+        return;
 
     pimeui->fShowStatus = bOpen;
 
@@ -856,6 +857,10 @@ LRESULT ImeWnd_OnImeSetContext(PIMEUI pimeui, WPARAM wParam, LPARAM lParam)
                 pimeui->fCtrlShowStatus = FALSE;
         }
 
+        /* The creation of the UI window sends messages: the IME window can be gone (the caller's frame
+           keeps the IMEUI, spwnd is NULL then); the same after every call below that sends */
+        if (!pimeui->spwnd)
+            return 0;
         hImeWnd = UserHMGetHandle(pimeui->spwnd);
 
         if (gfConIme)
@@ -910,6 +915,8 @@ LRESULT ImeWnd_OnImeSetContext(PIMEUI pimeui, WPARAM wParam, LPARAM lParam)
 
             IMM_FN(ImmUnlockIMC)(hIMC);
 
+            if (!pimeui->spwnd)
+                return 0;
             hImeWnd = UserHMGetHandle(pimeui->spwnd);
             if (NtUserSetImeOwnerWindow(hImeWnd, hwndFocus))
                 KSETSX(pimeui, hwndIMC, hwndFocus);
@@ -918,6 +925,8 @@ LRESULT ImeWnd_OnImeSetContext(PIMEUI pimeui, WPARAM wParam, LPARAM lParam)
         {
             KSETSX(pimeui, hwndIMC, hwndFocus);
 
+            if (!pimeui->spwnd)
+                return 0;
             hImeWnd = UserHMGetHandle(pimeui->spwnd);
             NtUserSetImeOwnerWindow(hImeWnd, NULL);
         }
@@ -984,9 +993,50 @@ LRESULT ImeWnd_OnImeSetContext(PIMEUI pimeui, WPARAM wParam, LPARAM lParam)
     return ret;
 }
 
+/*
+ * The IMEUI of an IME window is referenced by the window (from WM_NCCREATE to WM_NCDESTROY) and by every frame
+ * of the IME window procedure that uses it: the procedure sends messages (to the IME UI window, to the windows
+ * whose status it shows, WM_IME_SETCONTEXT) during which the IME window can be destroyed, and goes on with the
+ * IMEUI afterwards (it finds spwnd NULL then). The count is user32's own, kept next to the IMEUI that win32k
+ * reads.
+ */
+typedef struct _IMEUI_HOLDER
+{
+    IMEUI ImeUI;
+    LONG cRefs;
+} IMEUI_HOLDER, *PIMEUI_HOLDER;
+
+static VOID User32ReferenceImeUI(PIMEUI pimeui)
+{
+    InterlockedIncrement(&CONTAINING_RECORD(pimeui, IMEUI_HOLDER, ImeUI)->cRefs);
+}
+
+static VOID User32DereferenceImeUI(PIMEUI pimeui)
+{
+    PIMEUI_HOLDER pHolder = CONTAINING_RECORD(pimeui, IMEUI_HOLDER, ImeUI);
+
+    if (InterlockedDecrement(&pHolder->cRefs) == 0)
+        HeapFree(GetProcessHeap(), 0, pHolder);
+}
+
+static LRESULT
+ImeWndProc_Frame(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, BOOL unicode, PIMEUI *ppimeuiHeld);
+
 /* The window procedure of the default IME window */
 LRESULT WINAPI
 ImeWndProc_common(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, BOOL unicode) // ReactOS
+{
+    PIMEUI pimeuiHeld = NULL;
+    LRESULT ret;
+
+    ret = ImeWndProc_Frame(hwnd, msg, wParam, lParam, unicode, &pimeuiHeld);
+    if (pimeuiHeld)
+        User32DereferenceImeUI(pimeuiHeld);
+    return ret;
+}
+
+static LRESULT
+ImeWndProc_Frame(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, BOOL unicode, PIMEUI *ppimeuiHeld)
 {
     PWND pWnd;
     PIMEUI pimeui;
@@ -1011,13 +1061,16 @@ ImeWndProc_common(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, BOOL unicod
 
     if (msg == WM_NCCREATE)
     {
-        pimeui = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(IMEUI));
-        if (!pimeui)
+        PIMEUI_HOLDER pHolder = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(IMEUI_HOLDER));
+        if (!pHolder)
         {
             ERR("HeapAlloc failed\n");
             NtUserSetWindowFNID(hwnd, FNID_DESTROY);
             return FALSE;
         }
+        /* The window's reference */
+        pHolder->cRefs = 1;
+        pimeui = &pHolder->ImeUI;
         KSET(pimeui, spwnd, pWnd);
         SetWindowLongPtrW(hwnd, GWLP_IMEWND_PIMEUI, (LONG_PTR)pimeui);
     }
@@ -1031,6 +1084,10 @@ ImeWndProc_common(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, BOOL unicod
             return 0;
         }
     }
+
+    /* This frame's reference, given back by ImeWndProc_common */
+    User32ReferenceImeUI(pimeui);
+    *ppimeuiHeld = pimeui;
 
     if (IS_CICERO_MODE())
     {
@@ -1102,8 +1159,11 @@ ImeWndProc_common(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, BOOL unicod
 
         case WM_NCDESTROY:
         case WM_FINALDESTROY:
+            /* Frames of this procedure that are still running (this one too) keep the IMEUI and find
+               spwnd NULL; the window gives its reference back */
             KSET(pimeui, spwnd, NULL);
-            HeapFree(GetProcessHeap(), 0, pimeui);
+            SetWindowLongPtrW(hwnd, GWLP_IMEWND_PIMEUI, 0);
+            User32DereferenceImeUI(pimeui);
             NtUserSetWindowFNID(hwnd, FNID_DESTROY);
             break;
 

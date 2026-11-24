@@ -12,6 +12,7 @@ list(APPEND SOURCE
     ../include/msgtrace.c
     CallbackLifetimes.c
     LifetimeHeldBlocks.c
+    LifetimeStressCrashes.c
     CharFuncs.c
     CloseWindow.c
     CopyImage.c

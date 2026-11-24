@@ -77,6 +77,8 @@ static PVOID AllocDeskThreadObject(
 
     ObjHead->pSelf = ObjHead;
     ObjHead->rpdesk = pDesk;
+    /* The object lives in the heap of pDesk: the desktop, and the heap with it, stays while it does */
+    IntReferenceDesktopForObject(pDesk);
     ObjHead->pti = pti;
     IntReferenceThreadInfo(pti);
     *HandleOwner = pti;
@@ -97,7 +99,10 @@ static void FreeDeskThreadObject(
        that desktop's heap, which was kept for it (IntFreeDesktopWindow) and goes with the last such window
        (IntDesktopHeapWindowGone, after the last use of the object here) */
     if (pDesk)
+    {
         DesktopHeapFree(pDesk, Object);
+        IntDereferenceDesktopForObject(pDesk, Object);
+    }
 
     pti->ppi->UserHandleCount--;
     IntDereferenceThreadInfo(pti);
@@ -130,6 +135,8 @@ static PVOID AllocDeskProcObject(
 
     ObjHead->pSelf = ObjHead;
     ObjHead->rpdesk = pDesk;
+    /* As AllocDeskThreadObject: a menu or a call procedure keeps the desktop whose heap it lives in */
+    IntReferenceDesktopForObject(pDesk);
     ObjHead->hTaskWow = (DWORD_PTR)ppi;
     ppi->UserHandleCount++;
     IntReferenceProcessInfo(ppi);
@@ -149,6 +156,7 @@ static void FreeDeskProcObject(
     IntDereferenceProcessInfo(ppi);
 
     DesktopHeapFree(pDesk, Object);
+    IntDereferenceDesktopForObject(pDesk, Object);
 }
 
 _Success_(return!=NULL)

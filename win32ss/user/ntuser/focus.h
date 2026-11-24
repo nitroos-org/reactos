@@ -21,6 +21,7 @@ BOOL FASTCALL co_IntMouseActivateWindow(PWND Window);
 BOOL FASTCALL co_IntSetForegroundWindow(PWND Window);
 BOOL FASTCALL co_IntSetForegroundWindowMouse(PWND Window);
 BOOL FASTCALL co_IntSetActiveWindow(PWND,BOOL,BOOL,BOOL);
+VOID FASTCALL IntRundownActivations(PTHREADINFO pti);
 BOOL FASTCALL IntUserSetActiveWindow(PWND,BOOL,BOOL,BOOL);
 BOOL FASTCALL UserSetActiveWindow(PWND Wnd);
 BOOL FASTCALL IntLockSetForegroundWindow(UINT uLockCode);
