@@ -92,7 +92,8 @@ typedef struct IPADDR_ENTRY {
 #define FUNCTION_DISCONNECT             5
 #define FUNCTION_CLOSE                  6
 #define FUNCTION_CONNECTEX              7
-#define MAX_FUNCTIONS                   8
+#define FUNCTION_ADDRCHANGE             8
+#define MAX_FUNCTIONS                   9
 
 #define IN_FLIGHT_REQUESTS              5
 
@@ -388,6 +389,12 @@ AfdGetSockName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 NTSTATUS NTAPI
 AfdGetPeerName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 PIO_STACK_LOCATION IrpSp );
+
+/* addrchg.c */
+NTSTATUS AfdAddrChangeWait( PDEVICE_OBJECT DeviceObject, PIRP Irp,
+                            PIO_STACK_LOCATION IrpSp );
+NTSTATUS AfdAddrChangeComplete( PDEVICE_OBJECT DeviceObject, PIRP Irp,
+                                PIO_STACK_LOCATION IrpSp );
 
 /* listen.c */
 NTSTATUS AfdWaitForListen( PDEVICE_OBJECT DeviceObject, PIRP Irp,
