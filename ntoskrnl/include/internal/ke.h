@@ -176,6 +176,8 @@ LONGLONG
 NTAPI
 KiQueryClockPhase(VOID);
 extern ULONG KiFreezeFlag;
+/* The IRQL that the thaw of the outermost freeze goes back to */
+extern KIRQL KiOldIrql;
 extern ULONG KiDPCTimeout;
 extern PGDI_BATCHFLUSH_ROUTINE KeGdiFlushUserBatch;
 extern ULONGLONG BootCycles, BootCyclesEnd;
