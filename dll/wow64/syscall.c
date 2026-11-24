@@ -3547,6 +3547,10 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     }
     case W64_NtImpersonateAnonymousToken:
         return NtImpersonateAnonymousToken(H(0));
+    case W64_NtImpersonateThread:
+        /* two handles and a SECURITY_QUALITY_OF_SERVICE, which has no pointer: the same layout in both widths
+         * (the kernel captures it from guest memory); CreateProcessAsUser uses it to label the new process */
+        return NtImpersonateThread(H(0), H(1), P(2));
     case W64_NtPrivilegeCheck:
         /* PRIVILEGE_SET has no pointer and 4-byte fields (a LUID_AND_ATTRIBUTES is 12 bytes in both ABIs) */
         return NtPrivilegeCheck(H(0), P(1), P(2));
