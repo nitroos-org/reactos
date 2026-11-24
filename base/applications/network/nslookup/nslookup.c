@@ -320,6 +320,23 @@ cleanup:
     return bOk;
 }
 
+/* The name of the name server for the banner (Default Server / Server): the reverse lookup of its address. A server
+   that does not answer, or whose answer carries no name, is called "UnKnown" as on Windows, and the failed lookup
+   does not print the "Request to ... timed-out" line (there is no name to put into it yet). */
+static void LookupServerName( void )
+{
+    BOOL WasQuiet = g_bQuietTimeout;
+    BOOL bOk;
+
+    State.DefaultServer[0] = '\0';
+    g_bQuietTimeout = TRUE;
+    bOk = PerformInternalLookup( State.DefaultServerAddress, State.DefaultServer );
+    g_bQuietTimeout = WasQuiet;
+
+    if( !bOk || State.DefaultServer[0] == '\0' )
+        strcpy( State.DefaultServer, "UnKnown" );
+}
+
 /* An IPv6 address as text, the longest run of zero groups (two or more) written as :: (RFC 5952) */
 static void FormatIpv6( const UCHAR *Address, PCHAR Out )
 {
@@ -1121,8 +1138,7 @@ BOOL ParseCommandLine( int argc, char* argv[] )
                 {
                     strncpy( State.DefaultServerAddress, Server, sizeof(State.DefaultServerAddress) - 1 );
 
-                    PerformInternalLookup( State.DefaultServerAddress,
-                                           State.DefaultServer );
+                    LookupServerName();
                 }
                 else
                 {
@@ -1378,8 +1394,7 @@ BOOL ParseCommandLine( int argc, char* argv[] )
         if( NoMoreOptions && !Interactive )
         {
             /* Get the FQDN of the DNS server. */
-            PerformInternalLookup( State.DefaultServerAddress,
-                                   State.DefaultServer );
+            LookupServerName();
 
             PerformLookup( AddrToResolve );
 
@@ -1388,8 +1403,7 @@ BOOL ParseCommandLine( int argc, char* argv[] )
     }
 
     /* Get the FQDN of the DNS server. */
-    PerformInternalLookup( State.DefaultServerAddress,
-                           State.DefaultServer );
+    LookupServerName();
 
     return 1;
 }
@@ -1723,8 +1737,7 @@ void InteractiveMode()
                         strncpy(State.DefaultServerAddress, args_vector[1], min(sizeof(State.DefaultServerAddress) - 1, strlen(args_vector[1])));
                         State.DefaultServerAddress[min(sizeof(State.DefaultServerAddress) - 1, strlen(args_vector[1]))] = '\0';
 
-                        PerformInternalLookup(State.DefaultServerAddress,
-                                              State.DefaultServer);
+                        LookupServerName();
                     }
                     else
                     {

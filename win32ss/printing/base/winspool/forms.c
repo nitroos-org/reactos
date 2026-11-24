@@ -228,6 +228,7 @@ BOOL WINAPI
 EnumFormsW(HANDLE hPrinter, DWORD Level, PBYTE pForm, DWORD cbBuf, PDWORD pcbNeeded, PDWORD pcReturned)
 {
     DWORD dwErrorCode;
+    WOW64_INFO Wow64;
     PSPOOLER_HANDLE pHandle = (PSPOOLER_HANDLE)hPrinter;
 
     TRACE("EnumFormsW(%p, %lu, %p, %lu, %p, %p)\n", hPrinter, Level, pForm, cbBuf, pcbNeeded, pcReturned);
@@ -246,24 +247,34 @@ EnumFormsW(HANDLE hPrinter, DWORD Level, PBYTE pForm, DWORD cbBuf, PDWORD pcbNee
         goto Cleanup;
     }
 
-    // Do the RPC call
-    RpcTryExcept
-    {
-        dwErrorCode = _RpcEnumForms(pHandle->hPrinter, Level, pForm, cbBuf, pcbNeeded, pcReturned);
-    }
-    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
-    {
-        dwErrorCode = RpcExceptionCode();
-        ERR("_RpcEnumForms failed with exception code %lu!\n", dwErrorCode);
-    }
-    RpcEndExcept;
+    Wow64InfoBegin(&Wow64, WOW64_KIND_FORM, Level, pForm, cbBuf);
 
-    if (dwErrorCode == ERROR_SUCCESS)
+    for (;;)
+    {
+        // Do the RPC call
+        RpcTryExcept
+        {
+            dwErrorCode = _RpcEnumForms(pHandle->hPrinter, Level, Wow64.pRpc, Wow64.cbRpc, pcbNeeded, pcReturned);
+        }
+        RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+        {
+            dwErrorCode = RpcExceptionCode();
+            ERR("_RpcEnumForms failed with exception code %lu!\n", dwErrorCode);
+        }
+        RpcEndExcept;
+
+        if (!Wow64InfoRetry(&Wow64, dwErrorCode, pcbNeeded))
+            break;
+    }
+
+    if (dwErrorCode == ERROR_SUCCESS && !Wow64.bWow64)
     {
         // Replace relative offset addresses in the output by absolute pointers.
         ASSERT(Level >= 1 && Level <= 2);
         MarshallUpStructuresArray(cbBuf, pForm, *pcReturned, pFormInfoMarshalling[Level]->pInfo, pFormInfoMarshalling[Level]->cbStructureSize, TRUE);
     }
+
+    dwErrorCode = Wow64InfoEnd(&Wow64, dwErrorCode, pcbNeeded, pcReturned);
 
 Cleanup:
     SetLastError(dwErrorCode);
@@ -330,6 +341,7 @@ BOOL WINAPI
 GetFormW(HANDLE hPrinter, PWSTR pFormName, DWORD Level, PBYTE pForm, DWORD cbBuf, PDWORD pcbNeeded)
 {
     DWORD dwErrorCode;
+    WOW64_INFO Wow64;
     PSPOOLER_HANDLE pHandle = (PSPOOLER_HANDLE)hPrinter;
 
     TRACE("GetFormW(%p, %S, %lu, %p, %lu, %p)\n", hPrinter, pFormName, Level, pForm, cbBuf, pcbNeeded);
@@ -352,24 +364,34 @@ GetFormW(HANDLE hPrinter, PWSTR pFormName, DWORD Level, PBYTE pForm, DWORD cbBuf
     if (cbBuf && pForm)
         ZeroMemory(pForm, cbBuf);
 
-    // Do the RPC call
-    RpcTryExcept
-    {
-        dwErrorCode = _RpcGetForm(pHandle->hPrinter, pFormName, Level, pForm, cbBuf, pcbNeeded);
-    }
-    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
-    {
-        dwErrorCode = RpcExceptionCode();
-        ERR("_RpcGetForm failed with exception code %lu!\n", dwErrorCode);
-    }
-    RpcEndExcept;
+    Wow64InfoBegin(&Wow64, WOW64_KIND_FORM, Level, pForm, cbBuf);
 
-    if (dwErrorCode == ERROR_SUCCESS)
+    for (;;)
+    {
+        // Do the RPC call
+        RpcTryExcept
+        {
+            dwErrorCode = _RpcGetForm(pHandle->hPrinter, pFormName, Level, Wow64.pRpc, Wow64.cbRpc, pcbNeeded);
+        }
+        RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+        {
+            dwErrorCode = RpcExceptionCode();
+            ERR("_RpcGetForm failed with exception code %lu!\n", dwErrorCode);
+        }
+        RpcEndExcept;
+
+        if (!Wow64InfoRetry(&Wow64, dwErrorCode, pcbNeeded))
+            break;
+    }
+
+    if (dwErrorCode == ERROR_SUCCESS && !Wow64.bWow64)
     {
         // Replace relative offset addresses in the output by absolute pointers.
         ASSERT(Level >= 1 && Level <= 2);
         MarshallUpStructure(cbBuf, pForm, pFormInfoMarshalling[Level]->pInfo, pFormInfoMarshalling[Level]->cbStructureSize, TRUE);
     }
+
+    dwErrorCode = Wow64InfoEnd(&Wow64, dwErrorCode, pcbNeeded, NULL);
 
 Cleanup:
     SetLastError(dwErrorCode);

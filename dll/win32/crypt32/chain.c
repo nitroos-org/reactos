@@ -29,6 +29,9 @@
 #include "wininet.h"
 #include "wine/debug.h"
 #include "crypt32_private.h"
+#include "inaddr.h"
+#include "in6addr.h"
+#include "ip2string.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(crypt);
 WINE_DECLARE_DEBUG_CHANNEL(chain);
@@ -1956,6 +1959,12 @@ static void CRYPT_CheckSimpleChain(CertificateChainEngine *engine,
              (void *)chain->rgpElement[i]->pCertContext, 0, NULL))
                 chain->rgpElement[i - 1]->TrustStatus.dwErrorStatus |=
                  CERT_TRUST_IS_NOT_SIGNATURE_VALID;
+            else
+                /* Windows marks the issuer that was found and whose
+                 * signature verified as the preferred one (measured:
+                 * every element of a chain but a leaf without issuer). */
+                chain->rgpElement[i - 1]->TrustStatus.dwInfoStatus |=
+                 CERT_TRUST_HAS_PREFERRED_ISSUER;
             /* Once a path length constraint has been violated, every remaining
              * CA cert's basic constraints is considered invalid.
              */
@@ -2011,6 +2020,12 @@ static void CRYPT_CheckSimpleChain(CertificateChainEngine *engine,
     {
         rootElement->TrustStatus.dwInfoStatus |= status;
         CRYPT_CheckRootCert(engine->hRoot, rootElement);
+        /* A self-signed element is its own issuer: preferred when its
+         * signature verified. */
+        if (!(rootElement->TrustStatus.dwErrorStatus &
+         CERT_TRUST_IS_NOT_SIGNATURE_VALID))
+            rootElement->TrustStatus.dwInfoStatus |=
+             CERT_TRUST_HAS_PREFERRED_ISSUER;
     }
     CRYPT_CombineTrustStatus(&chain->TrustStatus, &rootElement->TrustStatus);
 }
@@ -3320,12 +3335,44 @@ static BOOL WINAPI verify_basic_constraints_policy(LPCSTR szPolicyOID,
     return TRUE;
 }
 
+/* The server name as an IP address: IPv4 in the forms inet_addr accepts, IPv6 with or without the square brackets of a
+ * URL (the forms Windows accepts, measured with the SSL chain policy). Returns the number of bytes of the address
+ * (4 or 16), or 0 when the name is not an address. */
+static DWORD parse_server_ip_address(const WCHAR *server_name, BYTE *address)
+{
+    IN_ADDR v4;
+    IN6_ADDR v6;
+    const WCHAR *terminator;
+    WCHAR unbracketed[64];
+    size_t len = wcslen(server_name);
+
+    if (RtlIpv4StringToAddressW(server_name, FALSE, &terminator, &v4) == 0 && !*terminator)
+    {
+        memcpy(address, &v4, 4);
+        return 4;
+    }
+    if (len > 2 && server_name[0] == '[' && server_name[len - 1] == ']' && len - 2 < ARRAY_SIZE(unbracketed))
+    {
+        memcpy(unbracketed, server_name + 1, (len - 2) * sizeof(WCHAR));
+        unbracketed[len - 2] = 0;
+        server_name = unbracketed;
+    }
+    if (RtlIpv6StringToAddressW(server_name, &terminator, &v6) == 0 && !*terminator)
+    {
+        memcpy(address, &v6, 16);
+        return 16;
+    }
+    return 0;
+}
+
 static BOOL match_dns_to_subject_alt_name(const CERT_EXTENSION *ext,
  LPCWSTR server_name)
 {
     BOOL matches = FALSE;
     CERT_ALT_NAME_INFO *subjectName;
     DWORD size;
+    BYTE server_ip[16];
+    DWORD server_ip_len = parse_server_ip_address(server_name, server_ip);
 
     TRACE_(chain)("%s\n", debugstr_w(server_name));
     /* This could be spoofed by the embedded NULL vulnerability, since the
@@ -3380,6 +3427,18 @@ static BOOL match_dns_to_subject_alt_name(const CERT_EXTENSION *ext,
                 }
                 else if (!wcsicmp(server_name,
                  subjectName->rgAltEntry[i].pwszDNSName))
+                    matches = TRUE;
+            }
+            else if (subjectName->rgAltEntry[i].dwAltNameChoice ==
+             CERT_ALT_NAME_IP_ADDRESS)
+            {
+                /* An address in the name matches an iPAddress entry of the
+                 * same length with the same bytes. */
+                const CRYPT_DATA_BLOB *ip = &subjectName->rgAltEntry[i].IPAddress;
+
+                TRACE_(chain)("iPAddress: %ld bytes\n", ip->cbData);
+                if (server_ip_len && ip->cbData == server_ip_len &&
+                 !memcmp(ip->pbData, server_ip, server_ip_len))
                     matches = TRUE;
             }
         }

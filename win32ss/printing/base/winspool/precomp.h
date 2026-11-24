@@ -68,6 +68,37 @@ LONG WINAPI IntProtectHandle(HANDLE,BOOL);
 BOOL WINAPI IntUnprotectHandle(HANDLE);
 VOID UpdateTrayIcon(HANDLE hPrinter, DWORD JobId);
 
+// wow64.c
+// Structure families of the Get*/Enum*/AddJob buffers that a 32-bit process receives from a 64-bit spooler.
+#define WOW64_KIND_PRINTER   0
+#define WOW64_KIND_DRIVER    1
+#define WOW64_KIND_FORM      2
+#define WOW64_KIND_JOB       3
+#define WOW64_KIND_PORT      4
+#define WOW64_KIND_MONITOR   5
+#define WOW64_KIND_DATATYPE  6
+#define WOW64_KIND_PROCESSOR 7
+#define WOW64_KIND_ADDJOB    8
+
+typedef struct _WOW64_INFO
+{
+    BOOL bWow64;        // TRUE: pRpc is a temporary buffer for the 64-bit layout, converted into pUser by Wow64InfoEnd
+    DWORD Kind;
+    DWORD Level;
+    PBYTE pUser;
+    DWORD cbUser;
+    PBYTE pRpc;         // buffer to hand to the RPC call
+    DWORD cbRpc;
+    PBYTE pAlloc;
+    DWORD cRetries;
+    BOOL bProbe;        // the caller gave a size but no buffer: ask the spooler with it first
+}
+WOW64_INFO, *PWOW64_INFO;
+
+BOOL Wow64InfoBegin(PWOW64_INFO pInfo, DWORD Kind, DWORD Level, PBYTE pUser, DWORD cbUser);
+BOOL Wow64InfoRetry(PWOW64_INFO pInfo, DWORD dwErrorCode, PDWORD pcbNeeded);
+DWORD Wow64InfoEnd(PWOW64_INFO pInfo, DWORD dwErrorCode, PDWORD pcbNeeded, PDWORD pcReturned);
+
 // devmode.c
 extern void RosConvertAnsiDevModeToUnicodeDevmode(PDEVMODEA pDevModeInput, PDEVMODEW *pDevModeOutput);
 

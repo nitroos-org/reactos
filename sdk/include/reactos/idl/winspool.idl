@@ -378,6 +378,11 @@ typedef struct _WINSPOOL_PRINTER_INFO_1
 }
 WINSPOOL_PRINTER_INFO_1;
 
+/*
+ * pDevMode and pSecurityDescriptor of PRINTER_INFO_2, 3, 8 and 9 are not data on the wire (the DEVMODE and the security
+ * descriptor travel in their own containers). They are ULONG, not ULONG_PTR, so that the wire format is the same for a 32-bit
+ * client and a 64-bit spooler; the client builds these structures from the PRINTER_INFO_n of its caller.
+ */
 typedef struct _WINSPOOL_PRINTER_INFO_2
 {
     [string] WCHAR* pServerName;
@@ -387,12 +392,12 @@ typedef struct _WINSPOOL_PRINTER_INFO_2
     [string] WCHAR* pDriverName;
     [string] WCHAR* pComment;
     [string] WCHAR* pLocation;
-    ULONG_PTR pDevMode;
+    ULONG pDevMode;
     [string] WCHAR* pSepFile;
     [string] WCHAR* pPrintProcessor;
     [string] WCHAR* pDatatype;
     [string] WCHAR* pParameters;
-    ULONG_PTR pSecurityDescriptor;
+    ULONG pSecurityDescriptor;
     DWORD Attributes;
     DWORD Priority;
     DWORD DefaultPriority;
@@ -406,7 +411,7 @@ WINSPOOL_PRINTER_INFO_2;
 
 typedef struct _WINSPOOL_PRINTER_INFO_3
 {
-    ULONG_PTR pSecurityDescriptor;
+    ULONG pSecurityDescriptor;
 }
 WINSPOOL_PRINTER_INFO_3;
 
@@ -443,13 +448,13 @@ WINSPOOL_PRINTER_INFO_7;
 
 typedef struct _WINSPOOL_PRINTER_INFO_8
 {
-    ULONG_PTR pDevMode;
+    ULONG pDevMode;
 }
 WINSPOOL_PRINTER_INFO_8;
 
 typedef struct _WINSPOOL_PRINTER_INFO_9
 {
-    ULONG_PTR pDevMode;
+    ULONG pDevMode;
 }
 WINSPOOL_PRINTER_INFO_9;
 

@@ -310,6 +310,7 @@ BOOL WINAPI
 EnumMonitorsW(PWSTR pName, DWORD Level, PBYTE pMonitors, DWORD cbBuf, PDWORD pcbNeeded, PDWORD pcReturned)
 {
     DWORD dwErrorCode;
+    WOW64_INFO Wow64;
 
     FIXME("EnumMonitorsW(%S, %lu, %p, %lu, %p, %p)\n", pName, Level, pMonitors, cbBuf, pcbNeeded, pcReturned);
 
@@ -320,24 +321,34 @@ EnumMonitorsW(PWSTR pName, DWORD Level, PBYTE pMonitors, DWORD cbBuf, PDWORD pcb
         return FALSE;
     }
 
-    // Do the RPC call
-    RpcTryExcept
-    {
-        dwErrorCode = _RpcEnumMonitors(pName, Level, pMonitors, cbBuf, pcbNeeded, pcReturned);
-    }
-    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
-    {
-        dwErrorCode = RpcExceptionCode();
-        ERR("_RpcEnumMonitors failed with exception code %lu!\n", dwErrorCode);
-    }
-    RpcEndExcept;
+    Wow64InfoBegin(&Wow64, WOW64_KIND_MONITOR, Level, pMonitors, cbBuf);
 
-    if (dwErrorCode == ERROR_SUCCESS)
+    for (;;)
+    {
+        // Do the RPC call
+        RpcTryExcept
+        {
+            dwErrorCode = _RpcEnumMonitors(pName, Level, Wow64.pRpc, Wow64.cbRpc, pcbNeeded, pcReturned);
+        }
+        RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+        {
+            dwErrorCode = RpcExceptionCode();
+            ERR("_RpcEnumMonitors failed with exception code %lu!\n", dwErrorCode);
+        }
+        RpcEndExcept;
+
+        if (!Wow64InfoRetry(&Wow64, dwErrorCode, pcbNeeded))
+            break;
+    }
+
+    if (dwErrorCode == ERROR_SUCCESS && !Wow64.bWow64)
     {
         // Replace relative offset addresses in the output by absolute pointers.
         ASSERT(Level >= 1 && Level <= 2);
         MarshallUpStructuresArray(cbBuf, pMonitors, *pcReturned, pMonitorInfoMarshalling[Level]->pInfo, pMonitorInfoMarshalling[Level]->cbStructureSize, TRUE);
     }
+
+    dwErrorCode = Wow64InfoEnd(&Wow64, dwErrorCode, pcbNeeded, pcReturned);
 
     SetLastError(dwErrorCode);
     return (dwErrorCode == ERROR_SUCCESS);

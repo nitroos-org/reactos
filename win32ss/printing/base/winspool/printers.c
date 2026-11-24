@@ -324,11 +324,80 @@ Cleanup:
     return ret;
 }
 
+/*
+ * The structures of the RPC interface for the levels with pDevMode and pSecurityDescriptor do not have the layout of the
+ * PRINTER_INFO_n of the caller (these members are 32 bits on the wire so that a 32-bit client and a 64-bit spooler agree);
+ * the DEVMODE and the security descriptor travel in their own containers. Build the RPC structure from the caller's.
+ */
+typedef union _RPC_PRINTER_INFO_COPY
+{
+    WINSPOOL_PRINTER_INFO_2 Info2;
+    WINSPOOL_PRINTER_INFO_3 Info3;
+    WINSPOOL_PRINTER_INFO_8 Info8;
+    WINSPOOL_PRINTER_INFO_9 Info9;
+}
+RPC_PRINTER_INFO_COPY;
+
+static void
+BuildRpcPrinterContainer(WINSPOOL_PRINTER_CONTAINER* pContainer, RPC_PRINTER_INFO_COPY* pCopy, DWORD Level, PBYTE pPrinter)
+{
+    pContainer->Level = Level;
+    pContainer->PrinterInfo.pPrinterInfo1 = (WINSPOOL_PRINTER_INFO_1*)pPrinter;
+
+    if (!pPrinter)
+        return;
+
+    ZeroMemory(pCopy, sizeof(*pCopy));
+
+    switch (Level)
+    {
+        case 2:
+        {
+            PPRINTER_INFO_2W pi2w = (PPRINTER_INFO_2W)pPrinter;
+
+            pCopy->Info2.pServerName = pi2w->pServerName;
+            pCopy->Info2.pPrinterName = pi2w->pPrinterName;
+            pCopy->Info2.pShareName = pi2w->pShareName;
+            pCopy->Info2.pPortName = pi2w->pPortName;
+            pCopy->Info2.pDriverName = pi2w->pDriverName;
+            pCopy->Info2.pComment = pi2w->pComment;
+            pCopy->Info2.pLocation = pi2w->pLocation;
+            pCopy->Info2.pSepFile = pi2w->pSepFile;
+            pCopy->Info2.pPrintProcessor = pi2w->pPrintProcessor;
+            pCopy->Info2.pDatatype = pi2w->pDatatype;
+            pCopy->Info2.pParameters = pi2w->pParameters;
+            pCopy->Info2.Attributes = pi2w->Attributes;
+            pCopy->Info2.Priority = pi2w->Priority;
+            pCopy->Info2.DefaultPriority = pi2w->DefaultPriority;
+            pCopy->Info2.StartTime = pi2w->StartTime;
+            pCopy->Info2.UntilTime = pi2w->UntilTime;
+            pCopy->Info2.Status = pi2w->Status;
+            pCopy->Info2.cJobs = pi2w->cJobs;
+            pCopy->Info2.AveragePPM = pi2w->AveragePPM;
+            pContainer->PrinterInfo.pPrinterInfo2 = &pCopy->Info2;
+            break;
+        }
+
+        case 3:
+            pContainer->PrinterInfo.pPrinterInfo3 = &pCopy->Info3;
+            break;
+
+        case 8:
+            pContainer->PrinterInfo.pPrinterInfo8 = &pCopy->Info8;
+            break;
+
+        case 9:
+            pContainer->PrinterInfo.pPrinterInfo9 = &pCopy->Info9;
+            break;
+    }
+}
+
 HANDLE WINAPI
 AddPrinterW(PWSTR pName, DWORD Level, PBYTE pPrinter)
 {
     DWORD dwErrorCode;
     WINSPOOL_PRINTER_CONTAINER PrinterContainer;
+    RPC_PRINTER_INFO_COPY InfoCopy;
     WINSPOOL_DEVMODE_CONTAINER DevModeContainer;
     WINSPOOL_SECURITY_CONTAINER SecurityContainer;
     SECURITY_DESCRIPTOR *sd = NULL;
@@ -381,8 +450,7 @@ AddPrinterW(PWSTR pName, DWORD Level, PBYTE pPrinter)
         }
     }
 
-    PrinterContainer.PrinterInfo.pPrinterInfo1 = (WINSPOOL_PRINTER_INFO_1*)pPrinter;
-    PrinterContainer.Level = Level;
+    BuildRpcPrinterContainer(&PrinterContainer, &InfoCopy, Level, pPrinter);
 
     // Do the RPC call
     RpcTryExcept
@@ -1312,6 +1380,14 @@ DocumentPropertiesW(HWND hWnd, HANDLE hPrinter, LPWSTR pDeviceName, PDEVMODEW pD
     {
         FIXME("DPW : CallDocumentPropertySheets\n");
         Result = DocumentPropertySheets( NULL, (LPARAM)&docprophdr );
+
+        /*
+         * With an output buffer the result is IDOK (measured on Windows Server 2022, 64- and 32-bit client: the call
+         * without a buffer returns the size, the call with DM_OUT_BUFFER returns 1); DocumentPropertySheets gives
+         * the size back in both cases.
+         */
+        if ( pDevModeOutput && Result > 0 )
+            Result = IDOK;
     }
 
     if ( Result != ERR_CPSUI_GETLASTERROR || Result != ERR_CPSUI_ALLOCMEM_FAILED )
@@ -1955,6 +2031,7 @@ BOOL WINAPI
 EnumPrintersW(DWORD Flags, PWSTR Name, DWORD Level, PBYTE pPrinterEnum, DWORD cbBuf, PDWORD pcbNeeded, PDWORD pcReturned)
 {
     DWORD dwErrorCode;
+    WOW64_INFO Wow64;
 
     TRACE("EnumPrintersW(%lu, %S, %lu, %p, %lu, %p, %p)\n", Flags, Name, Level, pPrinterEnum, cbBuf, pcbNeeded, pcReturned);
 
@@ -1968,24 +2045,34 @@ EnumPrintersW(DWORD Flags, PWSTR Name, DWORD Level, PBYTE pPrinterEnum, DWORD cb
     if (cbBuf && pPrinterEnum)
         ZeroMemory(pPrinterEnum, cbBuf);
 
-    // Do the RPC call
-    RpcTryExcept
-    {
-        dwErrorCode = _RpcEnumPrinters(Flags, Name, Level, pPrinterEnum, cbBuf, pcbNeeded, pcReturned);
-    }
-    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
-    {
-        dwErrorCode = RpcExceptionCode();
-        ERR("_RpcEnumPrinters failed with exception code %lu!\n", dwErrorCode);
-    }
-    RpcEndExcept;
+    Wow64InfoBegin(&Wow64, WOW64_KIND_PRINTER, Level, pPrinterEnum, cbBuf);
 
-    if (dwErrorCode == ERROR_SUCCESS)
+    for (;;)
+    {
+        // Do the RPC call
+        RpcTryExcept
+        {
+            dwErrorCode = _RpcEnumPrinters(Flags, Name, Level, Wow64.pRpc, Wow64.cbRpc, pcbNeeded, pcReturned);
+        }
+        RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+        {
+            dwErrorCode = RpcExceptionCode();
+            ERR("_RpcEnumPrinters failed with exception code %lu!\n", dwErrorCode);
+        }
+        RpcEndExcept;
+
+        if (!Wow64InfoRetry(&Wow64, dwErrorCode, pcbNeeded))
+            break;
+    }
+
+    if (dwErrorCode == ERROR_SUCCESS && !Wow64.bWow64)
     {
         // Replace relative offset addresses in the output by absolute pointers.
         ASSERT(Level <= 9);
         MarshallUpStructuresArray(cbBuf, pPrinterEnum, *pcReturned, pPrinterInfoMarshalling[Level]->pInfo, pPrinterInfoMarshalling[Level]->cbStructureSize, TRUE);
     }
+
+    dwErrorCode = Wow64InfoEnd(&Wow64, dwErrorCode, pcbNeeded, pcReturned);
 
 Cleanup:
     SetLastError(dwErrorCode);
@@ -2612,6 +2699,7 @@ BOOL WINAPI
 GetPrinterW(HANDLE hPrinter, DWORD Level, LPBYTE pPrinter, DWORD cbBuf, LPDWORD pcbNeeded)
 {
     DWORD dwErrorCode;
+    WOW64_INFO Wow64;
     PSPOOLER_HANDLE pHandle = (PSPOOLER_HANDLE)hPrinter;
 
     TRACE("GetPrinterW(%p, %lu, %p, %lu, %p)\n", hPrinter, Level, pPrinter, cbBuf, pcbNeeded);
@@ -2633,24 +2721,34 @@ GetPrinterW(HANDLE hPrinter, DWORD Level, LPBYTE pPrinter, DWORD cbBuf, LPDWORD 
     if (cbBuf && pPrinter)
         ZeroMemory(pPrinter, cbBuf);
 
-    // Do the RPC call
-    RpcTryExcept
-    {
-        dwErrorCode = _RpcGetPrinter(pHandle->hPrinter, Level, pPrinter, cbBuf, pcbNeeded);
-    }
-    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
-    {
-        dwErrorCode = RpcExceptionCode();
-        ERR("_RpcGetPrinter failed with exception code %lu!\n", dwErrorCode);
-    }
-    RpcEndExcept;
+    Wow64InfoBegin(&Wow64, WOW64_KIND_PRINTER, Level, pPrinter, cbBuf);
 
-    if (dwErrorCode == ERROR_SUCCESS)
+    for (;;)
+    {
+        // Do the RPC call
+        RpcTryExcept
+        {
+            dwErrorCode = _RpcGetPrinter(pHandle->hPrinter, Level, Wow64.pRpc, Wow64.cbRpc, pcbNeeded);
+        }
+        RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+        {
+            dwErrorCode = RpcExceptionCode();
+            ERR("_RpcGetPrinter failed with exception code %lu!\n", dwErrorCode);
+        }
+        RpcEndExcept;
+
+        if (!Wow64InfoRetry(&Wow64, dwErrorCode, pcbNeeded))
+            break;
+    }
+
+    if (dwErrorCode == ERROR_SUCCESS && !Wow64.bWow64)
     {
         // Replace relative offset addresses in the output by absolute pointers.
         ASSERT(Level <= 9);
         MarshallUpStructure(cbBuf, pPrinter, pPrinterInfoMarshalling[Level]->pInfo, pPrinterInfoMarshalling[Level]->cbStructureSize, TRUE);
     }
+
+    dwErrorCode = Wow64InfoEnd(&Wow64, dwErrorCode, pcbNeeded, NULL);
 
 Cleanup:
     SetLastError(dwErrorCode);
@@ -3405,6 +3503,7 @@ SetPrinterW(HANDLE hPrinter, DWORD Level, PBYTE pPrinter, DWORD Command)
 {
     DWORD dwErrorCode;
     WINSPOOL_PRINTER_CONTAINER PrinterContainer;
+    RPC_PRINTER_INFO_COPY InfoCopy;
     WINSPOOL_DEVMODE_CONTAINER DevModeContainer;
     WINSPOOL_SECURITY_CONTAINER SecurityContainer;
     SECURITY_DESCRIPTOR *sd = NULL;
@@ -3528,8 +3627,7 @@ SetPrinterW(HANDLE hPrinter, DWORD Level, PBYTE pPrinter, DWORD Command)
             return FALSE;
     }
 
-    PrinterContainer.PrinterInfo.pPrinterInfo1 = (WINSPOOL_PRINTER_INFO_1*)pPrinter;
-    PrinterContainer.Level = Level;
+    BuildRpcPrinterContainer(&PrinterContainer, &InfoCopy, Level, pPrinter);
 
     // Do the RPC call
     RpcTryExcept

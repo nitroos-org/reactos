@@ -3399,6 +3399,21 @@ static PCCERT_CHAIN_CONTEXT getChain(HCERTCHAINENGINE engine,
     return chain;
 }
 
+#ifdef __REACTOS__
+/* Windows 10 and Windows Server 2022 set CERT_TRUST_HAS_PREFERRED_ISSUER in the information status of every element
+ * whose issuer was found and verified, and so in that of the chain (measured with a chain of a throw-away root and
+ * leaf and with chains of the system stores); the expected values below come from older Windows versions that did
+ * not, and the checks treat the bit as one that may be there (the "ignore" status), which the broken() clause only
+ * does on Windows. ReactOS sets it as the current Windows does. */
+#define INFO_STATUS_EQ(got, expected) \
+    (((got) & ~CERT_TRUST_HAS_PREFERRED_ISSUER) == ((expected) & ~CERT_TRUST_HAS_PREFERRED_ISSUER))
+/* the checks of the information status of a whole chain that Wine marks as todo because it does not set the bit */
+#define todo_preferred_issuer
+#else
+#define INFO_STATUS_EQ(got, expected) ((got) == (expected))
+#define todo_preferred_issuer todo_wine
+#endif
+
 typedef struct _SimpleChainStatusCheck
 {
     DWORD                    cElement;
@@ -3423,13 +3438,13 @@ static void checkElementStatus(const CERT_TRUST_STATUS *expected,
          "expected if no valid root certificate is available.\n",
          testName, testIndex, chainIndex, elementIndex, expected->dwErrorStatus,
          got->dwErrorStatus, CERT_TRUST_IS_UNTRUSTED_ROOT);
-    if (got->dwInfoStatus == expected->dwInfoStatus)
-        ok(got->dwInfoStatus == expected->dwInfoStatus,
+    if (INFO_STATUS_EQ(got->dwInfoStatus, expected->dwInfoStatus))
+        ok(INFO_STATUS_EQ(got->dwInfoStatus, expected->dwInfoStatus),
          "%s[%ld], element [%ld,%ld]: expected info %08lx, got %08lx\n",
          testName, testIndex, chainIndex, elementIndex, expected->dwInfoStatus,
          got->dwInfoStatus);
     else todo_wine_if (todo & TODO_INFO)
-        ok(got->dwInfoStatus == expected->dwInfoStatus ||
+        ok(INFO_STATUS_EQ(got->dwInfoStatus, expected->dwInfoStatus) ||
          broken((got->dwInfoStatus & ~ignore->dwInfoStatus) ==
          (expected->dwInfoStatus & ~ignore->dwInfoStatus)),
          "%s[%ld], element [%ld,%ld]: expected info %08lx, got %08lx\n",
@@ -3485,9 +3500,9 @@ static void checkChainStatus(PCCERT_CHAIN_CONTEXT chain,
          testName, testIndex, chainStatus->status.dwErrorStatus,
          chain->TrustStatus.dwErrorStatus, CERT_TRUST_IS_UNTRUSTED_ROOT);
     todo_wine_if (todo & TODO_INFO &&
-     chain->TrustStatus.dwInfoStatus != chainStatus->status.dwInfoStatus)
-        ok(chain->TrustStatus.dwInfoStatus ==
-         chainStatus->status.dwInfoStatus ||
+     !INFO_STATUS_EQ(chain->TrustStatus.dwInfoStatus, chainStatus->status.dwInfoStatus))
+        ok(INFO_STATUS_EQ(chain->TrustStatus.dwInfoStatus,
+         chainStatus->status.dwInfoStatus) ||
          broken((chain->TrustStatus.dwInfoStatus &
          ~chainStatus->statusToIgnore.dwInfoStatus) ==
          (chainStatus->status.dwInfoStatus &
@@ -4560,7 +4575,7 @@ static void testGetCertChain(void)
 
     ok(chain->TrustStatus.dwErrorStatus == CERT_TRUST_HAS_EXACT_MATCH_ISSUER, "chain->TrustStatus.dwErrorStatus = %lx\n",
        chain->TrustStatus.dwErrorStatus);
-    todo_wine
+    todo_preferred_issuer
     ok(chain->TrustStatus.dwInfoStatus == CERT_TRUST_HAS_PREFERRED_ISSUER, "chain->TrustStatus.dwInfoStatus = %lx\n",
        chain->TrustStatus.dwInfoStatus);
 
@@ -4572,7 +4587,7 @@ static void testGetCertChain(void)
     ok(simple_chain->cbSize == sizeof(*simple_chain), "simple_chain->cbSize = %lu\n", simple_chain->cbSize);
     ok(simple_chain->TrustStatus.dwErrorStatus == CERT_TRUST_HAS_EXACT_MATCH_ISSUER, "simple_chain->TrustStatus.dwErrorStatus = %lx\n",
        simple_chain->TrustStatus.dwErrorStatus);
-    todo_wine
+    todo_preferred_issuer
     ok(simple_chain->TrustStatus.dwInfoStatus == CERT_TRUST_HAS_PREFERRED_ISSUER,
        "simple_chain->TrustStatus.dwInfoStatus = %lx\n", simple_chain->TrustStatus.dwInfoStatus);
     ok(simple_chain->cElement == 3, "simple_chain->cElement = %lu\n", simple_chain->cElement);
