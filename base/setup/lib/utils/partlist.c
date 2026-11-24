@@ -4493,6 +4493,69 @@ SetActivePartition(
 }
 
 /*
+ * The layout that comes back from the PARTMGR numbers the partitions in table order. A new partition that takes a
+ * free slot of the entry array before the partitions of another system (a table such as 1, 14, 15, 16) moves their
+ * numbers up in that layout, but the PARTMGR keeps the device of a partition that was there until the next start
+ * (\Device\Harddisk0\Partition2 still is the BIOS boot partition) and gives a new partition the first device
+ * number that none has. The volume looked up for the new partition through the number of the table was the one of
+ * the 4 MiB boot partition of the other system, and the format of the new partition was started on it (it failed
+ * only because that volume is too small).
+ * The partitions that were there therefore keep their device numbers, and the new ones take the first free numbers.
+ * (The number of the table stays in OnDiskPartitionNumber: the boot entries name the partition by it.)
+ */
+static
+VOID
+AssignPartitionDeviceNumbers(
+    _In_ PPARTENTRY* Parts,
+    _In_ ULONG Count,
+    _In_ const ULONG* OldNumbers)
+{
+    ULONG i, k, Number;
+    BOOLEAN Used;
+
+    /* A partition that was there keeps its device */
+    for (i = 0; i < Count; i++)
+    {
+        if (OldNumbers[i])
+        {
+            if (Parts[i]->PartitionNumber != OldNumbers[i])
+            {
+                DPRINT1("The device of the partition at %I64u stays Partition%lu (the table says %lu)\n",
+                        (ULONGLONG)GetPartEntryOffsetInBytes(Parts[i]), OldNumbers[i], Parts[i]->PartitionNumber);
+            }
+            Parts[i]->PartitionNumber = OldNumbers[i];
+            InitPartitionDeviceName(Parts[i]);
+        }
+    }
+
+    /* A new one gets the first number no device of the disk has */
+    for (i = 0; i < Count; i++)
+    {
+        if (OldNumbers[i])
+            continue;
+
+        for (Number = 1; ; Number++)
+        {
+            Used = FALSE;
+            for (k = 0; k < Count && !Used; k++)
+            {
+                if (k != i && (OldNumbers[k] || k < i) && Parts[k]->PartitionNumber == Number)
+                    Used = TRUE;
+            }
+            if (!Used)
+                break;
+        }
+        if (Parts[i]->PartitionNumber != Number)
+        {
+            DPRINT1("The device of the new partition at %I64u is Partition%lu (the table says %lu)\n",
+                    (ULONGLONG)GetPartEntryOffsetInBytes(Parts[i]), Number, Parts[i]->PartitionNumber);
+        }
+        Parts[i]->PartitionNumber = Number;
+        InitPartitionDeviceName(Parts[i]);
+    }
+}
+
+/*
  * Writes the partition table of a GPT disk: the GPT is created first if the
  * disk had none, then the whole drive layout is set. The partition entries
  * are written in the order the PARTMGR numbers them: the partitions that are
@@ -4561,7 +4624,8 @@ WriteGptPartitions(
         if (CONTAINING_RECORD(ListEntry, PARTENTRY, ListEntry)->IsPartitioned)
             ++Count;
     }
-    Parts = RtlAllocateHeap(ProcessHeap, HEAP_ZERO_MEMORY, (Count + 1) * sizeof(*Parts));
+    /* One block: the partitions, then the device numbers they had (0: a new partition) */
+    Parts = RtlAllocateHeap(ProcessHeap, HEAP_ZERO_MEMORY, (Count + 1) * (sizeof(*Parts) + sizeof(ULONG)));
     LayoutSize = sizeof(DRIVE_LAYOUT_INFORMATION_EX) + Count * sizeof(PARTITION_INFORMATION_EX);
     LayoutEx = RtlAllocateHeap(ProcessHeap, HEAP_ZERO_MEMORY, LayoutSize);
     if (!Parts || !LayoutEx)
@@ -4611,6 +4675,7 @@ WriteGptPartitions(
         Info->StartingOffset.QuadPart = GetPartEntryOffsetInBytes(PartEntry);
         Info->PartitionLength.QuadPart = GetPartEntrySizeInBytes(PartEntry);
         Info->PartitionNumber = (PartEntry->New ? 0 : PartEntry->PartitionNumber);
+        ((PULONG)(Parts + Count + 1))[i] = Info->PartitionNumber;
         Info->RewritePartition = TRUE;
         Info->Gpt.PartitionType = PartEntry->GptType;
         Info->Gpt.PartitionId = PartEntry->GptId;
@@ -4652,6 +4717,9 @@ WriteGptPartitions(
         PartEntry->New = FALSE;
         InitPartitionDeviceName(PartEntry);
     }
+
+    /* The numbers of the layout are those of the table; the devices keep the ones they had */
+    AssignPartitionDeviceNumbers(Parts, Count, (PULONG)(Parts + Count + 1));
 
     DiskEntry->NewDisk = FALSE;
     DiskEntry->Dirty = FALSE;
