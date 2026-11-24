@@ -2657,7 +2657,7 @@ MountMgrVolumeMountPointDeleted(IN PDEVICE_EXTENSION DeviceExtension,
 
     /* Dereference ourselves */
     DatabaseEntry->EntryReferences--;
-    if (DatabaseEntry->EntryReferences == 0)
+    if (DatabaseEntry->EntryReferences != 0)
     {
         /* If we're still referenced, just update the entry */
         Status = WriteRemoteDatabaseEntry(RemoteDatabase, Offset, DatabaseEntry);
@@ -2690,19 +2690,14 @@ MountMgrVolumeMountPointDeleted(IN PDEVICE_EXTENSION DeviceExtension,
             }
         }
 
-        /* It has to exist! */
-        if (Entry == &DeviceInformation->ReplicatedUniqueIdsListHead)
+        /* It exists when this boot recorded the mount point; one that was recorded by an earlier boot has none */
+        if (Entry != &DeviceInformation->ReplicatedUniqueIdsListHead)
         {
-            FreePool(DatabaseEntry);
-            FreePool(SourceSymbolicName.Buffer);
-            CloseRemoteDatabase(RemoteDatabase);
-            return STATUS_UNSUCCESSFUL;
+            /* Remove it and free it */
+            RemoveEntryList(&UniqueIdReplicate->ReplicatedUniqueIdsListEntry);
+            FreePool(UniqueIdReplicate->UniqueId);
+            FreePool(UniqueIdReplicate);
         }
-
-        /* Remove it and free it */
-        RemoveEntryList(&UniqueIdReplicate->ReplicatedUniqueIdsListEntry);
-        FreePool(UniqueIdReplicate->UniqueId);
-        FreePool(UniqueIdReplicate);
     }
 
     /* We're done with the remote database */
