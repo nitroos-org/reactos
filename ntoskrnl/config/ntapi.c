@@ -339,6 +339,9 @@ NtCreateKey(OUT PHANDLE KeyHandle,
                          sizeof(OBJECT_ATTRIBUTES),
                          sizeof(ULONG));
 
+            /* The probe does not touch the memory: a NULL pointer must fault (STATUS_ACCESS_VIOLATION on Windows) */
+            (VOID)*(volatile ULONG *)ObjectAttributes;
+
             if (Disposition)
                 ProbeForWriteUlong(Disposition);
         }
@@ -468,6 +471,9 @@ CmpOpenKeyInternal(OUT PHANDLE KeyHandle,
             ProbeForRead(ObjectAttributes,
                          sizeof(OBJECT_ATTRIBUTES),
                          sizeof(ULONG));
+
+            /* The probe does not touch the memory: a NULL pointer must fault (STATUS_ACCESS_VIOLATION on Windows) */
+            (VOID)*(volatile ULONG *)ObjectAttributes;
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
