@@ -5,3 +5,6 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Disk","Group",0x00000000,"SCSI Class"
 HKLM,"SYSTEM\CurrentControlSet\Services\Disk","ImagePath",0x00020000,"system32\drivers\disk.sys"
 HKLM,"SYSTEM\CurrentControlSet\Services\Disk","Start",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\Disk","Type",0x00010001,0x00000001
+; seconds a request to a disk may take before the port driver gives up on it and resets (the value Windows
+; Server 2022 has: 60; the class driver's built-in default is 10)
+HKLM,"SYSTEM\CurrentControlSet\Services\Disk","TimeOutValue",0x00010001,0x0000003C
