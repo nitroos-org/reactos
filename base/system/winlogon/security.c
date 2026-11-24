@@ -35,9 +35,86 @@
 #define GENERIC_ACCESS (GENERIC_READ | GENERIC_WRITE | \
     GENERIC_EXECUTE | GENERIC_ALL)
 
+/*
+ * What Windows Server 2022 grants ALL APPLICATION PACKAGES (S-1-15-2-1) and ALL RESTRICTED APPLICATION PACKAGES
+ * (S-1-15-2-2) on the interactive window station and on its Default desktop (both entries are the same for both SIDs):
+ * the window station gets the generic read and execute rights on what is created in it (inheritable) and
+ * READ_CONTROL | ENUMDESKTOPS | READATTRIBUTES | ACCESSCLIPBOARD | ACCESSGLOBALATOMS | ENUMERATE | READSCREEN (0x20327)
+ * on itself (not propagated); the desktop gets DELETE | READ_CONTROL | WRITE_DAC | WRITE_OWNER and every desktop right
+ * but SWITCHDESKTOP (0xf00ff). A process in an AppContainer is granted only what such an entry grants it, and connects
+ * to the interactive window station and the Default desktop when it starts.
+ */
+#define PACKAGE_WINSTA_ACCESS (STANDARD_RIGHTS_READ | WINSTA_ENUMDESKTOPS | WINSTA_READATTRIBUTES | \
+    WINSTA_ACCESSCLIPBOARD | WINSTA_ACCESSGLOBALATOMS | WINSTA_ENUMERATE | WINSTA_READSCREEN)
+
+#define PACKAGE_DESKTOP_ACCESS (DELETE | READ_CONTROL | WRITE_DAC | WRITE_OWNER | DESKTOP_READOBJECTS | \
+    DESKTOP_CREATEWINDOW | DESKTOP_CREATEMENU | DESKTOP_HOOKCONTROL | DESKTOP_JOURNALRECORD | \
+    DESKTOP_JOURNALPLAYBACK | DESKTOP_ENUMERATE | DESKTOP_WRITEOBJECTS)
+
+/* S-1-15-2-2: the last RID of ALL RESTRICTED APPLICATION PACKAGES */
+#define PACKAGE_ANY_RESTRICTED_PACKAGE_RID 0x2
+
+/* The room the entries of both SIDs take in a DACL: four for a window station, two for a desktop */
+#define PACKAGE_ACES_SIZE(Count) \
+    ((Count) * (sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + 16 /* a SID of two subauthorities */))
+
 /* GLOBALS ******************************************************************/
 
 static SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+static SID_IDENTIFIER_AUTHORITY PackageAuthority = {SECURITY_APP_PACKAGE_AUTHORITY};
+
+/* PRIVATE FUNCTIONS ********************************************************/
+
+/**
+ * @brief
+ * Adds the entries of ALL APPLICATION PACKAGES and ALL RESTRICTED APPLICATION
+ * PACKAGES to the DACL of the interactive window station or of its application desktop.
+ * The room for them is PACKAGE_ACES_SIZE(4) for a window station and PACKAGE_ACES_SIZE(2)
+ * for a desktop.
+ */
+static
+BOOL
+AddPackageAces(
+    _Inout_ PACL Dacl,
+    _In_ BOOL ForWindowStation)
+{
+    static const ULONG Rids[2] = { SECURITY_BUILTIN_PACKAGE_ANY_PACKAGE, PACKAGE_ANY_RESTRICTED_PACKAGE_RID };
+    ULONG i;
+    BOOL Success;
+
+    for (i = 0; i < ARRAYSIZE(Rids); i++)
+    {
+        PSID Sid = NULL;
+
+        if (!AllocateAndInitializeSid(&PackageAuthority, 2, SECURITY_APP_PACKAGE_BASE_RID, Rids[i],
+                                      0, 0, 0, 0, 0, 0, &Sid))
+        {
+            ERR("AddPackageAces(): Failed to create the package SID (error code %lu)\n", GetLastError());
+            return FALSE;
+        }
+
+        if (ForWindowStation)
+        {
+            Success = AddAccessAllowedAceEx(Dacl, ACL_REVISION,
+                                            INHERIT_ONLY_ACE | OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                                            GENERIC_READ | GENERIC_EXECUTE, Sid) &&
+                      AddAccessAllowedAceEx(Dacl, ACL_REVISION, NO_PROPAGATE_INHERIT_ACE,
+                                            PACKAGE_WINSTA_ACCESS, Sid);
+        }
+        else
+        {
+            Success = AddAccessAllowedAceEx(Dacl, ACL_REVISION, 0, PACKAGE_DESKTOP_ACCESS, Sid);
+        }
+        FreeSid(Sid);
+        if (!Success)
+        {
+            ERR("AddPackageAces(): Failed to add the package entries (error code %lu)\n", GetLastError());
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
 
 /* FUNCTIONS ****************************************************************/
 
@@ -240,6 +317,9 @@ CreateWinstaSecurity(
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(NetworkServiceSid) +
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(NetworkServiceSid);
 
+    /* The entries of the application packages */
+    DaclSize += PACKAGE_ACES_SIZE(4);
+
     /* Allocate the DACL now */
     Dacl = RtlAllocateHeap(RtlGetProcessHeap(),
                            HEAP_ZERO_MEMORY,
@@ -322,6 +402,10 @@ CreateWinstaSecurity(
         ERR("CreateWinstaSecurity(): Failed to set ACE for network service (error code %lu)\n", GetLastError());
         goto Quit;
     }
+
+    /* The entries of ALL APPLICATION PACKAGES and ALL RESTRICTED APPLICATION PACKAGES */
+    if (!AddPackageAces(Dacl, TRUE))
+        goto Quit;
 
     /* Initialize the security descriptor */
     if (!InitializeSecurityDescriptor(&AbsoluteSd, SECURITY_DESCRIPTOR_REVISION))
@@ -459,6 +543,9 @@ CreateApplicationDesktopSecurity(
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(AdminsSid) +
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(NetworkServiceSid); /* HACK */
 
+    /* The entries of the application packages */
+    DaclSize += PACKAGE_ACES_SIZE(2);
+
     /* Allocate the DACL now */
     Dacl = RtlAllocateHeap(RtlGetProcessHeap(),
                            HEAP_ZERO_MEMORY,
@@ -508,6 +595,10 @@ CreateApplicationDesktopSecurity(
         ERR("CreateApplicationDesktopSecurity(): Failed to set ACE for network services (error code %lu)\n", GetLastError());
         goto Quit;
     }
+
+    /* The entries of ALL APPLICATION PACKAGES and ALL RESTRICTED APPLICATION PACKAGES */
+    if (!AddPackageAces(Dacl, FALSE))
+        goto Quit;
 
     /* Initialize the security descriptor */
     if (!InitializeSecurityDescriptor(&AbsoluteSd, SECURITY_DESCRIPTOR_REVISION))
@@ -1003,6 +1094,9 @@ AllowWinstaAccessToUser(
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(NetworkServiceSid) + /* HACK */
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(NetworkServiceSid);
 
+    /* The entries of the application packages */
+    DaclSize += PACKAGE_ACES_SIZE(4);
+
     /* Allocate the DACL now */
     Dacl = RtlAllocateHeap(RtlGetProcessHeap(),
                            HEAP_ZERO_MEMORY,
@@ -1129,6 +1223,10 @@ AllowWinstaAccessToUser(
         ERR("AllowWinstaAccessToUser(): Failed to set ACE for network service SID (error code %lu)\n", GetLastError());
         goto Quit;
     }
+
+    /* The entries of ALL APPLICATION PACKAGES and ALL RESTRICTED APPLICATION PACKAGES */
+    if (!AddPackageAces(Dacl, TRUE))
+        goto Quit;
 
     /* Initialize the security descriptor */
     if (!InitializeSecurityDescriptor(&AbsoluteSd, SECURITY_DESCRIPTOR_REVISION))
@@ -1289,6 +1387,9 @@ AllowDesktopAccessToUser(
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(LogonSid) +
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(NetworkServiceSid); /* HACK */
 
+    /* The entries of the application packages */
+    DaclSize += PACKAGE_ACES_SIZE(2);
+
     /* Allocate the DACL now */
     Dacl = RtlAllocateHeap(RtlGetProcessHeap(),
                            HEAP_ZERO_MEMORY,
@@ -1360,6 +1461,10 @@ AllowDesktopAccessToUser(
         ERR("AllowDesktopAccessToUser(): Failed to set ACE for network service SID (error code %lu)\n", GetLastError());
         goto Quit;
     }
+
+    /* The entries of ALL APPLICATION PACKAGES and ALL RESTRICTED APPLICATION PACKAGES */
+    if (!AddPackageAces(Dacl, FALSE))
+        goto Quit;
 
     /* Initialize the security descriptor */
     if (!InitializeSecurityDescriptor(&AbsoluteSd, SECURITY_DESCRIPTOR_REVISION))

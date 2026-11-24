@@ -2268,6 +2268,7 @@ NtDuplicateToken(
     if (NT_SUCCESS(Status))
     {
         ACCESS_MASK GrantedAccess = DesiredAccess ? DesiredAccess : HandleInformation.GrantedAccess;
+        BOOLEAN IsLowbox;
 
         if (LimitedDuplicate)
         {
@@ -2283,12 +2284,24 @@ NtDuplicateToken(
             }
         }
 
+        /* A copy of a lowbox token names its package in its own descriptor, as the lowbox token does */
+        IsLowbox = (NewToken->Lowbox != NULL);
+        if (IsLowbox)
+            ObReferenceObject(NewToken);
+
         Status = ObInsertObject(NewToken,
                                 NULL,
                                 GrantedAccess,
                                 0,
                                 NULL,
                                 &hToken);
+        if (IsLowbox)
+        {
+            /* ObInsertObject has given up its own reference, the one taken above keeps the token */
+            if (NT_SUCCESS(Status))
+                SepLowboxAssignTokenSecurity(NewToken);
+            ObDereferenceObject(NewToken);
+        }
         if (NT_SUCCESS(Status))
         {
             _SEH2_TRY

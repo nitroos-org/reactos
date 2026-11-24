@@ -639,6 +639,11 @@ SepRebuildDynamicPartOfToken(
     _In_ PTOKEN Token,
     _In_ ULONG NewDynamicPartSize);
 
+NTSTATUS
+NTAPI
+SepLowboxAssignTokenSecurity(
+    _In_ PTOKEN Token);
+
 BOOLEAN
 NTAPI
 SeTokenCanImpersonate(

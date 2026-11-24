@@ -41,6 +41,9 @@ PISECURITY_DESCRIPTOR SmpKnownDllsSecurityDescriptor, SmpApiPortSecurityDescript
 ULONG SmpAllowProtectedRenames, SmpProtectionMode = 1;
 BOOLEAN MiniNTBoot = FALSE;
 
+/* The last RID of ALL RESTRICTED APPLICATION PACKAGES (S-1-15-2-2) */
+#define SMSS_BUILTIN_PACKAGE_ANY_RESTRICTED_PACKAGE 0x2
+
 #define SMSS_CHECKPOINT(x, y)           \
 {                                       \
     SmpInitProgressByLine = __LINE__;   \
@@ -1036,7 +1039,8 @@ SmpCreateSecurityDescriptors(IN BOOLEAN InitialCall)
 {
     NTSTATUS Status;
     PSID WorldSid = NULL, AdminSid = NULL, SystemSid = NULL;
-    PSID RestrictedSid = NULL, OwnerSid = NULL;
+    PSID RestrictedSid = NULL, OwnerSid = NULL, AppPackageSid = NULL, AppRestrictedPackageSid = NULL;
+    SID_IDENTIFIER_AUTHORITY PackageAuthority = {SECURITY_APP_PACKAGE_AUTHORITY};
     SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
     SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
     SID_IDENTIFIER_AUTHORITY CreatorAuthority = {SECURITY_CREATOR_SID_AUTHORITY};
@@ -1155,6 +1159,30 @@ SmpCreateSecurityDescriptors(IN BOOLEAN InitialCall)
         goto Quickie;
     }
 
+    /* Build the ALL APPLICATION PACKAGES SID (S-1-15-2-1) */
+    Status = RtlAllocateAndInitializeSid(&PackageAuthority, 2,
+                                         SECURITY_APP_PACKAGE_BASE_RID,
+                                         SECURITY_BUILTIN_PACKAGE_ANY_PACKAGE,
+                                         0, 0, 0, 0, 0, 0,
+                                         &AppPackageSid);
+    if (!NT_SUCCESS(Status))
+    {
+        AppPackageSid = NULL;
+        goto Quickie;
+    }
+
+    /* Build the ALL RESTRICTED APPLICATION PACKAGES SID (S-1-15-2-2) */
+    Status = RtlAllocateAndInitializeSid(&PackageAuthority, 2,
+                                         SECURITY_APP_PACKAGE_BASE_RID,
+                                         SMSS_BUILTIN_PACKAGE_ANY_RESTRICTED_PACKAGE,
+                                         0, 0, 0, 0, 0, 0,
+                                         &AppRestrictedPackageSid);
+    if (!NT_SUCCESS(Status))
+    {
+        AppRestrictedPackageSid = NULL;
+        goto Quickie;
+    }
+
     /* Now check if we're creating the core descriptors */
     if (!InitialCall)
     {
@@ -1187,10 +1215,17 @@ SmpCreateSecurityDescriptors(IN BOOLEAN InitialCall)
     ASSERT(NT_SUCCESS(Status));
 
 NextAcl:
-    /* Allocate an ACL with 6 ACEs, two ACEs per SID */
+    /*
+     * Allocate an ACL with 10 ACEs: two per SID of the world, the restricted code and the administrators, and two
+     * each for ALL APPLICATION PACKAGES and ALL RESTRICTED APPLICATION PACKAGES, as the Windows Server 2022
+     * descriptor of \KnownDlls has them (the AppContainer pass of the access check grants a lowbox token only what
+     * such an ACE grants it: without them a process in an AppContainer cannot open \KnownDlls, its sections or
+     * KnownDllPath)
+     */
     SidLength = RtlLengthSid(WorldSid) + RtlLengthSid(RestrictedSid) + RtlLengthSid(AdminSid);
     SidLength *= 2;
-    AclLength = sizeof(ACL) + 6 * sizeof(ACCESS_ALLOWED_ACE) + SidLength;
+    AclLength = sizeof(ACL) + 10 * sizeof(ACCESS_ALLOWED_ACE) + SidLength +
+                2 * (RtlLengthSid(AppPackageSid) + RtlLengthSid(AppRestrictedPackageSid));
     Acl = RtlAllocateHeap(RtlGetProcessHeap(), 0, AclLength);
     if (!Acl) Status = STATUS_NO_MEMORY;
     if (!NT_SUCCESS(Status)) goto NotInitial;
@@ -1211,7 +1246,18 @@ NextAcl:
     Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, GENERIC_ALL, AdminSid);
     ASSERT(NT_SUCCESS(Status));
 
-    /* Now edit the last three ACEs and make them inheritable */
+    /* ALL APPLICATION PACKAGES and ALL RESTRICTED APPLICATION PACKAGES: the directory itself (query, traverse) ... */
+    Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, GENERIC_EXECUTE, AppPackageSid);
+    ASSERT(NT_SUCCESS(Status));
+    Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, GENERIC_EXECUTE, AppRestrictedPackageSid);
+    ASSERT(NT_SUCCESS(Status));
+    /* ... and, inherited, what the world gets on the sections and links in it (Windows: 0x2000f / 0x20001) */
+    Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, GENERIC_EXECUTE | GENERIC_READ | GENERIC_WRITE, AppPackageSid);
+    ASSERT(NT_SUCCESS(Status));
+    Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, GENERIC_EXECUTE | GENERIC_READ | GENERIC_WRITE, AppRestrictedPackageSid);
+    ASSERT(NT_SUCCESS(Status));
+
+    /* Now edit the ACEs of the world, the restricted code, the administrators and the two package SIDs that are for the children, and make them inheritable */
     Status = RtlGetAce(Acl, 3, (PVOID)&Ace);
     ASSERT(NT_SUCCESS(Status));
     Ace->AceFlags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
@@ -1219,6 +1265,12 @@ NextAcl:
     ASSERT(NT_SUCCESS(Status));
     Ace->AceFlags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
     Status = RtlGetAce(Acl, 5, (PVOID)&Ace);
+    ASSERT(NT_SUCCESS(Status));
+    Ace->AceFlags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
+    Status = RtlGetAce(Acl, 8, (PVOID)&Ace);
+    ASSERT(NT_SUCCESS(Status));
+    Ace->AceFlags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
+    Status = RtlGetAce(Acl, 9, (PVOID)&Ace);
     ASSERT(NT_SUCCESS(Status));
     Ace->AceFlags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
 
@@ -1331,6 +1383,8 @@ Quickie:
     if (WorldSid) RtlFreeHeap(RtlGetProcessHeap(), 0, WorldSid);
     if (SystemSid) RtlFreeHeap(RtlGetProcessHeap(), 0, SystemSid);
     if (RestrictedSid) RtlFreeHeap(RtlGetProcessHeap(), 0, RestrictedSid);
+    if (AppPackageSid) RtlFreeHeap(RtlGetProcessHeap(), 0, AppPackageSid);
+    if (AppRestrictedPackageSid) RtlFreeHeap(RtlGetProcessHeap(), 0, AppRestrictedPackageSid);
     return Status;
 }
 
