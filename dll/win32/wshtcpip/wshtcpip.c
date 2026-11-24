@@ -1666,8 +1666,10 @@ WSHSetSocketInformation(
         }
 
         default:
+            /* A level this provider does not know is invalid (measured on Windows Server 2022: ws2_32_winetest sock
+             * test_set_getsockopt, levels 0xffffffff and 0x8000 give WSAEINVAL) */
             DPRINT1("Set: Received unexpected %d option %d\n", Level, OptionName);
-            return 0;
+            return WSAEINVAL;
     }
 
     /* If we get here, GetAddressOption must return something valid */
