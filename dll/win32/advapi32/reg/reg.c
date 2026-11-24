@@ -3805,6 +3805,12 @@ RegLoadKeyW(HKEY hKey,
         return ERROR_INVALID_HANDLE;
     }
 
+    /* an empty file name is an invalid parameter, not a bad path name (measured on Windows Server 2022) */
+    if (lpFile != NULL && *lpFile == UNICODE_NULL)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+
     Status = MapDefaultKey(&KeyHandle,
                            hKey);
     if (!NT_SUCCESS(Status))
