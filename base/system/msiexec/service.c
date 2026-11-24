@@ -135,29 +135,50 @@ static void ReportServiceError(const WCHAR *text, DWORD error)
     service_exit_code = error ? error : ERROR_GEN_FAILURE;
 }
 
+#ifndef TokenIsAppContainer
+#define TokenIsAppContainer 29
+#endif
+
+/*
+ * Who may ask: the token the client opened the pipe with (its thread's, when it impersonated) must be elevated, of
+ * High or System integrity, not restricted, not an AppContainer token, with the Administrators group enabled (a
+ * deny-only group does not count). The pipe's descriptor already refuses most of them (Administrators only, High
+ * label with no write up, no entry for an AppContainer); this is the second check. Identification is enough for
+ * these queries; the token is never used to open anything.
+ */
 static BOOL IsElevatedAdministrator(HANDLE pipe)
 {
     HANDLE token = NULL;
     TOKEN_ELEVATION elevation;
-    DWORD size;
+    union { TOKEN_MANDATORY_LABEL label; BYTE buffer[64]; } integrity;
+    SECURITY_IMPERSONATION_LEVEL level = SecurityAnonymous;
+    DWORD size, appcontainer = 1, count;
     BOOL ok = FALSE, member = FALSE;
     PSID admins = NULL;
     SID_IDENTIFIER_AUTHORITY nt = { SECURITY_NT_AUTHORITY };
 
     if (!ImpersonateNamedPipeClient(pipe))
         return FALSE;
-    if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token))
-    {
-        if (GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size) && elevation.TokenIsElevated &&
-            AllocateAndInitializeSid(&nt, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &admins))
-        {
-            /* the thread has the client's token: an enabled Administrators group */
-            ok = CheckTokenMembership(NULL, admins, &member) && member;
-            FreeSid(admins);
-        }
-        CloseHandle(token);
-    }
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token))
+        token = NULL;
     RevertToSelf();
+    if (!token)
+        return FALSE;
+
+    if (GetTokenInformation(token, TokenImpersonationLevel, &level, sizeof(level), &size) && level >= SecurityIdentification &&
+        GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size) && elevation.TokenIsElevated &&
+        GetTokenInformation(token, TokenIntegrityLevel, &integrity, sizeof(integrity), &size) &&
+        (count = *GetSidSubAuthorityCount(integrity.label.Label.Sid)) &&
+        *GetSidSubAuthority(integrity.label.Label.Sid, count - 1) >= SECURITY_MANDATORY_HIGH_RID &&
+        !IsTokenRestricted(token) &&
+        GetTokenInformation(token, TokenIsAppContainer, &appcontainer, sizeof(appcontainer), &size) && !appcontainer &&
+        AllocateAndInitializeSid(&nt, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &admins))
+    {
+        ok = CheckTokenMembership(token, admins, &member) && member;
+        FreeSid(admins);
+    }
+    if (!ok) WARN("refused a client: level %d, appcontainer %lu, administrator %d\n", level, appcontainer, member);
+    CloseHandle(token);
     return ok;
 }
 
@@ -365,8 +386,9 @@ static DWORD WINAPI ServiceExecutionThread(LPVOID param)
     sa.bInheritHandle = FALSE;
     sa.lpSecurityDescriptor = NULL;
     /* LocalSystem, and the Administrators group as clients only: not FILE_CREATE_PIPE_INSTANCE (= FILE_APPEND_DATA),
-     * so that every instance of the name is this service's */
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;0x12019b;;;BA)", SDDL_REVISION_1,
+     * so that every instance of the name is this service's. The High label refuses writers below High integrity (an
+     * administrator's program started at Medium or Low) when they open it. */
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;0x12019b;;;BA)S:(ML;;NW;;;HI)", SDDL_REVISION_1,
                                                               &sa.lpSecurityDescriptor, NULL))
     {
         ReportServiceError(L"The Installer service could not build the security descriptor of its launch pipe",

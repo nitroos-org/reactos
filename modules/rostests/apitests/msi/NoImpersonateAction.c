@@ -81,9 +81,9 @@ static BOOL CreatePackage(LPCWSTR pszPath, LPCWSTR pszDll, LPCWSTR pszCmd)
           RunQuery(hDatabase, L"CREATE TABLE `Binary` (`Name` CHAR(72) NOT NULL, `Data` OBJECT NOT NULL PRIMARY KEY `Name`)", 0) &&
           RunQuery(hDatabase, L"CREATE TABLE `CustomAction` (`Action` CHAR(72) NOT NULL, `Type` SHORT NOT NULL, `Source` CHAR(72), `Target` CHAR(255), `ExtendedType` LONG PRIMARY KEY `Action`)", 0) &&
           /* the files the actions write, named by the properties that have the actions' names (their CustomActionData) */
-          RunQuery(hDatabase, L"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES ('SetSysId', 51, 'SysId', '[TempFolder]gbboot_noimp_sys.txt')", 0) &&
-          RunQuery(hDatabase, L"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES ('SetUserId', 51, 'UserId', '[TempFolder]gbboot_noimp_user.txt')", 0) &&
-          RunQuery(hDatabase, L"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES ('SetExeId', 51, 'ExeId', '/c whoami > \"[TempFolder]gbboot_noimp_exe.txt\"')", 0) &&
+          RunQuery(hDatabase, L"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES ('SetSysId', 51, 'SysId', '[TempFolder]msi_noimp_sys.txt')", 0) &&
+          RunQuery(hDatabase, L"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES ('SetUserId', 51, 'UserId', '[TempFolder]msi_noimp_user.txt')", 0) &&
+          RunQuery(hDatabase, L"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES ('SetExeId', 51, 'ExeId', '/c whoami > \"[TempFolder]msi_noimp_exe.txt\"')", 0) &&
           /* deferred (0x400) + no impersonation (0x800) + DLL in the Binary table (1) */
           RunQuery(hDatabase, L"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES ('SysId', 3073, 'cadir', 'ReportIdentity')", 0) &&
           /* deferred (0x400) + DLL (1) */
@@ -210,34 +210,34 @@ START_TEST(NoImpersonateAction)
     StringCchCatW(szCmd, ARRAYSIZE(szCmd), L"\\cmd.exe");
 
     GetTempPathW(ARRAYSIZE(szTemp), szTemp);
-    StringCchPrintfW(szPkg, ARRAYSIZE(szPkg), L"%sgbboot_noimp.msi", szTemp);
+    StringCchPrintfW(szPkg, ARRAYSIZE(szPkg), L"%smsi_noimp.msi", szTemp);
     if (!CreatePackage(szPkg, szDll, szCmd))
     {
         skip("Could not create the package\n");
         return;
     }
-    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%sgbboot_noimp_sys.txt", szTemp);
+    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%smsi_noimp_sys.txt", szTemp);
     DeleteFileW(szFile);
-    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%sgbboot_noimp_user.txt", szTemp);
+    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%smsi_noimp_user.txt", szTemp);
     DeleteFileW(szFile);
-    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%sgbboot_noimp_exe.txt", szTemp);
+    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%smsi_noimp_exe.txt", szTemp);
     DeleteFileW(szFile);
 
     MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
     r = MsiInstallProductW(szPkg, L"");
     ok(r == ERROR_SUCCESS, "MsiInstallProductW failed: %u\n", r);
 
-    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%sgbboot_noimp_sys.txt", szTemp);
+    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%smsi_noimp_sys.txt", szTemp);
     ok(ReadResult(szFile, szText, ARRAYSIZE(szText)), "the no-impersonation DLL action wrote nothing\n");
     ok(!wcscmp(szText, L"S-1-5-18"), "the no-impersonation DLL action ran as '%S', expected LocalSystem S-1-5-18\n", szText);
     DeleteFileW(szFile);
 
-    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%sgbboot_noimp_user.txt", szTemp);
+    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%smsi_noimp_user.txt", szTemp);
     ok(ReadResult(szFile, szText, ARRAYSIZE(szText)), "the impersonating DLL action wrote nothing\n");
     ok(!wcsncmp(szText, L"S-1-5-21-", 9), "the impersonating DLL action ran as '%S', expected the installing user S-1-5-21-...\n", szText);
     DeleteFileW(szFile);
 
-    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%sgbboot_noimp_exe.txt", szTemp);
+    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%smsi_noimp_exe.txt", szTemp);
     ok(ReadResult(szFile, szText, ARRAYSIZE(szText)), "the no-impersonation EXE action wrote nothing\n");
     CharLowerBuffW(szText, lstrlenW(szText));
     ok(wcsstr(szText, L"system") != NULL, "the no-impersonation EXE action ran as '%S', expected nt authority\\system\n", szText);

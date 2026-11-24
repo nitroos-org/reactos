@@ -42,5 +42,6 @@ typedef struct _MSI_LAUNCH_REPLY
     DWORD Error;            /* 0 or a Win32 error code */
     DWORD ProcessId;
     DWORD Reserved;
-    ULONG64 ProcessHandle;  /* the new process, as a handle in the caller (all access) */
+    ULONG64 ProcessHandle;  /* the new process, as a handle in the caller: SYNCHRONIZE, PROCESS_QUERY_INFORMATION,
+                               PROCESS_TERMINATE, and PROCESS_DUP_HANDLE for a custom action server */
 } MSI_LAUNCH_REPLY, *PMSI_LAUNCH_REPLY;
