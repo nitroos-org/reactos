@@ -2199,6 +2199,12 @@ LsaApLogonUserEx2_S4U(
         case Batch:
             return STATUS_LOGON_TYPE_NOT_GRANTED;
 
+        /* Measured on Windows Server 2022: an S4U submission with the logon type Service or Interactive is an
+           invalid parameter (the other types are not measured) */
+        case Service:
+        case Interactive:
+            return STATUS_INVALID_PARAMETER;
+
         case NewCredentials:
             return STATUS_INVALID_LOGON_TYPE;
 
