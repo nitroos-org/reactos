@@ -4352,10 +4352,14 @@ RxCommonRead(
             }
             else
             {
-                if (ByteOffset.QuadPart > FileSize)
+                /* At or beyond the end of file a read gets nothing and says so
+                 * (STATUS_END_OF_FILE, as the cached path above and as a local
+                 * file system answer); a zero-length read never reaches here */
+                if (ByteOffset.QuadPart >= FileSize)
                 {
                     ReadLength = 0;
                     Irp->IoStatus.Information = ReadLength;
+                    Status = STATUS_END_OF_FILE;
                     _SEH2_LEAVE;
                 }
 
