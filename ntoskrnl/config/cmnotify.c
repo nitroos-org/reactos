@@ -45,6 +45,8 @@ typedef struct _CM_NOTIFY_REQUEST
     NTSTATUS Status;
     ULONG Filter;
     BOOLEAN WatchTree;
+    ULONG BlockFilter;          /* What decides which changes complete the request: those of the first */
+    BOOLEAN BlockWatchTree;     /* request pending on the same key handle (measured on Windows) */
     BOOLEAN Wow64Iosb;          /* UserIosb is an 8-byte guest IO_STATUS_BLOCK32 */
 } CM_NOTIFY_REQUEST, *PCM_NOTIFY_REQUEST;
 
@@ -255,9 +257,11 @@ CmpNotifyChangeKey(
 
     PAGED_CODE();
 
-    /* Only the four change classes (plus thread agnostic) are legal */
+    /* Only the four change classes (plus thread agnostic) are legal. An empty
+     * filter is legal too, as on Windows: the request never completes on a
+     * change, only when the key handle is closed or the key is deleted. */
     CompletionFilter &= ~REG_NOTIFY_THREAD_AGNOSTIC;
-    if (!CompletionFilter || (CompletionFilter & ~REG_LEGAL_CHANGE_FILTER))
+    if (CompletionFilter & ~REG_LEGAL_CHANGE_FILTER)
         return STATUS_INVALID_PARAMETER;
 
     /* A thread agnostic request has no thread to wait in or deliver an APC to */
@@ -393,6 +397,17 @@ CmpNotifyChangeKey(
         KeClearEvent(Request->Event);
 
     KeAcquireSpinLock(&CmpNotifyLock, &OldIrql);
+    /* The first request made on a key handle fixes what changes complete the requests of that handle, for
+     * as long as the handle lives (measured on Windows Server 2022: a later request with another filter or
+     * tree flag follows the first one, also after the first has completed) */
+    if (!KeyBody->NotifySet)
+    {
+        KeyBody->NotifyFilter = CompletionFilter;
+        KeyBody->NotifyWatchTree = WatchTree;
+        KeyBody->NotifySet = TRUE;
+    }
+    Request->BlockFilter = KeyBody->NotifyFilter;
+    Request->BlockWatchTree = KeyBody->NotifyWatchTree;
     InsertTailList(&CmpNotifyList, &Request->Link);
     KeReleaseSpinLock(&CmpNotifyLock, OldIrql);
     CmpReleaseKcbLock(Request->Kcb);
@@ -436,7 +451,7 @@ CmpReportNotify(IN PCM_KEY_CONTROL_BLOCK Kcb,
         Next = Entry->Flink;
         Request = CONTAINING_RECORD(Entry, CM_NOTIFY_REQUEST, Link);
 
-        if (!(Request->Filter & Filter))
+        if (!(Request->BlockFilter & Filter))
             continue;
 
         /* The key itself */
@@ -447,7 +462,7 @@ CmpReportNotify(IN PCM_KEY_CONTROL_BLOCK Kcb,
             Match = TRUE;
 
         /* Anything below the key, if the whole subtree is watched */
-        if (!Match && Request->WatchTree)
+        if (!Match && Request->BlockWatchTree)
         {
             for (Parent = Kcb->ParentKcb; Parent; Parent = Parent->ParentKcb)
             {
@@ -498,13 +513,13 @@ CmpReportNotifyRename(IN PCM_KEY_CONTROL_BLOCK Kcb)
         Request = CONTAINING_RECORD(Entry, CM_NOTIFY_REQUEST, Link);
 
         Match = (Request->Kcb == Kcb);
-        if (!Match && (Request->Filter & REG_NOTIFY_CHANGE_NAME))
+        if (!Match && (Request->BlockFilter & REG_NOTIFY_CHANGE_NAME))
         {
             if (Kcb->ParentKcb == Request->Kcb)
             {
                 Match = TRUE;
             }
-            else if (Request->WatchTree)
+            else if (Request->BlockWatchTree)
             {
                 for (Parent = Kcb->ParentKcb; Parent; Parent = Parent->ParentKcb)
                 {
