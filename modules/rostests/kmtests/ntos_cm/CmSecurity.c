@@ -8,6 +8,10 @@
 #include <kmt_test.h>
 #include "../ntos_se/se.h"
 
+/* The owner the keys are expected to have; NULL is the Administrators alias (Windows 8: all keys).
+ * Windows 10 gives the master keys of the namespace SYSTEM. */
+static PSID ExpectedKeyOwner;
+
 #define CheckKeySecurity(name, AceCount, ...) CheckKeySecurity_(name, AceCount, __FILE__, __LINE__, ##__VA_ARGS__)
 #define CheckKeySecurity_(name, AceCount, file, line, ...) CheckKeySecurity__(name, AceCount, file ":" KMT_STRINGIZE(line), ##__VA_ARGS__)
 static
@@ -81,7 +85,7 @@ CheckKeySecurity__(
         Status = RtlGetOwnerSecurityDescriptor(SecurityDescriptor,
                                                &Owner,
                                                &Defaulted);
-        CheckSid(Owner, NO_SIZE, SeExports->SeAliasAdminsSid);
+        CheckSid(Owner, NO_SIZE, ExpectedKeyOwner ? ExpectedKeyOwner : SeExports->SeAliasAdminsSid);
         ok(Defaulted == FALSE, "Owner defaulted for %ls\n", KeyName);
 
         Group = NULL;
@@ -449,6 +453,93 @@ static void CmSecurity_Win8(PSID TerminalServerSid)
                         ACCESS_ALLOWED_ACE_TYPE,                     0, SeExports->SeAllAppPackagesSid, KEY_READ);
 }
 
+/*
+ * Windows 10 (22H2): the namespace keys are owned by SYSTEM and carry the application package SID and the LPAC
+ * capability besides; the hive roots are Administrators' with Creator Owner, and the default user and the
+ * service accounts differ again. The descriptors are the ones captured on a Windows 10 22H2 system.
+ */
+static void CmSecurity_Win10(PSID TerminalServerSid)
+{
+    static const SID_IDENTIFIER_AUTHORITY AppAuthority = {{0, 0, 0, 0, 0, 15}};
+    static const ULONG LpacSubAuthorities[10] =
+        { 3, 1024, 1065365936, 1281604716, 3511738428u, 1654721687, 432734479, 3232135806u, 4053264122u, 3456934681u };
+    PSID LpacSid;
+    ULONG i;
+
+    LpacSid = ExAllocatePoolWithTag(PagedPool, RtlLengthRequiredSid(10), 'iSmK');
+    if (LpacSid == NULL)
+    {
+        skip(FALSE, "No memory for the LPAC capability SID\n");
+        return;
+    }
+    RtlInitializeSid(LpacSid, (PSID_IDENTIFIER_AUTHORITY)&AppAuthority, 10);
+    for (i = 0; i < 10; i++)
+        *RtlSubAuthoritySid(LpacSid, i) = LpacSubAuthorities[i];
+
+    /* The master keys: owner SYSTEM */
+    ExpectedKeyOwner = SeExports->SeLocalSystemSid;
+#define MASTER_KEY_ACES(Name)                                                                                        \
+    CheckKeySecurity(Name,                                                                                           \
+                     6, ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeLocalSystemSid,    KEY_ALL_ACCESS, \
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeAliasAdminsSid,    KEY_ALL_ACCESS, \
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeWorldSid,          KEY_READ,       \
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeRestrictedSid,     KEY_READ,       \
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeAllAppPackagesSid, KEY_READ,       \
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, LpacSid,                        KEY_READ)
+    MASTER_KEY_ACES(L"\\REGISTRY");
+    MASTER_KEY_ACES(L"\\REGISTRY\\MACHINE");
+    MASTER_KEY_ACES(L"\\REGISTRY\\MACHINE\\HARDWARE");
+    MASTER_KEY_ACES(L"\\REGISTRY\\USER");
+#undef MASTER_KEY_ACES
+
+    /* The roots of the system hives: Administrators own them */
+    ExpectedKeyOwner = NULL;
+#define HIVE_ROOT_ACES(Name)                                                                                         \
+    CheckKeySecurity(Name,                                                                                           \
+                     6, ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeAliasUsersSid,     KEY_READ,       \
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeAliasAdminsSid,    KEY_ALL_ACCESS, \
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeLocalSystemSid,    KEY_ALL_ACCESS, \
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeCreatorOwnerSid,   KEY_ALL_ACCESS, \
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeAllAppPackagesSid, KEY_READ,       \
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, LpacSid,                        KEY_READ)
+    HIVE_ROOT_ACES(L"\\REGISTRY\\MACHINE\\SAM");
+    HIVE_ROOT_ACES(L"\\REGISTRY\\MACHINE\\SOFTWARE");
+    HIVE_ROOT_ACES(L"\\REGISTRY\\MACHINE\\SYSTEM");
+#undef HIVE_ROOT_ACES
+
+    CheckKeySecurity(L"\\REGISTRY\\MACHINE\\SECURITY",
+                     2, ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeLocalSystemSid, KEY_ALL_ACCESS,
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeAliasAdminsSid, WRITE_DAC | READ_CONTROL);
+
+    /* The default user: the application package ACEs are not inherited */
+#define DEFAULT_USER_ACES(Name)                                                                                      \
+    CheckKeySecurity(Name,                                                                                           \
+                     6, ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeAliasUsersSid,     KEY_READ,       \
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeAliasAdminsSid,    KEY_ALL_ACCESS, \
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeLocalSystemSid,    KEY_ALL_ACCESS, \
+                        ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, SeExports->SeCreatorOwnerSid,   KEY_ALL_ACCESS, \
+                        ACCESS_ALLOWED_ACE_TYPE,                     0, SeExports->SeAllAppPackagesSid, KEY_READ,       \
+                        ACCESS_ALLOWED_ACE_TYPE,                     0, LpacSid,                        KEY_READ)
+    DEFAULT_USER_ACES(L"\\REGISTRY\\USER\\.DEFAULT");
+    DEFAULT_USER_ACES(L"\\REGISTRY\\USER\\S-1-5-18");
+#undef DEFAULT_USER_ACES
+
+    /* The network service account */
+    CheckKeySecurity(L"\\REGISTRY\\USER\\S-1-5-20",
+                     6, ACCESS_ALLOWED_ACE_TYPE, OBJECT_INHERIT_ACE |
+                                                 CONTAINER_INHERIT_ACE, SeExports->SeNetworkServiceSid, KEY_ALL_ACCESS,
+                        ACCESS_ALLOWED_ACE_TYPE, OBJECT_INHERIT_ACE |
+                                                 CONTAINER_INHERIT_ACE, SeExports->SeLocalSystemSid,    KEY_ALL_ACCESS,
+                        ACCESS_ALLOWED_ACE_TYPE, OBJECT_INHERIT_ACE |
+                                                 CONTAINER_INHERIT_ACE, SeExports->SeAliasAdminsSid,    KEY_ALL_ACCESS,
+                        ACCESS_ALLOWED_ACE_TYPE, OBJECT_INHERIT_ACE |
+                                                 CONTAINER_INHERIT_ACE, SeExports->SeRestrictedSid,     KEY_READ,
+                        ACCESS_ALLOWED_ACE_TYPE,                     0, SeExports->SeAllAppPackagesSid, KEY_READ,
+                        ACCESS_ALLOWED_ACE_TYPE,                     0, LpacSid,                        KEY_READ);
+
+    ExFreePoolWithTag(LpacSid, 'iSmK');
+}
+
 START_TEST(CmSecurity)
 {
     SID_IDENTIFIER_AUTHORITY NtSidAuthority = {SECURITY_NT_AUTHORITY};
@@ -474,8 +565,10 @@ START_TEST(CmSecurity)
             break;
         case _WIN32_WINNT_WIN8:
         case _WIN32_WINNT_WINBLUE:
-        case _WIN32_WINNT_WIN10:
             CmSecurity_Win8(TerminalServerSid);
+            break;
+        case _WIN32_WINNT_WIN10:
+            CmSecurity_Win10(TerminalServerSid);
             break;
         default:
             if (GetNTVersion() < _WIN32_WINNT_WS03)
@@ -486,7 +579,7 @@ START_TEST(CmSecurity)
             else
             {
                 trace("Unknown NT version (0x%X > 0x%X), running latest tests...\n", GetNTVersion(), _WIN32_WINNT_WIN10);
-                CmSecurity_Win8(TerminalServerSid);
+                CmSecurity_Win10(TerminalServerSid);
             }
             break;
     }
