@@ -246,6 +246,45 @@ static void CheckToken(PCWSTR What, S4U_RESULT *Result, PCWSTR User, SECURITY_IM
         ok(!HasWellKnownGroup(Groups, WinServiceSid), "%ls: SERVICE\n", What);
         ok(!HasWellKnownGroup(Groups, WinBuiltinAdministratorsSid), "%ls: Administrators\n", What);
         ok(!HasWellKnownGroup(Groups, WinLocalSystemSid), "%ls: SYSTEM\n", What);
+
+        /*
+         * The LSA gives the logon a logon SID of its own, the caller having passed none (Windows Server 2022,
+         * measured: one S-1-5-5-0-<n>, attributes 0xc0000007, also through an untrusted connection)
+         */
+        {
+            ULONG i, Found = 0, Attributes = 0;
+            TOKEN_STATISTICS LogonStats;
+
+            for (i = 0; i < Groups->GroupCount; i++)
+            {
+                if (Groups->Groups[i].Attributes & SE_GROUP_LOGON_ID)
+                {
+                    PSID Sid = Groups->Groups[i].Sid;
+                    Found++;
+                    Attributes = Groups->Groups[i].Attributes;
+                    ok(*GetSidSubAuthorityCount(Sid) == SECURITY_LOGON_IDS_RID_COUNT &&
+                       *GetSidSubAuthority(Sid, 0) == SECURITY_LOGON_IDS_RID, "%ls: the logon SID is no S-1-5-5-x-y\n", What);
+                }
+            }
+            ok(Found == 1 && Attributes == 0xc0000007, "%ls: %lu logon SIDs, attributes 0x%lx, expected one, 0xc0000007\n",
+               What, Found, Attributes);
+            if (GetTokenInformation(Result->Token, TokenLogonSid, Buffer + 4096, 4096, &Length))
+                ok(((PTOKEN_GROUPS)(Buffer + 4096))->GroupCount == 1, "%ls: TokenLogonSid has %lu SIDs\n", What,
+                   ((PTOKEN_GROUPS)(Buffer + 4096))->GroupCount);
+            else
+                ok(0, "%ls: TokenLogonSid failed: %lu\n", What, GetLastError());
+            if (GetTokenInformation(Result->Token, TokenStatistics, &LogonStats, sizeof(LogonStats), &Length))
+            {
+                for (i = 0; i < Groups->GroupCount; i++)
+                {
+                    PSID Sid = Groups->Groups[i].Sid;
+                    if ((Groups->Groups[i].Attributes & SE_GROUP_LOGON_ID) && *GetSidSubAuthorityCount(Sid) == 3)
+                        ok(*GetSidSubAuthority(Sid, 1) != (ULONG)LogonStats.AuthenticationId.HighPart ||
+                           *GetSidSubAuthority(Sid, 2) != LogonStats.AuthenticationId.LowPart,
+                           "%ls: the logon SID names the logon session\n", What);
+                }
+            }
+        }
     }
 
     Ok = GetTokenInformation(Result->Token, TokenPrivileges, Buffer, sizeof(Buffer), &Length);
