@@ -11,6 +11,7 @@ list(APPEND SOURCE
     AccessCheckAppContainer.c
     AppContainerNamespace.c
     AdjustTokenGroupsRows.c
+    AdjustTokenPreviousState.c
     AccessCheckObjectTypeList.c
     AddMandatoryAce.c
     RegSaveKeyExFormat.c
