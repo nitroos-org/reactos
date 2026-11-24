@@ -14,6 +14,9 @@
  *    itself has no access besides READ_CONTROL through OWNER RIGHTS, the Administrators may query it;
  *    the default DACL is (SY GENERIC_ALL)(<account> GENERIC_ALL), with a service SID (SY GENERIC_ALL)(OW READ_CONTROL)
  *    (<service SID> GENERIC_ALL).
+ *  - The logon SID: none for LocalSystem without a service SID; one of its own (S-1-5-5-0-<n>, a new value for each
+ *    process, not a logon session of the LSA: a LocalSystem token stays in the SYSTEM logon session) for the others,
+ *    attributes 0xc000000f with a service SID and 0xc0000007 without one.
  */
 
 #include "precomp.h"
@@ -272,6 +275,7 @@ typedef struct _ROW
     PCSTR Owner;        /* TokenOwner */
     PCSTR DefaultDacl;  /* the SIDs named as in SDDL; SVC is the service SID */
     PCSTR TokenSd;
+    DWORD LogonSid;     /* the attributes of the one logon SID S-1-5-5-x-y, 0: none */
 } ROW;
 
 #define SD_ALL "CCDCLCSWRPWPDTLOCRSDRCWDWO"
@@ -279,17 +283,17 @@ typedef struct _ROW
 static const ROW s_Rows[] =
 {
     { "LocalSystem", NULL, SERVICE_SID_TYPE_NONE, FALSE, "S-1-5-32-544", NULL,
-      "O:BAG:SYD:(A;;" SD_ALL ";;;SY)(A;;CCDCLCSWRPRC;;;BA)" },
+      "O:BAG:SYD:(A;;" SD_ALL ";;;SY)(A;;CCDCLCSWRPRC;;;BA)", 0 },
     { "LocalSystem+sid", NULL, SERVICE_SID_TYPE_UNRESTRICTED, TRUE, "S-1-5-18", "D:(A;;GA;;;SY)(A;;RC;;;OW)(A;;GA;;;SVC)",
-      "O:SYG:SYD:(A;;" SD_ALL ";;;SY)(A;;RC;;;OW)(A;;" SD_ALL ";;;SVC)(A;;SW;;;BA)" },
+      "O:SYG:SYD:(A;;" SD_ALL ";;;SY)(A;;RC;;;OW)(A;;" SD_ALL ";;;SVC)(A;;SW;;;BA)", 0xc000000f },
     { "LocalService", "NT AUTHORITY\\LocalService", SERVICE_SID_TYPE_NONE, TRUE, "S-1-5-19", "D:(A;;GA;;;SY)(A;;GA;;;LS)",
-      "O:LSG:LSD:(A;;" SD_ALL ";;;SY)(A;;" SD_ALL ";;;LS)(A;;SW;;;BA)" },
+      "O:LSG:LSD:(A;;" SD_ALL ";;;SY)(A;;" SD_ALL ";;;LS)(A;;SW;;;BA)", 0xc0000007 },
     { "LocalService+sid", "NT AUTHORITY\\LocalService", SERVICE_SID_TYPE_UNRESTRICTED, TRUE, "S-1-5-19", "D:(A;;GA;;;SY)(A;;RC;;;OW)(A;;GA;;;SVC)",
-      "O:LSG:LSD:(A;;" SD_ALL ";;;SY)(A;;RC;;;OW)(A;;" SD_ALL ";;;SVC)(A;;SW;;;BA)" },
+      "O:LSG:LSD:(A;;" SD_ALL ";;;SY)(A;;RC;;;OW)(A;;" SD_ALL ";;;SVC)(A;;SW;;;BA)", 0xc000000f },
     { "NetworkService", "NT AUTHORITY\\NetworkService", SERVICE_SID_TYPE_NONE, TRUE, "S-1-5-20", "D:(A;;GA;;;SY)(A;;GA;;;NS)",
-      "O:NSG:NSD:(A;;" SD_ALL ";;;SY)(A;;" SD_ALL ";;;NS)(A;;SW;;;BA)" },
+      "O:NSG:NSD:(A;;" SD_ALL ";;;SY)(A;;" SD_ALL ";;;NS)(A;;SW;;;BA)", 0xc0000007 },
     { "NetworkService+sid", "NT AUTHORITY\\NetworkService", SERVICE_SID_TYPE_UNRESTRICTED, TRUE, "S-1-5-20", "D:(A;;GA;;;SY)(A;;RC;;;OW)(A;;GA;;;SVC)",
-      "O:NSG:NSD:(A;;" SD_ALL ";;;SY)(A;;RC;;;OW)(A;;" SD_ALL ";;;SVC)(A;;SW;;;BA)" },
+      "O:NSG:NSD:(A;;" SD_ALL ";;;SY)(A;;RC;;;OW)(A;;" SD_ALL ";;;SVC)(A;;SW;;;BA)", 0xc000000f },
 };
 
 static VOID
@@ -328,6 +332,25 @@ RunRow(SC_HANDLE hScm, PCSTR Dir, const ROW *Row, ULONG Number)
         else
             ok(g < 0, "%s: NT AUTHORITY\\SERVICE is in the token\n", Row->Tag);
         ok(!strcmp(Facts.Owner, Row->Owner), "%s: owner %s, expected %s\n", Row->Tag, Facts.Owner, Row->Owner);
+        {
+            /* one logon SID of its own (a new LUID, not the logon session's: the SYSTEM session is S-1-5-5-0-999) */
+            ULONG Logon = 0, Found = 0, i;
+
+            for (i = 0; i < Facts.GroupCount; i++)
+            {
+                if (!strncmp(Facts.Groups[i], "S-1-5-5-", 8))
+                {
+                    Found++;
+                    Logon = Facts.GroupAttrs[i];
+                    ok(strcmp(Facts.Groups[i], "S-1-5-5-0-999") != 0, "%s: the logon SID is that of the SYSTEM logon session\n", Row->Tag);
+                }
+            }
+            ok(Found == (Row->LogonSid ? 1 : 0), "%s: %lu logon SIDs\n", Row->Tag, Found);
+            /* LocalService/NetworkService with a service SID: Windows sets SE_GROUP_OWNER on the logon SID, the logon here
+             * does not (ticket SCM-service-logon-sessions-and-logon-sid-attributes-differ) */
+            todo_ros_if(Row->Account != NULL && Row->SidType != SERVICE_SID_TYPE_NONE)
+                ok(Logon == Row->LogonSid, "%s: logon SID attributes 0x%lx, expected 0x%lx\n", Row->Tag, Logon, Row->LogonSid);
+        }
         if (Row->DefaultDacl)
         {
             StringCbCopyA(Text, sizeof(Text), Facts.DefaultDacl);
