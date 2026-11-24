@@ -54,6 +54,10 @@ SaferIdentifyLevel(
         return FALSE;
     }
 
+    /* The code properties are read even when there are none: a NULL pointer is an access violation on Windows
+     * (measured on Windows Server 2022 with a probe: SaferIdentifyLevel(0, NULL, &handle, NULL)) */
+    (VOID)*(volatile DWORD *)pCodeProperties;
+
     for (i = 0; i < dwNumProperties; i++)
     {
         if (pCodeProperties[i].cbSize != sizeof(SAFER_CODE_PROPERTIES_V1))
