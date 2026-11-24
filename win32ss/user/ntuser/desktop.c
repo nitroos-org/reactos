@@ -25,6 +25,9 @@ IntUnmapDesktopView(IN PDESKTOP pdesk);
 static VOID
 IntFreeDesktopHeap(IN PDESKTOP pdesk);
 
+static BOOLEAN
+IntOrphanDesktopHeap(_Inout_ PDESKTOP pdesk, _In_ ULONG cWindows);
+
 /* GLOBALS *******************************************************************/
 
 /* These can be changed via registry settings.
@@ -550,6 +553,7 @@ IntDesktopObjectDelete(
     PWIN32_DELETEMETHOD_PARAMETERS DeleteParameters = Parameters;
     PDESKTOP pdesk = (PDESKTOP)DeleteParameters->Object;
     BOOLEAN bLeakHeap = FALSE, bNoFree = FALSE;
+    ULONG cHeld = 0;
 
     TRACE("Deleting desktop object 0x%p\n", pdesk);
 
@@ -589,7 +593,9 @@ IntDesktopObjectDelete(
             /* Freed but still referenced (its storage went, the object stays): the message window can and
                must be freed all the same. Not freed at all (no desktop thread or no Win32 process to free it
                with): neither can the message window be */
-            if (!(pwndDesktop->state & WNDS_DESTROYED))
+            if (pwndDesktop->state & WNDS_DESTROYED)
+                cHeld++;
+            else
                 bNoFree = TRUE;
         }
     }
@@ -598,8 +604,16 @@ IntDesktopObjectDelete(
        desktop object freed after this */
     if (pdesk->spwndMessage && !bNoFree)
     {
-        if (!IntFreeDesktopWindow(pdesk->spwndMessage))
+        PWND pwndMessage = pdesk->spwndMessage;
+
+        if (!IntFreeDesktopWindow(pwndMessage))
+        {
             bLeakHeap = TRUE;
+            if (pwndMessage->state & WNDS_DESTROYED)
+                cHeld++;
+            else
+                bNoFree = TRUE;
+        }
     }
 
     /* Remove the desktop from the window station's list of associated desktops */
@@ -608,6 +622,10 @@ IntDesktopObjectDelete(
     /* CSRSS has exited: the desktop thread may have no window left now */
     if (!bLeakHeap)
         IntReleaseDesktopThread();
+
+    /* Only freed windows that are still referenced live in the heap: it goes with the last of them */
+    if (bLeakHeap && !bNoFree && IntOrphanDesktopHeap(pdesk, cHeld))
+        bLeakHeap = FALSE;
 
     UserLeave();
 
@@ -2516,13 +2534,13 @@ BOOL IntDeRegisterShellHookWindow(HWND hWnd)
     return FALSE;
 }
 
+/* Unmaps the view of a desktop heap from session space and dereferences its section (either may be NULL) */
 static VOID
-IntFreeDesktopHeap(IN OUT PDESKTOP Desktop)
+IntFreeDesktopHeapParts(
+    _In_opt_ PVOID pheapDesktop,
+    _In_opt_ PVOID hsectionDesktop)
 {
-    /* The heap belongs to the desktop: its view in session space and its section
-     * go away with the desktop object, like on Windows. Every process view was
-     * unmapped by IntUnmapDesktopView, each holds a reference to the desktop. */
-    if (Desktop->pheapDesktop != NULL)
+    if (pheapDesktop != NULL)
     {
         PEPROCESS Process = PsGetCurrentProcess();
         KAPC_STATE ApcState;
@@ -2537,21 +2555,106 @@ IntFreeDesktopHeap(IN OUT PDESKTOP Desktop)
             bAttached = TRUE;
         }
 
-        Status = MmUnmapViewInSessionSpace(Desktop->pheapDesktop);
+        Status = MmUnmapViewInSessionSpace(pheapDesktop);
         if (!NT_SUCCESS(Status))
-            ERR("Failed to unmap the heap of desktop %p, Status 0x%08lx\n", Desktop, Status);
+            ERR("Failed to unmap the desktop heap %p, Status 0x%08lx\n", pheapDesktop, Status);
 
         if (bAttached)
             KeUnstackDetachProcess(&ApcState);
-
-        Desktop->pDeskInfo = NULL;
-        Desktop->pheapDesktop = NULL;
     }
 
-    if (Desktop->hsectionDesktop != NULL)
+    if (hsectionDesktop != NULL)
+        ObDereferenceObject(hsectionDesktop);
+}
+
+static VOID
+IntFreeDesktopHeap(IN OUT PDESKTOP Desktop)
+{
+    /* The heap belongs to the desktop: its view in session space and its section
+     * go away with the desktop object, like on Windows. Every process view was
+     * unmapped by IntUnmapDesktopView, each holds a reference to the desktop. */
+    IntFreeDesktopHeapParts(Desktop->pheapDesktop, Desktop->hsectionDesktop);
+    if (Desktop->pheapDesktop != NULL)
+        Desktop->pDeskInfo = NULL;
+    Desktop->pheapDesktop = NULL;
+    Desktop->hsectionDesktop = NULL;
+}
+
+/*
+ * The heap of a deleted desktop whose desktop window or message window was still referenced when it was freed
+ * (IntFreeDesktopWindow: the window object stays in the heap until that reference goes). The heap outlives
+ * the desktop object for them, and goes with the last of them (FreeDeskThreadObject finds it by the address
+ * of the window). A heap is several MB of session space: kept for good, a program that sends to the desktop
+ * window of desktops it creates and closes ran the session out of it.
+ */
+typedef struct _ORPHAN_DESKTOP_HEAP
+{
+    LIST_ENTRY ListEntry;
+    PVOID pheapDesktop;
+    PVOID hsectionDesktop;
+    ULONG_PTR Base;
+    ULONG_PTR Limit;
+    ULONG cWindows;
+} ORPHAN_DESKTOP_HEAP, *PORPHAN_DESKTOP_HEAP;
+
+/* Under the USER lock */
+static LIST_ENTRY gOrphanDesktopHeaps = { &gOrphanDesktopHeaps, &gOrphanDesktopHeaps };
+
+/* The heap of pdesk is handed over to cWindows windows that still live in it. FALSE: it stays leaked */
+static BOOLEAN
+IntOrphanDesktopHeap(
+    _Inout_ PDESKTOP pdesk,
+    _In_ ULONG cWindows)
+{
+    PORPHAN_DESKTOP_HEAP Orphan;
+
+    ASSERT(UserIsEnteredExclusive());
+
+    if (!pdesk->pheapDesktop || !pdesk->pDeskInfo || cWindows == 0)
+        return FALSE;
+    Orphan = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Orphan), USERTAG_TRACKDESKTOP);
+    if (!Orphan)
+        return FALSE;
+    Orphan->pheapDesktop = pdesk->pheapDesktop;
+    Orphan->hsectionDesktop = pdesk->hsectionDesktop;
+    Orphan->Base = (ULONG_PTR)pdesk->pDeskInfo->pvDesktopBase;
+    Orphan->Limit = (ULONG_PTR)pdesk->pDeskInfo->pvDesktopLimit;
+    Orphan->cWindows = cWindows;
+    InsertTailList(&gOrphanDesktopHeaps, &Orphan->ListEntry);
+
+    /* The desktop object does not free them any more */
+    pdesk->pDeskInfo = NULL;
+    pdesk->pheapDesktop = NULL;
+    pdesk->hsectionDesktop = NULL;
+    return TRUE;
+}
+
+/*
+ * The last reference of a window without a desktop (IntFreeDesktopWindow) went (FreeDeskThreadObject): the
+ * heap of its deleted desktop goes with the last such window in it. Object is only compared.
+ */
+VOID
+IntDesktopHeapWindowGone(
+    _In_ PVOID Object)
+{
+    PLIST_ENTRY Entry;
+    PORPHAN_DESKTOP_HEAP Orphan;
+
+    ASSERT(UserIsEnteredExclusive());
+
+    for (Entry = gOrphanDesktopHeaps.Flink; Entry != &gOrphanDesktopHeaps; Entry = Entry->Flink)
     {
-        ObDereferenceObject(Desktop->hsectionDesktop);
-        Desktop->hsectionDesktop = NULL;
+        Orphan = CONTAINING_RECORD(Entry, ORPHAN_DESKTOP_HEAP, ListEntry);
+        if ((ULONG_PTR)Object < Orphan->Base || (ULONG_PTR)Object >= Orphan->Limit)
+            continue;
+        if (--Orphan->cWindows == 0)
+        {
+            RemoveEntryList(&Orphan->ListEntry);
+            TRACE("Freeing the heap %p of a deleted desktop, its last window went\n", Orphan->pheapDesktop);
+            IntFreeDesktopHeapParts(Orphan->pheapDesktop, Orphan->hsectionDesktop);
+            ExFreePoolWithTag(Orphan, USERTAG_TRACKDESKTOP);
+        }
+        return;
     }
 }
 

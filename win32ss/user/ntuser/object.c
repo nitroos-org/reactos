@@ -94,12 +94,16 @@ static void FreeDeskThreadObject(
     PTHREADINFO pti = ObjHead->pti;
 
     /* No desktop: a desktop window that was still referenced when its desktop was deleted; it stays in
-       that desktop's heap, which was leaked for it (IntFreeDesktopWindow) */
+       that desktop's heap, which was kept for it (IntFreeDesktopWindow) and goes with the last such window
+       (IntDesktopHeapWindowGone, after the last use of the object here) */
     if (pDesk)
         DesktopHeapFree(pDesk, Object);
 
     pti->ppi->UserHandleCount--;
     IntDereferenceThreadInfo(pti);
+
+    if (!pDesk)
+        IntDesktopHeapWindowGone(Object);
 }
 
 _Success_(return!=NULL)
