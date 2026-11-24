@@ -1276,6 +1276,16 @@ IntSetOwner(HWND hWnd, HWND hWndNewOwner)
       goto Error;
    }
 
+   /* An owner on another desktop would be referenced from a window of this one: its desktop's heap is freed
+      when that desktop goes, with the owner still referenced (as for a parent, see co_IntSetParent) */
+   if (WndNewOwner && WndNewOwner->head.rpdesk != Wnd->head.rpdesk)
+   {
+      ERR("IntSetOwner: owner %p is on another desktop than %p\n", hWndNewOwner, hWnd);
+      EngSetLastError(ERROR_INVALID_PARAMETER);
+      ret = NULL;
+      goto Error;
+   }
+
    /* if parent belongs to a different thread and the window isn't */
    /* top-level, attach the two threads */
    IntProcessOwnerSwap(Wnd, WndNewOwner, WndOldOwner);
@@ -2568,6 +2578,20 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
     else if (hWndOwner && !OwnerWindow)
     {
         ERR("Got invalid owner window handle for %wZ\n", ClassName);
+        ParentWindow = NULL;
+        goto cleanup;
+    }
+
+    /* The window is made in the heap of this thread's desktop. A parent or an owner on another desktop
+       would reference it from there, and be referenced by it (spwndParent, spwndOwner): the heap of either
+       desktop is freed when that desktop goes, while the other window still references a window in it (the
+       last dereference, or a walk of its owner chain, then reads unmapped memory). As SetParent does for a
+       parent on another desktop: ERROR_INVALID_PARAMETER */
+    if ((ParentWindow && ParentWindow->head.rpdesk != pti->rpdesk) ||
+        (OwnerWindow && OwnerWindow->head.rpdesk != pti->rpdesk))
+    {
+        ERR("The parent or the owner of %wZ is on another desktop\n", ClassName);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
         ParentWindow = NULL;
         goto cleanup;
     }
