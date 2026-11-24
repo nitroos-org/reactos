@@ -2988,8 +2988,10 @@ RCreateServiceW(
         return ERROR_SERVICE_EXISTS;
     }
 
+    /* The display name may be neither the display name nor the name of another service */
     if (lpDisplayName != NULL &&
-        ScmGetServiceEntryByDisplayName(lpDisplayName) != NULL)
+        (ScmGetServiceEntryByDisplayName(lpDisplayName) != NULL ||
+         ScmGetServiceEntryByName(lpDisplayName) != NULL))
     {
         /* Unlock the service database */
         ScmUnlockDatabase();
