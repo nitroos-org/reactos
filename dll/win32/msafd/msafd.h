@@ -48,6 +48,7 @@ typedef struct _SOCKET_INFORMATION {
 	SOCKET Handle;
 	PSOCK_SHARED_INFO SharedData;
 	HANDLE SharedDataHandle;
+	BOOLEAN SharedDataIsCopy; /* SharedData is a heap copy of the state a duplicate was made from, SharedDataHandle only to be closed */
 	DWORD HelperEvents;
 	PHELPER_DATA HelperData;
 	PVOID HelperContext;
