@@ -141,6 +141,29 @@ static ULONG HbPagedPoolPages(void)
     return Info.PagedPoolPages;
 }
 
+/*
+ * 80 threads end inside a WH_CBT (HCBT_CREATEWND) or WH_CALLWNDPROC (WM_NCCREATE) procedure of a window with a
+ * 30000-character title: NtUserCreateWindowEx captured the title (60 KB of paged pool) and freed it after the
+ * creation, which these threads never come back from. Before the fix the paged pool kept growing with
+ * them (+150 pages measured on i386 for 80 threads; +210 MB in a minute of the stress, tag 'STR ').
+ */
+START_TEST(LifetimeCreateNameExitLeak)
+{
+    ULONG Before, After;
+    int i;
+
+    HbRegister();
+    /* One round first: what the first window of a thread brings along (classes, the IME window) is counted
+       before the measurement */
+    HbRunHookThread(0);
+    Before = HbPagedPoolPages();
+    for (i = 0; i < 80; i++)
+        HbRunHookThread(i & 1);
+    After = HbPagedPoolPages();
+    ok(After < Before + 60, "paged pool grew from %lu to %lu pages\n", Before, After);
+    trace("paged pool: %lu -> %lu pages\n", Before, After);
+}
+
 static DWORD WINAPI HbReceiverThread(LPVOID Param)
 {
     HWND *phwnd = Param;
