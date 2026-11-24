@@ -434,6 +434,7 @@ IsMbrDiskUnusableForUefi(
 #define UEFI_INSTALL_OK                 0
 #define UEFI_INSTALL_SPECIAL_PARTITION  1   /* EFI system, reserved or recovery partition */
 #define UEFI_INSTALL_SECTOR_SIZE        2   /* sectors of other than 512 bytes */
+#define UEFI_INSTALL_NO_VOLUME          3   /* a partition of another system (no volume: Setup cannot format or copy to it) */
 
 ULONG
 GetUefiInstallRefusal(

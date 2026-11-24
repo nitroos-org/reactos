@@ -3679,7 +3679,11 @@ IsMbrDiskUnusableForUefi(
  * file of an unattended setup counts partitions in table order, where the EFI
  * system partition is number 1). The file system drivers cannot yet
  * format or copy to a volume of 4096-byte sectors, so such a disk is refused
- * before anything is written to it.
+ * before anything is written to it. A partition that is in the table but has
+ * no volume (a Linux file system, a BIOS boot or boot loader partition: only
+ * the EFI system and the basic data partitions get one) is another system's
+ * and cannot be formatted or copied to: it is refused too, where the install
+ * would otherwise go on with no volume to install to.
  */
 ULONG
 GetUefiInstallRefusal(
@@ -3695,6 +3699,8 @@ GetUefiInstallRefusal(
 
     if (IsEfiSystemPartition(PartEntry) || IsReservedGptPartition(PartEntry))
         return UEFI_INSTALL_SPECIAL_PARTITION;
+    if (PartEntry->IsPartitioned && !PartEntry->Volume && !IsContainerPartition(PartEntry->PartitionType))
+        return UEFI_INSTALL_NO_VOLUME;
     return UEFI_INSTALL_OK;
 }
 
