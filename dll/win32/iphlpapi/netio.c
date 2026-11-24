@@ -1265,3 +1265,72 @@ NET_IFINDEX WINAPI if_nametoindex(PCSTR Name)
     return 0;
   return Index;
 }
+
+/*
+ * The legacy interface table: the loopback interface is called "Software Loopback Interface 1" and every row has
+ * the name \DEVICE\TCPIP_{guid} (upper case), the same guid GetIfEntry2 reports (Windows Server 2022).
+ */
+VOID setLegacyIfRowNames(PMIB_IFROW Row)
+{
+  GUID Guid;
+  BOOL Known = FALSE;
+
+  if (Row->dwType == IF_TYPE_SOFTWARE_LOOPBACK)
+  {
+    static const CHAR LoopbackDescr[] = "Software Loopback Interface 1";
+
+    Guid = LoopbackGuid;
+    Known = TRUE;
+    memcpy(Row->bDescr, LoopbackDescr, sizeof(LoopbackDescr));
+    Row->dwDescrLen = sizeof(LoopbackDescr) - 1;
+  }
+  else if (parse_guid(Row->bDescr, Row->dwDescrLen, &Guid))
+  {
+    Known = TRUE;
+  }
+
+  if (Known)
+    StringCchPrintfW(Row->wszName, MAX_INTERFACE_NAME_LEN,
+                     L"\\DEVICE\\TCPIP_{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+                     Guid.Data1, Guid.Data2, Guid.Data3, Guid.Data4[0], Guid.Data4[1], Guid.Data4[2],
+                     Guid.Data4[3], Guid.Data4[4], Guid.Data4[5], Guid.Data4[6], Guid.Data4[7]);
+}
+
+/* The index of the interface that \DEVICE\TCPIP_{guid} names (the name of a row of GetIfTable) */
+DWORD WINAPI GetAdapterIndex(LPWSTR AdapterName, PULONG IfIndex)
+{
+  static const WCHAR Prefix[] = L"\\DEVICE\\TCPIP_";
+  UNICODE_STRING String;
+  GUID Guid;
+  NETIO_IF *List;
+  ULONG Count, i;
+  DWORD Result;
+
+  TRACE("(%s, %p)\n", debugstr_w(AdapterName), IfIndex);
+
+  if (!AdapterName || !IfIndex)
+    return ERROR_INVALID_PARAMETER;
+  *IfIndex = 0;
+
+  if (_wcsnicmp(AdapterName, Prefix, ARRAYSIZE(Prefix) - 1) != 0)
+    return ERROR_FILE_NOT_FOUND;
+  RtlInitUnicodeString(&String, AdapterName + ARRAYSIZE(Prefix) - 1);
+  if (!NT_SUCCESS(RtlGUIDFromString(&String, &Guid)))
+    return ERROR_FILE_NOT_FOUND;
+
+  Result = collect_interfaces(&List, &Count);
+  if (Result != NO_ERROR)
+    return Result;
+  Result = ERROR_FILE_NOT_FOUND;
+  for (i = 0; i < Count; i++)
+  {
+    if (!memcmp(&List[i].Guid, &Guid, sizeof(Guid)))
+    {
+      *IfIndex = List[i].Index;
+      Result = NO_ERROR;
+      break;
+    }
+  }
+  HeapFree(GetProcessHeap(), 0, List);
+  return Result;
+}
