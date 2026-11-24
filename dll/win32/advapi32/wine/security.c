@@ -3361,6 +3361,13 @@ ConvertStringSecurityDescriptorToSecurityDescriptorA(LPCSTR StringSecurityDescri
     BOOL ret = FALSE;
     LPWSTR StringSecurityDescriptorW;
 
+    /* A NULL string is an invalid parameter, not an empty string with an unknown revision */
+    if (StringSecurityDescriptor == NULL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     len = MultiByteToWideChar(CP_ACP, 0, StringSecurityDescriptor, -1, NULL, 0);
     StringSecurityDescriptorW = HeapAlloc(GetProcessHeap(), 0, len * sizeof(WCHAR));
 
