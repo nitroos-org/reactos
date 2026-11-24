@@ -20,6 +20,76 @@ SHAREDINFO gSharedInfo = { NULL };
 BYTE gfImmInitialized = FALSE; /* Is IMM32 initialized? */
 ULONG_PTR gHighestUserAddress = 0;
 
+/*
+ * The client data blocks (CLIENTIMC) of the input contexts of this process that are not freed yet. Any thread
+ * of the process can lock the client data of an input context of another thread of it (ImmLockClientImc), and
+ * that thread frees it when it destroys the context or ends (DLL_THREAD_DETACH). The pointer is read from the
+ * input context object through the desktop heap mapping, without the USER lock: the object can be freed and
+ * its memory used again meanwhile. A pointer is used only while it is listed here, and the lookup with the
+ * count that keeps the block, and the destroy mark that ends new lookups, are taken under gcsClientImc: a block
+ * marked for destroy is freed by the last unlock, never under a thread that found it.
+ */
+static RTL_CRITICAL_SECTION gcsClientImc;
+static PCLIENTIMC *gapClientImc;
+static ULONG gcClientImc, gcClientImcMax;
+
+/* Under gcsClientImc */
+static BOOL Imm32IsClientImcListed(PCLIENTIMC pClientImc)
+{
+    ULONG i;
+
+    for (i = 0; i < gcClientImc; i++)
+    {
+        if (gapClientImc[i] == pClientImc)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL Imm32ListClientImc(PCLIENTIMC pClientImc)
+{
+    BOOL ret = TRUE;
+
+    RtlEnterCriticalSection(&gcsClientImc);
+    if (gcClientImc == gcClientImcMax)
+    {
+        ULONG cNew = gcClientImcMax ? gcClientImcMax * 2 : 16;
+        PCLIENTIMC *apNew = ImmLocalAlloc(0, cNew * sizeof(PCLIENTIMC));
+        if (apNew)
+        {
+            if (gapClientImc)
+            {
+                RtlCopyMemory(apNew, gapClientImc, gcClientImc * sizeof(PCLIENTIMC));
+                ImmLocalFree(gapClientImc);
+            }
+            gapClientImc = apNew;
+            gcClientImcMax = cNew;
+        }
+    }
+    if (gcClientImc < gcClientImcMax)
+        gapClientImc[gcClientImc++] = pClientImc;
+    else
+        ret = FALSE;
+    RtlLeaveCriticalSection(&gcsClientImc);
+    return ret;
+}
+
+static VOID Imm32UnlistClientImc(PCLIENTIMC pClientImc)
+{
+    ULONG i;
+
+    RtlEnterCriticalSection(&gcsClientImc);
+    for (i = 0; i < gcClientImc; i++)
+    {
+        if (gapClientImc[i] == pClientImc)
+        {
+            gapClientImc[i] = gapClientImc[--gcClientImc];
+            break;
+        }
+    }
+    RtlLeaveCriticalSection(&gcsClientImc);
+}
+
 static BOOL ImmInitializeGlobals(HMODULE hMod)
 {
     NTSTATUS status;
@@ -32,6 +102,13 @@ static BOOL ImmInitializeGlobals(HMODULE hMod)
         return TRUE;
 
     status = RtlInitializeCriticalSection(&gcsImeDpi);
+    if (NT_ERROR(status))
+    {
+        ERR("\n");
+        return FALSE;
+    }
+
+    status = RtlInitializeCriticalSection(&gcsClientImc);
     if (NT_ERROR(status))
     {
         ERR("\n");
@@ -620,14 +697,24 @@ ImmCreateContext(VOID)
     if (IS_NULL_UNEXPECTEDLY(pClientImc))
         return NULL;
 
-    hIMC = NtUserCreateInputContext((ULONG_PTR)pClientImc);
-    if (IS_NULL_UNEXPECTEDLY(hIMC))
+    RtlInitializeCriticalSection(&pClientImc->cs);
+
+    /* Listed before win32k can hand it out (see gcsClientImc) */
+    if (!Imm32ListClientImc(pClientImc))
     {
+        RtlDeleteCriticalSection(&pClientImc->cs);
         ImmLocalFree(pClientImc);
         return NULL;
     }
 
-    RtlInitializeCriticalSection(&pClientImc->cs);
+    hIMC = NtUserCreateInputContext((ULONG_PTR)pClientImc);
+    if (IS_NULL_UNEXPECTEDLY(hIMC))
+    {
+        Imm32UnlistClientImc(pClientImc);
+        RtlDeleteCriticalSection(&pClientImc->cs);
+        ImmLocalFree(pClientImc);
+        return NULL;
+    }
 
     pClientImc->dwCompatFlags = (DWORD)NtUserGetThreadState(THREADSTATE_IMECOMPATFLAGS);
 
@@ -683,23 +770,31 @@ Imm32DestroyInputContext(HIMC hIMC, HKL hKL, BOOL bKeep)
         return FALSE;
     }
 
+    /* The lookup and the count that keeps the block are taken together (see gcsClientImc) */
+    RtlEnterCriticalSection(&gcsClientImc);
     pClientImc = (PCLIENTIMC)pIMC->dwClientImcData;
-    if (pClientImc == NULL)
+    if (pClientImc == NULL || !Imm32IsClientImcListed(pClientImc))
     {
+        RtlLeaveCriticalSection(&gcsClientImc);
         TRACE("pClientImc == NULL\n");
         goto Finish;
     }
 
     if ((pClientImc->dwFlags & CLIENTIMC_LOCKED) && !bKeep)
     {
+        RtlLeaveCriticalSection(&gcsClientImc);
         ERR("Can't destroy for CLIENTIMC_LOCKED\n");
         return FALSE;
     }
 
     if (pClientImc->dwFlags & CLIENTIMC_DESTROY)
+    {
+        RtlLeaveCriticalSection(&gcsClientImc);
         return TRUE;
+    }
 
     InterlockedIncrement(&pClientImc->cLockObj);
+    RtlLeaveCriticalSection(&gcsClientImc);
 
     if (IS_NULL_UNEXPECTEDLY(pClientImc->hInputContext))
         goto Quit;
@@ -738,7 +833,10 @@ Imm32DestroyInputContext(HIMC hIMC, HKL hKL, BOOL bKeep)
     ImmUnlockIMC(hIMC);
 
 Quit:
+    /* No lookup finds it from now on; the last unlock frees it */
+    RtlEnterCriticalSection(&gcsClientImc);
     pClientImc->dwFlags |= CLIENTIMC_DESTROY;
+    RtlLeaveCriticalSection(&gcsClientImc);
     ImmUnlockClientImc(pClientImc);
 
 Finish:
@@ -966,13 +1064,23 @@ ImmLockClientImc(_In_ HIMC hImc)
     if (!pIMC || !Imm32CheckImcProcess(pIMC))
         return NULL;
 
+    /* The lookup and the count that keeps the block are taken together (see gcsClientImc): the block of an
+       input context of another thread can be freed by that thread at any time, and the pointer read from a
+       freed input context object is not one of ours any more */
+    RtlEnterCriticalSection(&gcsClientImc);
     pClientImc = (PCLIENTIMC)pIMC->dwClientImcData;
     if (pClientImc)
     {
-        if (pClientImc->dwFlags & CLIENTIMC_DESTROY)
+        if (!Imm32IsClientImcListed(pClientImc) || (pClientImc->dwFlags & CLIENTIMC_DESTROY))
+        {
+            RtlLeaveCriticalSection(&gcsClientImc);
             return NULL;
-        goto Finish;
+        }
+        InterlockedIncrement(&pClientImc->cLockObj);
+        RtlLeaveCriticalSection(&gcsClientImc);
+        return pClientImc;
     }
+    RtlLeaveCriticalSection(&gcsClientImc);
 
     pClientImc = ImmLocalAlloc(HEAP_ZERO_MEMORY, sizeof(CLIENTIMC));
     if (IS_NULL_UNEXPECTEDLY(pClientImc))
@@ -980,18 +1088,26 @@ ImmLockClientImc(_In_ HIMC hImc)
 
     RtlInitializeCriticalSection(&pClientImc->cs);
     pClientImc->dwCompatFlags = (DWORD)NtUserGetThreadState(THREADSTATE_IMECOMPATFLAGS);
+    pClientImc->dwFlags |= CLIENTIMC_LOCKED;
+    pClientImc->cLockObj = 1;
 
-    if (!NtUserUpdateInputContext(hImc, UIC_CLIENTIMCDATA, (DWORD_PTR)pClientImc))
+    /* Listed before win32k can hand it out */
+    if (!Imm32ListClientImc(pClientImc))
     {
-        ERR("\n");
+        RtlDeleteCriticalSection(&pClientImc->cs);
         ImmLocalFree(pClientImc);
         return NULL;
     }
 
-    pClientImc->dwFlags |= CLIENTIMC_LOCKED;
+    if (!NtUserUpdateInputContext(hImc, UIC_CLIENTIMCDATA, (DWORD_PTR)pClientImc))
+    {
+        ERR("\n");
+        Imm32UnlistClientImc(pClientImc);
+        RtlDeleteCriticalSection(&pClientImc->cs);
+        ImmLocalFree(pClientImc);
+        return NULL;
+    }
 
-Finish:
-    InterlockedIncrement(&pClientImc->cLockObj);
     return pClientImc;
 }
 
@@ -1009,6 +1125,9 @@ ImmUnlockClientImc(_Inout_ PCLIENTIMC pClientImc)
     cLocks = InterlockedDecrement(&pClientImc->cLockObj);
     if (cLocks != 0 || !(pClientImc->dwFlags & CLIENTIMC_DESTROY))
         return;
+
+    /* Marked for destroy, so no lookup counts it any more: this was the last lock */
+    Imm32UnlistClientImc(pClientImc);
 
     hInputContext = pClientImc->hInputContext;
     if (hInputContext)
@@ -1379,6 +1498,7 @@ ImmDllInitialize(
 
         case DLL_PROCESS_DETACH:
             RtlDeleteCriticalSection(&gcsImeDpi);
+            RtlDeleteCriticalSection(&gcsClientImc);
             TRACE("imm32.dll is unloaded\n");
             break;
     }
