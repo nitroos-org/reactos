@@ -170,6 +170,7 @@ list(APPEND SOURCE
     ServiceInheritOnlyGeneric.c
     ServiceSharedToken.c
     ServiceTokenSd.c
+    TokenAdminQuery.c
     ServiceSidToken.c
     PerfCounterValues.c
     PerfProvider.c
