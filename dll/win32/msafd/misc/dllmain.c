@@ -1922,8 +1922,9 @@ WSPAccept(
     }
     Ipv6Socket = (Socket->SharedData->AddressFamily == AF_INET6);
     ReceiveBufferLength = 0xA + (Ipv6Socket ? TDIADDR_SOCKADDR_IN6_LENGTH : sizeof(SOCKADDR));
-    if ((SocketAddress && !SocketAddressLength) ||
-        (SocketAddressLength && !SocketAddress) ||
+    /* An address without a length is accepted and left untouched (measured on Windows Server 2022:
+     * ws2_32_winetest sock test_accept, accept(s, &address, NULL)) */
+    if ((SocketAddressLength && !SocketAddress) ||
         (SocketAddressLength && *SocketAddressLength < (Ipv6Socket ? TDIADDR_SOCKADDR_IN6_LENGTH : sizeof(SOCKADDR))))
     {
        if (lpErrno) *lpErrno = WSAEFAULT;
@@ -2328,7 +2329,7 @@ WSPAccept(
     MsafdInheritListenerOptions(AcceptSocketInfo, Socket, TRUE);
 
     /* Return Address in SOCKADDR FORMAT */
-    if( SocketAddress )
+    if( SocketAddress && SocketAddressLength )
     {
         if (Ipv6Socket)
         {
