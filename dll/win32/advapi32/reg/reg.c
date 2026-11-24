@@ -4023,6 +4023,10 @@ RegOpenKeyExA(
     TRACE("RegOpenKeyExA hKey 0x%x lpSubKey %s ulOptions 0x%x samDesired 0x%x phkResult %p\n",
           hKey, lpSubKey, ulOptions, samDesired, phkResult);
 
+    /* refused before the wide version, which clears the result, is called: the ANSI version leaves it alone */
+    if (!hKey && lpSubKey && phkResult)
+        return ERROR_INVALID_HANDLE;
+
     if (lpSubKey)
     {
         if (!RtlCreateUnicodeStringFromAsciiz(&SubKeyString, lpSubKey))
@@ -4068,6 +4072,8 @@ RegOpenKeyExW(HKEY hKey,
 
     if (!hKey && lpSubKey && phkResult)
     {
+        /* the wide version clears the result, the ANSI version leaves it alone (measured on Windows Server 2022) */
+        *phkResult = NULL;
         return ERROR_INVALID_HANDLE;
     }
 
