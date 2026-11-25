@@ -4434,7 +4434,8 @@ SeclClientGrantObject(HANDLE hObject, PSID LogonSid, DWORD Rights)
     {
         ZeroMemory(&Ea, sizeof(Ea));
         Ea.grfAccessPermissions = Rights;
-        Ea.grfAccessMode = GRANT_ACCESS;
+        /* Rights 0: take the entries of the logon out again */
+        Ea.grfAccessMode = Rights ? GRANT_ACCESS : REVOKE_ACCESS;
         Ea.grfInheritance = NO_INHERITANCE;
         Ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
         Ea.Trustee.TrusteeType = TRUSTEE_IS_GROUP;
@@ -4449,9 +4450,60 @@ SeclClientGrantObject(HANDLE hObject, PSID LogonSid, DWORD Rights)
     return (dwError == ERROR_SUCCESS);
 }
 
+/*
+ * The window station and desktop the new logon was given, kept until the process has exited; then the
+ * logon is taken out of both again, as the service does for a process it starts in its own session.
+ * This runs in the caller: a caller that exits before the process leaves the entries in place.
+ */
+typedef struct _SECL_CLIENT_GRANT
+{
+    HMODULE hUser32;
+    HANDLE hWinSta;
+    HANDLE hDesk;
+    HANDLE hProcess;
+    BYTE LogonSid[SECURITY_MAX_SID_SIZE];
+} SECL_CLIENT_GRANT, *PSECL_CLIENT_GRANT;
+
 static
 VOID
-SeclClientGrantDesktop(PSID LogonSid, LPCWSTR lpDesktop)
+SeclClientFreeGrant(PSECL_CLIENT_GRANT Grant)
+{
+    typedef BOOL (WINAPI *PCLOSEDESKTOP)(HANDLE);
+    PCLOSEDESKTOP pCloseDesktop;
+
+    if (Grant->hDesk)
+    {
+        pCloseDesktop = (PCLOSEDESKTOP)GetProcAddress(Grant->hUser32, "CloseDesktop");
+        if (pCloseDesktop)
+            pCloseDesktop(Grant->hDesk);
+    }
+    if (Grant->hWinSta)
+        CloseHandle(Grant->hWinSta);
+    if (Grant->hProcess)
+        CloseHandle(Grant->hProcess);
+    FreeLibrary(Grant->hUser32);
+    HeapFree(GetProcessHeap(), 0, Grant);
+}
+
+static
+DWORD
+WINAPI
+SeclClientRevokeOnExit(PVOID Context)
+{
+    PSECL_CLIENT_GRANT Grant = Context;
+
+    WaitForSingleObject(Grant->hProcess, INFINITE);
+    if (Grant->hDesk)
+        SeclClientGrantObject(Grant->hDesk, (PSID)Grant->LogonSid, 0);
+    if (Grant->hWinSta)
+        SeclClientGrantObject(Grant->hWinSta, (PSID)Grant->LogonSid, 0);
+    SeclClientFreeGrant(Grant);
+    return 0;
+}
+
+static
+VOID
+SeclClientGrantDesktop(PSID LogonSid, LPCWSTR lpDesktop, HANDLE hProcess)
 {
     typedef HANDLE (WINAPI *PGETPROCESSWINSTA)(VOID);
     typedef HANDLE (WINAPI *POPENDESKTOPW)(LPCWSTR, DWORD, BOOL, ACCESS_MASK);
@@ -4462,8 +4514,9 @@ SeclClientGrantDesktop(PSID LogonSid, LPCWSTR lpDesktop)
     POPENDESKTOPW pOpenDesktopW;
     PCLOSEDESKTOP pCloseDesktop;
     PGETUSEROBJECTINFOW pGetUserObjectInformationW;
+    PSECL_CLIENT_GRANT Grant;
     HMODULE hUser32;
-    HANDLE hWinSta, hDesk;
+    HANDLE hWinSta, hDesk, hWait;
     const WCHAR *Sep;
     DWORD Length;
 
@@ -4487,6 +4540,14 @@ SeclClientGrantDesktop(PSID LogonSid, LPCWSTR lpDesktop)
     pOpenDesktopW = (POPENDESKTOPW)GetProcAddress(hUser32, "OpenDesktopW");
     pCloseDesktop = (PCLOSEDESKTOP)GetProcAddress(hUser32, "CloseDesktop");
     pGetUserObjectInformationW = (PGETUSEROBJECTINFOW)GetProcAddress(hUser32, "GetUserObjectInformationW");
+    Grant = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Grant));
+    if (Grant == NULL || !CopySid(sizeof(Grant->LogonSid), (PSID)Grant->LogonSid, LogonSid))
+    {
+        if (Grant) HeapFree(GetProcessHeap(), 0, Grant);
+        FreeLibrary(hUser32);
+        return;
+    }
+    Grant->hUser32 = hUser32;
     if (pGetProcessWindowStation && pOpenDesktopW && pCloseDesktop && pGetUserObjectInformationW)
     {
         hWinSta = pGetProcessWindowStation();
@@ -4494,12 +4555,20 @@ SeclClientGrantDesktop(PSID LogonSid, LPCWSTR lpDesktop)
         if (hWinSta && pGetUserObjectInformationW(hWinSta, 2, OwnName, sizeof(OwnName), &Length) &&
             !lstrcmpiW(OwnName, WinStaName))
         {
-            SeclClientGrantObject(hWinSta, LogonSid, SECL_CLIENT_WINSTA_RIGHTS);
+            if (SeclClientGrantObject(hWinSta, LogonSid, SECL_CLIENT_WINSTA_RIGHTS) &&
+                !DuplicateHandle(GetCurrentProcess(), hWinSta, GetCurrentProcess(), &Grant->hWinSta,
+                                 READ_CONTROL | WRITE_DAC, FALSE, 0))
+            {
+                WARN("Cannot keep the window station, error %lu: its entry stays\n", GetLastError());
+                Grant->hWinSta = NULL;
+            }
             hDesk = pOpenDesktopW(DeskName, 0, FALSE, READ_CONTROL | WRITE_DAC);
             if (hDesk)
             {
-                SeclClientGrantObject(hDesk, LogonSid, SECL_CLIENT_DESKTOP_RIGHTS);
-                pCloseDesktop(hDesk);
+                if (SeclClientGrantObject(hDesk, LogonSid, SECL_CLIENT_DESKTOP_RIGHTS))
+                    Grant->hDesk = hDesk;
+                else
+                    pCloseDesktop(hDesk);
             }
             else
             {
@@ -4511,7 +4580,21 @@ SeclClientGrantDesktop(PSID LogonSid, LPCWSTR lpDesktop)
             WARN("Window station %S is not the caller's: no access given\n", WinStaName);
         }
     }
-    FreeLibrary(hUser32);
+
+    /* Take the logon out again when the process has exited */
+    if ((Grant->hWinSta || Grant->hDesk) && hProcess &&
+        DuplicateHandle(GetCurrentProcess(), hProcess, GetCurrentProcess(), &Grant->hProcess,
+                        SYNCHRONIZE, FALSE, 0))
+    {
+        hWait = CreateThread(NULL, 0, SeclClientRevokeOnExit, Grant, 0, NULL);
+        if (hWait)
+        {
+            CloseHandle(hWait);
+            return;
+        }
+        WARN("Cannot wait for the process, error %lu: the entries stay\n", GetLastError());
+    }
+    SeclClientFreeGrant(Grant);
 }
 
 BOOL
@@ -4642,7 +4725,8 @@ CreateProcessWithLogonW(
             IsValidSid((PSID)Response.LogonSid) &&
             GetLengthSid((PSID)Response.LogonSid) == Response.dwLogonSidLength)
         {
-            SeclClientGrantDesktop((PSID)Response.LogonSid, Request.Desktop);
+            SeclClientGrantDesktop((PSID)Response.LogonSid, Request.Desktop,
+                                   (HANDLE)(LONG_PTR)(LONG)Response.hProcess);
         }
         if (!(dwCreationFlags & CREATE_SUSPENDED))
             ResumeThread(hThread);
