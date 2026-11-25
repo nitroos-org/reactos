@@ -88,6 +88,7 @@ KMT_TESTFUNC Test_KeApc;
 KMT_TESTFUNC Test_KeApcDelivery;
 KMT_TESTFUNC Test_KeBugCheckCallback;
 KMT_TESTFUNC Test_KeDeviceQueue;
+KMT_TESTFUNC Test_KeDbgPrintIrql;
 KMT_TESTFUNC Test_KeDpc;
 KMT_TESTFUNC Test_KeEvent;
 KMT_TESTFUNC Test_KeFastFail;
@@ -276,6 +277,7 @@ const KMT_TEST TestList[] =
     { "KeApcDelivery",                      Test_KeApcDelivery },
     { "-KeBugCheckCallback",                Test_KeBugCheckCallback },
     { "KeDeviceQueue",                      Test_KeDeviceQueue },
+    { "KeDbgPrintIrql",                     Test_KeDbgPrintIrql },
     { "KeDpc",                              Test_KeDpc },
     { "KeEvent",                            Test_KeEvent },
     { "-KeFastFail",                        Test_KeFastFail },
