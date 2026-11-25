@@ -3135,23 +3135,10 @@ static
 ULONG64
 CmpAclNewGeneration(VOID)
 {
-    LARGE_INTEGER Counter, Time;
     ULONG64 Value;
-    ULONG Seed, i;
 
-    Counter = KeQueryPerformanceCounter(NULL);
-    KeQuerySystemTime(&Time);
-    Seed = Counter.LowPart ^ Time.LowPart ^ (ULONG)KeQueryInterruptTime();
-    Value = (ULONG64)Counter.QuadPart ^ ((ULONG64)Time.QuadPart << 17) ^ KeQueryInterruptTime();
-    /* splitmix64 rounds over the mix, with two draws of the boot's seed */
-    for (i = 0; i < 2; i++)
-    {
-        Value ^= ((ULONG64)RtlRandomEx(&Seed) << 32) | RtlRandomEx(&Seed);
-        Value += 0x9E3779B97F4A7C15ULL;
-        Value = (Value ^ (Value >> 30)) * 0xBF58476D1CE4E5B9ULL;
-        Value = (Value ^ (Value >> 27)) * 0x94D049BB133111EBULL;
-        Value ^= Value >> 31;
-    }
+    /* the system generator (ksecdd.sys is up long before the registry's ACLs are checked) */
+    ExpGetRandomBytes(&Value, sizeof(Value), NULL);
     return Value ? Value : 1;
 }
 
