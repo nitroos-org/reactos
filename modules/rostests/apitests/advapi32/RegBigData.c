@@ -439,7 +439,7 @@ static void CheckData(HKEY Key, PCWSTR Name, DWORD Length, DWORD Seed)
 
 START_TEST(RegBigData)
 {
-    WCHAR Dir[MAX_PATH], File[MAX_PATH], Saved[MAX_PATH], Old[MAX_PATH];
+    WCHAR Dir[MAX_PATH], File[MAX_PATH], Saved[MAX_PATH], Old[MAX_PATH], New[MAX_PATH], NewLog[MAX_PATH];
     PBYTE Hive, Now;
     unsigned HiveSize;
     DWORD NowSize, Size;
@@ -761,6 +761,63 @@ START_TEST(RegBigData)
             }
         }
     }
+
+    /* 6. a hive that the kernel creates (RegLoadKeyW of a file that does not exist) is of format 1.5, as Windows'
+          own hives: values of 1 MiB and 2 MiB are big data, every chain in the layout Windows reads, and they read
+          back, also after an unload and a load */
+    StringCchPrintfW(New, _countof(New), L"%sRegBigDataNew.hiv", Dir);
+    StringCchPrintfW(NewLog, _countof(NewLog), L"%sRegBigDataNew.hiv.LOG", Dir);
+    DeleteFileW(New);
+    DeleteFileW(NewLog);
+    Error = Load(MOUNT, New);
+    if (Error != ERROR_SUCCESS)
+    {
+        skip("RegLoadKeyW did not create a hive for a file that does not exist: %ld\n", Error);
+    }
+    else
+    {
+        ULONG Bad, Chains;
+
+        Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, MOUNT, 0, KEY_ALL_ACCESS, &Key);
+        ok(Error == ERROR_SUCCESS, "open the new hive: %ld\n", Error);
+        if (Error == ERROR_SUCCESS)
+        {
+            SetData(Key, L"1m", 1048576, 120);
+            SetData(Key, L"2m", 2097152, 121);
+            SetData(Key, L"100k", 100000, 122);
+            CheckData(Key, L"1m", 1048576, 120);
+            CheckData(Key, L"2m", 2097152, 121);
+            ok(RegFlushKey(Key) == ERROR_SUCCESS, "flush the new hive\n");
+            RegCloseKey(Key);
+        }
+        ok(RegUnLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT) == ERROR_SUCCESS, "unload the new hive\n");
+        Now = ReadWholeFile(New, &NowSize);
+        ok(Now != NULL, "read the new hive file\n");
+        if (Now)
+        {
+            CountCells(Now, NowSize, &Db, &Long, &Minor);
+            Chains = CheckSegmentCells(Now, NowSize, &Bad);
+            ok(Minor == 5, "the hive the kernel created is format 1.%lu, want 1.5\n", Minor);
+            ok(Db == 3 && Chains == 3, "new hive: 'db' cells: %lu counted, %lu checked (want 3)\n", Db, Chains);
+            ok(Bad == 0, "new hive: %lu chains hold a segment cell smaller than %u bytes\n", Bad, HG_SEGMENT);
+            HeapFree(GetProcessHeap(), 0, Now);
+        }
+        Error = Load(MOUNT, New);
+        ok(Error == ERROR_SUCCESS, "load the new hive again: %ld\n", Error);
+        if (Error == ERROR_SUCCESS)
+        {
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, MOUNT, 0, KEY_READ, &Key) == ERROR_SUCCESS)
+            {
+                CheckData(Key, L"1m", 1048576, 120);
+                CheckData(Key, L"2m", 2097152, 121);
+                CheckData(Key, L"100k", 100000, 122);
+                RegCloseKey(Key);
+            }
+            ok(RegUnLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT) == ERROR_SUCCESS, "unload the new hive again\n");
+        }
+    }
+    DeleteFileW(New);
+    DeleteFileW(NewLog);
 
 Cleanup:
     RegUnLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT);

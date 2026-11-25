@@ -375,6 +375,17 @@ CmpInitHiveFromFile(IN PCUNICODE_STRING HiveName,
         return Status;
     }
 
+    /*
+     * A hive file created here is of format 1.5, as Windows' own hives: data longer than CM_KEY_VALUE_BIG is
+     * stored as big data, and a value of 1 MB or more fits (a 1.3 hive holds at most 1048572 bytes in a value).
+     * The boot loader reads only the SYSTEM hive, which is never created here (it comes from the loader).
+     */
+    if (Operation == HINIT_CREATE)
+    {
+        NewHive->Hive.Version = HSYS_WHISTLER;
+        NewHive->Hive.BaseBlock->Minor = HSYS_WHISTLER;
+    }
+
     /* Success, return hive */
     *Hive = NewHive;
 

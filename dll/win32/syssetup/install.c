@@ -1462,11 +1462,11 @@ SaveDefaultUserHive(VOID)
     if (!pSetupEnablePrivilege(SE_BACKUP_NAME, TRUE))
         DPRINT1("pSetupEnablePrivilege(SE_BACKUP_NAME) failed (Error %lu)\n", GetLastError());
 
-    /* Save the Default hive */
+    /* Save the Default hive, in the format of 1.5 (the hive of every new user profile: big values fit) */
     dwError = RegSaveKeyExW(hUserKey,
                             szDefaultUserHive,
                             NULL,
-                            REG_STANDARD_FORMAT);
+                            REG_LATEST_FORMAT);
     if (dwError == ERROR_ALREADY_EXISTS)
     {
         WCHAR szBackupHive[MAX_PATH];
@@ -1490,7 +1490,7 @@ SaveDefaultUserHive(VOID)
             dwError = RegSaveKeyExW(hUserKey,
                                     szDefaultUserHive,
                                     NULL,
-                                    REG_STANDARD_FORMAT);
+                                    REG_LATEST_FORMAT);
         }
     }
     if (dwError != ERROR_SUCCESS)
