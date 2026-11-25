@@ -141,6 +141,12 @@ VOID NTAPI
 LdrpInsertMemoryTableEntry(IN PLDR_DATA_TABLE_ENTRY LdrEntry);
 
 VOID NTAPI
+LdrpRemoveMemoryTableEntry(_In_ PLDR_DATA_TABLE_ENTRY LdrEntry);
+
+/* Held exclusively for every change of the module lists and the hash table, shared by lookups without the loader lock */
+extern RTL_SRWLOCK LdrpModuleListLock;
+
+VOID NTAPI
 LdrpRemoveImageRange(_In_ PLDR_DATA_TABLE_ENTRY LdrEntry);
 
 BOOLEAN NTAPI

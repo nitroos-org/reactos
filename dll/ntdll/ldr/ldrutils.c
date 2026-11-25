@@ -1480,10 +1480,7 @@ SkipCheck:
         if (NT_SUCCESS(HardErrorStatus) && Response == ResponseCancel)
         {
             /* Remove the DLL from the lists */
-            RemoveEntryList(&LdrEntry->InLoadOrderLinks);
-            LdrpRemoveImageRange(LdrEntry);
-            RemoveEntryList(&LdrEntry->InMemoryOrderLinks);
-            RemoveEntryList(&LdrEntry->HashLinks);
+            LdrpRemoveMemoryTableEntry(LdrEntry);
 
             /* Remove the LDR Entry */
             RtlFreeHeap(LdrpHeap, 0, LdrEntry );
@@ -1692,10 +1689,7 @@ FailRelocate:
             if (!NT_SUCCESS(Status))
             {
                 /* Remove it from the lists */
-                RemoveEntryList(&LdrEntry->InLoadOrderLinks);
-                LdrpRemoveImageRange(LdrEntry);
-                RemoveEntryList(&LdrEntry->InMemoryOrderLinks);
-                RemoveEntryList(&LdrEntry->HashLinks);
+                LdrpRemoveMemoryTableEntry(LdrEntry);
 
                 /* Unmap it, clear the entry */
                 NtUnmapViewOfSection(NtCurrentProcess(), ViewBase);
@@ -1948,12 +1942,25 @@ LdrpLookupImageRange(
     return TRUE;
 }
 
+/*
+ * The module lists (load order, memory order) and the hash table change under the loader lock, and also under this
+ * lock, held exclusively for the change itself only (no call out, no wait). A lookup by name that leaves the load
+ * counts alone (GetModuleHandle) holds it shared instead of the loader lock: Windows answers such a lookup at once
+ * while another thread holds the loader lock (a program that calls it with a lock of its own held deadlocks
+ * otherwise against a DLL entry point that needs that lock). An entry leaves these lists under the exclusive lock
+ * before it is freed (and before its names are), so a shared holder never reaches freed memory; the name buffers and
+ * the base of an entry do not change while it is on the lists. Order: loader lock, then this lock.
+ */
+RTL_SRWLOCK LdrpModuleListLock = RTL_SRWLOCK_INIT;
+
 VOID
 NTAPI
 LdrpInsertMemoryTableEntry(IN PLDR_DATA_TABLE_ENTRY LdrEntry)
 {
     PPEB_LDR_DATA PebData = NtCurrentPeb()->Ldr;
     ULONG i;
+
+    RtlAcquireSRWLockExclusive(&LdrpModuleListLock);
 
     /* Insert into hash table */
     i = LDR_GET_HASH_ENTRY(LdrEntry->BaseDllName.Buffer[0]);
@@ -1963,6 +1970,24 @@ LdrpInsertMemoryTableEntry(IN PLDR_DATA_TABLE_ENTRY LdrEntry)
     InsertTailList(&PebData->InLoadOrderModuleList, &LdrEntry->InLoadOrderLinks);
     InsertTailList(&PebData->InMemoryOrderModuleList, &LdrEntry->InMemoryOrderLinks);
     LdrpInsertImageRange(LdrEntry);
+
+    RtlReleaseSRWLockExclusive(&LdrpModuleListLock);
+}
+
+/*!
+ * \brief Takes a module off the load order, memory order and hash lists (the module list lock above)
+ */
+VOID
+NTAPI
+LdrpRemoveMemoryTableEntry(
+    _In_ PLDR_DATA_TABLE_ENTRY LdrEntry)
+{
+    RtlAcquireSRWLockExclusive(&LdrpModuleListLock);
+    RemoveEntryList(&LdrEntry->InLoadOrderLinks);
+    LdrpRemoveImageRange(LdrEntry);
+    RemoveEntryList(&LdrEntry->InMemoryOrderLinks);
+    RemoveEntryList(&LdrEntry->HashLinks);
+    RtlReleaseSRWLockExclusive(&LdrpModuleListLock);
 }
 
 VOID
