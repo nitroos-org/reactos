@@ -531,9 +531,17 @@ NPAddConnection3(HWND hwndOwner,
         Letter = DriveLetterOf(lpNetResource->lpLocalName);
         if (Letter == 0)
             return WN_BAD_LOCALNAME;
-        if (QueryDosDeviceW(lpNetResource->lpLocalName, Target, ARRAYSIZE(Target)) ||
-            GetLastError() != ERROR_FILE_NOT_FOUND)
+        /* The letter is taken when it has a target (one longer than the buffer too). Any other
+         * failure is the answer: a caller that may not look at the device map (a filtered token
+         * impersonated: ERROR_ACCESS_DENIED) gets that, as on Windows Server 2022 (measured), not
+         * "already assigned" for a letter that is free */
+        if (QueryDosDeviceW(lpNetResource->lpLocalName, Target, ARRAYSIZE(Target)))
             return WN_ALREADY_CONNECTED;
+        Error = GetLastError();
+        if (Error == ERROR_INSUFFICIENT_BUFFER)
+            return WN_ALREADY_CONNECTED;
+        if (Error != ERROR_FILE_NOT_FOUND)
+            return Error;
     }
     if (!CallerLogonId(&LogonId))
         return GetLastError();
