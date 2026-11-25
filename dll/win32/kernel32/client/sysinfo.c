@@ -87,8 +87,15 @@ BaseQuerySystemFirmware(
 {
     SYSTEM_FIRMWARE_TABLE_INFORMATION* SysFirmwareInfo;
     ULONG Result = 0, ReturnedSize;
-    ULONG TotalSize = BufferSize + sizeof(SYSTEM_FIRMWARE_TABLE_INFORMATION);
+    /* The data area starts at TableBuffer: the size of the structure also counts its padding and the one byte array */
+    ULONG TotalSize = BufferSize + FIELD_OFFSET(SYSTEM_FIRMWARE_TABLE_INFORMATION, TableBuffer);
     NTSTATUS Status;
+
+    if (TotalSize < BufferSize)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
 
     SysFirmwareInfo = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, TotalSize);
     if (!SysFirmwareInfo)
@@ -96,28 +103,32 @@ BaseQuerySystemFirmware(
         SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
     }
-    _SEH2_TRY
+
+    SysFirmwareInfo->ProviderSignature = FirmwareTableProviderSignature;
+    SysFirmwareInfo->TableID = FirmwareTableID;
+    SysFirmwareInfo->Action = Action;
+    SysFirmwareInfo->TableBufferLength = BufferSize;
+
+    Status = NtQuerySystemInformation(SystemFirmwareTableInformation, SysFirmwareInfo, TotalSize, &ReturnedSize);
+
+    if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_TOO_SMALL)
+        Result = SysFirmwareInfo->TableBufferLength;
+
+    /* The caller's buffer is written only when the whole table fits; a pointer that cannot be written is an error, not an exception */
+    if (NT_SUCCESS(Status) && pFirmwareTableBuffer && Result != 0)
     {
-        SysFirmwareInfo->ProviderSignature = FirmwareTableProviderSignature;
-        SysFirmwareInfo->TableID = FirmwareTableID;
-        SysFirmwareInfo->Action = Action;
-        SysFirmwareInfo->TableBufferLength = BufferSize;
-
-        Status = NtQuerySystemInformation(SystemFirmwareTableInformation, SysFirmwareInfo, TotalSize, &ReturnedSize);
-
-        if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_TOO_SMALL)
-            Result = SysFirmwareInfo->TableBufferLength;
-
-        if (NT_SUCCESS(Status) && pFirmwareTableBuffer)
+        _SEH2_TRY
         {
-            RtlCopyMemory(pFirmwareTableBuffer, SysFirmwareInfo->TableBuffer, SysFirmwareInfo->TableBufferLength);
+            RtlCopyMemory(pFirmwareTableBuffer, SysFirmwareInfo->TableBuffer, Result);
         }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = STATUS_ACCESS_VIOLATION;
+        }
+        _SEH2_END;
     }
-    _SEH2_FINALLY
-    {
-        RtlFreeHeap(RtlGetProcessHeap(), 0, SysFirmwareInfo);
-    }
-    _SEH2_END;
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, SysFirmwareInfo);
 
     BaseSetLastNTError(Status);
     return Result;
