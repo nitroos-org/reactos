@@ -37,12 +37,14 @@ static VOID TestInherit(PCWSTR Base)
     PSECURITY_DESCRIPTOR Sd;
     PACL Dacl;
     LONG i;
-    /* With a directory whose stored DACL is not marked SE_DACL_AUTO_INHERITED, a create inherits
-     * ACEs unmarked and an explicit DACL replaces them (Windows Server 2008 R2 and Windows 10 22H2).
-     * Neither version stores the mark from a caller's descriptor (SE_DACL_AUTO_INHERITED or
-     * SE_DACL_AUTO_INHERIT_REQ, at create or by NtSetSecurityObject); TestAutoInherited covers a
-     * directory that inherited the mark. */
-    const BYTE Inh = 0;
+    /* With a directory whose stored DACL is not marked SE_DACL_AUTO_INHERITED, a create inherits ACEs marked
+     * INHERITED_ACE and the new descriptor does not carry SE_DACL_AUTO_INHERITED; an explicit DACL replaces them and
+     * the descriptor is protected (measured on Windows Server 2022, build 20348, with native and Win32 creates,
+     * evidence/kbatch30-20261125/data/windows/win-nat.txt; the advapi32 winetest security rows agree). An earlier note in
+     * this file said that Windows Server 2008 R2 and Windows 10 22H2 inherit the ACEs unmarked: not reproduced on the
+     * reference, not re-measured on those versions. The CREATOR OWNER ACE that becomes an effective ACE of a directory
+     * is NOT marked on Windows Server 2022 (and comes first); ours marks it: todo_ros below. */
+    const BYTE Inh = INHERITED_ACE;
     const BYTE AllFlags = 0x1f;
     WCHAR Name[64];
 
@@ -105,7 +107,8 @@ static VOID TestInherit(PCWSTR Base)
     ok(NtFindAce(Dacl, SidUser, FILE_GENERIC_READ, AllFlags, Inh | OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE, FALSE) >= 0,
        "No inherit-only user ACE for files below\n");
     ok(NtFindAce(Dacl, SidEveryone, FILE_GENERIC_EXECUTE, AllFlags, Inh, FALSE) >= 0, "No one-level Everyone ACE\n");
-    ok(NtFindAce(Dacl, (PSID)Owner, FILE_ALL_ACCESS, AllFlags, Inh, FALSE) >= 0, "No effective owner ACE\n");
+    todo_ros
+    ok(NtFindAce(Dacl, (PSID)Owner, FILE_ALL_ACCESS, AllFlags, 0, FALSE) >= 0, "No effective owner ACE\n");
     ok(NtFindAce(Dacl, SidCreatorOwner, GENERIC_ALL, AllFlags,
                  Inh | OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE, FALSE) >= 0,
        "No inherit-only CREATOR OWNER ACE\n");
@@ -430,7 +433,7 @@ static VOID TestInheritAfterChange(PCWSTR Base)
     }
     ok_hex(NtMakeFile(F1, NULL, 0, FALSE, "x"), STATUS_SUCCESS);
     Dacl = NtGetDacl(F1, Text, sizeof(Text), &Sd);
-    ok(NtFindAce(Dacl, SidUser, FILE_GENERIC_READ, AllFlags, 0, FALSE) >= 0, "f1: no user ACE\n");
+    ok(NtFindAce(Dacl, SidUser, FILE_GENERIC_READ, AllFlags, INHERITED_ACE, FALSE) >= 0, "f1: no user ACE\n");
     if (Sd)
         LocalFree(Sd);
 
@@ -446,7 +449,7 @@ static VOID TestInheritAfterChange(PCWSTR Base)
     ok_hex(NtMakeFile(F2, NULL, 0, FALSE, "x"), STATUS_SUCCESS);
     Dacl = NtGetDacl(F2, Text, sizeof(Text), &Sd);
     trace("f2: %s\n", Text);
-    ok(NtFindAce(Dacl, SidEveryone, FILE_GENERIC_READ, AllFlags, 0, FALSE) >= 0, "f2: no Everyone ACE after the change\n");
+    ok(NtFindAce(Dacl, SidEveryone, FILE_GENERIC_READ, AllFlags, INHERITED_ACE, FALSE) >= 0, "f2: no Everyone ACE after the change\n");
     ok(NtFindAce(Dacl, SidUser, FILE_GENERIC_READ, AllFlags, 0, FALSE) < 0, "f2: the old user ACE is inherited\n");
     if (Sd)
         LocalFree(Sd);
@@ -459,7 +462,7 @@ static VOID TestInheritAfterChange(PCWSTR Base)
     ok_hex(NtMakeDirControl(Dir, Aces, 2, SE_DACL_PROTECTED), STATUS_SUCCESS);
     ok_hex(NtMakeFile(F3, NULL, 0, FALSE, "x"), STATUS_SUCCESS);
     Dacl = NtGetDacl(F3, Text, sizeof(Text), &Sd);
-    ok(NtFindAce(Dacl, SidUser, FILE_GENERIC_READ, AllFlags, 0, FALSE) >= 0, "f3: no user ACE in the new directory\n");
+    ok(NtFindAce(Dacl, SidUser, FILE_GENERIC_READ, AllFlags, INHERITED_ACE, FALSE) >= 0, "f3: no user ACE in the new directory\n");
     ok(NtFindAce(Dacl, SidEveryone, FILE_GENERIC_READ, AllFlags, 0, FALSE) < 0, "f3: Everyone ACE of the old directory\n");
     if (Sd)
         LocalFree(Sd);
