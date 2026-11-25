@@ -1415,7 +1415,7 @@ AfdQueryFsDeviceInfo(PDEVICE_OBJECT DeviceObject, PFILE_FS_DEVICE_INFORMATION Bu
 {
     if (*Length >= sizeof(FILE_FS_DEVICE_INFORMATION))
     {
-        Buffer->Characteristics = 0;
+        Buffer->Characteristics = FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL;
         Buffer->DeviceType = FILE_DEVICE_NAMED_PIPE;
 
         *Length -= sizeof(FILE_FS_DEVICE_INFORMATION);
@@ -2067,7 +2067,7 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
                             sizeof(AFD_DEVICE_EXTENSION),
                             &wstrDeviceName,
                             FILE_DEVICE_NAMED_PIPE,
-                            0,
+                            FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL,
                             FALSE,
                             &DeviceObject);
 
