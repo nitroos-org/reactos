@@ -1899,12 +1899,30 @@ KdpQueryPerformanceCounter(IN PKTRAP_FRAME TrapFrame)
     return KeQueryPerformanceCounter(NULL);
 }
 
+/*
+ * The port lock is taken before the other processors are frozen. A processor
+ * that holds it (the clock tick that polls for a break-in, with its interrupts
+ * off) is in the middle of an exchange with the port, and the freeze NMI would
+ * stop it there: the debugger would then use the port without the lock, and
+ * that processor would go on with its half-done receive after the thaw (a lost
+ * acknowledge, bytes of the next exchange read by the wrong side). The holder
+ * lets go within microseconds. The wait is bounded: a holder that is frozen
+ * already never lets go (a bug check freezes the processors before it enters
+ * the debugger), and the entry then goes on without the lock as before. The
+ * wait counts its own stalls, so the time a waiter spends frozen by another
+ * processor's debugger session does not count.
+ */
+#define KDP_PORT_LOCK_WAIT_US   500000
+#define KDP_PORT_LOCK_STALL_US  10
+
 BOOLEAN
 NTAPI
 KdEnterDebugger(IN PKTRAP_FRAME TrapFrame,
                 IN PKEXCEPTION_FRAME ExceptionFrame)
 {
-    BOOLEAN Enable;
+    BOOLEAN Enable, PortLocked = FALSE, Raised = FALSE;
+    KIRQL OldIrql = PASSIVE_LEVEL;
+    ULONG Waited;
 
     /* Check if we have a trap frame */
     if (TrapFrame)
@@ -1923,11 +1941,35 @@ KdEnterDebugger(IN PKTRAP_FRAME TrapFrame,
     /* Save the current IRQL */
     KeGetCurrentPrcb()->DebuggerSavedIRQL = KeGetCurrentIrql();
 
+    /* Take the port before the others are frozen (see above); not again from inside the debugger */
+    if (!KdEnteredDebugger)
+    {
+        KeRaiseIrql(HIGH_LEVEL, &OldIrql);
+        Raised = TRUE;
+        for (Waited = 0; ; Waited += KDP_PORT_LOCK_STALL_US)
+        {
+            if (KeTryToAcquireSpinLockAtDpcLevel(&KdpDebuggerLock))
+            {
+                PortLocked = TRUE;
+                break;
+            }
+            if (Waited >= KDP_PORT_LOCK_WAIT_US)
+                break;
+            KeStallExecutionProcessor(KDP_PORT_LOCK_STALL_US);
+        }
+    }
+
     /* Freeze all CPUs, raising also the IRQL to HIGH_LEVEL */
     Enable = KeFreezeExecution(TrapFrame, ExceptionFrame);
 
-    /* Lock the port, save its state and set the debugger entered flag */
-    KdpPortLocked = KeTryToAcquireSpinLockAtDpcLevel(&KdpDebuggerLock);
+    /* The thaw goes back to the IRQL of the caller, not to the one raised for the wait */
+    if (Raised)
+        KiOldIrql = OldIrql;
+
+    /* Lock the port (if the wait above did not), save its state and set the debugger entered flag */
+    if (!PortLocked)
+        PortLocked = KeTryToAcquireSpinLockAtDpcLevel(&KdpDebuggerLock);
+    KdpPortLocked = PortLocked;
     KdSave(FALSE);
     KdEnteredDebugger = TRUE;
 

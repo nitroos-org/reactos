@@ -98,9 +98,10 @@ KeThawExecution(IN BOOLEAN Enable)
     GraceDropped = KiCheckGraceDroppedNmi();
 #endif
 
-    /* Restore the old IRQL */
+    /* Restore the old IRQL (on one processor the freeze raised it only from below
+       DISPATCH_LEVEL, the debugger entry may have raised it before the freeze) */
 #ifndef CONFIG_SMP
-    if (KiOldIrql < DISPATCH_LEVEL)
+    if (KiOldIrql < KeGetCurrentIrql())
 #endif
     KeLowerIrql(KiOldIrql);
 
