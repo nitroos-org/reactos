@@ -1785,10 +1785,12 @@ PATH_PathToRegion(
     /* A lone PT_MOVETO draws nothing (and the allocation below would have no size) */
     if (pPath->numEntriesUsed < 2) return FALSE;
 
-    counts = ExAllocatePoolWithTag(PagedPool, (pPath->numEntriesUsed / 2) * sizeof(*counts), TAG_PATH);
+    /* One count for each PT_MOVETO at most: a stroke of a single point (a PT_MOVETO followed by another one) is a
+       stroke of its own, so there can be as many strokes as entries */
+    counts = ExAllocatePoolWithTag(PagedPool, pPath->numEntriesUsed * sizeof(*counts), TAG_PATH);
     if (!counts)
     {
-        ERR("Failed to allocate %lu strokes\n", (pPath->numEntriesUsed / 2) * sizeof(*counts));
+        ERR("Failed to allocate %lu strokes\n", pPath->numEntriesUsed * sizeof(*counts));
         EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return FALSE;
     }
@@ -1803,7 +1805,7 @@ PATH_PathToRegion(
     }
     if (i > pos + 1) counts[polygons++] = i - pos;
 
-    ASSERT( polygons <= pPath->numEntriesUsed / 2 );
+    ASSERT( polygons <= pPath->numEntriesUsed );
 
     /* Fill the region with the strokes */
     Ret = REGION_SetPolyPolygonRgn(Rgn,
