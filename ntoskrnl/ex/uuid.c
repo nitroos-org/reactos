@@ -39,6 +39,7 @@ BOOLEAN ExpUuidSequenceNumberValid;
 BOOLEAN ExpUuidSequenceNumberNotSaved = FALSE;
 UUID_CACHED_VALUES_STRUCT ExpUuidCachedValues = {0ULL, 0xFFFFFFFF, {{0, 0, {0x80, 0x6E, 0x6F, 0x6E, 0x69, 0x63}}}};
 BOOLEAN ExpUuidCacheValid = FALSE;
+BOOLEAN ExpUuidNodeRandomized = FALSE;
 ULONG ExpLuidIncrement = 1;
 LARGE_INTEGER ExpLuid = {{0x3e9, 0x0}};
 
@@ -199,7 +200,7 @@ ExpAllocateUuids(PULARGE_INTEGER Time,
                  PULONG Sequence)
 {
     NTSTATUS Status;
-    LARGE_INTEGER Counter, Frequency, CurrentTime, TimeDiff, ClockDiff;
+    LARGE_INTEGER CurrentTime, TimeDiff, ClockDiff;
 
     PAGED_CODE();
 
@@ -214,14 +215,28 @@ ExpAllocateUuids(PULARGE_INTEGER Time,
         }
         else
         {
-            /* If we cannot, generate a "true" random */
-            Counter = KeQueryPerformanceCounter(&Frequency);
-            ExpUuidSequenceNumber ^= (ULONG_PTR)&Status ^ (ULONG_PTR)Sequence ^ Counter.LowPart ^ Counter.HighPart;
+            /* If we cannot, take a random one from the system generator */
+            ExpGetRandomBytes(&ExpUuidSequenceNumber, sizeof(ExpUuidSequenceNumber), NULL);
         }
 
         /* It's valid and to be saved */
         ExpUuidSequenceNumberValid = TRUE;
         ExpUuidSequenceNumberNotSaved = TRUE;
+    }
+
+    /*
+     * Until a user mode service sets the node of a NIC (NtSetUuidSeed) the node is a constant that every copy of the
+     * system shares. Take a random one for this boot (RFC 4122, 4.5: the multicast bit set, so it cannot be the
+     * address of a NIC). The UUIDs stay "local only" (ExpUuidCacheValid is untouched).
+     */
+    if (!ExpUuidNodeRandomized && !ExpUuidCacheValid)
+    {
+        UCHAR Node[SEED_BUFFER_SIZE];
+
+        ExpGetRandomBytes(Node, sizeof(Node), NULL);
+        Node[0] |= 0x01;
+        RtlCopyMemory(&ExpUuidCachedValues.NodeId[0], Node, sizeof(Node));
+        ExpUuidNodeRandomized = TRUE;
     }
 
     KeQuerySystemTime(&CurrentTime);
@@ -590,6 +605,9 @@ NtSetUuidSeed(IN PUCHAR Seed)
          * Reflect it here
          */
         ExpUuidCacheValid = ~(*Seed >> 7) & 1;
+
+        /* a node was chosen: the random one for this boot is not needed */
+        ExpUuidNodeRandomized = TRUE;
 
         Status = STATUS_SUCCESS;
     }
