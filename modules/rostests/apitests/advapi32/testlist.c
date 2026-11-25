@@ -56,6 +56,7 @@ extern void func_EventSetInformationFault(void);
 extern void func_GetSecurityInfoSaclReopen(void);
 extern void func_GetSecurityInfoSequence(void);
 extern void func_ObjectLockStress(void);
+extern void func_KeyCreateIntegrity(void);
 extern void func_OpenThreadTokenLeak(void);
 extern void func_OwnerRightsAccess(void);
 extern void func_Hash(void);
@@ -284,6 +285,7 @@ const struct test winetest_testlist[] =
     { "GetSecurityInfoSaclReopen", func_GetSecurityInfoSaclReopen },
     { "GetSecurityInfoSequence", func_GetSecurityInfoSequence },
     { "ObjectLockStress", func_ObjectLockStress },
+    { "KeyCreateIntegrity", func_KeyCreateIntegrity },
     { "OpenThreadTokenLeak", func_OpenThreadTokenLeak },
     { "OwnerRightsAccess", func_OwnerRightsAccess },
     { "Hash", func_Hash },
