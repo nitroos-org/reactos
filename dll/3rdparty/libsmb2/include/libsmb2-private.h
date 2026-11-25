@@ -271,6 +271,9 @@ struct smb2_context {
         /* NitroOS: smb2->pdu's callback is running (socket.c), so a
          * reconnect from inside it must leave that pdu to the dispatcher */
         int dispatching_pdu;
+        /* NitroOS: PreviousSessionId of the SESSION_SETUP requests
+         * (NitroSmb2SetPreviousSessionId), 0 = none */
+        uint64_t previous_session_id;
         /*
          * For handling received smb3 encrypted blobs
          */

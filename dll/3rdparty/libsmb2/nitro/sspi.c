@@ -686,6 +686,14 @@ void smb2_sspi_destroy(struct smb2_context *smb2)
     SecureZeroMemory(smb2->serverout_key, sizeof(smb2->serverout_key));
 }
 
+int NitroSmb2SetPreviousSessionId(struct smb2_context *smb2, uint64_t session_id)
+{
+    if (smb2 == NULL)
+        return -EINVAL;
+    smb2->previous_session_id = session_id;
+    return 0;
+}
+
 int NitroSmb2GetAuthInfo(struct smb2_context *smb2, struct nitro_smb2_auth_info *info)
 {
     struct smb2_sspi_ctx *ctx;
