@@ -943,10 +943,12 @@ SeExchangePrimaryToken(
     if (NewToken->TokenType != TokenPrimary)
         return STATUS_BAD_TOKEN_TYPE;
 
+    /* Lock the new token: whether it is in use is decided and marked under the lock */
+    SepAcquireTokenLockExclusive(NewToken);
+
     if (NewToken->TokenInUse)
     {
-        BOOLEAN IsEqual;
-        NTSTATUS Status;
+        SepReleaseTokenLock(NewToken);
 
         /* Maybe we're trying to set the same token */
         OldToken = PsReferencePrimaryToken(Process);
@@ -957,28 +959,14 @@ SeExchangePrimaryToken(
             return STATUS_SUCCESS;
         }
 
-        Status = SepCompareTokens(OldToken, NewToken, &IsEqual);
-        if (!NT_SUCCESS(Status))
-        {
-            PsDereferencePrimaryToken(OldToken);
-            *OldAccessToken = NULL;
-            return Status;
-        }
-
-        if (!IsEqual)
-        {
-            PsDereferencePrimaryToken(OldToken);
-            *OldAccessToken = NULL;
-            return STATUS_TOKEN_ALREADY_IN_USE;
-        }
-        /* Silently return STATUS_SUCCESS but do not set the new token,
-         * as it's already in use elsewhere. */
-        *OldAccessToken = OldToken;
-        return STATUS_SUCCESS;
+        /*
+         * The token of another process, even one equal to this process' own (the token of
+         * the caller given to its own suspended child, measured on Windows Server 2022)
+         */
+        PsDereferencePrimaryToken(OldToken);
+        *OldAccessToken = NULL;
+        return STATUS_TOKEN_ALREADY_IN_USE;
     }
-
-    /* Lock the new token */
-    SepAcquireTokenLockExclusive(NewToken);
 
     /* Mark new token in use */
     NewToken->TokenInUse = TRUE;
@@ -1499,6 +1487,84 @@ SeSubProcessToken(
 
     /* Return status */
     return Status;
+}
+
+/**
+ * @brief
+ * Makes the primary token of a process created with a token (CreateProcessAsUser,
+ * through the ReactOS-private ProcessRosAccessTokenCopy).
+ *
+ * @param[in] Token
+ * The token, primary or impersonation (then of level SecurityImpersonation or above),
+ * referenced by the caller, who has done every check of the assignment on it.
+ *
+ * @param[out] PrimaryToken
+ * The primary copy, with one reference for the caller. It is what NtDuplicateToken
+ * would make of the token for TokenPrimary without EffectiveOnly: the same user,
+ * groups, privileges, restricting SIDs, default DACL, logon session, originating
+ * logon session, parent token id and integrity level, a new token id; not in use.
+ *
+ * @return
+ * STATUS_SUCCESS, or the failure of the copy.
+ *
+ * @remarks
+ * The copy's own descriptor is made from the token itself: its owner, primary group
+ * and default DACL, as Windows Server 2022 gives the token of a process created with
+ * a token (measured: O:<owner>G:<primary group>D:<the default DACL>). It does not
+ * depend on the caller, who therefore gets no access to the copy that the token
+ * does not grant it.
+ */
+NTSTATUS
+NTAPI
+SeCopyTokenForNewProcess(
+    _In_ PACCESS_TOKEN Token,
+    _Out_ PACCESS_TOKEN *PrimaryToken)
+{
+    PTOKEN Source = (PTOKEN)Token;
+    PTOKEN NewToken;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    SECURITY_SUBJECT_CONTEXT SubjectContext;
+    PSECURITY_DESCRIPTOR Descriptor = NULL;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    *PrimaryToken = NULL;
+    ASSERT(Source->TokenType == TokenPrimary || Source->ImpersonationLevel >= SecurityImpersonation);
+
+    /* The descriptor of the copy, from the token as the subject */
+    RtlZeroMemory(&SubjectContext, sizeof(SubjectContext));
+    SubjectContext.PrimaryToken = Source;
+    SubjectContext.ImpersonationLevel = SecurityAnonymous;
+    Status = SeAssignSecurity(NULL,
+                              NULL,
+                              &Descriptor,
+                              FALSE,
+                              &SubjectContext,
+                              &SeTokenObjectType->TypeInfo.GenericMapping,
+                              PagedPool);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, Descriptor);
+    Status = SepDuplicateToken(Source,
+                               &ObjectAttributes,
+                               FALSE,
+                               TokenPrimary,
+                               Source->ImpersonationLevel,
+                               KernelMode,
+                               &NewToken);
+    SeDeassignSecurity(&Descriptor);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* No handle: the reference of the creation is the caller's; on failure the object is gone */
+    Status = ObInsertObject(NewToken, NULL, 0, 0, NULL, NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    *PrimaryToken = NewToken;
+    return STATUS_SUCCESS;
 }
 
 /**

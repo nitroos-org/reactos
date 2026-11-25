@@ -489,7 +489,8 @@ InsertTokenToProcessCommon(
     _In_ BOOL ImpersonateAsSelf,
     _In_ HANDLE ProcessHandle,
     _In_ HANDLE ThreadHandle,
-    _In_ HANDLE DuplicatedTokenHandle)
+    _In_ HANDLE DuplicatedTokenHandle,
+    _In_ BOOL KernelCopy)
 {
     NTSTATUS Status;
     PROCESS_ACCESS_TOKEN AccessToken;
@@ -554,9 +555,12 @@ InsertTokenToProcessCommon(
     AccessToken.Token = DuplicatedTokenHandle;
     AccessToken.Thread = ThreadHandle;
 
-    /* Set the new process token */
+    /*
+     * Set the new process token: our own duplicate itself, or (KernelCopy) a primary copy the
+     * kernel makes of the caller's token, as process creation with a token does on Windows
+     */
     Status = NtSetInformationProcess(ProcessHandle,
-                                     ProcessAccessToken,
+                                     KernelCopy ? ProcessRosAccessTokenCopy : ProcessAccessToken,
                                      (PVOID)&AccessToken,
                                      sizeof(AccessToken));
 
@@ -674,11 +678,15 @@ AddProcessLabelAce(
  * The NT 5 creation path installs the primary token after creating both
  * objects. Complete their NT 6 labels before releasing the suspended thread.
  * Native ProcessAccessToken assignment alone does not relabel objects.
+ * Token gives the level (TOKEN_QUERY). The ceiling is the assigned token: Token is
+ * impersonated, or, when NewThread is given (the caller's handle may lack the rights
+ * to impersonate with), the new thread, whose token is the one assigned.
  */
 static BOOL
 SetProcessTokenLabel(
     HANDLE Object,
     HANDLE Token,
+    HANDLE NewThread,
     PSECURITY_DESCRIPTOR ExplicitDescriptor)
 {
     ULONG TokenBuffer[(sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE + sizeof(ULONG) - 1) / sizeof(ULONG)];
@@ -735,7 +743,22 @@ SetProcessTokenLabel(
     SetSecurityDescriptorSacl(&Descriptor, TRUE, Sacl, FALSE);
 
     /* Use the assigned token for the label ceiling, just as during NT 6 creation. */
-    Ret = ImpersonateLoggedOnUser(Token);
+    if (NewThread)
+    {
+        SECURITY_QUALITY_OF_SERVICE Sqos;
+
+        Sqos.Length = sizeof(Sqos);
+        Sqos.ImpersonationLevel = SecurityImpersonation;
+        Sqos.ContextTrackingMode = SECURITY_STATIC_TRACKING;
+        Sqos.EffectiveOnly = FALSE;
+        Status = NtImpersonateThread(NtCurrentThread(), NewThread, &Sqos);
+        Ret = NT_SUCCESS(Status);
+        if (!Ret) SetLastError(RtlNtStatusToDosError(Status));
+    }
+    else
+    {
+        Ret = ImpersonateLoggedOnUser(Token);
+    }
     if (Ret)
     {
         Ret = SetKernelObjectSecurity(Object, LABEL_SECURITY_INFORMATION, &Descriptor);
@@ -828,20 +851,32 @@ CreateProcessAsUserCommon(
     OBJECT_ATTRIBUTES ObjectAttributes;
     PSECURITY_DESCRIPTOR DefaultSd = NULL, ProcessSd, ThreadSd;
     SECURITY_DESCRIPTOR MergedProcessSd, MergedThreadSd;
-    HANDLE hTokenDup = NULL;
+    HANDLE hTokenDup = NULL, AssignToken = NULL;
+    BOOL NoQuery = FALSE, KernelCopy = FALSE;
+    OBJECT_BASIC_INFORMATION HandleInfo;
     HANDLE OriginalImpersonationToken = NULL;
     HANDLE NullToken = NULL;
 
     if (hToken != NULL)
     {
-        /* Check whether the user-provided token is a primary token */
-        // GetTokenInformation();
+        /*
+         * The order of the failures, measured on Windows Server 2022 for every combination of
+         * TOKEN_QUERY, TOKEN_DUPLICATE and TOKEN_ASSIGN_PRIMARY: a handle without
+         * TOKEN_ASSIGN_PRIMARY fails with ERROR_ACCESS_DENIED whatever the token; then the level
+         * (ERROR_BAD_IMPERSONATION_LEVEL) and the privilege (ERROR_PRIVILEGE_NOT_HELD), which
+         * the kernel decides; only then a handle without TOKEN_QUERY fails with
+         * ERROR_ACCESS_DENIED. TOKEN_DUPLICATE is not needed.
+         */
         Status = NtQueryInformationToken(hToken,
                                          TokenType,
                                          &Type,
                                          sizeof(Type),
                                          &ReturnLength);
-        if (!NT_SUCCESS(Status))
+        if (Status == STATUS_ACCESS_DENIED)
+        {
+            NoQuery = TRUE;
+        }
+        else if (!NT_SUCCESS(Status))
         {
             ERR("NtQueryInformationToken() failed, Status 0x%08x\n", Status);
             Success = FALSE;
@@ -852,12 +887,21 @@ CreateProcessAsUserCommon(
          * Windows takes an impersonation token as well (the token a logon with
          * LOGON32_LOGON_NETWORK_CLEARTEXT returns, as OpenSSH's sshd passes it) when its level
          * is impersonation or above, and makes the primary token of the process from it. A
-         * lower level fails below, in the duplication.
+         * lower level fails below, in the duplication or the kernel's copy.
          */
-        if (Type != TokenPrimary && Type != TokenImpersonation)
+        if (!NoQuery && Type != TokenPrimary && Type != TokenImpersonation)
         {
             ERR("Wrong token type for token 0x%p, expected a primary or impersonation token, got %ld\n", hToken, Type);
             Status = STATUS_BAD_TOKEN_TYPE;
+            Success = FALSE;
+            goto Quit;
+        }
+
+        /* TOKEN_ASSIGN_PRIMARY first; the kernel checks it again where it takes the token */
+        if (NT_SUCCESS(NtQueryObject(hToken, ObjectBasicInformation, &HandleInfo, sizeof(HandleInfo), NULL)) &&
+            !(HandleInfo.GrantedAccess & TOKEN_ASSIGN_PRIMARY))
+        {
+            Status = STATUS_ACCESS_DENIED;
             Success = FALSE;
             goto Quit;
         }
@@ -904,6 +948,48 @@ CreateProcessAsUserCommon(
         }
 
         /*
+         * Without TOKEN_QUERY nothing below can be done, but the level and the privilege come
+         * first: the kernel decides them while it gives the process a copy of the token, and
+         * the call then fails for the missing right (the process is ended at Quit).
+         */
+        if (NoQuery)
+        {
+            Status = InsertTokenToProcessCommon(TRUE,
+                                                lpProcessInformation->hProcess,
+                                                lpProcessInformation->hThread,
+                                                hToken,
+                                                TRUE);
+            if (!NT_SUCCESS(Status))
+            {
+                /*
+                 * The second try of the path below, without impersonating ourselves: a restricted
+                 * caller cannot open its own token for that, and the kernel's answer (the privilege)
+                 * is the one to report
+                 */
+                Status = NtSetInformationThread(NtCurrentThread(),
+                                                ThreadImpersonationToken,
+                                                &OriginalImpersonationToken,
+                                                sizeof(OriginalImpersonationToken));
+                if (NT_SUCCESS(Status))
+                {
+                    Status = InsertTokenToProcessCommon(FALSE,
+                                                        lpProcessInformation->hProcess,
+                                                        lpProcessInformation->hThread,
+                                                        hToken,
+                                                        TRUE);
+                    NtSetInformationThread(NtCurrentThread(),
+                                           ThreadImpersonationToken,
+                                           &NullToken,
+                                           sizeof(NullToken));
+                }
+            }
+            if (NT_SUCCESS(Status))
+                Status = STATUS_ACCESS_DENIED;
+            Success = FALSE;
+            goto Quit;
+        }
+
+        /*
          * Create a security descriptor that will be common for the
          * newly created process on behalf of the context user.
          */
@@ -932,11 +1018,30 @@ CreateProcessAsUserCommon(
                                   FALSE,
                                   TokenPrimary,
                                   &hTokenDup);
-        if (!NT_SUCCESS(Status))
+        if (Status == STATUS_ACCESS_DENIED)
+        {
+            /*
+             * The handle has no TOKEN_DUPLICATE. Windows takes such a handle when it has
+             * TOKEN_ASSIGN_PRIMARY (measured on Windows Server 2022, primary and impersonation
+             * tokens alike), so the process is given a copy the kernel makes from the caller's
+             * own handle: the kernel checks TOKEN_ASSIGN_PRIMARY, the level, the privilege or
+             * the child-of-own-token rule. The label steps below then impersonate the new
+             * thread instead of a token handle of ours.
+             */
+            hTokenDup = NULL;
+            AssignToken = hToken;
+            KernelCopy = TRUE;
+            Status = STATUS_SUCCESS;
+        }
+        else if (!NT_SUCCESS(Status))
         {
             ERR("NtDuplicateToken() failed, Status 0x%08x\n", Status);
             Success = FALSE;
             goto Quit;
+        }
+        else
+        {
+            AssignToken = hTokenDup;
         }
 
         /*
@@ -948,7 +1053,8 @@ CreateProcessAsUserCommon(
         Status = InsertTokenToProcessCommon(TRUE,
                                             lpProcessInformation->hProcess,
                                             lpProcessInformation->hThread,
-                                            hTokenDup);
+                                            AssignToken,
+                                            KernelCopy);
         if (!NT_SUCCESS(Status))
         {
             /*
@@ -965,7 +1071,6 @@ CreateProcessAsUserCommon(
             if (!NT_SUCCESS(Status))
             {
                 ERR("Failed to restore impersonation token for setting process token, Status 0x%08lx\n", Status);
-                NtClose(hTokenDup);
                 Success = FALSE;
                 goto Quit;
             }
@@ -974,12 +1079,12 @@ CreateProcessAsUserCommon(
             Status = InsertTokenToProcessCommon(FALSE,
                                                 lpProcessInformation->hProcess,
                                                 lpProcessInformation->hThread,
-                                                hTokenDup);
+                                                AssignToken,
+                                                KernelCopy);
             if (!NT_SUCCESS(Status))
             {
                 /* Even the second try failed, bail out... */
                 ERR("Failed to insert the primary token into process, Status 0x%08lx\n", Status);
-                NtClose(hTokenDup);
                 Success = FALSE;
                 goto Quit;
             }
@@ -992,7 +1097,6 @@ CreateProcessAsUserCommon(
             if (!NT_SUCCESS(Status))
             {
                 ERR("Failed to unset impersonationg token after setting process token, Status 0x%08lx\n", Status);
-                NtClose(hTokenDup);
                 Success = FALSE;
                 goto Quit;
             }
@@ -1042,15 +1146,17 @@ CreateProcessAsUserCommon(
             ThreadSd = DefaultSd;
         }
 
-        if (!SetProcessTokenLabel(lpProcessInformation->hProcess, hTokenDup,
+        /* Without a duplicate of ours the label steps use the caller's handle (for the level) and the new thread */
+        if (!SetProcessTokenLabel(lpProcessInformation->hProcess, AssignToken,
+                                   hTokenDup ? NULL : lpProcessInformation->hThread,
                                    lpProcessAttributes ? lpProcessAttributes->lpSecurityDescriptor : NULL) ||
-            !SetProcessTokenLabel(lpProcessInformation->hThread, hTokenDup,
+            !SetProcessTokenLabel(lpProcessInformation->hThread, AssignToken,
+                                   hTokenDup ? NULL : lpProcessInformation->hThread,
                                    lpThreadAttributes ? lpThreadAttributes->lpSecurityDescriptor : NULL))
         {
             SecurityError = GetLastError();
             Status = STATUS_UNSUCCESSFUL;
             Success = FALSE;
-            NtClose(hTokenDup);
             goto Quit;
         }
 
@@ -1063,13 +1169,10 @@ CreateProcessAsUserCommon(
             ERR("Failed to set new security information for process and thread\n");
             SecurityError = GetLastError();
             Status = STATUS_UNSUCCESSFUL;
-            NtClose(hTokenDup);
             Success = FALSE;
             goto Quit;
         }
 
-        /* Close the duplicated token */
-        NtClose(hTokenDup);
         Success = TRUE;
     }
 
@@ -1082,6 +1185,12 @@ CreateProcessAsUserCommon(
     Success = TRUE;
 
 Quit:
+    /* Our duplicate, if one was made; the caller's handle stays the caller's */
+    if (hTokenDup != NULL)
+    {
+        NtClose(hTokenDup);
+    }
+
     /*
      * If we successfully opened the thread token before
      * and stopped the impersonation then we have to assign

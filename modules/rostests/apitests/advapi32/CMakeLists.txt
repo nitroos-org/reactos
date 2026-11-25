@@ -38,6 +38,7 @@ list(APPEND SOURCE
     RestrictedTokenCrypt.c
     CreateService.c
     CreateProcessAsUserToken.c
+    CreateProcessAsUserRights.c
     CreateProcessWithLogon.c
     CreateProcessWithToken.c
     CreateEnvironmentBlockProfile.c
@@ -90,6 +91,7 @@ list(APPEND SOURCE
     MandatoryLabelOpen.c
     TokenDuplicateLimit.c
     ProcessThreadLabel.c
+    ProcessTokenCopy.c
     QueryServiceConfig.c
     QueryServiceConfig2.c
     QueryServiceObjectSecurity.c

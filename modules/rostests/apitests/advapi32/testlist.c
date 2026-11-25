@@ -34,6 +34,7 @@ extern void func_NamedPipeSD(void);
 extern void func_ConvertStringSidToSid(void);
 extern void func_CreateService(void);
 extern void func_CreateProcessAsUserToken(void);
+extern void func_CreateProcessAsUserRights(void);
 extern void func_CreateProcessWithLogon(void);
 extern void func_CreateProcessWithToken(void);
 extern void func_CreateEnvironmentBlockProfile(void);
@@ -90,6 +91,7 @@ extern void func_NetUserChangePassword(void);
 extern void func_MandatoryLabelOpen(void);
 extern void func_TokenDuplicateLimit(void);
 extern void func_ProcessThreadLabel(void);
+extern void func_ProcessTokenCopy(void);
 extern void func_QueryServiceConfig(void);
 extern void func_QueryServiceConfig2(void);
 extern void func_QueryServiceObjectSecurity(void);
@@ -252,6 +254,7 @@ const struct test winetest_testlist[] =
     { "RegWow64RelativeView", func_RegWow64RelativeView },
     { "CreateService", func_CreateService },
     { "CreateProcessAsUserToken", func_CreateProcessAsUserToken },
+    { "CreateProcessAsUserRights", func_CreateProcessAsUserRights },
     { "CreateProcessWithLogon", func_CreateProcessWithLogon },
     { "CreateProcessWithToken", func_CreateProcessWithToken },
     { "CreateEnvironmentBlockProfile", func_CreateEnvironmentBlockProfile },
@@ -308,6 +311,7 @@ const struct test winetest_testlist[] =
     { "MandatoryLabelOpen", func_MandatoryLabelOpen },
     { "TokenDuplicateLimit", func_TokenDuplicateLimit },
     { "ProcessThreadLabel", func_ProcessThreadLabel },
+    { "ProcessTokenCopy", func_ProcessTokenCopy },
     { "QueryServiceConfig", func_QueryServiceConfig },
     { "QueryServiceConfig2", func_QueryServiceConfig2 },
     { "QueryServiceObjectSecurity", func_QueryServiceObjectSecurity },
