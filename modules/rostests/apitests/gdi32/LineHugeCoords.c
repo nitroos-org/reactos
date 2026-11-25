@@ -484,6 +484,65 @@ static void test_ManySegments(void)
     HeapFree(GetProcessHeap(), 0, pt);
 }
 
+/* Polyline, PolyBezier and StrokePath keep device coordinates as 28 bit numbers, as Windows does (measured there:
+   (20,20) to (2^28 + 100, 120) draws 100 pixels, the end point is (100, 120)) */
+static void test_Wrap28(void)
+{
+    HPEN pen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0)), old = SelectObject(g_dc, pen);
+    POINT p[4];
+    int n;
+
+    p[0].x = 20; p[0].y = 20; p[1].x = 0x10000000 + 100; p[1].y = 120;
+
+    Clear();
+    ok(Polyline(g_dc, p, 2), "Polyline failed\n");
+    n = CountInk();
+    ok(n == 100, "Polyline: %d pixels drawn, expected 100\n", n);
+
+    Clear();
+    BeginPath(g_dc);
+    MoveToEx(g_dc, 20, 20, NULL);
+    LineTo(g_dc, 0x10000000 + 100, 120);
+    EndPath(g_dc);
+    StrokePath(g_dc);
+    n = CountInk();
+    ok(n == 100, "StrokePath: %d pixels drawn, expected 100\n", n);
+
+    SelectObject(g_dc, old);
+    DeleteObject(pen);
+}
+
+/* The same lines on the screen DC: the display driver's own line function, if it has one (the VGA driver steps whole
+   lines), must return too */
+static void test_ScreenDC(void)
+{
+    HDC hdc = GetDC(NULL);
+    HPEN pen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0)), old;
+    int is;
+
+    if (!hdc)
+    {
+        skip("no screen DC\n");
+        return;
+    }
+    old = SelectObject(hdc, pen);
+    for (is = 0; is < (int)_countof(g_ext); is++)
+    {
+        DWORD t = GetTickCount();
+        POINT p[2];
+
+        MoveToEx(hdc, g_ext[is].x1, g_ext[is].y1, NULL);
+        LineTo(hdc, g_ext[is].x2, g_ext[is].y2);
+        p[0].x = g_ext[is].x1; p[0].y = g_ext[is].y1; p[1].x = g_ext[is].x2; p[1].y = g_ext[is].y2;
+        Polyline(hdc, p, 2);
+        /* (the VGA driver's fallback reads the planar screen back into a bitmap: seconds a call in an emulator) */
+        ok(GetTickCount() - t < 30000, "screen DC: line %d took %lu ms\n", is, GetTickCount() - t);
+    }
+    SelectObject(hdc, old);
+    DeleteObject(pen);
+    ReleaseDC(NULL, hdc);
+}
+
 START_TEST(LineHugeCoords)
 {
     BITMAPINFO bi;
@@ -509,6 +568,8 @@ START_TEST(LineHugeCoords)
     test_OrdinaryLines();
     test_ExactPixels();
     test_ExactPixelsFar();
+    test_Wrap28();
+    test_ScreenDC();
     test_PieChordStyled();
     test_StyleSumWraps();
     test_NoStall();
