@@ -1254,6 +1254,12 @@ NTAPI VioScsiAdapterControl(IN PVOID DeviceExtension, IN SCSI_ADAPTER_CONTROL_TY
                     RhelDbgPrint(TRACE_LEVEL_FATAL, " Cannot reinitialize HW\n");
                     break;
                 }
+                if (adaptExt->tmf_infly)
+                {
+                    /* The virtqueues are new: the reset request of before the restart can never be answered */
+                    adaptExt->tmf_infly = FALSE;
+                    StorPortResume(DeviceExtension);
+                }
                 status = ScsiAdapterControlSuccess;
                 break;
             }
