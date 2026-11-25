@@ -92,6 +92,7 @@ list(APPEND SOURCE
     NtAdjustGroupsToken.c
     NtAdjustPrivilegesToken.c
     NtAllocateVirtualMemory.c
+    NtAllocateVirtualMemoryStatuses.c
     NtApphelpCacheControl.c
     NtCompareTokens.c
     NtConnectPortTerminate.c
