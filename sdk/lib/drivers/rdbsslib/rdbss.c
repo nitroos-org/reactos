@@ -58,6 +58,9 @@
  * (RxLowIoLockControlShellCompletion) */
 #define RXP_LOWIO_FLAG_IN_COMPLETION_WORKER 0x0800
 #define RXP_LOWIO_FLAG_RELEASE_AT_SERVER 0x0400
+/* RDBSS-private LOWIO_CONTEXT flag: the lock to release at the server was
+ * granted after the cleanup of its handle (the request ends cancelled) */
+#define RXP_LOWIO_FLAG_RELEASE_AFTER_CLEANUP 0x0200
 
 typedef
 NTSTATUS
@@ -8729,9 +8732,11 @@ RxLowIoLockControlShellCompletion(
             if (BooleanFlagOn(LowIoContext->Flags, RXP_LOWIO_FLAG_RELEASE_AT_SERVER))
             {
                 /* Called again from the completion worker (below): the local
-                 * table refused what the server granted */
+                 * table refused what the server granted, or the server
+                 * granted it after the cleanup of its handle */
                 RxpReleaseRefusedLockAtServer(RxContext);
-                Status = STATUS_LOCK_NOT_GRANTED;
+                Status = BooleanFlagOn(LowIoContext->Flags, RXP_LOWIO_FLAG_RELEASE_AFTER_CLEANUP) ?
+                         STATUS_CANCELLED : STATUS_LOCK_NOT_GRANTED;
             }
             else if (NT_SUCCESS(Status))
             {
@@ -8780,8 +8785,12 @@ RxLowIoLockControlShellCompletion(
                      * before it cancels the handle's lock requests and
                      * releases its locks, with a spin lock in between: with
                      * the barrier here, either its release saw this lock or
-                     * this sees the mark. The server drops the lock
-                     * with the handle's server open */
+                     * this sees the mark. The server would drop the lock
+                     * only with the handle's server open, which is closed
+                     * after this request ends: until then the range stays
+                     * held for a handle that is gone, so it is released at
+                     * the server first, as a refused lock is (the cleanup's
+                     * own unlock of the handle's locks has run already) */
                     KeMemoryBarrier();
                     if (Fobx != NULL && BooleanFlagOn(Fobx->Flags, RXP_FOBX_FLAG_CLEANUP_STARTED))
                     {
@@ -8791,6 +8800,15 @@ RxLowIoLockControlShellCompletion(
                                               IoGetRequestorProcess(Irp), LowIoContext->ParamsFor.Locks.Key,
                                               NULL, FALSE);
                         Status = STATUS_CANCELLED;
+                        if (BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION) &&
+                            !BooleanFlagOn(LowIoContext->Flags, LOWIO_CONTEXT_FLAG_SYNCCALL) &&
+                            !BooleanFlagOn(LowIoContext->Flags, RXP_LOWIO_FLAG_IN_COMPLETION_WORKER))
+                        {
+                            InterlockedOr16((volatile SHORT *)&LowIoContext->Flags,
+                                            (SHORT)(RXP_LOWIO_FLAG_RELEASE_AT_SERVER | RXP_LOWIO_FLAG_RELEASE_AFTER_CLEANUP));
+                            return STATUS_MORE_PROCESSING_REQUIRED;
+                        }
+                        RxpReleaseRefusedLockAtServer(RxContext);
                     }
                 }
             }
