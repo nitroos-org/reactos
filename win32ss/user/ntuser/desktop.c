@@ -4122,6 +4122,9 @@ NtUserSwitchDesktop(HDESK hdesk)
     /* Show the new desktop window */
     co_IntShowDesktop(pdesk, UserGetSystemMetrics(SM_CXSCREEN), UserGetSystemMetrics(SM_CYSCREEN), bRedrawDesktop);
 
+    /* A session without the console keeps its memory display from its first input desktop on */
+    co_IntHoldHeadlessDisplay();
+
     // TODO: Request hard-error popups to be respawned to the new desktop.
 
     /* Notify waiters that a desktop has been switched on the

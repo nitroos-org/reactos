@@ -689,21 +689,6 @@ WinMain(
     }
 
     /*
-     * Session 0 without the console draws into memory, and its display is set up only while a program of
-     * the session uses it (a window or a device context); a session that runs only services may have none.
-     * Then a console or an icon that a service asks for finds no display. Winlogon uses the display for as
-     * long as it runs (a device context taken once counts until the process ends), so it is always there.
-     */
-    if (WlSessionRole == WlRoleServices)
-    {
-        HDC hdc = GetDC(NULL);
-        if (hdc)
-            ReleaseDC(NULL, hdc);
-        else
-            ERR("WL: no display in session 0, error %lu\n", GetLastError());
-    }
-
-    /*
      * The shutdown requests (InitiateSystemShutdown) go to the Winlogon of the console session: it shows
      * the warning where the user is and logs the user off before the system goes down
      */
