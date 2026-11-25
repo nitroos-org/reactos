@@ -37,6 +37,7 @@ extern void func_FileMappingFromApp(void);
 extern void func_ThreadpoolEx(void);
 extern void func_CtrlRoutine(void);
 extern void func_CalendarInfo(void);
+extern void func_CompareStringEqualPrefix(void);
 extern void func_ConsoleCP(void);
 extern void func_CopyFile2(void);
 extern void func_CopyFile2Identity(void);
@@ -334,6 +335,7 @@ const struct test winetest_testlist[] =
     { "ThreadpoolEx", func_ThreadpoolEx },
     { "CtrlRoutine", func_CtrlRoutine },
     { "CalendarInfo",                func_CalendarInfo },
+    { "CompareStringEqualPrefix",    func_CompareStringEqualPrefix },
     { "ConsoleCP",                   func_ConsoleCP },
     { "CopyFile2",                   func_CopyFile2 },
     { "CopyFile2Identity",           func_CopyFile2Identity },

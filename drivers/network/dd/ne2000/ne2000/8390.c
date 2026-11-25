@@ -426,6 +426,112 @@ NDIS_STATUS NICSetup(
 }
 
 
+/* The bit of an address in the multicast address registers: the 6 high bits of the Ethernet CRC-32 of the
+   address (polynomial 0x04C11DB7, each byte least significant bit first, as the bits are sent) */
+static UINT NICMulticastHashIndex(
+    const UCHAR *Address)
+{
+    ULONG Crc = 0xFFFFFFFF;
+    UINT i, Bit;
+
+    for (i = 0; i < DRIVER_LENGTH_OF_ADDRESS; i++) {
+        UCHAR b = Address[i];
+
+        for (Bit = 0; Bit < 8; Bit++, b >>= 1) {
+            ULONG Top = (Crc >> 31) ^ (b & 1);
+
+            Crc <<= 1;
+            if (Top)
+                Crc ^= 0x04C11DB7;
+        }
+    }
+
+    return Crc >> 26;
+}
+
+
+VOID NICWriteReceiveFilter(
+    PNIC_ADAPTER Adapter)
+/*
+ * FUNCTION: Programs the receive configuration and the multicast address registers from the packet filter
+ * ARGUMENTS:
+ *     Adapter = Pointer to adapter information
+ * NOTES:
+ *     The NIC accepts frames for its own address whatever the filter says (there is no switch for that
+ *     in the chip). Multicast frames pass the AM bit only if their bit in the multicast address registers
+ *     is set: all of them for all multicast and promiscuous, the groups of the multicast list for multicast,
+ *     none otherwise. Called with the interrupt excluded (NICStart, or through NICApplyPacketFilter)
+ */
+{
+    UCHAR Mask[8];
+    UCHAR Rcr = 0;
+    UINT i;
+
+    RtlZeroMemory(Mask, sizeof(Mask));
+    if (Adapter->PacketFilter & (NDIS_PACKET_TYPE_ALL_MULTICAST | NDIS_PACKET_TYPE_PROMISCUOUS)) {
+        RtlFillMemory(Mask, sizeof(Mask), 0xFF);
+    } else if (Adapter->PacketFilter & NDIS_PACKET_TYPE_MULTICAST) {
+        for (i = 0; i < Adapter->MulticastListSize; i++) {
+            UINT Index;
+
+            if (!(Adapter->Addresses[i][0] & 0x01))
+                continue;
+            Index = NICMulticastHashIndex(Adapter->Addresses[i]);
+            Mask[Index >> 3] |= (UCHAR)(1 << (Index & 7));
+        }
+    }
+
+    if (Adapter->PacketFilter & NDIS_PACKET_TYPE_BROADCAST)
+        Rcr |= RCR_AB;
+    if (Adapter->PacketFilter & (NDIS_PACKET_TYPE_MULTICAST | NDIS_PACKET_TYPE_ALL_MULTICAST |
+                                 NDIS_PACKET_TYPE_PROMISCUOUS))
+        Rcr |= RCR_AM;
+    if (Adapter->PacketFilter & NDIS_PACKET_TYPE_PROMISCUOUS)
+        Rcr |= RCR_PRO;
+
+    /* The multicast address registers are on page 1 */
+    NdisRawWritePortUchar(Adapter->IOBase + PG0_CR, CR_STA | CR_RD2 | CR_PAGE1);
+    for (i = 0; i < sizeof(Mask); i++) {
+        Adapter->MulticastAddressMask[i] = Mask[i];
+        NdisRawWritePortUchar(Adapter->IOBase + PG1_MAR + i, Mask[i]);
+    }
+    NdisRawWritePortUchar(Adapter->IOBase + PG0_CR, CR_STA | CR_RD2 | CR_PAGE0);
+
+    NdisRawWritePortUchar(Adapter->IOBase + PG0_RCR, Rcr);
+
+#if DBG
+    DbgPrint("NE2000: packet filter 0x%X: RCR 0x%02X, MAR %02X%02X%02X%02X%02X%02X%02X%02X.\n",
+        Adapter->PacketFilter, Rcr, Mask[0], Mask[1], Mask[2], Mask[3], Mask[4], Mask[5], Mask[6], Mask[7]);
+#endif
+}
+
+
+static BOOLEAN NTAPI NICApplyPacketFilterSync(
+    PVOID Context)
+{
+    NICWriteReceiveFilter((PNIC_ADAPTER)Context);
+    return TRUE;
+}
+
+
+VOID NICApplyPacketFilter(
+    PNIC_ADAPTER Adapter)
+/*
+ * FUNCTION: Applies the current packet filter and multicast list to a running NIC
+ * ARGUMENTS:
+ *     Adapter = Pointer to adapter information
+ * NOTES:
+ *     The registers are written with the interrupt excluded: the interrupt routine reads the status register
+ *     of page 0, which the page switch would hide
+ */
+{
+    if (Adapter->InterruptRegistered)
+        NdisMSynchronizeWithInterrupt(&Adapter->Interrupt, NICApplyPacketFilterSync, Adapter);
+    else
+        NICWriteReceiveFilter(Adapter);
+}
+
+
 NDIS_STATUS NICStart(
     PNIC_ADAPTER Adapter)
 /*
@@ -441,8 +547,8 @@ NDIS_STATUS NICStart(
     /* Take NIC out of loopback mode */
     NdisRawWritePortUchar(Adapter->IOBase + PG0_TCR, 0x00);
 
-    /* Initialize RCR - Receive Configuration Register (accept all) */
-    NdisRawWritePortUchar(Adapter->IOBase + PG0_RCR, RCR_AB | RCR_AM | RCR_PRO);
+    /* Initialize RCR - Receive Configuration Register from the packet filter */
+    NICWriteReceiveFilter(Adapter);
 
     return NDIS_STATUS_SUCCESS;
 }
@@ -1075,6 +1181,7 @@ static BOOLEAN NICPrepareForTransmit(
 {
     UINT Length;
     UINT BufferCount;
+    UINT Skip;
     PNDIS_PACKET Packet;
 
     NDIS_DbgPrint(MAX_TRACE, ("Called.\n"));
@@ -1088,11 +1195,30 @@ static BOOLEAN NICPrepareForTransmit(
 
     BufferCount = (Length + DRIVER_BLOCK_SIZE - 1) / DRIVER_BLOCK_SIZE;
 
-    if (BufferCount > Adapter->TXFree) {
+    /*
+     * The NIC sends a packet from consecutive blocks starting at the one in TPSR, it does not wrap around the end of
+     * the ring: what lies behind it is the start of the receive ring, which went out as the tail of the packet (and
+     * failed its checksum at the receiver, for every retransmission that starts at the same block, so a bulk
+     * upload stopped). With nothing in the ring the packet starts at the first block; else, a packet that does not
+     * fit before the end of the ring starts at the first block once the packets before it are sent, and the blocks
+     * at the end stay unused until then.
+     */
+    Skip = 0;
+    if (Adapter->TXCurrent == -1)
+        Adapter->TXNext = 0;
+    else if (Adapter->TXNext + BufferCount > Adapter->TXCount)
+        Skip = Adapter->TXCount - Adapter->TXNext;
+
+    if (BufferCount + Skip > Adapter->TXFree) {
         NDIS_DbgPrint(MID_TRACE, ("No transmit resources. Have (%d) buffers, need (%d).\n",
-            Adapter->TXFree, BufferCount));
+            Adapter->TXFree, BufferCount + Skip));
         /* We don't have the resources to transmit this packet right now */
         return FALSE;
+    }
+
+    if (Skip) {
+        Adapter->TXTail[Adapter->TXLast] = Skip;
+        Adapter->TXNext = 0;
     }
 
     /* Write the packet to the card */
@@ -1102,8 +1228,10 @@ static BOOLEAN NICPrepareForTransmit(
     if (Adapter->TXCurrent == -1)
         Adapter->TXCurrent = Adapter->TXNext;
 
+    Adapter->TXLast  = Adapter->TXNext;
+    Adapter->TXTail[Adapter->TXNext] = 0;
     Adapter->TXNext  = (Adapter->TXNext + BufferCount) % Adapter->TXCount;
-    Adapter->TXFree -= BufferCount;
+    Adapter->TXFree -= BufferCount + Skip;
 
     /* Remove the packet from the queue */
     Packet = Adapter->TXQueueHead;
@@ -1275,9 +1403,13 @@ static VOID HandleTransmit(
         Adapter->TransmitError = FALSE;
     }
 
+    /* A transmit interrupt with no packet in the ring (a stale one) has nothing to free */
+    if (Adapter->TXCurrent < 0)
+        return;
+
     /* Free transmit buffers */
     Length      = Adapter->TXSize[Adapter->TXCurrent];
-    BufferCount = (Length + DRIVER_BLOCK_SIZE - 1) / DRIVER_BLOCK_SIZE;
+    BufferCount = (Length + DRIVER_BLOCK_SIZE - 1) / DRIVER_BLOCK_SIZE + Adapter->TXTail[Adapter->TXCurrent];
 
     NDIS_DbgPrint(MID_TRACE, ("Freeing (%d) buffers at (%d).\n",
         BufferCount,
@@ -1285,12 +1417,14 @@ static VOID HandleTransmit(
 
     Adapter->TXFree += BufferCount;
     Adapter->TXSize[Adapter->TXCurrent] = 0;
+    Adapter->TXTail[Adapter->TXCurrent] = 0;
     Adapter->TXCurrent = (Adapter->TXCurrent + BufferCount) % Adapter->TXCount;
 
     if (Adapter->TXSize[Adapter->TXCurrent] == 0) {
         NDIS_DbgPrint(MID_TRACE, ("No more packets in transmit buffer.\n"));
 
         Adapter->TXCurrent = -1;
+        Adapter->TXLast = -1;
     }
 
     if (Adapter->TXQueueTail) {

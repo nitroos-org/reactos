@@ -548,6 +548,10 @@ VOID GetInterfaceConnectionStatus(PIP_INTERFACE Interface, PULONG Result)
     if (Adapter == NULL || Adapter->State == LAN_STATE_STARTED) {
         *Result = MIB_IF_OPER_STATUS_OPERATIONAL;
     }
+    else if (Adapter->State == LAN_STATE_STOPPED) {
+        /* The cable is out (measured on Windows Server 2022: GetIfEntry says 0, not 2, while it is) */
+        *Result = MIB_IF_OPER_STATUS_NON_OPERATIONAL;
+    }
     else {
         *Result = MIB_IF_OPER_STATUS_DISCONNECTED;
     }

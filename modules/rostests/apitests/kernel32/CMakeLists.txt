@@ -31,6 +31,7 @@ list(APPEND SOURCE
     ApplicationRestart.c
     AppModel.c
     CalendarInfo.c
+    CompareStringEqualPrefix.c
     ConsoleCP.c
     CopyFile2.c
     CopyFile2Identity.c

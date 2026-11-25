@@ -28,10 +28,17 @@
 #elif defined(_AMD64_)
 
 //
-// R8/R9 on AMD64
+// R8/R9 on AMD64. A 32-bit program of WoW64 calls the debug service with
+// the registers of x86 (EBX/EDI), and its pointers are 32 bits wide
 //
-#define KdpGetParameterThree(Context)  ((Context)->R8)
-#define KdpGetParameterFour(Context)   ((Context)->R9)
+#define KdpIsWow64Context(Context) \
+    (((Context)->SegCs & ~RPL_MASK) == KGDT64_R3_CMCODE)
+#define KdpGetParameterThree(Context) \
+    (KdpIsWow64Context(Context) ? (Context)->Rbx : (Context)->R8)
+#define KdpGetParameterFour(Context) \
+    (KdpIsWow64Context(Context) ? (Context)->Rdi : (Context)->R9)
+#define KdpGetUserPointer(Context, Value) \
+    (KdpIsWow64Context(Context) ? (ULONG_PTR)(ULONG)(Value) : (ULONG_PTR)(Value))
 
 #elif defined(_ARM_)
 
@@ -43,6 +50,10 @@
 
 #else
 #error Unsupported Architecture
+#endif
+
+#ifndef KdpGetUserPointer
+#define KdpGetUserPointer(Context, Value) ((ULONG_PTR)(Value))
 #endif
 
 /* FUNCTIONS *****************************************************************/
@@ -182,7 +193,7 @@ KdpTrap(IN PKTRAP_FRAME TrapFrame,
                 /* Call the worker routine */
                 ReturnStatus = KdpPrint((ULONG)KdpGetParameterThree(ContextRecord),
                                         (ULONG)KdpGetParameterFour(ContextRecord),
-                                        (PCHAR)ExceptionRecord->ExceptionInformation[1],
+                                        (PCHAR)KdpGetUserPointer(ContextRecord, ExceptionRecord->ExceptionInformation[1]),
                                         (USHORT)ExceptionRecord->ExceptionInformation[2],
                                         PreviousMode,
                                         TrapFrame,
@@ -197,9 +208,9 @@ KdpTrap(IN PKTRAP_FRAME TrapFrame,
             case BREAKPOINT_PROMPT:
 
                 /* Call the worker routine */
-                ReturnLength = KdpPrompt((PCHAR)ExceptionRecord->ExceptionInformation[1],
+                ReturnLength = KdpPrompt((PCHAR)KdpGetUserPointer(ContextRecord, ExceptionRecord->ExceptionInformation[1]),
                                          (USHORT)ExceptionRecord->ExceptionInformation[2],
-                                         (PCHAR)KdpGetParameterThree(ContextRecord),
+                                         (PCHAR)KdpGetUserPointer(ContextRecord, KdpGetParameterThree(ContextRecord)),
                                          (USHORT)KdpGetParameterFour(ContextRecord),
                                          PreviousMode,
                                          TrapFrame,

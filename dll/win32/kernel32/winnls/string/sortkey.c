@@ -355,10 +355,49 @@ static inline int compare_case_weights(int flags, const WCHAR *str1, int len1,
     return len1 - len2;
 }
 
+/*
+ * The number of characters at the start of both strings that are the same. Strings that are equal up to
+ * there need no table lookup for those characters: the three passes compare character n of one string with
+ * character n of the other, a skipped character (symbol, hyphen or apostrophe) only moves the two strings
+ * apart when the characters at the same position differ, and equal characters give no difference in any
+ * pass. The result of the comparison is therefore the one of what follows the common start.
+ */
+static inline int count_equal_prefix(const WCHAR *str1, const WCHAR *str2, int len)
+{
+    int i = 0;
+    const int step = (int)(sizeof(ULONG_PTR) / sizeof(WCHAR));
+
+    /* Strings that differ at the first character are the common case of a search */
+    if (len <= 0 || str1[0] != str2[0])
+        return 0;
+
+    while (len - i >= step)
+    {
+        ULONG_PTR a, b;
+
+        memcpy(&a, str1 + i, sizeof(a));
+        memcpy(&b, str2 + i, sizeof(b));
+        if (a != b) break;
+        i += step;
+    }
+    while (i < len && str1[i] == str2[i]) i++;
+    return i;
+}
+
 int wine_compare_string(int flags, const WCHAR *str1, int len1,
                         const WCHAR *str2, int len2)
 {
     int ret;
+    int same;
+
+    same = count_equal_prefix(str1, str2, len1 < len2 ? len1 : len2);
+    if (same)
+    {
+        str1 += same;
+        str2 += same;
+        len1 -= same;
+        len2 -= same;
+    }
 
     ret = compare_unicode_weights(flags, str1, len1, str2, len2);
     if (!ret)

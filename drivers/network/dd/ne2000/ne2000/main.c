@@ -394,6 +394,7 @@ static NDIS_STATUS NTAPI MiniportInitialize(
     Adapter->TXCount   = DRIVER_DEFAULT_TX_BUFFER_COUNT;
     Adapter->TXFree    = DRIVER_DEFAULT_TX_BUFFER_COUNT;
     Adapter->TXCurrent = -1;
+    Adapter->TXLast    = -1;
     Adapter->PageStart = Adapter->TXStart + Adapter->TXCount;
     Adapter->PageStop  = Adapter->TXStart + (Adapter->RamSize >> 8);
 
@@ -782,7 +783,9 @@ static NDIS_STATUS NTAPI MiniportSetInformation(
 
         Adapter->PacketFilter = GenericULONG;
 
-        /* FIXME: Set filter on hardware */
+#ifndef NOCARD
+        NICApplyPacketFilter(Adapter);
+#endif
 
         break;
     case OID_GEN_CURRENT_LOOKAHEAD:
@@ -809,10 +812,20 @@ static NDIS_STATUS NTAPI MiniportSetInformation(
             break;
         }
 
+        if ((InformationBufferLength / DRIVER_LENGTH_OF_ADDRESS) > DRIVER_MAX_MULTICAST_LIST_SIZE) {
+            *BytesRead   = 0;
+            *BytesNeeded = 0;
+            Status       = NDIS_STATUS_MULTICAST_FULL;
+            break;
+        }
+
         /* Set new multicast address list */
         NdisMoveMemory(Adapter->Addresses, InformationBuffer, InformationBufferLength);
+        Adapter->MulticastListSize = InformationBufferLength / DRIVER_LENGTH_OF_ADDRESS;
 
-        /* FIXME: Update hardware */
+#ifndef NOCARD
+        NICApplyPacketFilter(Adapter);
+#endif
 
         break;
     default:
