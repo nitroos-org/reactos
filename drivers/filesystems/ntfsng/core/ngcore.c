@@ -84,6 +84,8 @@ struct ngc_vol {
 	/* its increments at the last complete commit: kshim_jnl_aux_done (a commit's journal I/O may run without the volume lock) */
 	int damaged;                    /* the mount-time check found damage: read-only */
 	int checked;                    /* the mount-time consistency check ran to its verdict */
+	int unmarked;                   /* it found records or clusters in use that their bitmap marks free (no damage else):
+					   the write pass sets those bits (ngc_mark_unmarked) */
 	char why[160];
 	int failed;                     /* a consistency point was abandoned for good: every later one fails */
 	int label_read;                 /* label holds $VOLUME_NAME as on disk */
@@ -185,16 +187,23 @@ static const char *ngc_mount_check(struct ngc_vol *v, struct ntfs_volume *vol, s
 		printk(KERN_ERR "CHECK: not run (out of memory)\n");
 		return NULL;
 	}
-	err = ngc_fsck(vol, b, r);
+	/* In use but free in a bitmap is not damage here: the write pass sets those bits before anything is allocated. */
+	err = ngc_fsck_ex(vol, b, r, NGC_FSCK_DEFER_MARKS);
 	v->checked = !err || r->fatal;
 	if (err && !r->fatal) {
 		printk(KERN_ERR "CHECK: not run (%d)\n", err);
 	} else {
 		printk(KERN_WARNING "CHECK: %s: %llu records (%llu in use), %llu directories (%u not walked), "
 		       "%llu index entries, %llu clusters%s, %u leaks (%llu clusters), %u errors, %u ms%s\n",
-		       r->fatal ? "DAMAGED" : "consistent", r->records, r->inuse, r->dirs, r->dirs_skipped, r->ientries,
+		       r->fatal ? "DAMAGED" : r->unmarked_records || r->unmarked_clusters ? "consistent once bits are set" : "consistent",
+		       r->records, r->inuse, r->dirs, r->dirs_skipped, r->ientries,
 		       r->clusters, r->clusters_skipped ? " (cluster map not checked: volume too large)" : "",
 		       r->leaks, r->leaked_clusters, r->fatal, r->ms, unclean ? " (after an unclean shutdown)" : "");
+		if (!r->fatal && (r->unmarked_records || r->unmarked_clusters)) {
+			printk(KERN_WARNING "CHECK: %u records and %llu clusters in use are free in their bitmaps: marked in use before the volume goes read-write\n",
+			       r->unmarked_records, r->unmarked_clusters);
+			v->unmarked = 1;
+		}
 		if (r->fatal) {
 			v->damaged = 1;
 			snprintf(v->why, sizeof(v->why), "the consistency check found %u errors, first: %s", r->fatal, r->why);
@@ -418,7 +427,7 @@ enum { NGC_PASS_RO, NGC_PASS_CHECK, NGC_PASS_WRITE };
  * which replays in place, clears the dirty flag and goes read-write.
  */
 static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sector_size, int pass,
-		ngc_vol **out, const char **why_ro, int *was_dirty)
+		ngc_vol **out, const char **why_ro, int *was_dirty, int *marks)
 {
 	struct fs_context *fc;
 	struct block_device *b;
@@ -547,6 +556,11 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 				"$LogFile was not shut down cleanly";
 		else if (pass == NGC_PASS_CHECK)
 			*why_ro = ngc_mount_check(v, vol, b, need_write || dirty);
+		if (!*why_ro && pass == NGC_PASS_CHECK && v->unmarked) {
+			/* The bits are set once the volume is writable (ngc_mount), always through the write pass. */
+			*marks = 1;
+			need_write = 1;
+		}
 		if (!*why_ro && foreign && pass == NGC_PASS_CHECK) {
 			if (!v->checked)
 				*why_ro = "volume is marked dirty and the mount-time check could not run";
@@ -645,16 +659,21 @@ fail:
 	return err;
 }
 
+static int ngc_mark_unmarked(ngc_vol *v);
+
 int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, int want_rw,
 		ngc_vol **out, const char **why_ro)
 {
-	int err, was_dirty = 0;
+	int err, was_dirty = 0, marks = 0;
 	if (!want_rw)
-		return ngc_mount_pass(osdev, size, sector_size, NGC_PASS_RO, out, why_ro, &was_dirty);
-	err = ngc_mount_pass(osdev, size, sector_size, NGC_PASS_CHECK, out, why_ro, &was_dirty);
+		return ngc_mount_pass(osdev, size, sector_size, NGC_PASS_RO, out, why_ro, &was_dirty, &marks);
+	err = ngc_mount_pass(osdev, size, sector_size, NGC_PASS_CHECK, out, why_ro, &was_dirty, &marks);
 	if (err != NGC_NEED_WRITE_PASS)
 		return err;
-	err = ngc_mount_pass(osdev, size, sector_size, NGC_PASS_WRITE, out, why_ro, &was_dirty);
+	err = ngc_mount_pass(osdev, size, sector_size, NGC_PASS_WRITE, out, why_ro, &was_dirty, &marks);
+	/* Before anything can allocate: what the check found in use but free in its bitmap is marked in use. */
+	if (!err && marks && *out && !sb_rdonly((*out)->sb) && ngc_mark_unmarked(*out))
+		*why_ro = (*out)->why;
 	/*
 	 * A real dirty flag the disk carried (see ngc_mount_pass) is a request for autochk, as on Windows: the checks
 	 * above found nothing wrong and the volume goes read-write for the system to boot, but the flag stays (set again
@@ -5446,7 +5465,8 @@ int ngc_check(ngc_vol *v, unsigned int flags, struct ngc_check *out)
 	out->leaked_clusters = r->leaked_clusters;
 	out->fixed_clusters = r->fixed_clusters;
 	out->fatal = r->fatal;
-	out->leaks = r->leaks;
+	/* What a repair found in use but free in its bitmap (only a repair counts it apart from the errors) is a problem it corrected. */
+	out->leaks = r->leaks + r->unmarked_records + (r->unmarked_clusters ? 1 : 0);
 	out->leaked_records = r->leaked_records;
 	out->fixed_records = r->fixed_records;
 	out->dirs_skipped = r->dirs_skipped;
@@ -5495,7 +5515,7 @@ int ngc_check(ngc_vol *v, unsigned int flags, struct ngc_check *out)
 			}
 		} else {
 			int e = 0;
-			if (r->fixed_clusters || r->fixed_records) {
+			if (r->fixed_clusters || r->fixed_records || r->marked_records || r->marked_clusters) {
 				e = ngc_commit(v);
 				if (!e)
 					out->flags |= NGC_CHK_REPAIRED;
@@ -5524,4 +5544,51 @@ int ngc_check(ngc_vol *v, unsigned int flags, struct ngc_check *out)
 	}
 	kfree(r);
 	return 0;
+}
+
+/*
+ * The mount-time check of the read-only pass found records or clusters in use that their bitmap marks free, and nothing else
+ * wrong (ngc_mount_check).  Called by ngc_mount once the write pass has made the volume writable (journal replayed in place,
+ * journal active) and before anything can be allocated on it: the check runs again on that volume and sets those bits, and
+ * one commit puts them on disk.  Setting a bit loses nothing: at worst something that should have been free stays allocated,
+ * a leak a later check frees.  Cost: one more consistency check (bounded as the mount-time check: at most 4M records, the
+ * cluster map only up to 16 MB of bitmap) plus one commit, paid only at a mount that found the state.  A repair that fails,
+ * or damage found this time, leaves the volume dirty and read-only, as the mount-time check does for damage.
+ */
+static int ngc_mark_unmarked(ngc_vol *v)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct ngc_fsck_res *r = kzalloc(sizeof(*r), GFP_KERNEL);
+	int err = r ? ngc_fsck_ex(vol, v->bdev, r, NGC_FSCK_MARKS) : -ENOMEM;
+	if (!err && !r->fatal && !r->repair_errors) {
+		if (r->marked_records || r->marked_clusters)
+			err = ngc_commit(v);
+		if (!err) {
+			printk(KERN_WARNING "CHECK (repair at mount): %u records marked in use in $MFT:$BITMAP, %llu clusters in $Bitmap, %u ms\n",
+			       r->marked_records, r->marked_clusters, r->ms);
+			kfree(r);
+			return 0;
+		}
+	}
+	if (r && r->fatal)
+		snprintf(v->why, sizeof(v->why), "the consistency check found %u errors, first: %s", r->fatal, r->why);
+	else
+		snprintf(v->why, sizeof(v->why), "records or clusters in use that their bitmap marks free could not be marked (%d, %u)",
+			 err, r ? r->repair_errors : 0);
+	printk(KERN_ERR "CHECK (repair at mount): %s: read-only\n", v->why);
+	ngc_set_keep(v, true);
+	err = 0;
+	if (!(vol->vol_flags & VOLUME_IS_DIRTY)) {
+		err = ntfs_set_volume_flags(vol, VOLUME_IS_DIRTY);
+		if (!err)
+			err = write_inode_now(vol->vol_ino, 1);
+	}
+	if (!err)
+		err = ngc_commit(v);
+	if (err)
+		printk(KERN_ERR "CHECK: could not keep the volume dirty (%d)\n", err);
+	v->damaged = 1;
+	v->sb->s_flags |= SB_RDONLY;
+	kfree(r);
+	return -EIO;
 }
