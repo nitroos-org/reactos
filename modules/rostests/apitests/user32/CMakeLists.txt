@@ -70,6 +70,7 @@ list(APPEND SOURCE
     ForegroundIdleHook.c
     HookFamilies.c
     HungWindow.c
+    WindowNestingLimit.c
     WindowPosChanged.c
     WindowRgnHandles.c
     PowerSettingNotification.c
@@ -80,6 +81,8 @@ list(APPEND SOURCE
     SetWindowPosFlags.c
     SetParentCrossProcess.c
     SetParentKillOrder.c
+    SetParentLoop.c
+    SetCursorParentDestroys.c
     SetWindowPosLastError.c
     WmCancelModeLastError.c
     LastInputInfo.c

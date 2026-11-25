@@ -1169,6 +1169,9 @@ IntDefWindowProc(
                  if (!UserIsDesktopWindow(parent) &&
                      co_IntSendMessage( UserHMGetHandle(parent), WM_SETCURSOR, wParam, lParam))
                     return TRUE;
+                 /* The parent's procedure can have destroyed this window: it is held, but freed (no class) */
+                 if ((Wnd->state & WNDS_DESTROYED) || !Wnd->pcls)
+                    return FALSE;
              }
          }
          return DefWndHandleSetCursor(Wnd, wParam, lParam);

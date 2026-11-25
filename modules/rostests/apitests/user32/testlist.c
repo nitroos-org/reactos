@@ -99,6 +99,7 @@ extern void func_HookChainUnhookUaf(void);
 extern void func_ForegroundIdleHook(void);
 extern void func_HookFamilies(void);
 extern void func_HungWindow(void);
+extern void func_WindowNestingLimit(void);
 extern void func_WindowPosChanged(void);
 extern void func_WindowRgnHandles(void);
 extern void func_PowerSettingNotification(void);
@@ -109,6 +110,8 @@ extern void func_NcPaintLayered(void);
 extern void func_SetWindowPosFlags(void);
 extern void func_SetParentCrossProcess(void);
 extern void func_SetParentKillOrder(void);
+extern void func_SetParentLoop(void);
+extern void func_SetCursorParentDestroys(void);
 extern void func_SetWindowPosLastError(void);
 extern void func_WmCancelModeLastError(void);
 extern void func_LastInputInfo(void);
@@ -323,6 +326,7 @@ const struct test winetest_testlist[] =
     { "ForegroundIdleHook", func_ForegroundIdleHook },
     { "HookFamilies", func_HookFamilies },
     { "HungWindow", func_HungWindow },
+    { "WindowNestingLimit", func_WindowNestingLimit },
     { "WindowPosChanged", func_WindowPosChanged },
     { "WindowRgnHandles", func_WindowRgnHandles },
     { "PowerSettingNotification", func_PowerSettingNotification },
@@ -333,6 +337,8 @@ const struct test winetest_testlist[] =
     { "SetWindowPosFlags", func_SetWindowPosFlags },
     { "SetParentCrossProcess", func_SetParentCrossProcess },
     { "SetParentKillOrder", func_SetParentKillOrder },
+    { "SetParentLoop", func_SetParentLoop },
+    { "SetCursorParentDestroys", func_SetCursorParentDestroys },
     { "SetWindowPosLastError", func_SetWindowPosLastError },
     { "LastInputInfo", func_LastInputInfo },
     { "WmCancelModeLastError", func_WmCancelModeLastError },
