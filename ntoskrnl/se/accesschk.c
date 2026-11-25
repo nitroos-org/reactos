@@ -298,6 +298,57 @@ SepGetRestrictedAccessMask(
 
 /**
  * @brief
+ * Tells whether an OWNER RIGHTS ACE is for the token: the owner SID of the
+ * descriptor is in the token. A write restricted token with restricting SIDs
+ * is the owner only when its restricting SIDs hold the owner SID as well, also
+ * in the pass that compares the SIDs of the token for rights the restricting
+ * SIDs are not asked about. Measured on Windows Server 2022 (descriptors with
+ * an OWNER RIGHTS ACE, owner the user of the token, write restricted tokens
+ * restricted to Everyone, Users, RESTRICTED and the three together): the OWNER
+ * RIGHTS ACE grants nothing to such a token, not even the read right of a
+ * read request; a plain restricted token, which compares the restricting SIDs
+ * for every right, already was equal.
+ *
+ * @param[in] Token
+ * The token the access check is for.
+ *
+ * @param[in] OwnerSid
+ * The owner SID of the descriptor.
+ *
+ * @param[in] IsDenied
+ * TRUE for a deny ACE.
+ *
+ * @param[in] IsTokenRestricted
+ * TRUE in the pass that looks at the restricting SIDs.
+ *
+ * @return
+ * TRUE if the OWNER RIGHTS ACE applies to the token.
+ */
+static
+BOOLEAN
+SepOwnerRightsAceAppliesToToken(
+    _In_ PACCESS_TOKEN Token,
+    _In_ PSID OwnerSid,
+    _In_ BOOLEAN IsDenied,
+    _In_ BOOLEAN IsTokenRestricted)
+{
+    PAGED_CODE();
+
+    if (!SepSidInTokenEx(Token, NULL, OwnerSid, IsDenied, IsTokenRestricted))
+        return FALSE;
+
+    if (!IsTokenRestricted &&
+        (((PTOKEN)Token)->TokenFlags & SEP_TOKEN_WRITE_RESTRICTED) &&
+        ((PTOKEN)Token)->RestrictedSidCount != 0)
+    {
+        return SepSidInTokenEx(Token, NULL, OwnerSid, IsDenied, TRUE);
+    }
+
+    return TRUE;
+}
+
+/**
+ * @brief
  * Checks if the token gets the implicit owner rights (READ_CONTROL and
  * WRITE_DAC) on an object: it is the owner, and the DACL of the object
  * has no OWNER RIGHTS ACE that applies to the object.
@@ -957,7 +1008,7 @@ SepAnalyzeAcesForObjectTypeList(
             /* An OWNER RIGHTS ACE is for the owner (looked at only when no SID matched) */
             if (OwnerSid == NULL ||
                 !SepIsOwnerRightsSid(Sid) ||
-                !SepSidInTokenEx(AccessToken, NULL, OwnerSid, IsDenied, IsTokenRestricted))
+                !SepOwnerRightsAceAppliesToToken(AccessToken, OwnerSid, IsDenied, IsTokenRestricted))
             {
                 continue;
             }
@@ -1254,7 +1305,7 @@ SepAnalyzeAcesFromDacl(
             /* An OWNER RIGHTS ACE is for the owner (looked at only when no SID matched) */
             if (OwnerSid == NULL ||
                 !SepIsOwnerRightsSid(Sid) ||
-                !SepSidInTokenEx(AccessToken, NULL, OwnerSid, IsDenied, IsTokenRestricted))
+                !SepOwnerRightsAceAppliesToToken(AccessToken, OwnerSid, IsDenied, IsTokenRestricted))
             {
                 continue;
             }

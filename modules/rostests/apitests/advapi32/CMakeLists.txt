@@ -6,6 +6,7 @@ list(APPEND SOURCE
     AccessCheckDifferential.c
     AccessCheckMandatory.c
     AccessCheckNoAccess.c
+    AccessCheckWriteRestrictedOwner.c
     AccessCheckGenericAce.c
     AccessCheckMalformedAcl.c
     AccessCheckAppContainer.c
