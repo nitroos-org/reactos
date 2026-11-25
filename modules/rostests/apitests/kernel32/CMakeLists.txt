@@ -138,6 +138,7 @@ list(APPEND SOURCE
     GetFinalPathNameByHandle.c
     GetUserDefaultGeoName.c
     GetLocaleInfo.c
+    IsNLSDefinedString.c
     GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
     GetNamedPipeServerProcessId.c

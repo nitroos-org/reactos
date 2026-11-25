@@ -140,6 +140,7 @@ extern void func_GetFileType(void);
 extern void func_GetFinalPathNameByHandle(void);
 extern void func_GetUserDefaultGeoName(void);
 extern void func_GetLocaleInfo(void);
+extern void func_IsNLSDefinedString(void);
 extern void func_GetLogicalProcessorInformationEx(void);
 extern void func_GetModuleFileName(void);
 extern void func_GetNamedPipeServerProcessId(void);
@@ -441,6 +442,7 @@ const struct test winetest_testlist[] =
     { "GetFinalPathNameByHandle",    func_GetFinalPathNameByHandle },
     { "GetUserDefaultGeoName", func_GetUserDefaultGeoName },
     { "GetLocaleInfo",               func_GetLocaleInfo },
+    { "IsNLSDefinedString",          func_IsNLSDefinedString },
     { "GetLogicalProcessorInformationEx", func_GetLogicalProcessorInformationEx },
     { "GetModuleFileName",           func_GetModuleFileName },
     { "GetNamedPipeServerProcessId", func_GetNamedPipeServerProcessId },
