@@ -225,6 +225,12 @@ UserRedirInit(VOID)
     if (!gRedirTimer || !AtomRedir)
     {
         ERR("Redirection: no timer or atom, staying off\n");
+        /* The raw input thread waits on the timer when there is one: no timer that was never initialized */
+        if (gRedirTimer)
+        {
+            ExFreePoolWithTag(gRedirTimer, USERTAG_REDIRSURF);
+            gRedirTimer = NULL;
+        }
         gRedirLevel = 0;
         return;
     }
@@ -1614,6 +1620,9 @@ UserRedirPresentPending(VOID)
         }
         else if (r->Dirty && r->pwnd)
         {
+            /* A burst of scrolls that is over (two frames without a present of it) ends here, not at the next release */
+            if (r->HoldUntil && KeQueryPerformanceCounter(NULL).QuadPart >= r->HoldUntil)
+                r->HoldUntil = 0;
             /* RedirPresentDirty may detach r; the next entry was taken first, and r stays alive while a DC holds it */
             InterlockedIncrement(&r->cRefs);
             RedirPresentDirty(r);
@@ -1679,6 +1688,8 @@ UserRedirPresentTail(VOID)
         /* RedirPresentDirty may detach r; the next entry was taken first, and r stays alive while a DC holds it */
         InterlockedIncrement(&r->cRefs);
         r->LastPresent = KeQueryPerformanceCounter(NULL).QuadPart;
+        /* The last frame of the burst: the burst ends (a scroll within a frame of the last one starts it again) */
+        r->HoldUntil = 0;
         RedirPresentDirty(r);
         RedirRelease(r);
     }
