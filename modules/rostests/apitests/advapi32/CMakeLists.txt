@@ -158,6 +158,7 @@ list(APPEND SOURCE
     ServiceVirtualAccount.c
     ServiceNetwork.c
     SetEntriesInAclOld.c
+    SetPrivateObjectSecurityEx.c
     SetSecurityGenericMap.c
     SetSecurityTypeMask.c
     SetSecurityInfoKey.c

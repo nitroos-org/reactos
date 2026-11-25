@@ -1541,6 +1541,36 @@ SetPrivateObjectSecurity(SECURITY_INFORMATION SecurityInformation,
 /*
  * @implemented
  */
+BOOL
+WINAPI
+SetPrivateObjectSecurityEx(SECURITY_INFORMATION SecurityInformation,
+                           PSECURITY_DESCRIPTOR ModificationDescriptor,
+                           PSECURITY_DESCRIPTOR *ObjectsSecurityDescriptor,
+                           ULONG AutoInheritFlags,
+                           PGENERIC_MAPPING GenericMapping,
+                           HANDLE Token)
+{
+    NTSTATUS Status;
+
+    Status = RtlSetSecurityObjectEx(SecurityInformation,
+                                    ModificationDescriptor,
+                                    ObjectsSecurityDescriptor,
+                                    AutoInheritFlags,
+                                    GenericMapping,
+                                    Token);
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastError(RtlNtStatusToDosError(Status));
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+
+/*
+ * @implemented
+ */
 DWORD
 WINAPI
 TreeResetNamedSecurityInfoW(LPWSTR pObjectName,

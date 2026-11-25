@@ -68,6 +68,100 @@ RtlpMapGenericAcl(
     }
 }
 
+/*
+ * The ACL a set with SEF_DACL_AUTO_INHERIT / SEF_SACL_AUTO_INHERIT stores (measured on
+ * Windows Server 2022, SetPrivateObjectSecurityEx): the ACEs of the modification ACL that
+ * are not marked inherited, then the inherited ACEs the object has now (the caller does not
+ * supply those, the inheritance engine does). A modification ACL that is protected is
+ * taken whole: its inherited ACEs become explicit (the inherited bit goes; no-propagate and
+ * inherit-only go with it when no inheritance flag is left). An inheritable ACE that is not
+ * inherit-only and carries generic rights is split into an effective ACE without inheritance
+ * flags (the audit flags stay) and an inherit-only copy that keeps the generic rights.
+ */
+static
+NTSTATUS
+RtlpBuildAutoInheritAcl(
+    _In_ PACL ModificationAcl,
+    _In_opt_ PACL ObjectAcl,
+    _In_ BOOLEAN Protected,
+    _Out_ PACL *NewAcl)
+{
+    PACL Acl;
+    PACE_HEADER Ace, Added;
+    PVOID FreeAce;
+    ULONG Size, i;
+    UCHAR Flags;
+    NTSTATUS Status;
+
+    Size = ModificationAcl->AclSize * 2 + (ObjectAcl ? ObjectAcl->AclSize : 0) + sizeof(ACL);
+    if (Size > 0xFFFC)
+        Size = 0xFFFC;
+    Acl = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size);
+    if (Acl == NULL)
+        return STATUS_NO_MEMORY;
+    RtlCreateAcl(Acl, Size, ModificationAcl->AclRevision);
+
+    for (i = 0; i < ModificationAcl->AceCount; i++)
+    {
+        Status = RtlGetAce(ModificationAcl, i, (PVOID *)&Ace);
+        if (!NT_SUCCESS(Status))
+            goto fail;
+        Flags = Ace->AceFlags;
+        if (Flags & INHERITED_ACE)
+        {
+            if (!Protected)
+                continue;
+            Flags &= ~INHERITED_ACE;
+            if (!(Flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)))
+                Flags &= ~(NO_PROPAGATE_INHERIT_ACE | INHERIT_ONLY_ACE);
+        }
+
+        if (!(Flags & INHERIT_ONLY_ACE) && (Flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)) &&
+            Ace->AceType <= SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE &&
+            (*(PACCESS_MASK)(Ace + 1) & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL)))
+        {
+            Status = RtlAddAce(Acl, ModificationAcl->AclRevision, MAXULONG, Ace, Ace->AceSize);
+            if (!NT_SUCCESS(Status))
+                goto fail;
+            RtlGetAce(Acl, Acl->AceCount - 1, (PVOID *)&Added);
+            Added->AceFlags = Flags & (SUCCESSFUL_ACCESS_ACE_FLAG | FAILED_ACCESS_ACE_FLAG);
+            Flags |= INHERIT_ONLY_ACE;
+        }
+
+        Status = RtlAddAce(Acl, ModificationAcl->AclRevision, MAXULONG, Ace, Ace->AceSize);
+        if (!NT_SUCCESS(Status))
+            goto fail;
+        RtlGetAce(Acl, Acl->AceCount - 1, (PVOID *)&Added);
+        Added->AceFlags = Flags;
+    }
+
+    if (!Protected && ObjectAcl != NULL)
+    {
+        for (i = 0; i < ObjectAcl->AceCount; i++)
+        {
+            Status = RtlGetAce(ObjectAcl, i, (PVOID *)&Ace);
+            if (!NT_SUCCESS(Status))
+                goto fail;
+            if (!(Ace->AceFlags & INHERITED_ACE))
+                continue;
+            Status = RtlAddAce(Acl, ModificationAcl->AclRevision, MAXULONG, Ace, Ace->AceSize);
+            if (!NT_SUCCESS(Status))
+                goto fail;
+        }
+    }
+
+    /* Trim the ACL to what is used */
+    if (RtlFirstFreeAce(Acl, (PACE *)&FreeAce) && FreeAce != NULL)
+        Acl->AclSize = (USHORT)((PUCHAR)FreeAce - (PUCHAR)Acl);
+
+    *NewAcl = Acl;
+    return STATUS_SUCCESS;
+
+fail:
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Acl);
+    return Status;
+}
+
 NTSTATUS
 NTAPI
 RtlpSetSecurityObject(IN PVOID Object OPTIONAL,
@@ -90,10 +184,16 @@ RtlpSetSecurityObject(IN PVOID Object OPTIONAL,
     ULONG ulDaclSize = 0, ulSaclSize = 0;
     ULONG ulNewSdSize;
     SECURITY_DESCRIPTOR_CONTROL Control = SE_SELF_RELATIVE;
+    SECURITY_DESCRIPTOR_CONTROL ModControl = 0;
+    PACL pObjectAcl, pBuiltDacl = NULL, pBuiltSacl = NULL;
+    ULONG Revision;
     PUCHAR pDest;
     NTSTATUS Status = STATUS_SUCCESS;
 
     DPRINT("RtlpSetSecurityObject()\n");
+
+    if (SecurityInformation & (DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION))
+        RtlGetControlSecurityDescriptor(ModificationDescriptor, &ModControl, &Revision);
 
     /* Change the Owner SID */
     if (SecurityInformation & OWNER_SECURITY_INFORMATION)
@@ -180,6 +280,58 @@ RtlpSetSecurityObject(IN PVOID Object OPTIONAL,
             Control |= SE_SACL_DEFAULTED;
     }
 
+    /* The auto-inherit controls and ACL selection of a set with the auto-inherit flags */
+    if (SecurityInformation & DACL_SECURITY_INFORMATION)
+    {
+        if (AutoInheritFlags & SEF_DACL_AUTO_INHERIT)
+        {
+            Control |= SE_DACL_AUTO_INHERITED;
+            if (pDacl != NULL)
+            {
+                RtlGetDaclSecurityDescriptor(*ObjectsSecurityDescriptor, &Present, &pObjectAcl, &Defaulted);
+                Status = RtlpBuildAutoInheritAcl(pDacl, Present ? pObjectAcl : NULL,
+                                                 (ModControl & SE_DACL_PROTECTED) != 0, &pBuiltDacl);
+                if (!NT_SUCCESS(Status))
+                    return Status;
+                pDacl = pBuiltDacl;
+                ulDaclSize = pDacl->AclSize;
+            }
+        }
+        else if ((ModControl & (SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED)) ==
+                 (SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED))
+        {
+            Control |= SE_DACL_AUTO_INHERITED;
+        }
+
+        if (ModControl & SE_DACL_PROTECTED)
+            Control |= SE_DACL_PROTECTED;
+    }
+
+    if (SecurityInformation & SACL_SECURITY_INFORMATION)
+    {
+        if (AutoInheritFlags & SEF_SACL_AUTO_INHERIT)
+        {
+            Control |= SE_SACL_AUTO_INHERITED;
+            if (pSacl != NULL)
+            {
+                RtlGetSaclSecurityDescriptor(*ObjectsSecurityDescriptor, &Present, &pObjectAcl, &Defaulted);
+                Status = RtlpBuildAutoInheritAcl(pSacl, Present ? pObjectAcl : NULL,
+                                                 (ModControl & SE_SACL_PROTECTED) != 0, &pBuiltSacl);
+                if (!NT_SUCCESS(Status))
+                    goto done;
+                pSacl = pBuiltSacl;
+            }
+        }
+        else if ((ModControl & (SE_SACL_AUTO_INHERIT_REQ | SE_SACL_AUTO_INHERITED)) ==
+                 (SE_SACL_AUTO_INHERIT_REQ | SE_SACL_AUTO_INHERITED))
+        {
+            Control |= SE_SACL_AUTO_INHERITED;
+        }
+
+        if (ModControl & SE_SACL_PROTECTED)
+            Control |= SE_SACL_PROTECTED;
+    }
+
     if (pSacl != NULL)
         ulSaclSize = pSacl->AclSize;
 
@@ -248,6 +400,11 @@ RtlpSetSecurityObject(IN PVOID Object OPTIONAL,
     *ObjectsSecurityDescriptor = (PSECURITY_DESCRIPTOR)pNewSd;
 
 done:
+    if (pBuiltDacl != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pBuiltDacl);
+    if (pBuiltSacl != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pBuiltSacl);
+
     if (!NT_SUCCESS(Status))
     {
         if (pNewSd != NULL)
@@ -1375,6 +1532,8 @@ RtlQuerySecurityObject(IN PSECURITY_DESCRIPTOR ObjectDescriptor,
     BOOLEAN defaulted, present;
     PACL pacl;
     PSID psid;
+    SECURITY_DESCRIPTOR_CONTROL Control, Mask = 0;
+    ULONG Revision;
 
     Status = RtlCreateSecurityDescriptor(&desc, SECURITY_DESCRIPTOR_REVISION);
     if (!NT_SUCCESS(Status)) return Status;
@@ -1410,6 +1569,14 @@ RtlQuerySecurityObject(IN PSECURITY_DESCRIPTOR ObjectDescriptor,
         Status = RtlSetSaclSecurityDescriptor(&desc, present, pacl, defaulted);
         if (!NT_SUCCESS(Status)) return Status;
     }
+
+    /* The auto-inherited and protected bits of the ACLs that are returned stay (Windows Server 2022 reports them) */
+    if (SecurityInformation & DACL_SECURITY_INFORMATION)
+        Mask |= SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED;
+    if (SecurityInformation & SACL_SECURITY_INFORMATION)
+        Mask |= SE_SACL_AUTO_INHERITED | SE_SACL_PROTECTED;
+    if (Mask != 0 && NT_SUCCESS(RtlGetControlSecurityDescriptor(ObjectDescriptor, &Control, &Revision)))
+        RtlSetControlSecurityDescriptor(&desc, Mask, Control & Mask);
 
     *ReturnLength = DescriptorLength;
     Status = RtlAbsoluteToSelfRelativeSD(&desc, ResultantDescriptor, ReturnLength);
