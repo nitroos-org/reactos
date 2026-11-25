@@ -841,11 +841,6 @@ static DWORD write_dacl(const WCHAR *path, const acelist *l, UCHAR revision, BOO
     return err;
 }
 
-static BOOL is_reparse_dir(const WIN32_FIND_DATAW *fd)
-{
-    return (fd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-}
-
 static WCHAR *join_path(const WCHAR *dir, const WCHAR *name)
 {
     size_t dl = wcslen(dir), nl = wcslen(name);
@@ -857,93 +852,6 @@ static WCHAR *join_path(const WCHAR *dir, const WCHAR *name)
     return r;
 }
 
-/* The objects below a directory, collected before its DACL changes: an empty or restrictive DACL
-   would otherwise stop us from listing the directory afterwards. */
-typedef struct
-{
-    WCHAR *path;
-    int parent;
-} pnode;
-
-typedef struct
-{
-    pnode *n;
-    int count, cap;
-} plist;
-
-static void plist_collect(const WCHAR *dir, int parent, plist *pl)
-{
-    WIN32_FIND_DATAW fd;
-    WCHAR *pattern = join_path(dir, L"*");
-    HANDLE h = FindFirstFileW(pattern, &fd);
-
-    HeapFree(GetProcessHeap(), 0, pattern);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do
-    {
-        int idx;
-
-        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-        if (is_reparse_dir(&fd)) continue;
-        if (pl->count == pl->cap)
-        {
-            pl->cap = pl->cap ? pl->cap * 2 : 64;
-            pl->n = pl->n ? HeapReAlloc(GetProcessHeap(), 0, pl->n, pl->cap * sizeof(pnode))
-                          : HeapAlloc(GetProcessHeap(), 0, pl->cap * sizeof(pnode));
-            if (!pl->n) ExitProcess(ERROR_NOT_ENOUGH_MEMORY);
-        }
-        idx = pl->count++;
-        pl->n[idx].path = join_path(dir, fd.cFileName);
-        pl->n[idx].parent = parent;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) plist_collect(pl->n[idx].path, idx, pl);
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-}
-
-/* rebuilds the inherited part of the DACL of every unprotected object of the list, parents first */
-static void plist_apply(plist *pl)
-{
-    int i;
-    BOOL *skip = pl->count ? HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, pl->count * sizeof(BOOL)) : NULL;
-
-    for (i = 0; i < pl->count; i++)
-    {
-        PSECURITY_DESCRIPTOR sd;
-        PACL dacl;
-        BOOL protect;
-        DWORD err;
-        acelist l;
-        UCHAR rev;
-
-        if (pl->n[i].parent >= 0 && skip[pl->n[i].parent]) { skip[i] = TRUE; continue; }
-        if (!read_security(pl->n[i].path, DACL_SECURITY_INFORMATION, &sd, &dacl, &protect, &err))
-        {
-            skip[i] = TRUE;
-            continue;
-        }
-        if (protect) skip[i] = TRUE; /* nothing below a protected object inherits through it from us */
-        else if (acelist_load(&l, dacl, &rev))
-        {
-            if (write_dacl(pl->n[i].path, &l, rev, FALSE)) skip[i] = TRUE;
-            acelist_free(&l);
-        }
-        LocalFree(sd);
-    }
-    for (i = 0; i < pl->count; i++) HeapFree(GetProcessHeap(), 0, pl->n[i].path);
-    HeapFree(GetProcessHeap(), 0, pl->n);
-    HeapFree(GetProcessHeap(), 0, skip);
-}
-
-static void plist_apply_discard(plist *pl)
-{
-    int i;
-
-    for (i = 0; i < pl->count; i++) HeapFree(GetProcessHeap(), 0, pl->n[i].path);
-    HeapFree(GetProcessHeap(), 0, pl->n);
-    pl->n = NULL;
-    pl->count = 0;
-}
-
 static DWORD apply_ops(const WCHAR *path, BOOL is_dir)
 {
     PSECURITY_DESCRIPTOR sd;
@@ -953,7 +861,6 @@ static DWORD apply_ops(const WCHAR *path, BOOL is_dir)
     acelist l;
     UCHAR rev;
     int i;
-    plist pl = { NULL, 0, 0 };
 
     if (!read_security(path, DACL_SECURITY_INFORMATION, &sd, &dacl, &protect, &err)) return err;
     if (!acelist_load(&l, dacl, &rev)) { LocalFree(sd); return ERROR_NOT_ENOUGH_MEMORY; }
@@ -988,17 +895,10 @@ static DWORD apply_ops(const WCHAR *path, BOOL is_dir)
             break;
         }
     }
-    if (is_dir && !opt.t) plist_collect(path, -1, &pl);
+    /* SetNamedSecurityInfo passes the inheritable entries on to what exists below a directory */
     err = write_dacl(path, &l, rev, protect);
     acelist_free(&l);
     LocalFree(sd);
-    if (!err)
-    {
-        /* a directory that could not be listed before may be listable now */
-        if (is_dir && !opt.t && !pl.count) plist_collect(path, -1, &pl);
-        plist_apply(&pl);
-    }
-    else plist_apply_discard(&pl);
     return err;
 }
 
