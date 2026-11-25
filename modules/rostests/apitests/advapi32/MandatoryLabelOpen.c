@@ -807,7 +807,10 @@ static VOID ChildRowsV2(DWORD Level)
                 CloseHandle(Handle);
         }
 
-        /* V2-open: the parent's event with a default descriptor: Low for SYNCHRONIZE, not for EVENT_MODIFY_STATE */
+        /* V2-open: the parent's event with a default descriptor: Low for SYNCHRONIZE, not for EVENT_MODIFY_STATE.
+           The parent made it as Local\ in its own session: Global\ names the same event only in session 0 */
+        if (Session != 0 && i == 1)
+            continue;
         StringCchPrintfW(Name, _countof(Name), L"%smlo%lu-pev", Prefixes[i], ParentPid);
         Handle = OpenEventW(SYNCHRONIZE, FALSE, Name);
         Error = Handle ? 0 : GetLastError();

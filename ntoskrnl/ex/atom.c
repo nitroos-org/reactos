@@ -49,7 +49,9 @@ ExpGetGlobalAtomTable(VOID)
 
     /* A process in a job with UI limits on global atoms has the job's own table (MSDN:
        JOBOBJECT_BASIC_UI_RESTRICTIONS). It lives as long as the job, which the process keeps. */
-    if (Callout)
+    /* win32k as a session image is reachable only from a process of a session that has it loaded: a system
+       thread (no session) has no job with UI limits and uses the global table */
+    if (Callout && (!MmIsWin32kASessionImage() || MmIsWin32kLoadedInCurrentSession()))
     {
         PRTL_ATOM_TABLE JobTable = Callout();
         if (JobTable) return JobTable;

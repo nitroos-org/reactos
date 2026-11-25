@@ -285,6 +285,18 @@ typedef enum _NOTIFICATION_TYPE
 extern HINSTANCE hAppInstance;
 extern PWLSESSION WLSession;
 
+/* Session 0's Winlogon starts the services and the LSA, the console session's logs the user on */
+typedef enum _WL_SESSION_ROLE
+{
+    WlRoleServices,     /* session 0: services and LSA only */
+    WlRoleInteractive   /* the console session: the interactive logon and the shutdown requests */
+} WL_SESSION_ROLE;
+extern WL_SESSION_ROLE WlSessionRole;
+extern ULONG WlSessionId;
+
+VOID
+WlShutdownSession0(VOID);
+
 #define WLX_LOGGINGOFF(wlxAction) \
   (((wlxAction) == WLX_SAS_ACTION_LOGOFF) || \
    ((wlxAction) == WLX_SAS_ACTION_FORCE_LOGOFF))

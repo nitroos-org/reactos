@@ -154,6 +154,7 @@ KMT_TESTFUNC Test_ObTypeNoClean;
 KMT_TESTFUNC Test_ObTypes;
 KMT_TESTFUNC Test_PsNotify;
 KMT_TESTFUNC Test_PsQuota;
+KMT_TESTFUNC Test_PsJobSessionCallout;
 KMT_TESTFUNC Test_PsQuotaLimited;
 KMT_TESTFUNC Test_PsQuotaLimitedTrim;
 KMT_TESTFUNC Test_PsQuotaLimitedSetLimits;
@@ -343,6 +344,7 @@ const KMT_TEST TestList[] =
     { "ObTypes",                            Test_ObTypes },
     { "PsNotify",                           Test_PsNotify },
     { "PsQuota",                            Test_PsQuota },
+    { "PsJobSessionCallout",                Test_PsJobSessionCallout },
     { "PsQuotaLimited",                     Test_PsQuotaLimited },
     { "PsQuotaLimitedTrim",                 Test_PsQuotaLimitedTrim },
     { "PsQuotaLimitedSetLimits",            Test_PsQuotaLimitedSetLimits },

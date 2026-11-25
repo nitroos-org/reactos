@@ -47,6 +47,44 @@ InitWindowStationImpl(VOID)
     return STATUS_SUCCESS;
 }
 
+/* The DACL of session 0's WindowStations directory (pool, USERTAG_SECURITY), or NULL */
+static
+PSECURITY_DESCRIPTOR
+IntGetSession0WinStaDirSecurity(VOID)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(WINSTA_OBJ_DIR);
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    HANDLE hDir;
+    ULONG Length = 0;
+    NTSTATUS Status;
+
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = ZwOpenDirectoryObject(&hDir, READ_CONTROL, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("Cannot open %wZ for its DACL, Status 0x%08lx\n", &Name, Status);
+        return NULL;
+    }
+    Status = ZwQuerySecurityObject(hDir, DACL_SECURITY_INFORMATION, NULL, 0, &Length);
+    if ((Status == STATUS_BUFFER_TOO_SMALL) && Length)
+    {
+        Sd = ExAllocatePoolWithTag(PagedPool, Length, USERTAG_SECURITY);
+        if (Sd)
+        {
+            Status = ZwQuerySecurityObject(hDir, DACL_SECURITY_INFORMATION, Sd, Length, &Length);
+            if (!NT_SUCCESS(Status))
+            {
+                ExFreePoolWithTag(Sd, USERTAG_SECURITY);
+                Sd = NULL;
+            }
+        }
+    }
+    if (!Sd) ERR("Cannot read the DACL of %wZ, Status 0x%08lx\n", &Name, Status);
+    ZwClose(hDir);
+    return Sd;
+}
+
 NTSTATUS
 NTAPI
 UserCreateWinstaDirectory(VOID)
@@ -55,6 +93,7 @@ UserCreateWinstaDirectory(VOID)
     ULONG SessionId;
     OBJECT_ATTRIBUTES ObjectAttributes;
     WCHAR wstrWindowStationsDir[MAX_PATH];
+    PSECURITY_DESCRIPTOR SessionSd;
 
     /* Create the WindowStations directory and cache its path for later use */
     SessionId = PsGetCurrentProcessSessionId(); // gSessionId
@@ -78,12 +117,22 @@ UserCreateWinstaDirectory(VOID)
             return STATUS_INSUFFICIENT_RESOURCES;
     }
 
+    /*
+     * Session 0's directory inherits its DACL from \Windows (the world and the restricted code may create
+     * window stations there, Administrators have full access). \Sessions\<id>\Windows has no inheritable
+     * entries (its DACL is the measured Windows one), so the directory of another session would get the
+     * default DACL of csrss alone (SYSTEM full, Administrators query): no program of the session could
+     * create a window station. It gets the DACL of session 0's directory instead.
+     */
+    SessionSd = (SessionId != 0) ? IntGetSession0WinStaDirSecurity() : NULL;
+
     InitializeObjectAttributes(&ObjectAttributes,
                                &gustrWindowStationsDir,
                                OBJ_KERNEL_HANDLE,
                                NULL,
-                               NULL);
+                               SessionSd);
     Status = ZwCreateDirectoryObject(&ghWinStaDir, DIRECTORY_CREATE_OBJECT, &ObjectAttributes);
+    if (SessionSd) ExFreePoolWithTag(SessionSd, USERTAG_SECURITY);
     if (!NT_SUCCESS(Status))
         ERR("Could not create %wZ directory (Status 0x%X)\n", &gustrWindowStationsDir, Status);
     else

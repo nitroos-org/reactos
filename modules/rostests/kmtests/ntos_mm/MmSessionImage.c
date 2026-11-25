@@ -288,17 +288,9 @@ START_TEST(MmSessionImage)
     ok(Member0 != NULL, "No process in session 0\n");
     if (!Member0) return;
 
-    /* Without NitroSessions there are no session images */
     Status = Load(Member0, &NameA, &A0);
-    if (Status == STATUS_NOT_SUPPORTED)
-    {
-        skip(FALSE, "NitroSessions is not set\n");
-        ObDereferenceObject(Member0);
-        if (Member1) ObDereferenceObject(Member1);
-        return;
-    }
     ok_eq_hex(Status, STATUS_SUCCESS);
-    ok(Member1 != NULL, "No process in session 1: run with NitroSessions 4\n");
+    ok(Member1 != NULL, "No process in session 1\n");
     if (!NT_SUCCESS(Status) || !Member1)
         goto Out;
     ok(IS_SESSION_IMAGE(A0.Base), "session image at %p\n", A0.Base);
@@ -520,8 +512,8 @@ START_TEST(MmSessionImageBugCheck)
 
 /*
  * A different system service table in the used win32k slot is refused, as is a slot that does not exist.
- * The same table again is accepted: every session's win32k registers its table, at the same address (seen
- * with NitroSessions 5: win32k's DriverEntry succeeds in session 1).
+ * The same table again is accepted: every session's win32k registers its table, at the same address
+ * (win32k's DriverEntry succeeds in session 1).
  */
 static ULONG_PTR TestServiceTable[1];
 static UCHAR TestArgumentTable[1];

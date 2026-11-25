@@ -201,11 +201,6 @@ SmpCompleteSession(
     _In_ ULONG SessionId,
     _In_ PSMP_SUBSYSTEM Subsystem);
 
-/* The number of session records SMSS holds (for the test log) */
-ULONG
-NTAPI
-SmpCountSessions(VOID);
-
 ULONG
 NTAPI
 SmpAllocateSessionId(
@@ -270,51 +265,18 @@ SmpUnhandledExceptionFilter(
 
 /* smnitro.c */
 
-/* NitroSessions values (HKLM\...\Session Manager\NitroSessions) */
-#define SMP_NITRO_SESSIONS_TEST     1   /* P0: session 1 with a native test command, no csrss */
-#define SMP_NITRO_SESSIONS_CSR      4   /* P2: session 1 with its own csrss (basesrv only) */
-#define SMP_NITRO_SESSIONS_WIN32K   5   /* P3b: session 1 with its own win32k and a full csrss */
-#define SMP_NITRO_SESSIONS_CSR_START(f) (((f) == SMP_NITRO_SESSIONS_CSR) || ((f) == SMP_NITRO_SESSIONS_WIN32K))
+/* The session of the interactive logon (KUSER_SHARED_DATA.ActiveConsoleId, set by the kernel) */
+#define SMP_CONSOLE_SESSION_ID 1
 
-extern ULONG SmpNitroSessions;
-
-/*
- * NitroSessionsTestForward (DWORD, test only, flags 4 and 5): bit 0 runs the forward self-test; bit 1 makes
- * SMSS log its session-record count at every refused forward; bit 2 makes it log the result of every
- * SmSessionComplete datagram it serves (one line per datagram: not for a long soak).
- * NitroSessionsTestForwardStall (DWORD, seconds, test only): every forward that passes the checks waits that
- * long, in place of the target csrss answering, then fails: a stuck target csrss.
- */
-#define SMP_NITRO_TEST_FORWARD_SELF     0x1
-#define SMP_NITRO_TEST_FORWARD_COUNT    0x2
-#define SMP_NITRO_TEST_FORWARD_COMPLETE 0x4
-extern ULONG SmpNitroSessionsTestForward;
-extern ULONG SmpNitroSessionsTestForwardStall;
-
-NTSTATUS
-NTAPI
-SmpSbCreateRemoteProcessEx(
-    _In_ PCLIENT_ID ClientId,
-    _In_ ULONG TargetSessionId,
-    _In_ ULONG MuSessionId,
-    _In_ ULONG Flags);
 extern RTL_CRITICAL_SECTION SmpMuSessionLock;
 
 NTSTATUS
 NTAPI
-SmpNitroDetach(VOID);
-
-VOID
-NTAPI
-SmpReadNitroSessionsConfig(VOID);
+SmpDetachSession(VOID);
 
 NTSTATUS
 NTAPI
-SmpStartNitroTestSession(VOID);
-
-NTSTATUS
-NTAPI
-SmpStartNitroCsrSession(VOID);
+SmpStartConsoleSession(VOID);
 
 /* smsubsys.c */
 

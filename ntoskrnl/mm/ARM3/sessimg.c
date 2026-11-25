@@ -67,9 +67,6 @@ typedef struct _MI_SESSION_IMAGE
     PLDR_DATA_TABLE_ENTRY *SessionImports;
 } MI_SESSION_IMAGE, *PMI_SESSION_IMAGE;
 
-/* NitroSessions (Session Manager key): 0 = one session as before, session images are not loaded */
-ULONG MmNitroSessions;
-
 /* win32k, when it is a session image */
 static PLDR_DATA_TABLE_ENTRY MiWin32kSessionImage;
 
@@ -733,8 +730,7 @@ MmIsWin32kLoadedInCurrentSession(VOID)
 
 /*
  * Test hook for kernel tests (an export, found through MmGetSystemRoutineAddress): loads an image of
- * \SystemRoot\ as a session image in the current session, or drops one load of it.
- * Not available unless NitroSessions is set.
+ * \SystemRoot\ as a session image in the current session, or drops one load of it. Kernel callers only.
  */
 NTSTATUS
 NTAPI
@@ -746,7 +742,6 @@ NitroMmLoadSessionImageForTest(
     static const UNICODE_STRING Root = RTL_CONSTANT_STRING(L"\\SystemRoot\\");
     UNICODE_STRING Prefix;
 
-    if (!MmNitroSessions) return STATUS_NOT_SUPPORTED;
     if (!FileName || (FileName->Length <= Root.Length)) return STATUS_INVALID_PARAMETER;
 
     Prefix = *FileName;
@@ -761,7 +756,6 @@ NTAPI
 NitroMmUnloadSessionImageForTest(
     _In_ PVOID ImageHandle)
 {
-    if (!MmNitroSessions) return STATUS_NOT_SUPPORTED;
     if (!MiIsSessionImage(ImageHandle)) return STATUS_INVALID_PARAMETER;
     return MmUnloadSystemImage(ImageHandle);
 }

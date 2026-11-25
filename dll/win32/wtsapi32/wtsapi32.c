@@ -21,6 +21,7 @@
 #define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
+#include "winnls.h"
 #include "wine/winternl.h"
 #include "wtsapi32.h"
 #include "wine/debug.h"
@@ -186,7 +187,7 @@ BOOL WINAPI WTSEnumerateProcessesW(HANDLE hServer, DWORD Reserved, DWORD Version
     spi = buf;
     while (count--)
     {
-        processInfo->SessionId = 0;
+        processInfo->SessionId = spi->SessionId;
         processInfo->ProcessId = HandleToUlong(spi->UniqueProcessId);
         processInfo->pProcessName = name;
         processInfo->pUserSid = NULL;
@@ -241,22 +242,112 @@ BOOL WINAPI WTSEnumerateSessionsExA(HANDLE server, DWORD *level, DWORD filter, W
     return FALSE;
 }
 
+/*
+ * The sessions that have a process, in ascending order (at most Max). Session 0 holds the services, the
+ * console session (session 1) the logged-on user; there are no remote sessions.
+ */
+static DWORD get_session_ids(DWORD *ids, DWORD max)
+{
+    SYSTEM_PROCESS_INFORMATION *spi;
+    ULONG size = 0x4000;
+    void *buf = NULL;
+    NTSTATUS status;
+    DWORD count = 0, i, j;
+
+    do
+    {
+        size *= 2;
+        heap_free(buf);
+        buf = heap_alloc(size);
+        if (!buf) return 0;
+        status = NtQuerySystemInformation(SystemProcessInformation, buf, size, NULL);
+    }
+    while (status == STATUS_INFO_LENGTH_MISMATCH);
+
+    if (status == STATUS_SUCCESS)
+    {
+        spi = buf;
+        for (;;)
+        {
+            for (i = 0; i < count && ids[i] != spi->SessionId; i++) ;
+            if (i == count && count < max)
+            {
+                /* keep the list sorted */
+                for (j = count; j > 0 && ids[j - 1] > spi->SessionId; j--) ids[j] = ids[j - 1];
+                ids[j] = spi->SessionId;
+                count++;
+            }
+            if (spi->NextEntryOffset == 0) break;
+            spi = (SYSTEM_PROCESS_INFORMATION *)(((PCHAR)spi) + spi->NextEntryOffset);
+        }
+    }
+    heap_free(buf);
+    return count;
+}
+
+/* Windows 10 (measured): session 0 "Services" disconnected, the console session "Console" active */
+static void get_session_state(DWORD id, WTS_CONNECTSTATE_CLASS *state, const WCHAR **name)
+{
+    if (id == WTSGetActiveConsoleSessionId())
+    {
+        *state = WTSActive;
+        *name = L"Console";
+    }
+    else
+    {
+        *state = WTSDisconnected;
+        *name = id ? L"" : L"Services";
+    }
+}
+
 /************************************************************
  *                WTSEnumerateEnumerateSessionsA  (WTSAPI32.@)
  */
 BOOL WINAPI WTSEnumerateSessionsA(HANDLE hServer, DWORD Reserved, DWORD Version,
     PWTS_SESSION_INFOA* ppSessionInfo, DWORD* pCount)
 {
-    static int once;
+    WTS_SESSION_INFOA *info;
+    const WCHAR *name;
+    DWORD ids[64], count, i, size;
+    char *str;
+    int len;
 
-    if (!once++) FIXME("Stub %p 0x%08x 0x%08x %p %p\n", hServer, Reserved, Version,
-          ppSessionInfo, pCount);
+    if (!ppSessionInfo || !pCount || Reserved != 0 || Version != 1)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (hServer != WTS_CURRENT_SERVER_HANDLE)
+    {
+        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+        return FALSE;
+    }
 
-    if (!ppSessionInfo || !pCount) return FALSE;
-
-    *pCount = 0;
-    *ppSessionInfo = NULL;
-
+    count = get_session_ids(ids, ARRAY_SIZE(ids));
+    size = count * sizeof(*info);
+    for (i = 0; i < count; i++)
+    {
+        WTS_CONNECTSTATE_CLASS state;
+        get_session_state(ids[i], &state, &name);
+        size += WideCharToMultiByte(CP_ACP, 0, name, -1, NULL, 0, NULL, NULL);
+    }
+    info = heap_alloc(size ? size : 1);
+    if (!info)
+    {
+        SetLastError(ERROR_OUTOFMEMORY);
+        return FALSE;
+    }
+    str = (char *)&info[count];
+    for (i = 0; i < count; i++)
+    {
+        info[i].SessionId = ids[i];
+        get_session_state(ids[i], &info[i].State, &name);
+        len = WideCharToMultiByte(CP_ACP, 0, name, -1, str, size - (DWORD)(str - (char *)info), NULL, NULL);
+        info[i].pWinStationName = str;
+        str += len;
+    }
+    *ppSessionInfo = info;
+    *pCount = count;
     return TRUE;
 }
 
@@ -266,14 +357,47 @@ BOOL WINAPI WTSEnumerateSessionsA(HANDLE hServer, DWORD Reserved, DWORD Version,
 BOOL WINAPI WTSEnumerateSessionsW(HANDLE hServer, DWORD Reserved, DWORD Version,
     PWTS_SESSION_INFOW* ppSessionInfo, DWORD* pCount)
 {
-    FIXME("Stub %p 0x%08x 0x%08x %p %p\n", hServer, Reserved, Version,
-          ppSessionInfo, pCount);
+    WTS_SESSION_INFOW *info;
+    const WCHAR *name;
+    DWORD ids[64], count, i, size;
+    WCHAR *str;
 
-    if (!ppSessionInfo || !pCount) return FALSE;
+    if (!ppSessionInfo || !pCount || Reserved != 0 || Version != 1)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (hServer != WTS_CURRENT_SERVER_HANDLE)
+    {
+        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+        return FALSE;
+    }
 
-    *pCount = 0;
-    *ppSessionInfo = NULL;
-
+    count = get_session_ids(ids, ARRAY_SIZE(ids));
+    size = count * sizeof(*info);
+    for (i = 0; i < count; i++)
+    {
+        WTS_CONNECTSTATE_CLASS state;
+        get_session_state(ids[i], &state, &name);
+        size += (lstrlenW(name) + 1) * sizeof(WCHAR);
+    }
+    info = heap_alloc(size ? size : 1);
+    if (!info)
+    {
+        SetLastError(ERROR_OUTOFMEMORY);
+        return FALSE;
+    }
+    str = (WCHAR *)&info[count];
+    for (i = 0; i < count; i++)
+    {
+        info[i].SessionId = ids[i];
+        get_session_state(ids[i], &info[i].State, &name);
+        lstrcpyW(str, name);
+        info[i].pWinStationName = str;
+        str += lstrlenW(name) + 1;
+    }
+    *ppSessionInfo = info;
+    *pCount = count;
     return TRUE;
 }
 
@@ -585,19 +709,172 @@ BOOL WINAPI WTSQuerySessionInformationW(
 /************************************************************
  *                WTSQueryUserToken (WTSAPI32.@)
  */
+/* The caller holds SeTcbPrivilege, enabled (documented: LocalSystem with SE_TCB_NAME) */
+static BOOL caller_has_tcb(void)
+{
+    PRIVILEGE_SET set;
+    HANDLE token;
+    BOOL ok = FALSE, has = FALSE;
+
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token))
+    {
+        if (GetLastError() != ERROR_NO_TOKEN) return FALSE;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return FALSE;
+    }
+    set.PrivilegeCount = 1;
+    set.Control = PRIVILEGE_SET_ALL_NECESSARY;
+    set.Privilege[0].Attributes = 0;
+    if (LookupPrivilegeValueW(NULL, L"SeTcbPrivilege", &set.Privilege[0].Luid))
+        ok = PrivilegeCheck(token, &set, &has);
+    CloseHandle(token);
+    return ok && has;
+}
+
+/*
+ * Whether a process token is the token of an interactive user: not a service account, not restricted,
+ * with the INTERACTIVE group enabled and a logon SID.
+ */
+static BOOL is_interactive_user_token(HANDLE token)
+{
+    static const SID_IDENTIFIER_AUTHORITY nt = { SECURITY_NT_AUTHORITY };
+    BYTE user_buf[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    TOKEN_USER *user = (TOKEN_USER *)user_buf;
+    TOKEN_GROUPS *groups = NULL;
+    PSID interactive = NULL;
+    BOOL interactive_found = FALSE, logon_found = FALSE;
+    DWORD len, i, rid;
+
+    if (!GetTokenInformation(token, TokenUser, user, sizeof(user_buf), &len)) return FALSE;
+    if (*GetSidSubAuthorityCount(user->User.Sid) == 1 &&
+        !memcmp(GetSidIdentifierAuthority(user->User.Sid), &nt, sizeof(nt)))
+    {
+        rid = *GetSidSubAuthority(user->User.Sid, 0);
+        if (rid == SECURITY_LOCAL_SYSTEM_RID || rid == SECURITY_LOCAL_SERVICE_RID ||
+            rid == SECURITY_NETWORK_SERVICE_RID)
+            return FALSE;
+    }
+    /* a restricted token (restricting SIDs) is not the user's logon token */
+    {
+        BYTE rbuf[sizeof(TOKEN_GROUPS)];
+        TOKEN_GROUPS *restricted = (TOKEN_GROUPS *)rbuf;
+
+        /* a buffer too small for one SID fails when there are restricting SIDs; any failure: not this one */
+        if (!GetTokenInformation(token, TokenRestrictedSids, restricted, sizeof(rbuf), &len) ||
+            restricted->GroupCount)
+            return FALSE;
+    }
+
+    GetTokenInformation(token, TokenGroups, NULL, 0, &len);
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || !(groups = heap_alloc(len))) return FALSE;
+    if (GetTokenInformation(token, TokenGroups, groups, len, &len) &&
+        AllocateAndInitializeSid((PSID_IDENTIFIER_AUTHORITY)&nt, 1, SECURITY_INTERACTIVE_RID, 0, 0, 0, 0, 0, 0, 0,
+                                 &interactive))
+    {
+        for (i = 0; i < groups->GroupCount; i++)
+        {
+            if (!(groups->Groups[i].Attributes & SE_GROUP_ENABLED)) continue;
+            if (EqualSid(groups->Groups[i].Sid, interactive)) interactive_found = TRUE;
+            if ((groups->Groups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID) logon_found = TRUE;
+        }
+        FreeSid(interactive);
+    }
+    heap_free(groups);
+    return interactive_found && logon_found;
+}
+
+/*
+ * The primary token of the user logged on in a session, for a LocalSystem caller holding SeTcbPrivilege
+ * (documented contract of WTSQueryUserToken). The user's token is taken from the first process the logon
+ * started in the session (the oldest interactive-user process there: userinit or the shell); a program
+ * that the user starts later as another account (runas) is younger and is never chosen.
+ * Errors: ERROR_INVALID_PARAMETER (no output), ERROR_PRIVILEGE_NOT_HELD, ERROR_NO_TOKEN (no user logged on
+ * in the session, or no such session).
+ */
 BOOL WINAPI WTSQueryUserToken(ULONG session_id, PHANDLE token)
 {
-    FIXME("%u %p semi-stub!\n", session_id, token);
+    SYSTEM_PROCESS_INFORMATION *spi;
+    ULONG size = 0x4000;
+    void *buf = NULL;
+    NTSTATUS status;
+    HANDLE best = NULL;
+    LARGE_INTEGER best_time;
 
     if (!token)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
+    *token = NULL;
 
-    return DuplicateHandle(GetCurrentProcess(), GetCurrentProcessToken(),
-                           GetCurrentProcess(), token,
-                           0, FALSE, DUPLICATE_SAME_ACCESS);
+    if (!caller_has_tcb())
+    {
+        SetLastError(ERROR_PRIVILEGE_NOT_HELD);
+        return FALSE;
+    }
+
+    do
+    {
+        size *= 2;
+        heap_free(buf);
+        buf = heap_alloc(size);
+        if (!buf)
+        {
+            SetLastError(ERROR_OUTOFMEMORY);
+            return FALSE;
+        }
+        status = NtQuerySystemInformation(SystemProcessInformation, buf, size, NULL);
+    }
+    while (status == STATUS_INFO_LENGTH_MISMATCH);
+
+    if (status != STATUS_SUCCESS)
+    {
+        heap_free(buf);
+        SetLastError(RtlNtStatusToDosError(status));
+        return FALSE;
+    }
+
+    best_time.QuadPart = MAXLONGLONG;
+    for (spi = buf; ; spi = (SYSTEM_PROCESS_INFORMATION *)(((PCHAR)spi) + spi->NextEntryOffset))
+    {
+        if (spi->SessionId == session_id && spi->UniqueProcessId &&
+            spi->CreationTime.QuadPart < best_time.QuadPart)
+        {
+            HANDLE process, process_token;
+
+            process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, HandleToUlong(spi->UniqueProcessId));
+            if (process)
+            {
+                if (OpenProcessToken(process, TOKEN_QUERY | TOKEN_DUPLICATE, &process_token))
+                {
+                    if (is_interactive_user_token(process_token))
+                    {
+                        if (best) CloseHandle(best);
+                        best = process_token;
+                        best_time = spi->CreationTime;
+                    }
+                    else
+                        CloseHandle(process_token);
+                }
+                CloseHandle(process);
+            }
+        }
+        if (spi->NextEntryOffset == 0) break;
+    }
+    heap_free(buf);
+
+    if (!best)
+    {
+        SetLastError(ERROR_NO_TOKEN);
+        return FALSE;
+    }
+
+    if (!DuplicateTokenEx(best, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenPrimary, token))
+    {
+        CloseHandle(best);
+        return FALSE;
+    }
+    CloseHandle(best);
+    return TRUE;
 }
 
 /************************************************************

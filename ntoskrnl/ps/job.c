@@ -2338,8 +2338,14 @@ PsSetJobUIRestrictionsClass(
  *     been registered (i.e. the win32 subsystem is not loaded yet).
  *
  * @remarks
- *     FIXME: TODO: We do not attach to the session of the job, as win32k is only ever
- *     loaded in one session.
+ *     win32k is a session image: its code, globals and pool are those of one
+ *     session, and only a thread whose process is in that session can reach
+ *     them. The job's state lives in the win32k of the job's session (the
+ *     session of its creator, Job->SessionId), so the callout runs attached to
+ *     that session, whatever thread makes it: the last reference to a job can
+ *     go in a system thread (no session) or in a process of another session.
+ *     When the job's session is gone, so is everything win32k kept for the
+ *     job: then there is nothing to call and the callout is not made.
  */
 NTSTATUS
 NTAPI
@@ -2350,6 +2356,12 @@ PspInvokeW32JobCallout(
 )
 {
     WIN32_JOBCALLOUT_PARAMETERS Parameters;
+    PEPROCESS CurrentProcess = PsGetCurrentProcess();
+    PVOID SessionEntry = NULL;
+    KAPC_STATE ApcState;
+    NTSTATUS Status;
+
+    PAGED_CODE();
 
     /* Nothing to do if win32k has not registered a callout */
     if (PspW32JobCallout == NULL)
@@ -2361,7 +2373,53 @@ PspInvokeW32JobCallout(
     Parameters.CalloutType = CalloutType;
     Parameters.Data = Data;
 
-    return PspW32JobCallout(&Parameters);
+    /* A win32k loaded once for the whole system (no session image) is reachable from any thread */
+    if (!MmIsWin32kASessionImage())
+    {
+        return PspW32JobCallout(&Parameters);
+    }
+
+    /* Not in the job's session: attach to it */
+    if (!CurrentProcess->ProcessInSession ||
+        (PsGetProcessSessionId(CurrentProcess) != Job->SessionId))
+    {
+        SessionEntry = MmGetSessionById(Job->SessionId);
+        if (SessionEntry == NULL)
+        {
+            DPRINT1("Job %p: session %lu is gone, no win32k callout %d\n",
+                    Job, Job->SessionId, CalloutType);
+            return STATUS_PROCESS_IS_TERMINATING;
+        }
+
+        Status = MmAttachSession(SessionEntry, &ApcState);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Job %p: cannot attach to session %lu (0x%lx), no win32k callout %d\n",
+                    Job, Job->SessionId, Status, CalloutType);
+            MmQuitNextSession(SessionEntry);
+            return Status;
+        }
+    }
+
+    /* A session whose win32k is not loaded (or failed to load) has no state for the job */
+    if (MmIsWin32kLoadedInCurrentSession())
+    {
+        Status = PspW32JobCallout(&Parameters);
+    }
+    else
+    {
+        DPRINT1("Job %p: no win32k in session %lu, no callout %d\n",
+                Job, Job->SessionId, CalloutType);
+        Status = STATUS_PROCESS_IS_TERMINATING;
+    }
+
+    if (SessionEntry != NULL)
+    {
+        MmDetachSession(SessionEntry, &ApcState);
+        MmQuitNextSession(SessionEntry);
+    }
+
+    return Status;
 }
 
 /*!

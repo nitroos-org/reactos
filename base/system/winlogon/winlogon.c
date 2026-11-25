@@ -13,6 +13,7 @@
 #include "winlogon.h"
 
 #include <ndk/cmfuncs.h>
+#include <ndk/psfuncs.h>
 
 /* GLOBALS ******************************************************************/
 
@@ -27,6 +28,10 @@ BOOL WINAPI SecureRegistryKeys(VOID);
 /* userenv private export (ordinal 302): the IPv6 transport and Winsock catalog entries of an install that predates them */
 BOOL WINAPI UpgradeNetworkCatalog(VOID);
 PWLSESSION WLSession = NULL;
+
+/* What this Winlogon does (see WlGetSessionRole) */
+WL_SESSION_ROLE WlSessionRole = WlRoleServices;
+ULONG WlSessionId = 0;
 
 /* FUNCTIONS *****************************************************************/
 
@@ -120,17 +125,175 @@ StartLsass(VOID)
 }
 
 
+/*
+ * Session 1 holds the console. Session 0's Winlogon only starts the services and the LSA (the part
+ * Windows gives wininit); session 1's Winlogon, started by the Session Manager, logs the interactive
+ * user on and serves the shutdown requests. The role comes from the kernel's session id of the
+ * process, never from the PEB. When the session id cannot be read, the process stops: a Winlogon
+ * that guessed its role would either start a second set of services or none.
+ */
+static
+BOOL
+WlGetSessionRole(VOID)
+{
+    PROCESS_SESSION_INFORMATION SessionInfo;
+    NTSTATUS Status;
+
+    Status = NtQueryInformationProcess(NtCurrentProcess(),
+                                       ProcessSessionInformation,
+                                       &SessionInfo,
+                                       sizeof(SessionInfo),
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("WL: cannot read the session id, Status 0x%lx\n", Status);
+        return FALSE;
+    }
+
+    WlSessionId = SessionInfo.SessionId;
+    WlSessionRole = (WlSessionId == 0) ? WlRoleServices : WlRoleInteractive;
+    ERR("WL: session %lu, %s\n", WlSessionId,
+        (WlSessionRole == WlRoleServices) ? "services and LSA only" : "interactive logon");
+    return TRUE;
+}
+
+
+/*
+ * A shutdown that the console session's Winlogon carries out ends the processes of its own
+ * session only (its csrss knows no other). The services and the other processes of session 0 are ended,
+ * and the services told about the shutdown (SERVICE_CONTROL_SHUTDOWN), by session 0's Winlogon, the
+ * registered logon process of session 0's csrss, which it asks through two events. Both are created by
+ * session 0's Winlogon before any program but the system's runs, for SYSTEM only; when a name is taken
+ * already, no event of that name is trusted and session 0 is not shut down this way.
+ */
+#define WL_SESSION0_SHUTDOWN_EVENT      L"Global\\NitroWinlogonSession0Shutdown"
+#define WL_SESSION0_SHUTDOWN_DONE_EVENT L"Global\\NitroWinlogonSession0ShutdownDone"
+#define WL_SESSION0_SHUTDOWN_WAIT       (2 * 60 * 1000)
+
+static HANDLE WlSession0ShutdownEvent;
+static HANDLE WlSession0ShutdownDoneEvent;
+
+static
+HANDLE
+WlCreateSystemOnlyEvent(
+    _In_ PCWSTR Name)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    ULONG AclBuffer[(sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) + SECURITY_MAX_SID_SIZE) / sizeof(ULONG)];
+    PACL Acl = (PACL)AclBuffer;
+    SECURITY_DESCRIPTOR Sd;
+    SECURITY_ATTRIBUTES Sa;
+    PSID SystemSid = NULL;
+    HANDLE hEvent = NULL;
+
+    if (!AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &SystemSid))
+        return NULL;
+    if (InitializeAcl(Acl, sizeof(AclBuffer), ACL_REVISION) &&
+        AddAccessAllowedAce(Acl, ACL_REVISION, EVENT_ALL_ACCESS, SystemSid) &&
+        InitializeSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION) &&
+        SetSecurityDescriptorDacl(&Sd, TRUE, Acl, FALSE))
+    {
+        Sa.nLength = sizeof(Sa);
+        Sa.lpSecurityDescriptor = &Sd;
+        Sa.bInheritHandle = FALSE;
+        hEvent = CreateEventW(&Sa, FALSE, FALSE, Name);
+        if (hEvent && GetLastError() == ERROR_ALREADY_EXISTS)
+        {
+            ERR("WL: %S exists already, not used\n", Name);
+            CloseHandle(hEvent);
+            hEvent = NULL;
+        }
+    }
+    FreeSid(SystemSid);
+    return hEvent;
+}
+
+/* Session 0's Winlogon (services role), before the services start */
+static
+VOID
+WlCreateSession0ShutdownEvents(VOID)
+{
+    WlSession0ShutdownEvent = WlCreateSystemOnlyEvent(WL_SESSION0_SHUTDOWN_EVENT);
+    WlSession0ShutdownDoneEvent = WlCreateSystemOnlyEvent(WL_SESSION0_SHUTDOWN_DONE_EVENT);
+    if (!WlSession0ShutdownEvent || !WlSession0ShutdownDoneEvent)
+        ERR("WL: no shutdown events for session 0, error %lu\n", GetLastError());
+}
+
+/* Session 0's Winlogon (services role): waits for the console session's shutdown, then ends session 0's processes */
+static
+VOID
+WlServeSession0Shutdown(VOID)
+{
+    if (!WlSession0ShutdownEvent || !WlSession0ShutdownDoneEvent)
+    {
+        SleepEx(INFINITE, FALSE);
+        return;
+    }
+
+    for (;;)
+    {
+        if (WaitForSingleObject(WlSession0ShutdownEvent, INFINITE) != WAIT_OBJECT_0)
+        {
+            SleepEx(INFINITE, FALSE);
+            return;
+        }
+
+        ERR("WL: shutdown of session 0 asked for by the console session\n");
+        /*
+         * Not forced first: a forced shutdown ends every process at once, the console server then tells no
+         * service process (CTRL_SHUTDOWN_EVENT) and no service gets SERVICE_CONTROL_SHUTDOWN. Forced only
+         * when a process refused.
+         */
+        if (!ExitWindowsEx(EWX_CALLER_WINLOGON | EWX_SHUTDOWN, 0))
+        {
+            ERR("WL: shutdown of session 0 failed, error %lu, forcing it\n", GetLastError());
+            if (!ExitWindowsEx(EWX_CALLER_WINLOGON | EWX_SHUTDOWN | EWX_FORCE, 0))
+                ERR("WL: forced shutdown of session 0 failed, error %lu\n", GetLastError());
+        }
+        SetEvent(WlSession0ShutdownDoneEvent);
+    }
+}
+
+/* The console session's Winlogon (interactive role), after its own session's processes are ended */
+VOID
+WlShutdownSession0(VOID)
+{
+    HANDLE hEvent, hDone;
+    DWORD dwWait;
+
+    if (WlSessionRole != WlRoleInteractive)
+        return;
+
+    hEvent = OpenEventW(EVENT_MODIFY_STATE, FALSE, WL_SESSION0_SHUTDOWN_EVENT);
+    hDone = OpenEventW(SYNCHRONIZE, FALSE, WL_SESSION0_SHUTDOWN_DONE_EVENT);
+    if (!hEvent || !hDone)
+    {
+        ERR("WL: cannot ask session 0 to shut down, error %lu\n", GetLastError());
+    }
+    else if (SetEvent(hEvent))
+    {
+        dwWait = WaitForSingleObject(hDone, WL_SESSION0_SHUTDOWN_WAIT);
+        if (dwWait != WAIT_OBJECT_0)
+            ERR("WL: session 0 did not finish its shutdown (%lu)\n", dwWait);
+    }
+    if (hEvent) CloseHandle(hEvent);
+    if (hDone) CloseHandle(hDone);
+}
+
+
 static
 VOID
 WaitForLsass(VOID)
 {
     HANDLE hEvent;
     DWORD dwError;
+    /* The LSA creates the event in session 0; from another session it is reached by its global name */
+    PCWSTR EventName = (WlSessionId == 0) ? L"LSA_RPC_SERVER_ACTIVE" : L"Global\\LSA_RPC_SERVER_ACTIVE";
 
     hEvent = CreateEventW(NULL,
                           TRUE,
                           FALSE,
-                          L"LSA_RPC_SERVER_ACTIVE");
+                          EventName);
     if (hEvent == NULL)
     {
         dwError = GetLastError();
@@ -140,7 +303,7 @@ WaitForLsass(VOID)
         {
             hEvent = OpenEventW(SYNCHRONIZE,
                                 FALSE,
-                                L"LSA_RPC_SERVER_ACTIVE");
+                                EventName);
             if (hEvent == NULL)
             {
                ERR("WL: Could not open the notification event (Error %lu)\n", GetLastError());
@@ -466,15 +629,26 @@ WinMain(
     RtlSetProcessIsCritical(TRUE, NULL, FALSE);
     RtlSetThreadIsCritical(TRUE, NULL, FALSE);
 
-    /* Installs from before the well-known folders had the DACLs of Windows get them now (nothing happens once they have) */
-    SecureSystemDirectories();
-    SecureRegistryKeys();
+    /* Which part of the work is ours */
+    if (!WlGetSessionRole())
+    {
+        NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
+        ExitProcess(1);
+    }
 
-    /* An install from before the IPv6 transport and catalog entries gets them now when the stack's IPv6 switch is on (once) */
-    UpgradeNetworkCatalog();
+    /* The machine-wide work is session 0's */
+    if (WlSessionRole == WlRoleServices)
+    {
+        /* Installs from before the well-known folders had the DACLs of Windows get them now (nothing happens once they have) */
+        SecureSystemDirectories();
+        SecureRegistryKeys();
 
-    /* Update the cached TCP/IP Information in the registry */
-    UpdateTcpIpInformation();
+        /* An install from before the IPv6 transport and catalog entries gets them now when the stack's IPv6 switch is on (once) */
+        UpgradeNetworkCatalog();
+
+        /* Update the cached TCP/IP Information in the registry */
+        UpdateTcpIpInformation();
+    }
 
     if (!RegisterLogonProcess(GetCurrentProcessId(), TRUE))
     {
@@ -514,29 +688,51 @@ WinMain(
         ExitProcess(1);
     }
 
-    if (!StartRpcServer())
+    /*
+     * The shutdown requests (InitiateSystemShutdown) go to the Winlogon of the console session: it shows
+     * the warning where the user is and logs the user off before the system goes down
+     */
+    if ((WlSessionRole == WlRoleInteractive) && !StartRpcServer())
     {
         ERR("WL: Could not start the RPC server\n");
         NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
         ExitProcess(1);
     }
 
-    if (!StartServicesManager())
+    /* The services and the LSA run in session 0 */
+    if (WlSessionRole == WlRoleServices)
     {
-        ERR("WL: Could not start services.exe\n");
-        NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
-        ExitProcess(1);
-    }
+        /* Before any service runs: the events the console session's Winlogon asks for session 0's shutdown with */
+        WlCreateSession0ShutdownEvents();
 
-    if (!StartLsass())
-    {
-        ERR("WL: Failed to start lsass.exe service (error %lu)\n", GetLastError());
-        NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
-        ExitProcess(1);
+        if (!StartServicesManager())
+        {
+            ERR("WL: Could not start services.exe\n");
+            NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
+            ExitProcess(1);
+        }
+
+        if (!StartLsass())
+        {
+            ERR("WL: Failed to start lsass.exe service (error %lu)\n", GetLastError());
+            NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
+            ExitProcess(1);
+        }
     }
 
     /* Wait for the LSA server */
     WaitForLsass();
+
+    if (WlSessionRole == WlRoleServices)
+    {
+        /*
+         * No logon in this session: the console session's Winlogon does it, and it accepts the boot
+         * (last known good) once it is up. A boot whose console session never comes up is not accepted.
+         */
+        ERR("WL: services and LSA started, the interactive logon is in another session\n");
+        WlServeSession0Shutdown();
+        return 0;
+    }
 
     /* Init Notifications */
     InitNotifications();
@@ -616,8 +812,8 @@ WinMain(
         PostMessageW(WLSession->SASWindow, WLX_WM_SAS, WLX_SAS_TYPE_CTRL_ALT_DEL, 0);
     }
 
-    /* Tell kernel that CurrentControlSet is good (needed
-     * to support Last good known configuration boot) */
+    /* Tell kernel that CurrentControlSet is good (needed to support Last good known configuration
+     * boot): the console session's logon is up, so the boot is good */
     NtInitializeRegistry(CM_BOOT_FLAG_ACCEPTED | 1);
 
     /* Message loop for the SAS window */

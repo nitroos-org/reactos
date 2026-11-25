@@ -111,7 +111,8 @@ CreateWindowStationW(
                                        &ObjectAttributes);
         if (!NT_SUCCESS(Status))
         {
-            ERR("Failed to open WindowStations directory\n");
+            ERR("Failed to open WindowStations directory, Status 0x%08lx\n", Status);
+            SetLastError(RtlNtStatusToDosError(Status));
             return NULL;
         }
 

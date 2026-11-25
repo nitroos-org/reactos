@@ -3728,9 +3728,6 @@ MmLoadSystemImage(IN PUNICODE_STRING FileName,
         ASSERT(NamePrefix == NULL);
         ASSERT(LoadedName == NULL);
 
-        /* Session images exist only with NitroSessions */
-        if (!MmNitroSessions) return STATUS_NOT_SUPPORTED;
-
         /* Make sure the process is in session too */
         if (!PsGetCurrentProcess()->ProcessInSession) return STATUS_NO_MEMORY;
     }

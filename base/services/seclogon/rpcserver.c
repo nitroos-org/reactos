@@ -8,6 +8,7 @@
 /* INCLUDES *****************************************************************/
 
 #include "precomp.h"
+#include <ndk/setypes.h>
 
 #include <seclogon_s.h>
 
@@ -142,6 +143,76 @@ StartExitWait(
 }
 
 
+/* The session of the RPC caller, from its token (impersonation) */
+static
+DWORD
+SeclGetCallerSession(
+    _In_ handle_t hBinding,
+    _Out_ PDWORD SessionId)
+{
+    HANDLE hToken;
+    DWORD dwError, Length;
+    RPC_STATUS RpcStatus;
+
+    RpcStatus = RpcImpersonateClient(hBinding);
+    if (RpcStatus != RPC_S_OK)
+    {
+        WARN("RpcImpersonateClient() failed with %lu\n", RpcStatus);
+        return ERROR_ACCESS_DENIED;
+    }
+    dwError = ERROR_SUCCESS;
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &hToken))
+    {
+        dwError = GetLastError();
+    }
+    else
+    {
+        if (!GetTokenInformation(hToken, TokenSessionId, SessionId, sizeof(*SessionId), &Length))
+            dwError = GetLastError();
+        CloseHandle(hToken);
+    }
+    RpcRevertToSelf();
+    if (dwError != ERROR_SUCCESS)
+        WARN("Cannot read the caller's session, Error %lu\n", dwError);
+    return dwError;
+}
+
+/* A copy of the logon SID of a token */
+static
+BOOL
+SeclCopyLogonSid(
+    _In_ HANDLE hToken,
+    _Out_writes_bytes_(Size) PBYTE Buffer,
+    _In_ DWORD Size,
+    _Out_ PDWORD Length)
+{
+    PTOKEN_GROUPS Groups;
+    DWORD Needed = 0, i;
+    BOOL Found = FALSE;
+
+    *Length = 0;
+    GetTokenInformation(hToken, TokenGroups, NULL, 0, &Needed);
+    if (!Needed) return FALSE;
+    Groups = HeapAlloc(GetProcessHeap(), 0, Needed);
+    if (!Groups) return FALSE;
+    if (GetTokenInformation(hToken, TokenGroups, Groups, Needed, &Needed))
+    {
+        for (i = 0; i < Groups->GroupCount; i++)
+        {
+            if ((Groups->Groups[i].Attributes & SE_GROUP_LOGON_ID) != SE_GROUP_LOGON_ID) continue;
+            if (GetLengthSid(Groups->Groups[i].Sid) <= Size &&
+                CopySid(Size, Buffer, Groups->Groups[i].Sid))
+            {
+                *Length = GetLengthSid(Groups->Groups[i].Sid);
+                Found = TRUE;
+            }
+            break;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Groups);
+    return Found;
+}
+
 VOID
 __stdcall
 SeclCreateProcessWithLogonW(
@@ -162,6 +233,8 @@ SeclCreateProcessWithLogonW(
 
     ULONG dwError = ERROR_SUCCESS;
     BOOL rc;
+    DWORD CallerSessionId = 0, TargetSessionId = 0, OwnSessionId = 0;
+    BOOL bOtherSession = FALSE;
 
     TRACE("SeclCreateProcessWithLogonW(%p %p %p)\n", hBinding, pRequest, pResponse);
 
@@ -179,6 +252,12 @@ SeclCreateProcessWithLogonW(
         TRACE("ProcessId: %lu\n", pRequest->dwProcessId);
     }
 
+    if (pResponse != NULL)
+    {
+        pResponse->dwFlags = 0;
+        pResponse->dwLogonSidLength = 0;
+    }
+
     hTargetProcessHandle = OpenProcess(PROCESS_DUP_HANDLE,
                                        FALSE,
                                        pRequest->dwProcessId);
@@ -188,6 +267,25 @@ SeclCreateProcessWithLogonW(
         WARN("OpenProcess() failed with Error %lu\n", dwError);
         goto done;
     }
+
+    /*
+     * The program runs in the caller's session, as runas does on Windows (on the caller's desktop). The
+     * session is the one of the caller's token, never anything the request says; the process the handles
+     * go to must be in that session too.
+     */
+    dwError = SeclGetCallerSession(hBinding, &CallerSessionId);
+    if (dwError != ERROR_SUCCESS)
+        goto done;
+    if (!ProcessIdToSessionId(pRequest->dwProcessId, &TargetSessionId) ||
+        TargetSessionId != CallerSessionId)
+    {
+        WARN("Process %lu is not in the caller's session %lu\n", pRequest->dwProcessId, CallerSessionId);
+        dwError = ERROR_ACCESS_DENIED;
+        goto done;
+    }
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &OwnSessionId))
+        OwnSessionId = 0;
+    bOtherSession = (CallerSessionId != OwnSessionId);
 
     ZeroMemory(&ProfileInfo, sizeof(ProfileInfo));
     ZeroMemory(&ProcessInfo, sizeof(ProcessInfo));
@@ -204,6 +302,20 @@ SeclCreateProcessWithLogonW(
         dwError = GetLastError();
         WARN("LogonUser() failed with Error %lu\n", dwError);
         goto done;
+    }
+
+    /* The new logon's process is created in the caller's session (setting it needs SeTcbPrivilege) */
+    if (bOtherSession)
+    {
+        BOOLEAN Old;
+
+        RtlAdjustPrivilege(SE_TCB_PRIVILEGE, TRUE, FALSE, &Old);
+        if (!SetTokenInformation(hToken, TokenSessionId, &CallerSessionId, sizeof(CallerSessionId)))
+        {
+            dwError = GetLastError();
+            WARN("Cannot give the token session %lu, Error %lu\n", CallerSessionId, dwError);
+            goto done;
+        }
     }
 
     /* Load the user profile */
@@ -232,8 +344,17 @@ SeclCreateProcessWithLogonW(
      * The process runs on the desktop the caller named, else on the interactive one (WinSta0\Default).
      * Its new logon needs access to the window station and the desktop to create a window there.
      */
-    SeclGrantDesktopAccess(hToken, pRequest->Desktop, &DesktopAccess, &pszDesktop);
-    StartupInfo.lpDesktop = pszDesktop;
+    if (!bOtherSession)
+    {
+        SeclGrantDesktopAccess(hToken, pRequest->Desktop, &DesktopAccess, &pszDesktop);
+        StartupInfo.lpDesktop = pszDesktop;
+    }
+    else
+    {
+        /* This service cannot reach the window stations of another session: the caller grants the access
+           (SECL_RESPONSE_GRANT_DESKTOP), the process waits suspended until it has */
+        StartupInfo.lpDesktop = pRequest->Desktop ? pRequest->Desktop : L"WinSta0\\Default";
+    }
 
     /*
      * Without an environment from the caller, the new process gets one made from the profile of
@@ -241,6 +362,8 @@ SeclCreateProcessWithLogonW(
      * service, with the profile of the system as USERPROFILE.
      */
     dwCreationFlags = pRequest->dwCreationFlags;
+    if (bOtherSession)
+        dwCreationFlags |= CREATE_SUSPENDED;
     if (pRequest->Environment != NULL)
     {
         pEnvironment = pRequest->Environment;
@@ -334,9 +457,28 @@ SeclCreateProcessWithLogonW(
         pResponse->hThread = (DWORD)(ULONG_PTR)hThreadCopy;
         pResponse->dwProcessId = ProcessInfo.dwProcessId;
         pResponse->dwThreadId = ProcessInfo.dwThreadId;
+
+        if (bOtherSession)
+        {
+            /* The logon SID the caller grants the access to (CreateProcessWithLogonW resumes the thread) */
+            if (!SeclCopyLogonSid(hToken, pResponse->LogonSid, sizeof(pResponse->LogonSid),
+                                  &pResponse->dwLogonSidLength))
+            {
+                dwError = ERROR_NO_SUCH_LOGON_SESSION;
+                DuplicateHandle(hTargetProcessHandle, hProcessCopy, NULL, NULL, 0, FALSE, DUPLICATE_CLOSE_SOURCE);
+                DuplicateHandle(hTargetProcessHandle, hThreadCopy, NULL, NULL, 0, FALSE, DUPLICATE_CLOSE_SOURCE);
+                pResponse->hProcess = pResponse->hThread = 0;
+                goto done;
+            }
+            pResponse->dwFlags |= SECL_RESPONSE_GRANT_DESKTOP;
+        }
     }
 
 done:
+    /* A process created suspended for the caller that the caller will not get is ended */
+    if (dwError != ERROR_SUCCESS && bOtherSession && ProcessInfo.hProcess)
+        TerminateProcess(ProcessInfo.hProcess, dwError);
+
     SeclRevokeDesktopAccess(DesktopAccess);
 
     if (pszDesktop)

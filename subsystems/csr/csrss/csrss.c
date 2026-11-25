@@ -11,6 +11,7 @@
 
 #define NTOS_MODE_USER
 #include <ndk/exfuncs.h>
+#include <ndk/ketypes.h>
 #include <ndk/psfuncs.h>
 #include <ndk/rtlfuncs.h>
 
@@ -86,8 +87,16 @@ _main(int argc,
     /* Disable errors */
     CsrpSetDefaultProcessHardErrorMode();
 
-    /* If this is Session 0, make sure killing us bugchecks the system */
-    if (NtCurrentPeb()->SessionId == 0) RtlSetProcessIsCritical(TRUE, NULL, FALSE);
+    /*
+     * Session 0 (the services) and the console session (the logged-on user's display, keyboard and
+     * logon): killing us bugchecks the system. Without us the session cannot start a process or show
+     * a window, so a console session left without its csrss would be a frozen machine that runs on.
+     */
+    if ((NtCurrentPeb()->SessionId == 0) ||
+        (NtCurrentPeb()->SessionId == SharedUserData->ActiveConsoleId))
+    {
+        RtlSetProcessIsCritical(TRUE, NULL, FALSE);
+    }
 
     /* Kill this thread. CSRSRV keeps us going */
     NtTerminateThread(NtCurrentThread(), Status);

@@ -72,7 +72,58 @@ ExpSystemErrorHandler(IN NTSTATUS ErrorStatus,
         BugCheckParameters[i] = Parameters[i];
     }
 
-    /* FIXME: STUB */
+    /*
+     * The stop screen shows the caption and message of a hard error. A system process that ends the
+     * machine (STATUS_SYSTEM_PROCESS_TERMINATED, the Session Manager among others) names what failed in
+     * its first parameter (a string) and the status in the second: show them, in the documented text of
+     * the status ("{Fatal System Error} The %hs system process terminated unexpectedly with a status of
+     * 0x%08x"). The string is the caller's (this thread's process), read under SEH; the buffers are
+     * static: nothing else runs once the machine stops.
+     */
+    if ((ErrorStatus == STATUS_SYSTEM_PROCESS_TERMINATED) &&
+        (NumberOfParameters >= 2) && (UnicodeStringParameterMask & 1))
+    {
+        static CHAR Caption[] = "\r\n{Fatal System Error}\r\n";
+        static CHAR Message[256];
+        CHAR Name[160] = "";
+        UNICODE_STRING String;
+
+        _SEH2_TRY
+        {
+            String = *(PUNICODE_STRING)Parameters[0];
+            if (String.Buffer && String.Length)
+            {
+                ANSI_STRING Ansi;
+
+                Ansi.Buffer = Name;
+                Ansi.Length = 0;
+                Ansi.MaximumLength = sizeof(Name) - 1;
+                if (String.Length > (sizeof(Name) - 1) * sizeof(WCHAR))
+                    String.Length = (USHORT)((sizeof(Name) - 1) * sizeof(WCHAR));
+                if (NT_SUCCESS(RtlUnicodeStringToAnsiString(&Ansi, &String, FALSE)))
+                    Name[Ansi.Length] = ANSI_NULL;
+                else
+                    Name[0] = ANSI_NULL;
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Name[0] = ANSI_NULL;
+        }
+        _SEH2_END;
+
+        RtlStringCbPrintfA(Message, sizeof(Message),
+                           "The %s system process terminated unexpectedly with a status of 0x%08lx.\r\n"
+                           "The system has been shut down.\r\n",
+                           Name[0] ? Name : "(unknown)",
+                           (ULONG)Parameters[1]);
+        KeBugCheckEx(FATAL_UNHANDLED_HARD_ERROR,
+                     ErrorStatus,
+                     (ULONG_PTR)BugCheckParameters,
+                     (ULONG_PTR)Caption,
+                     (ULONG_PTR)Message);
+    }
+
     KeBugCheckEx(FATAL_UNHANDLED_HARD_ERROR,
                  ErrorStatus,
                  (ULONG_PTR)BugCheckParameters,

@@ -4,7 +4,7 @@
  * PURPOSE:     Sessions P1 (per-session namespace) test. Two modes:
  *
  *              No argument: a GUI-subsystem image that uses only kernel32 and
- *              ntdll, started by SMSS in session 1 (NitroSessions=4). It
+ *              ntdll, run in session 1 (the console session). It
  *              creates an event and a section under a plain name and under
  *              the Local\, Global\, Session\0\ and Session\1\ prefixes and
  *              writes the object-manager name each one resolved to, the
