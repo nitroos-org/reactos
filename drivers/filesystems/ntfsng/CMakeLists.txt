@@ -45,7 +45,6 @@ list(APPEND CORE_SOURCE
 list(APPEND NT_SOURCE
     nt/access.c
     nt/create.c
-    nt/diag.c
     nt/dirctl.c
     nt/fsctl.c
     nt/info.c

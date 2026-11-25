@@ -388,7 +388,7 @@ static NTSTATUS NgCommitWriteThrough(PNG_VCB Vcb)
  * Group commit, under CoreLock: a non-cached write-through write of @Length bytes that extended @Fcb was written to the
  * device and waited for (its data is in the device's cache: any later commit's first flush puts it on the medium before the
  * COMMITTED header that records the new sizes), and its commit is left to a batch.  The batch is committed here once
- * GroupCommitMB accumulated; until then FlushFileBuffers, a cleanup of the file, the flusher (within NG_GROUP_PERIOD_MS)
+ * NG_GROUP_DEFAULT_MB accumulated; until then FlushFileBuffers, a cleanup of the file, the flusher (within NG_GROUP_PERIOD_MS)
  * or any other commit covers it.  Windows does not make such a write durable at its return on a disk with a volatile cache
  * and no FUA either (it sends neither a flush nor FUA for it there).  Returns the commit's error, if it ran.
  */
@@ -406,7 +406,7 @@ static int NgGroupWritten(PNG_VCB Vcb, PNG_FCB Fcb, ULONG Length)
     Vcb->GroupBytes += Length;
     NgProfile.Stage[NGP_GROUP_WRITE].Count++;
     NgProfile.Stage[NGP_GROUP_WRITE].Bytes += Length;
-    if (Vcb->GroupBytes >= ((ULONGLONG)NgGlobal.GroupCommitMB << 20))
+    if (Vcb->GroupBytes >= ((ULONGLONG)NG_GROUP_DEFAULT_MB << 20))
     {
         Err = NgCommitEx(Vcb, TRUE);
         Vcb->Syncs++;
@@ -1851,25 +1851,15 @@ NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
      * it saw or put the record there itself and no write since can have touched it (Fcb->Home, ngc_flush_home); else it
      * reads the record.  Otherwise the retained pages are written in place (ngc_checkpoint: one more device flush),
      * together with whatever else was retained.
-     * FlushAlwaysInPlace=1: every flush checkpoints; FlushJournalOnly=1: none does, as before (comparison).
      */
-    if (NgGlobal.FlushAlwaysInPlace)
+    Err = NgCommitEx(Vcb, TRUE);
+    if (!Err)
     {
-        Err = NgCommitEx(Vcb, FALSE);
-        if (!Err)
+        if (Fcb->IsDirectory || NgEnsureNode(Fcb))
             Err = ngc_checkpoint(Vcb->Core);
-    }
-    else
-    {
-        Err = NgCommitEx(Vcb, TRUE);
-        if (!Err && !NgGlobal.FlushJournalOnly)
-        {
-            if (Fcb->IsDirectory || NgEnsureNode(Fcb))
-                Err = ngc_checkpoint(Vcb->Core);
-            else
-                Err = ngc_flush_home(Vcb->Core, Fcb->Node, &Fcb->Home, Fcb->HomeFresh);
-            Fcb->HomeFresh = FALSE;
-        }
+        else
+            Err = ngc_flush_home(Vcb->Core, Fcb->Node, &Fcb->Home, Fcb->HomeFresh);
+        Fcb->HomeFresh = FALSE;
     }
     Vcb->Syncs++;
     NgReleaseCore(Vcb);

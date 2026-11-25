@@ -312,7 +312,6 @@ typedef struct _NG_DEVST
 {
     PDEVICE_OBJECT Dev;
     volatile LONG Fua;
-    ULONGLONG Alias;            /* test only (registry FuaAliasMB): a FUA write goes to this offset above its own, see NgDevSetFua */
     volatile LONG Dirty;
     volatile LONG Flushed;
     volatile LONG NPend;        /* writes started and not yet drained (all threads) */
@@ -349,20 +348,12 @@ static NG_DEVST *NgDevStFind(PDEVICE_OBJECT Device, BOOLEAN Create)
 }
 
 /* At mount: the device's FUA capability; the next barrier flushes (whatever was written before this mount is not known to be durable). */
-/*
- * Alias (test only, registry FuaAliasMB, only for a volume whose partition is larger than its file system by at least that much):
- * emulated FUA for a test disk behind an NBD server that models a volatile write cache.  QEMU 8.2 delivers FUA to the backend
- * neither from AHCI (queued FUA ignored, WRITE DMA FUA EXT aborted) nor from NVMe, so the server could not tell a FUA write from
- * a plain one.  A write that asks for FUA is sent as a plain write Alias bytes above its place instead (inside the partition,
- * outside the file system), and the server treats a write in that range as a FUA write of the offset below.
- */
-VOID NgDevSetFua(PDEVICE_OBJECT Device, BOOLEAN Fua, ULONGLONG Alias)
+VOID NgDevSetFua(PDEVICE_OBJECT Device, BOOLEAN Fua)
 {
     NG_DEVST *St = NgDevStFind(Device, TRUE);
 
     if (!St)
         return;
-    St->Alias = Fua ? Alias : 0;
     InterlockedExchange(&St->Flushed, 0);
     InterlockedExchange(&St->Dirty, 1);
     InterlockedExchange(&St->Fua, Fua ? 1 : 0);
@@ -497,14 +488,14 @@ int ngos_dev_write_start(void *dev, unsigned long long off, void *buf, unsigned 
     P->Owner = KeGetCurrentThread();
     P->Fua = Fua;
     P->Data = data != 0;
-    Offset.QuadPart = (LONGLONG)off + (Fua ? (LONGLONG)St->Alias : 0);
-    P->Irp = IoBuildAsynchronousFsdRequest(IRP_MJ_WRITE, Device, buf, len, &Offset, &P->Iosb);
+    Offset.QuadPart = (LONGLONG)off;
+    P->Irp =IoBuildAsynchronousFsdRequest(IRP_MJ_WRITE, Device, buf, len, &Offset, &P->Iosb);
     if (!P->Irp)
     {
         ExFreePoolWithTag(P, TAG_NTFSNG);
         return 1;
     }
-    IoGetNextIrpStackLocation(P->Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME | (Fua && !St->Alias ? SL_WRITE_THROUGH : 0);
+    IoGetNextIrpStackLocation(P->Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME | (Fua ? SL_WRITE_THROUGH : 0);
     IoSetCompletionRoutine(P->Irp, NgReadCompletion, &P->Event, TRUE, TRUE, TRUE);
     KeAcquireSpinLock(&NgDevStLock, &Irql);
     for (i = 0; i < NG_PEND_MAX && St->Pend[i]; i++)
@@ -554,15 +545,15 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
     FlushStart = St ? St->Dirty : 0;
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
-    Offset.QuadPart = (LONGLONG)off + (Fua ? (LONGLONG)St->Alias : 0);
-    Irp = IoBuildAsynchronousFsdRequest(Major, Device, Major == IRP_MJ_FLUSH_BUFFERS ? NULL : buf,
+    Offset.QuadPart = (LONGLONG)off;
+    Irp =IoBuildAsynchronousFsdRequest(Major, Device, Major == IRP_MJ_FLUSH_BUFFERS ? NULL : buf,
                                         Major == IRP_MJ_FLUSH_BUFFERS ? 0 : len,
                                         Major == IRP_MJ_FLUSH_BUFFERS ? NULL : &Offset, &Iosb);
     if (!Irp)
         return NG_DEV_NOT_SENT;
     /* No SL_WRITE_THROUGH: durability comes from the flushes at each commit (and FUA is not honoured everywhere). */
     IoGetNextIrpStackLocation(Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
-    if ((Flags & NG_IO_WRITE_THROUGH) || (Fua && !St->Alias))
+    if ((Flags & NG_IO_WRITE_THROUGH) || Fua)
         IoGetNextIrpStackLocation(Irp)->Flags |= SL_WRITE_THROUGH;
     IoSetCompletionRoutine(Irp, NgReadCompletion, &Event, TRUE, TRUE, TRUE);
     Status = IoCallDriver(Device, Irp);
@@ -660,7 +651,7 @@ static int NgDevWriteWave(PDEVICE_OBJECT Dev, const NG_WR *W, ULONG N, BOOLEAN W
             const NG_WR *R = &W[Base + i];
             LARGE_INTEGER Offset;
 
-            Offset.QuadPart = (LONGLONG)R->Off + (Fua ? (LONGLONG)St->Alias : 0);
+            Offset.QuadPart = (LONGLONG)R->Off;
             KeInitializeEvent(&Req[i].Event, NotificationEvent, FALSE);
             if (!R->Src)
             {
@@ -696,7 +687,7 @@ static int NgDevWriteWave(PDEVICE_OBJECT Dev, const NG_WR *W, ULONG N, BOOLEAN W
                 Err = NG_DEV_NOT_SENT;
                 break;
             }
-            IoGetNextIrpStackLocation(Req[i].Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME | (Fua && !St->Alias ? SL_WRITE_THROUGH : 0);
+            IoGetNextIrpStackLocation(Req[i].Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME | (Fua ? SL_WRITE_THROUGH : 0);
             IoSetCompletionRoutine(Req[i].Irp, NgReadCompletion, &Req[i].Event, TRUE, TRUE, TRUE);
         }
         Count = i;

@@ -160,10 +160,9 @@ static uintptr_t ksites_lock;
 #endif
 long kshim_alloc_live;
 long long kshim_alloc_bytes;
-/* Unused (cached) inodes over all volumes and what they cost, for the Verbose dump (kshim_dump_icache). */
+/* Unused (cached) inodes over all volumes and what they cost. */
 static long kshim_lru_total;
 static long long kshim_lru_bytes_total;
-static void kshim_dump_icache(void);
 #ifdef __x86_64__
 /*
  * Every kmalloc and kfree passes here (dozens per file operation), so on
@@ -209,24 +208,6 @@ static void ksite_account(void *caller, long d, long long bytes)
 	ngos_spin_unlock(&ksites_lock, irql);
 }
 #endif
-void kshim_dump_allocs(void)
-{
-	int top[12], nt = 0;
-	kshim_dump_icache();
-	for (int k = 0; k < 12; k++) {
-		int best = -1;
-		for (int i = 0; i < KSITES; i++) {
-			int seen = 0;
-			for (int j = 0; j < nt; j++) if (top[j] == i) seen = 1;
-			if (!seen && ksites[i].caller && (best < 0 || ksites[i].bytes > ksites[best].bytes)) best = i;
-		}
-		if (best < 0 || ksites[best].live <= 0) break;
-		top[nt++] = best;
-	}
-	printk("allocs: %ld live, %lld bytes; top call sites:\n", kshim_alloc_live, kshim_alloc_bytes);
-	for (int k = 0; k < nt; k++)
-		printk("  site %p: %ld live, %lld bytes\n", ksites[top[k]].caller, ksites[top[k]].live, ksites[top[k]].bytes);
-}
 static void *kmalloc_site(size_t n, gfp_t g, void *caller)
 {
 	struct khdr *h = ngos_alloc(sizeof(*h) + (n ? n : 1));
@@ -1760,15 +1741,6 @@ void kshim_icache_trim(struct super_block *sb)
  * writes it, instead of eviction dropping its dirty pages.
  */
 unsigned long kshim_counter_wb_kept;
-/* Verbose dump: where the inode cache stands against its limits (inodes live = unused on the LRU lists + in use). */
-static void kshim_dump_icache(void)
-{
-	printk("icache: %lu inodes live, %ld unused (%lld KB cost) + %ld in use; limits %lu inodes / %lu KB, pages %lu of %lu; "
-	       "evicted %lu (byte %lu, pressure %lu, wb kept %lu)\n",
-	       kshim_inodes_live, kshim_lru_total, kshim_lru_bytes_total / 1024, (long)kshim_inodes_live - kshim_lru_total,
-	       KSHIM_ICACHE_UNUSED, KSHIM_ICACHE_BYTES / 1024, kshim_pc_pages, KSHIM_PC_PAGES_SOFT,
-	       kshim_icache_evicted, kshim_icache_byte_evicted, kshim_icache_pressure_evicted, kshim_counter_wb_kept);
-}
 static bool kshim_writeback_last(struct inode *i)
 {
 	if (i->i_nlink && !(i->i_state & (I_FREEING | I_NEW)) && i->i_sb && !sb_rdonly(i->i_sb) &&
