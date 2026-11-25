@@ -88,6 +88,7 @@ list(APPEND SOURCE
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/mutant.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/profile.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/pushlock.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/random.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/reserve.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/waitcomp.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/resource.c

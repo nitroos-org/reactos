@@ -618,6 +618,9 @@ KsecInitializeRandom(
     RtlSecureZeroMemory(Material, sizeof(Material));
     KsecRngReady = TRUE;
 
+    /* the kernel's own secrets (image security cookies, UUID node, registry ACL generation) draw from here from now on */
+    ExRegisterRandomProvider(KsecGenRandom);
+
     End = KeQueryPerformanceCounter(NULL);
     Microseconds = (ULONG)((End.QuadPart - Start.QuadPart) * 1000000 / max(Frequency.QuadPart, 1));
     DbgPrint("KSECDD: RNG seeded in %lu us: self-test passed, RDSEED %s (%lu of %lu words), RDRAND %s (%lu of %lu "
