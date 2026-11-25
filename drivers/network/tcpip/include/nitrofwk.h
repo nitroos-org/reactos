@@ -7,8 +7,8 @@
 
 #pragma once
 
-/* Non-zero only while an installed policy is actually enforced (filter not killed, NitroFwEnforce
-   not set to 0, policy ENFORCE flag set, an active profile enabled). Read without a lock on the fast path. */
+/* Non-zero only while an installed policy is actually enforced (filter not killed, policy ENFORCE flag
+   set, an active profile enabled). Read without a lock on the fast path. */
 extern volatile LONG NitroFwEnforcing;
 
 NTSTATUS NitroFwInitialize(PDRIVER_OBJECT DriverObject);

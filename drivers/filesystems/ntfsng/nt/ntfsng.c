@@ -183,8 +183,7 @@ VOID NgReleaseCoreShared(PNG_VCB Vcb, NG_SHARED_HOLD *Hold)
 VOID NgPrintLockStats(PNG_VCB Vcb)
 {
     ULONG i;
-    DPRINT1("ntfsng: FastIoQueryOpen: %ld answered, %ld left to the ordinary open%s\n", NgGlobal.FastQueryHits, NgGlobal.FastQueryMisses,
-            NgGlobal.NoFastQueryOpen ? " (NoFastQueryOpen)" : "");
+    DPRINT1("ntfsng: FastIoQueryOpen: %ld answered, %ld left to the ordinary open\n", NgGlobal.FastQueryHits, NgGlobal.FastQueryMisses);
     DPRINT1("ntfsng: paging writes: %lu with the transfer outside CoreLock, %lu under it, %lu written again\n",
             Vcb->DioWrites, Vcb->DioFallbacks, Vcb->DioRedone);
     DPRINT1("ntfsng: gap zero fill: %lu pieces written outside CoreLock\n", Vcb->DioZeroPieces);
@@ -841,7 +840,6 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     if (Status != STATUS_PENDING)
     {
-        NgDiagLogRequest(DeviceObject, Irp, Status);
         Irp->IoStatus.Status = Status;
         IoCompleteRequest(Irp, NT_SUCCESS(Status) ? IO_DISK_INCREMENT : IO_NO_INCREMENT);
     }
@@ -913,42 +911,19 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         DPRINT1("ntfsng: lock timing at %I64d ticks/s\n", NgPerfFrequency);
     }
 #endif
+#if DBG
+    /* Test hooks, checked builds only: "PermissiveOpen", "ReadOnly", "MountCheck"=1 (the mount-time check at every mount). */
     NgGlobal.PermissiveOpen = NgReadDword(RegistryPath, L"PermissiveOpen");
     NgGlobal.ForceReadOnly = NgReadDword(RegistryPath, L"ReadOnly");
-    NgGlobal.NoFua = NgReadDword(RegistryPath, L"NoFua");
-    NgGlobal.FuaAliasMB = NgReadDword(RegistryPath, L"FuaAliasMB");
-    /* Group commit of extending write-through writes (write.c NgGroupWritten): "GroupCommitMB" = batch size (1-1024), "NoGroupCommit"=1 = off. */
-    NgGlobal.GroupCommitMB = NgReadDword(RegistryPath, L"GroupCommitMB");
-    if (!NgGlobal.GroupCommitMB)
-        NgGlobal.GroupCommitMB = NG_GROUP_DEFAULT_MB;
-    else if (NgGlobal.GroupCommitMB > 1024)
-        NgGlobal.GroupCommitMB = 1024;
-    if (NgReadDword(RegistryPath, L"NoGroupCommit"))
-    {
-        NgGlobal.GroupCommitMB = 0;
-        DPRINT1("ntfsng: NoGroupCommit: every write-through write commits before it returns\n");
-    }
-    /*
-     * FlushFileBuffers (write.c NgFlushBuffers): "FlushAlwaysInPlace"=1 = every flush puts the metadata in place;
-     * "FlushJournalOnly"=1 = no flush does, as before: durable through the journal only (both for comparison).
-     */
-    NgGlobal.FlushAlwaysInPlace = NgReadDword(RegistryPath, L"FlushAlwaysInPlace");
-    NgGlobal.FlushJournalOnly = !NgGlobal.FlushAlwaysInPlace && NgReadDword(RegistryPath, L"FlushJournalOnly");
-    if (NgGlobal.FlushAlwaysInPlace)
-        DPRINT1("ntfsng: FlushAlwaysInPlace: every file flush puts the metadata in place\n");
-    if (NgGlobal.FlushJournalOnly)
-        DPRINT1("ntfsng: FlushJournalOnly: a file flush is durable in the journal, not in place\n");
-    NgGlobal.Verbose = NgReadDword(RegistryPath, L"Verbose");
-    /* "MountCheck": 0 or absent = after an unclean shutdown and for small MFTs, 1 = always, 2 = never. */
-    i = NgReadDword(RegistryPath, L"MountCheck");
-    ngc_check_policy = i == 1 ? 2 : i == 2 ? 0 : 1;
+    ngc_check_always = NgReadDword(RegistryPath, L"MountCheck") == 1;
+#endif
     {
         /* The system-wide NTFS switch for short names (0 = create them, as on Windows). */
         UNICODE_STRING Fs = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\FileSystem");
         NgGlobal.Disable8dot3 = NgReadDword(&Fs, L"NtfsDisable8dot3NameCreation") == 1;
     }
-    DPRINT1("ntfsng: ReadOnly=%lu\n", NgGlobal.ForceReadOnly);
 #if DBG
+    DPRINT1("ntfsng: ReadOnly=%lu\n", NgGlobal.ForceReadOnly);
     i = NgReadDword(RegistryPath, L"JournalFault");
     if (i)
     {
@@ -982,45 +957,15 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         DPRINT1("ntfsng: JournalStall: the journal I/O of a commit pauses %lu ms between its phases\n", i);
     }
 #endif
-    /* FcbCacheMax=N: idle FCBs with cached file data kept per volume (default NG_FCB_CACHE_DEFAULT); NoFcbTrim=1: no limit
-     * (comparison, fallback: every FCB whose data Mm caches lives until Mm lets the pages go). */
-    NgGlobal.FcbCacheMax = NgReadDword(RegistryPath, L"FcbCacheMax");
-    if (!NgGlobal.FcbCacheMax)
     {
-        /* 1024 on a small machine; more with memory (about one per 256 KB of RAM, up to 32768). */
+        /* Idle FCBs with cached file data kept per volume: 1024 on a small machine; more with memory (about one per 256 KB of RAM, up to 32768). */
         ULONG Scaled = (ULONG)(ngos_physical_pages() / 64);
         NgGlobal.FcbCacheMax = Scaled > 32768 ? 32768 : Scaled < NG_FCB_CACHE_DEFAULT ? NG_FCB_CACHE_DEFAULT : Scaled;
     }
-    if (NgReadDword(RegistryPath, L"NoFcbTrim"))
-        NgGlobal.FcbCacheMax = MAXULONG;
-    /* NoUnlockedCommit=1: every commit is synchronous under CoreLock, as before the journal I/O left it (comparison, fallback). */
-    if (NgReadDword(RegistryPath, L"NoUnlockedCommit"))
-    {
-        ngc_unlocked_commit = 0;
-        DPRINT1("ntfsng: NoUnlockedCommit: commits run under CoreLock\n");
-    }
-    /* NoFastQueryOpen=1: attribute queries by name take the ordinary open (comparison, fallback). */
-    if (NgReadDword(RegistryPath, L"NoFastQueryOpen"))
-        NgGlobal.NoFastQueryOpen = 1;
-    /* NoNameCache=1: no cache of looked-up names (comparison, fallback); NameCacheVerify=1: every hit is checked against the directory (test). */
-    if (NgReadDword(RegistryPath, L"NoNameCache"))
-        ngc_set_namecache(0);
-    else if (NgReadDword(RegistryPath, L"NameCacheVerify"))
-        ngc_set_namecache(2);
-    /* NoFreeReservation=1: an allocation after a free waits for the commit that covers the free, as before (comparison, fallback). */
-    if (NgReadDword(RegistryPath, L"NoFreeReservation"))
-    {
-        ngc_free_reservation = 0;
-        DPRINT1("ntfsng: NoFreeReservation: an allocation after a free waits for its commit\n");
-    }
-
-    /* NoRetainedCommit=1: every commit puts its pages in place before it returns (comparison, fallback). */
-    if (NgReadDword(RegistryPath, L"NoRetainedCommit"))
-    {
-        ngc_set_no_retain(1);
-        DPRINT1("ntfsng: NoRetainedCommit: commits put their pages in place at once\n");
-    }
 #if DBG
+    /* Test only (checked builds): every name cache hit is checked against the directory. */
+    if (NgReadDword(RegistryPath, L"NameCacheVerify"))
+        ngc_set_namecache_verify();
     i = NgReadDword(RegistryPath, L"DioFault");
     if (i)
     {
@@ -1029,8 +974,11 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         DPRINT1("ntfsng: DioFault: every %lu'th unlocked paging write is forced to be written again\n", i);
     }
 #endif
-    DPRINT1("ntfsng: service key %wZ, PermissiveOpen=%lu%s\n", RegistryPath, NgGlobal.PermissiveOpen,
-            NgGlobal.PermissiveOpen ? " (opens with write access are granted, modifications are still refused)" : "");
+    DPRINT1("ntfsng: service key %wZ\n", RegistryPath);
+#if DBG
+    if (NgGlobal.PermissiveOpen)
+        DPRINT1("ntfsng: PermissiveOpen: opens with write access are granted, modifications are still refused\n");
+#endif
 
     Err = ngc_init();
     if (Err)

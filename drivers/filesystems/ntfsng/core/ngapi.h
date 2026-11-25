@@ -65,8 +65,10 @@ struct ngc_volinfo {
 	unsigned char label_valid;       /* label was read (0: reading it ran out of memory, ask again) */
 };
 
-/* Mount-time consistency check: 0 never, 1 after an unclean shutdown or for small MFTs, 2 always. */
-extern int ngc_check_policy;
+#if DBG
+/* Test only (registry MountCheck=1, checked builds): the mount-time consistency check runs at every mount; otherwise after an unclean shutdown or for small MFTs. */
+extern int ngc_check_always;
+#endif
 
 typedef int (*ngc_filldir_t)(void *ctx, const unsigned short *name, unsigned int len,
 		unsigned long long mft_no, unsigned int dtype);
@@ -124,14 +126,14 @@ int ngc_commit_now(ngc_vol *v);
 /* Commit with the journal I/O outside the volume lock (the glue's NgCommit; details at ngc_commit_begin in ngcore.c). */
 #define NGC_COMMIT_IO 1
 #define NGC_COMMIT_BUSY (-1000)
-extern int ngc_unlocked_commit;		/* 0: every commit is synchronous (registry NoUnlockedCommit=1) */
 void ngc_set_fua(ngc_vol *v, int on);	/* the device honours FUA (glue, at mount): the journal uses it in place of flushes where it can */
 void ngc_set_data_fua(ngc_vol *v, int on);	/* under the volume lock, around a write-through write: its file data is written with FUA */
 void ngc_set_defer(ngc_vol *v, int on);	/* under the volume lock, around a write-through write: its direct data writes are sent and waited for later */
 int ngc_drain_data(ngc_vol *v);	/* waits for them (the calling thread's); -EIO if one failed */
 void ngc_commit_prestart(ngc_vol *v);	/* after ngc_commit_begin returned NGC_COMMIT_IO, still under the lock: slot writes in flight with the data writes, both waited for */
-void ngc_set_namecache(int mode);	/* 0: off (registry NoNameCache=1), 1: on (default), 2: verify every hit (NameCacheVerify=1) */
-void ngc_set_no_retain(int off);	/* 1: no retained transactions (registry NoRetainedCommit=1): every commit is in place when it returns */
+#if DBG
+void ngc_set_namecache_verify(void);	/* test only (registry NameCacheVerify=1): every name cache hit is checked against the directory */
+#endif
 /* The core calls fn(ctx) (under the volume lock, never blocking) when the overlay is past its threshold and a commit is wanted. */
 void ngc_set_commit_kick(ngc_vol *v, void (*fn)(void *ctx), void *ctx);
 int ngc_commit_begin(ngc_vol *v, int retain);	/* retain: the caller waits for durability, a small commit may stay out of place (kshim_jnl.c) */
@@ -157,7 +159,6 @@ void ngc_home_free(ngc_home *h);
 void ngc_home_mark(ngc_vol *v, unsigned long long off, unsigned long long len);
 /* The overlay is past its threshold, or (alloc_bytes > 0: a growth of about that many bytes) a free is not committed and an allocation follows that cannot go around the freed clusters. */
 int ngc_commit_wanted(ngc_vol *v, long long alloc_bytes);
-extern int ngc_free_reservation;	/* 0: an allocation after a free waits for the commit (registry NoFreeReservation=1) */
 int ngc_changed(ngc_vol *v);
 void ngc_icache_trim(ngc_vol *v);
 int ngc_dirty(ngc_vol *v);
@@ -312,8 +313,6 @@ int ngc_dir_empty(ngc_vol *v, ngc_node *dir);
 int ngc_deleted_dir(ngc_vol *v, int create, ngc_node **out);
 int ngc_purge_deleted(ngc_vol *v, unsigned int *count);
 void ngc_write_stats(unsigned long *writes, unsigned long long *bytes, unsigned long *syncs, unsigned long *skips, unsigned long *dirties);
-/* Prints shim memory accounting (live allocations by call site, cache pages, inodes). */
-void ngc_debug_dump(void);
 
 /*
  * ngc_check: the consistency check of ngfsck.c on the mounted volume (under the caller's volume lock), as FSCTL_NG_CHECK.

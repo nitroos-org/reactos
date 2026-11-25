@@ -18,13 +18,6 @@
 LIST_ENTRY HandleTableListHead;
 EX_PUSH_LOCK HandleTableListLock;
 
-/*
- * SMP lever #1 kill-switch. When FALSE the per-CPU free-handle cache fast path is
- * bypassed entirely and allocation/free fall back to the shared FirstFree list
- * (identical to the pre-lever behaviour). Left writable for A/B measurement and as
- * an emergency disable; the cache storage is still allocated either way.
- */
-BOOLEAN ExpHandleCpuCacheEnabled = TRUE;
 #define SizeOfHandle(x) (sizeof(HANDLE) * (x))
 #define INDEX_TO_HANDLE_VALUE(x) ((x) << HANDLE_TAG_BITS)
 
@@ -335,15 +328,13 @@ ExpFreeHandleTable(IN PHANDLE_TABLE HandleTable)
 
 //
 // SMP lever #1 fast-path eligibility: the per-CPU cache is a LIFO, so it is only
-// used for non-StrictFIFO tables; it also honours the global kill-switch and only
-// engages once the cache storage exists.
+// used for non-StrictFIFO tables, and only engages once the cache storage exists.
 //
 FORCEINLINE
 BOOLEAN
 ExpHandleCacheEligible(IN PHANDLE_TABLE HandleTable)
 {
-    return (ExpHandleCpuCacheEnabled &&
-            !HandleTable->StrictFIFO &&
+    return (!HandleTable->StrictFIFO &&
             (HandleTable->PerCpuFreeCache != NULL));
 }
 

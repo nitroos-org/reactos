@@ -1097,7 +1097,7 @@ static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp, PFILE_NETW
     {
         if (Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF)
             return Vcb->ReadOnly ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_ACCESS_DENIED;
-        if ((Access & NG_WRITE_ACCESS) && !(NgGlobal.PermissiveOpen || Vcb->Damaged) && Vcb->ReadOnly)
+        if ((Access & NG_WRITE_ACCESS) && !(NG_PERMISSIVE_OPEN || Vcb->Damaged) && Vcb->ReadOnly)
             return STATUS_MEDIA_WRITE_PROTECTED;
         return NgOpenVolume(Vcb, FileObject, Stack, Check);
     }
@@ -1599,7 +1599,7 @@ walked:
             goto out;
         }
         if (Vcb->ReadOnly && ((Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF) ||
-                              (Options & FILE_DELETE_ON_CLOSE) || ((Access & NG_WRITE_ACCESS) && !(NgGlobal.PermissiveOpen || Vcb->Damaged))))
+                              (Options & FILE_DELETE_ON_CLOSE) || ((Access & NG_WRITE_ACCESS) && !(NG_PERMISSIVE_OPEN || Vcb->Damaged))))
         {
             Status = STATUS_MEDIA_WRITE_PROTECTED;
             goto out;
@@ -1934,13 +1934,7 @@ walked:
     Shared = FALSE;
     Fcb = NULL;
     Ccb = NULL;
-    if ((InterlockedIncrement(&NgGlobal.Opens) % 2000) == 0 && NgGlobal.Verbose)
-    {
-        DPRINT1("ntfsng: %ld opens, %ld FCBs live\n", NgGlobal.Opens, NgGlobal.FcbLive);
-        NgAcquireCore(Vcb);
-        ngc_debug_dump();
-        NgReleaseCore(Vcb);
-    }
+    InterlockedIncrement(&NgGlobal.Opens);
 
 out:
     if (Opening)
@@ -2010,7 +2004,7 @@ VOID NgFcbIdle(PNG_FCB Fcb)
     PNG_VCB Vcb = Fcb->Vcb;
 
     if (Fcb->OpenHandles || !Fcb->HasNode || Fcb->IsDirectory || Fcb->IsVolume ||
-        !Fcb->SectionObjectPointers.DataSectionObject || NgGlobal.FcbCacheMax == MAXULONG)
+        !Fcb->SectionObjectPointers.DataSectionObject)
         return;
     KeAcquireGuardedMutex(&Vcb->FcbListLock);
     if (Fcb->VcbLinks.Flink && !Fcb->OpenHandles && !Fcb->Opening && !Fcb->Deleted && !Fcb->DeletePending &&
@@ -2175,7 +2169,7 @@ BOOLEAN NTAPI NgFastQueryOpen(PIRP Irp, PFILE_NETWORK_OPEN_INFORMATION Query, PD
     NTSTATUS Status;
     BOOLEAN TopLevel = FALSE;
 
-    if (NgGlobal.NoFastQueryOpen || DeviceObject == NgGlobal.ControlDevice)
+    if (DeviceObject == NgGlobal.ControlDevice)
         return FALSE;
     Vcb = DeviceObject->DeviceExtension;
     if (Vcb->Dismounted || Vcb->WrongMedia || Vcb->Removable || Vcb->RemovePending)

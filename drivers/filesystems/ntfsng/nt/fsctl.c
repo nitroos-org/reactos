@@ -243,8 +243,6 @@ static BOOLEAN NgFuaUsable(PDEVICE_OBJECT Target)
     NTSTATUS Status;
     PIRP Irp;
 
-    if (NgGlobal.NoFua)
-        return FALSE;
     RtlZeroMemory(&Query, sizeof(Query));
     RtlZeroMemory(&Cache, sizeof(Cache));
     Query.PropertyId = StorageDeviceWriteCacheProperty;
@@ -362,16 +360,10 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Vdo->SectorSize = (USHORT)SectorSize;
 
     NgAcquireCore(Vcb);
-    NoFlush = !NgGlobal.ForceReadOnly && !Removable && !NgFlushUsable(Target);
-    {
-        /* BootSectors: the file system's own size; a partition that holds it and FuaAliasMB more is a test disk (see NgDevSetFua) */
-        ULONGLONG Alias = (ULONGLONG)NgGlobal.FuaAliasMB << 20;
-        BOOLEAN Test = Alias && Size >= Alias + (BootSectors + 1) * SectorSize;
-
-        NgDevSetFua(Target, !NoFlush && !Removable && (Test || NgFuaUsable(Target)), Test ? Alias : 0);
-    }
-    Err = ngc_mount(Target, Size, SectorSize, !NgGlobal.ForceReadOnly && !Removable && !NoFlush, &Vcb->Core, &WhyRo);
-    if (!Err && Removable && !NgGlobal.ForceReadOnly)
+    NoFlush = !NG_FORCE_READ_ONLY && !Removable && !NgFlushUsable(Target);
+    NgDevSetFua(Target, !NoFlush && !Removable && NgFuaUsable(Target));
+    Err = ngc_mount(Target, Size, SectorSize, !NG_FORCE_READ_ONLY && !Removable && !NoFlush, &Vcb->Core, &WhyRo);
+    if (!Err && Removable && !NG_FORCE_READ_ONLY)
         WhyRo = "removable media";
     if (!Err && NoFlush)
         WhyRo = "the storage stack cannot flush the disk's write cache";
@@ -385,7 +377,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         ngc_set_dio_drain_range(Vcb->Core, NgDrainDataIoRangeCallback, Vcb);
         ngc_set_fua(Vcb->Core, ngos_dev_fua(Target));
         /* A disk that honours FUA keeps the write-through data of each call durable at its return (FUA writes, no flush): no group commit there. */
-        Vcb->GroupCommit = NgGlobal.GroupCommitMB != 0 && !ngos_dev_fua(Target);
+        Vcb->GroupCommit = !ngos_dev_fua(Target);
         ngc_set_commit_kick(Vcb->Core, NgCommitKickCallback, Vcb);
         if (!Vcb->Info.read_only)
         {
@@ -434,14 +426,14 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
      * Read-only for good on a disk that cannot flush, or whose sectors the journal cannot use: the
      * system volume boots read-only there, as a damaged one does.
      */
-    Vcb->Damaged = Vcb->Info.damaged || NoFlush || (SectorSize != 512 && !Removable && !NgGlobal.ForceReadOnly) ? TRUE : FALSE;
+    Vcb->Damaged = Vcb->Info.damaged || NoFlush || (SectorSize != 512 && !Removable && !NG_FORCE_READ_ONLY) ? TRUE : FALSE;
     /*
      * The boot volume that the policy kept read-only although the mount asked for read-write (a dirty
      * volume whose $LogFile is in use, flags only a checker clears): the registry needs write opens on
      * it before anything can show the user why, and a bugcheck there (0xC0000218 from the SYSTEM hive,
      * 0xC000021A from smss) leaves no recoverable state.  It boots read-only like a damaged one, with a notice.
      */
-    if (Vcb->ReadOnly && !Vcb->Damaged && WhyRo && !Removable && !NgGlobal.ForceReadOnly &&
+    if (Vcb->ReadOnly && !Vcb->Damaged && WhyRo && !Removable && !NG_FORCE_READ_ONLY &&
         Vpb->RealDevice && (Vpb->RealDevice->Flags & DO_SYSTEM_BOOT_PARTITION))
         Vcb->Damaged = TRUE;
     if (!Vcb->ReadOnly && !NT_SUCCESS(NgStartFlusher(Vcb)))
