@@ -148,92 +148,39 @@ void kshim_unimpl(const char *name)
 
 /* ------------------------------------------------------------- memory */
 /*
- * A 16-byte header (on x86) keeps the size for krealloc and the allocating
- * call site, so live allocations can be attributed when hunting leaks.
+ * A header of four words (16 bytes on x86, 32 on x86_64: NGC_ALLOC_OVH in
+ * ngcore.c counts it) keeps the size for krealloc and a magic that kfree checks.
  */
-struct khdr { size_t n; size_t magic; void *caller; size_t pad; };
+struct khdr { size_t n; size_t magic; size_t pad[2]; };
 #define KMAGIC ((size_t)0x4e474b4dUL)
-#define KSITES 1024
-static struct { void *caller; long live; long long bytes; } ksites[KSITES];
-#ifndef __x86_64__
-static uintptr_t ksites_lock;
-#endif
-long kshim_alloc_live;
-long long kshim_alloc_bytes;
 /* Unused (cached) inodes over all volumes and what they cost. */
 static long kshim_lru_total;
 static long long kshim_lru_bytes_total;
-#ifdef __x86_64__
-/*
- * Every kmalloc and kfree passes here (dozens per file operation), so on
- * 64-bit it takes no lock: a slot is claimed with a compare-exchange on its
- * caller and the counters are atomic adds. A spin lock here cost a raise and
- * a lower of the IRQL per call (two CR8 writes). The dump reads the table
- * without a lock either way, so it sees the same kind of snapshot.
- */
-static void ksite_account(void *caller, long d, long long bytes)
-{
-	unsigned int h = ((uintptr_t)caller >> 2) % KSITES;
-	for (unsigned int i = 0; i < KSITES; i++, h = (h + 1) % KSITES) {
-		void *c = __atomic_load_n(&ksites[h].caller, __ATOMIC_ACQUIRE);
-		if (!c) {
-			void *expected = NULL;
-			c = __atomic_compare_exchange_n(&ksites[h].caller, &expected, caller, 0,
-							__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ? caller : expected;
-		}
-		if (c == caller) {
-			__atomic_add_fetch(&ksites[h].live, d, __ATOMIC_RELAXED);
-			__atomic_add_fetch(&ksites[h].bytes, bytes, __ATOMIC_RELAXED);
-			break;
-		}
-	}
-	__atomic_add_fetch(&kshim_alloc_live, d, __ATOMIC_RELAXED);
-	__atomic_add_fetch(&kshim_alloc_bytes, bytes, __ATOMIC_RELAXED);
-}
-#else
-static void ksite_account(void *caller, long d, long long bytes)
-{
-	unsigned int h = ((uintptr_t)caller >> 2) % KSITES;
-	unsigned char irql = ngos_spin_lock(&ksites_lock);
-	for (unsigned int i = 0; i < KSITES; i++, h = (h + 1) % KSITES) {
-		if (ksites[h].caller == caller || !ksites[h].caller) {
-			ksites[h].caller = caller;
-			ksites[h].live += d;
-			ksites[h].bytes += bytes;
-			break;
-		}
-	}
-	kshim_alloc_live += d;
-	kshim_alloc_bytes += bytes;
-	ngos_spin_unlock(&ksites_lock, irql);
-}
-#endif
-static void *kmalloc_site(size_t n, gfp_t g, void *caller)
+static void *kmalloc_site(size_t n, gfp_t g)
 {
 	struct khdr *h = ngos_alloc(sizeof(*h) + (n ? n : 1));
 	if (!h)
 		return NULL;
-	h->n = n; h->magic = KMAGIC; h->caller = caller;
-	ksite_account(caller, 1, n);
+	h->n = n; h->magic = KMAGIC;
 	if (g & __GFP_ZERO)
 		memset(h + 1, 0, n);
 	return h + 1;
 }
-void *kmalloc(size_t n, gfp_t g) { return kmalloc_site(n, g, __builtin_return_address(0)); }
-void *kzalloc(size_t n, gfp_t g) { return kmalloc_site(n, g | __GFP_ZERO, __builtin_return_address(0)); }
+void *kmalloc(size_t n, gfp_t g) { return kmalloc_site(n, g); }
+void *kzalloc(size_t n, gfp_t g) { return kmalloc_site(n, g | __GFP_ZERO); }
 void *kcalloc(size_t n, size_t s, gfp_t g)
 {
 	size_t t;
 	if (__builtin_mul_overflow(n, s, &t))
 		return NULL;
-	return kmalloc_site(t, g | __GFP_ZERO, __builtin_return_address(0));
+	return kmalloc_site(t, g | __GFP_ZERO);
 }
 void *kmalloc_array(size_t n, size_t s, gfp_t g)
 {
 	size_t t;
 	if (__builtin_mul_overflow(n, s, &t))
 		return NULL;
-	return kmalloc_site(t, g, __builtin_return_address(0));
+	return kmalloc_site(t, g);
 }
 void kfree(const void *p)
 {
@@ -244,7 +191,6 @@ void kfree(const void *p)
 	if (h->magic != KMAGIC)
 		ngos_bugcheck("kfree of a foreign pointer", __FILE__, __LINE__);
 	h->magic = 0;
-	ksite_account(h->caller, -1, -(long long)h->n);
 	ngos_free(h);
 }
 void *krealloc(const void *p, size_t n, gfp_t g)
@@ -273,7 +219,7 @@ char *kstrndup(const char *s, size_t n, gfp_t g)
 	if (p) { memcpy(p, s, l); p[l] = 0; }
 	return p;
 }
-void *kmemdup(const void *s, size_t n, gfp_t g) { void *p = kmalloc_site(n, g, __builtin_return_address(0)); if (p) memcpy(p, s, n); return p; }
+void *kmemdup(const void *s, size_t n, gfp_t g) { void *p = kmalloc_site(n, g); if (p) memcpy(p, s, n); return p; }
 unsigned long totalram_pages(void) { return ngos_physical_pages(); }
 struct kmem_cache *kmem_cache_create(const char *name, unsigned int size,
 		unsigned int align, unsigned long flags, void (*ctor)(void *))
@@ -288,7 +234,7 @@ struct kmem_cache *kmem_cache_create(const char *name, unsigned int size,
 void kmem_cache_destroy(struct kmem_cache *c) { kfree(c); }
 void *kmem_cache_alloc(struct kmem_cache *c, gfp_t g)
 {
-	void *p = kmalloc_site(c->size, g | __GFP_ZERO, __builtin_return_address(0));
+	void *p = kmalloc_site(c->size, g | __GFP_ZERO);
 	if (p && c->ctor) c->ctor(p);
 	return p;
 }
