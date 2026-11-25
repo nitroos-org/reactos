@@ -28,7 +28,18 @@ typedef struct _SECL_RESPONSE
     DWORD dwProcessId;
     DWORD dwThreadId;
     DWORD dwError;
+    /*
+     * SECL_RESPONSE_GRANT_DESKTOP: the process was created suspended in the caller's session, which the
+     * service cannot reach (a window station or desktop goes only to a process of its own session):
+     * the caller gives LogonSid access to the window station and desktop, then resumes the thread
+     * unless it asked for CREATE_SUSPENDED.
+     */
+    DWORD dwFlags;
+    DWORD dwLogonSidLength;
+    BYTE LogonSid[68];
 } SECL_RESPONSE, *PSECL_RESPONSE;
+
+cpp_quote("#define SECL_RESPONSE_GRANT_DESKTOP 0x1")
 
 [
     uuid(12b81e99-f207-4a4c-85d3-77b42f76fd14),
