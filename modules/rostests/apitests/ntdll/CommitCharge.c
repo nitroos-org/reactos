@@ -140,6 +140,77 @@ CheckProcessDelta_(
 
 static
 VOID
+TouchPages(
+    _In_ PVOID Base,
+    _In_ SIZE_T Size)
+{
+    PUCHAR Address;
+
+    for (Address = Base; Address < (PUCHAR)Base + Size; Address += PageSize)
+        *(volatile UCHAR *)Address = 1;
+}
+
+/*
+ * Touching committed pages costs nothing more. The process's own charge shows
+ * it exactly. Faulting in 64 MB also puts the system under memory pressure,
+ * and other parts of it may give commit back meanwhile (about 1450 pages were
+ * seen on a 2 GB i386 system); a try in which the system-wide charge moved is
+ * measured again on a fresh committed range, up to three tries in all.
+ */
+static
+VOID
+CheckTouchCostsNothing(
+    _In_ PVOID Base,
+    _In_ SIZE_T Size)
+{
+    PVOID Range = Base, Fresh = NULL;
+    SIZE_T RangeSize;
+    ULONG_PTR System;
+    LONG_PTR Process, Delta;
+    NTSTATUS Status;
+    ULONG Try;
+
+    Process = QueryProcessCommit(NtCurrentProcess());
+    for (Try = 0; ; Try++)
+    {
+        System = QuerySystemCommit(NULL);
+        TouchPages(Range, Size);
+        Delta = (LONG_PTR)(QuerySystemCommit(NULL) - System);
+        if (Try == 0)
+            CheckProcessDelta(NtCurrentProcess(), Process, 0, "touch 64 MB");
+        if (SystemDeltaFits(Delta, 0) || (Try == 2))
+            break;
+
+        trace("touch 64 MB: system commit moved by %Id pages in try %lu, measured again\n", Delta, Try + 1);
+        if (Fresh)
+        {
+            RangeSize = 0;
+            Status = NtFreeVirtualMemory(NtCurrentProcess(), &Fresh, &RangeSize, MEM_RELEASE);
+            ok_ntstatus(Status, STATUS_SUCCESS);
+        }
+        Fresh = NULL;
+        RangeSize = Size;
+        Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Fresh, 0, &RangeSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+        {
+            Fresh = NULL;
+            break;
+        }
+        Range = Fresh;
+    }
+    CheckSystemDelta(System, 0, "touch 64 MB");
+
+    if (Fresh)
+    {
+        RangeSize = 0;
+        Status = NtFreeVirtualMemory(NtCurrentProcess(), &Fresh, &RangeSize, MEM_RELEASE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+    }
+}
+
+static
+VOID
 TestPrivateBalance(VOID)
 {
     PVOID Base = NULL, Address;
@@ -189,12 +260,7 @@ TestPrivateBalance(VOID)
 
     /* A committed page that is touched costs nothing more */
     if (NT_SUCCESS(Status))
-    {
-        System = QuerySystemCommit(NULL);
-        for (Address = Base; Address < (PVOID)((PUCHAR)Base + Size); Address = (PUCHAR)Address + PageSize)
-            *(volatile UCHAR *)Address = 1;
-        CheckSystemDelta(System, 0, "touch 64 MB");
-    }
+        CheckTouchCostsNothing(Base, Size);
 
     System = QuerySystemCommit(NULL);
     Process = QueryProcessCommit(NtCurrentProcess());
