@@ -17,6 +17,7 @@ list(APPEND SOURCE
     CloseWindow.c
     CopyImage.c
     CalculatePopupWindowPosition.c
+    ChangeDisplaySettings.c
     CreateDialog.c
     CreateIconFromResourceEx.c
     CreateWindowEx.c
