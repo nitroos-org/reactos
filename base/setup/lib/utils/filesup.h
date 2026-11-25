@@ -13,6 +13,14 @@ SetupCreateDirectory(
     _In_ PCWSTR PathName);
 
 NTSTATUS
+SetupCreateSystemDirectory(
+    _In_ PCWSTR PathName);
+
+NTSTATUS
+SetupSecureSystemVolumeRoot(
+    _In_ PCWSTR RootPath);
+
+NTSTATUS
 SetupDeleteFile(
     IN PCWSTR FileName,
     IN BOOLEAN ForceDelete); // ForceDelete can be used to delete read-only files

@@ -21,7 +21,8 @@
 static
 NTSTATUS
 SetupCreateSingleDirectory(
-    _In_ PCUNICODE_STRING DirectoryName)
+    _In_ PCUNICODE_STRING DirectoryName,
+    _In_opt_ PSECURITY_DESCRIPTOR SecurityDescriptor)
 {
     NTSTATUS Status;
     UNICODE_STRING PathName = *DirectoryName;
@@ -40,7 +41,7 @@ SetupCreateSingleDirectory(
                                &PathName,
                                OBJ_CASE_INSENSITIVE,
                                NULL,
-                               NULL);
+                               SecurityDescriptor);
 
     Status = NtCreateFile(&DirectoryHandle,
                           FILE_LIST_DIRECTORY | SYNCHRONIZE,
@@ -69,9 +70,11 @@ SetupCreateSingleDirectory(
  *
  * @return  An NTSTATUS code indicating success or failure.
  **/
+static
 NTSTATUS
-SetupCreateDirectory(
-    _In_ PCWSTR PathName)
+SetupCreateDirectoryWithSd(
+    _In_ PCWSTR PathName,
+    _In_opt_ PSECURITY_DESCRIPTOR SecurityDescriptor)
 {
     NTSTATUS Status = STATUS_SUCCESS;
     UNICODE_STRING PathNameU;
@@ -122,12 +125,226 @@ SetupCreateDirectory(
         PathNameU.Length = (ULONG_PTR)Ptr - (ULONG_PTR)Buffer;
 
         DPRINT("Create: %wZ\n", &PathNameU);
-        Status = SetupCreateSingleDirectory(&PathNameU);
+        /* The descriptor is for the directory that was asked for, not for the ones made on the way to it */
+        Status = SetupCreateSingleDirectory(&PathNameU, (Ptr >= End) ? SecurityDescriptor : NULL);
         if (!NT_SUCCESS(Status))
             break;
     }
 
     DPRINT("Done.\n");
+    return Status;
+}
+
+NTSTATUS
+SetupCreateDirectory(
+    _In_ PCWSTR PathName)
+{
+    return SetupCreateDirectoryWithSd(PathName, NULL);
+}
+
+/*
+ * The descriptors Windows gives the system directory and the root of the system volume, as userenv gives them when it
+ * repairs an install that was made without (SystemAces and RootAces of dll/win32/userenv/profacl.c: keep them equal).
+ * A new install is made with them, so that the first start of winlogon has nothing to repair and what Setup copies below
+ * the system directory is born with the entries it inherits.
+ */
+typedef struct _SETUP_SD_SID
+{
+    UCHAR Authority;
+    UCHAR SubCount;
+    ULONG Sub[2];
+} SETUP_SD_SID;
+
+#define SETUP_SID_SY    0
+#define SETUP_SID_BA    1
+#define SETUP_SID_BU    2
+#define SETUP_SID_CO    3
+#define SETUP_SID_AU    4
+#define SETUP_SID_AC    5
+#define SETUP_SID_LPAC  6
+
+static const SETUP_SD_SID SetupSdSids[] =
+{
+    { 5, 1, { 18 } },           /* SY, S-1-5-18 */
+    { 5, 2, { 32, 544 } },      /* BA, S-1-5-32-544 */
+    { 5, 2, { 32, 545 } },      /* BU, S-1-5-32-545 */
+    { 3, 1, { 0 } },            /* CO, S-1-3-0 */
+    { 5, 1, { 11 } },           /* AU, S-1-5-11 */
+    { 15, 2, { 2, 1 } },        /* All Application Packages, S-1-15-2-1 */
+    { 15, 2, { 2, 2 } },        /* All Restricted Application Packages, S-1-15-2-2 */
+};
+
+typedef struct _SETUP_SD_ACE
+{
+    UCHAR Sid;
+    UCHAR Flags;
+    ACCESS_MASK Mask;
+} SETUP_SD_ACE;
+
+#define SETUP_OI_CI     (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)
+#define SETUP_OI_CI_IO  (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE)
+#define SETUP_ALL       0x001F01FF                  /* FILE_ALL_ACCESS */
+#define SETUP_RX        0x001200A9                  /* FILE_GENERIC_READ | FILE_GENERIC_EXECUTE */
+#define SETUP_MODIFY    0x001301BF
+#define SETUP_GRGX      (GENERIC_READ | GENERIC_EXECUTE)
+
+/* Windows, Program Files: SYSTEM and Administrators full, Users and the application packages read and run, CREATOR OWNER full */
+static const SETUP_SD_ACE SetupSystemDirAces[] =
+{
+    { SETUP_SID_SY, SETUP_OI_CI, SETUP_ALL },
+    { SETUP_SID_BA, SETUP_OI_CI, SETUP_ALL },
+    { SETUP_SID_BU, 0, SETUP_RX },
+    { SETUP_SID_BU, SETUP_OI_CI_IO, SETUP_GRGX },
+    { SETUP_SID_CO, SETUP_OI_CI_IO, SETUP_ALL },
+    { SETUP_SID_AC, 0, SETUP_RX },
+    { SETUP_SID_AC, SETUP_OI_CI_IO, SETUP_GRGX },
+    { SETUP_SID_LPAC, 0, SETUP_RX },
+    { SETUP_SID_LPAC, SETUP_OI_CI_IO, SETUP_GRGX },
+};
+
+/* The root of the system volume: Authenticated Users create directories there, not files */
+static const SETUP_SD_ACE SetupSystemRootAces[] =
+{
+    { SETUP_SID_BA, SETUP_OI_CI, SETUP_ALL },
+    { SETUP_SID_SY, SETUP_OI_CI, SETUP_ALL },
+    { SETUP_SID_BU, SETUP_OI_CI, SETUP_RX },
+    { SETUP_SID_AU, SETUP_OI_CI_IO, SETUP_MODIFY },
+    { SETUP_SID_AU, 0, FILE_ADD_SUBDIRECTORY },
+};
+
+/*
+ * Builds the descriptor (a DACL only, with the given control bits) of a list of entries in Sd, with the memory
+ * for the DACL in *Dacl and the SIDs in Sids (the caller frees them with SetupFreeSd).
+ */
+static NTSTATUS
+SetupBuildSd(
+    _In_ const SETUP_SD_ACE *Aces,
+    _In_ ULONG AceCount,
+    _In_ SECURITY_DESCRIPTOR_CONTROL Control,
+    _Out_ PSECURITY_DESCRIPTOR Sd,
+    _Out_ PACL *Dacl,
+    _Out_writes_(AceCount) PSID *Sids)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG i, DaclSize = sizeof(ACL);
+
+    *Dacl = NULL;
+    RtlZeroMemory(Sids, AceCount * sizeof(PSID));
+
+    for (i = 0; i < AceCount; i++)
+    {
+        const SETUP_SD_SID *Def = &SetupSdSids[Aces[i].Sid];
+        SID_IDENTIFIER_AUTHORITY Authority = {{0, 0, 0, 0, 0, Def->Authority}};
+
+        Status = RtlAllocateAndInitializeSid(&Authority,
+                                             Def->SubCount,
+                                             Def->Sub[0], Def->Sub[1], 0, 0, 0, 0, 0, 0,
+                                             &Sids[i]);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        DaclSize += FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + RtlLengthSid(Sids[i]);
+    }
+
+    *Dacl = RtlAllocateHeap(RtlGetProcessHeap(), 0, DaclSize);
+    if (!*Dacl)
+        return STATUS_NO_MEMORY;
+
+    Status = RtlCreateAcl(*Dacl, DaclSize, ACL_REVISION);
+    for (i = 0; NT_SUCCESS(Status) && i < AceCount; i++)
+    {
+        Status = RtlAddAccessAllowedAceEx(*Dacl, ACL_REVISION, Aces[i].Flags, Aces[i].Mask, Sids[i]);
+    }
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = RtlCreateSecurityDescriptor(Sd, SECURITY_DESCRIPTOR_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetDaclSecurityDescriptor(Sd, TRUE, *Dacl, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetControlSecurityDescriptor(Sd, SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED, Control);
+    return Status;
+}
+
+static VOID
+SetupFreeSd(
+    _In_opt_ PACL Dacl,
+    _In_ ULONG SidCount,
+    _In_reads_(SidCount) PSID *Sids)
+{
+    ULONG i;
+
+    for (i = 0; i < SidCount; i++)
+    {
+        if (Sids[i])
+            RtlFreeSid(Sids[i]);
+    }
+    if (Dacl)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Dacl);
+}
+
+/*
+ * Creates a directory (and the ones on the way to it, without a descriptor of their own) with the descriptor of the
+ * Windows directory. On a volume without access control lists (FAT) the descriptor is ignored.
+ */
+NTSTATUS
+SetupCreateSystemDirectory(
+    _In_ PCWSTR PathName)
+{
+    SECURITY_DESCRIPTOR Sd;
+    PACL Dacl;
+    PSID Sids[ARRAYSIZE(SetupSystemDirAces)];
+    NTSTATUS Status;
+
+    Status = SetupBuildSd(SetupSystemDirAces, ARRAYSIZE(SetupSystemDirAces), SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED, &Sd, &Dacl, Sids);
+    if (NT_SUCCESS(Status))
+        Status = SetupCreateDirectoryWithSd(PathName, &Sd);
+    else
+        Status = SetupCreateDirectory(PathName);
+    SetupFreeSd(Dacl, ARRAYSIZE(Sids), Sids);
+    return Status;
+}
+
+/*
+ * Gives the root of a volume the descriptor of the root of a system volume (the formatter writes the one of a data
+ * volume). Only meant for the volume that is being installed to, before anything is copied. Nothing happens on a volume
+ * without access control lists; a failure is only reported, the first start of winlogon repairs a root that the old
+ * formatter wrote and leaves one alone that is not like that.
+ */
+NTSTATUS
+SetupSecureSystemVolumeRoot(
+    _In_ PCWSTR RootPath)
+{
+    SECURITY_DESCRIPTOR Sd;
+    PACL Dacl;
+    PSID Sids[ARRAYSIZE(SetupSystemRootAces)];
+    UNICODE_STRING PathName;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    HANDLE RootHandle;
+    NTSTATUS Status;
+
+    Status = SetupBuildSd(SetupSystemRootAces, ARRAYSIZE(SetupSystemRootAces), SE_DACL_PROTECTED, &Sd, &Dacl, Sids);
+    if (!NT_SUCCESS(Status))
+        goto Done;
+
+    RtlInitUnicodeString(&PathName, RootPath);
+    InitializeObjectAttributes(&ObjectAttributes, &PathName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&RootHandle,
+                        WRITE_DAC | SYNCHRONIZE,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        FILE_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtSetSecurityObject(RootHandle, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, &Sd);
+        NtClose(RootHandle);
+    }
+
+Done:
+    if (!NT_SUCCESS(Status))
+        DPRINT1("The root descriptor of '%S' was not set: Status = 0x%08lx\n", RootPath, Status);
+    SetupFreeSd(Dacl, ARRAYSIZE(Sids), Sids);
     return Status;
 }
 
