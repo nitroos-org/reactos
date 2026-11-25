@@ -3152,7 +3152,7 @@ CmpCopyKeyNode(IN PHHIVE SourceHive,
 
     /* Set the parent and copy the flags */
     DestNode->Parent = Parent;
-    DestNode->Flags  = (SrcNode->Flags & KEY_COMP_NAME); // Keep only the single permanent flag
+    DestNode->Flags  = (SrcNode->Flags & (KEY_COMP_NAME | KEY_SYM_LINK)); // Keep only the permanent flags (a link stays a link)
     if (Parent == HCELL_NIL)
     {
         /* This is the new root node */
