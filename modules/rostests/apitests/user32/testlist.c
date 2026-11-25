@@ -110,6 +110,7 @@ extern void func_NcPaintLayered(void);
 extern void func_SetWindowPosFlags(void);
 extern void func_SetParentCrossProcess(void);
 extern void func_SetParentKillOrder(void);
+extern void func_SetParentLoop(void);
 extern void func_SetWindowPosLastError(void);
 extern void func_WmCancelModeLastError(void);
 extern void func_LastInputInfo(void);
@@ -335,6 +336,7 @@ const struct test winetest_testlist[] =
     { "SetWindowPosFlags", func_SetWindowPosFlags },
     { "SetParentCrossProcess", func_SetParentCrossProcess },
     { "SetParentKillOrder", func_SetParentKillOrder },
+    { "SetParentLoop", func_SetParentLoop },
     { "SetWindowPosLastError", func_SetWindowPosLastError },
     { "LastInputInfo", func_LastInputInfo },
     { "WmCancelModeLastError", func_WmCancelModeLastError },
