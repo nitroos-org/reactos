@@ -77,7 +77,7 @@ VOID Echo6CompleteDone(VOID);
 VOID Echo6Startup(VOID);
 
 #define UDP6_TAG                'U6pT'
-#define UDP6_SOCKET_GROUPS      NITRO_MCAST_MAX_GROUPS  /* IP_MAX_MEMBERSHIPS (Windows takes at least 300: release notes) */
+#define UDP6_SOCKET_GROUPS      NITRO_MCAST_MAX_GROUPS6 /* IP_MAX_MEMBERSHIPS (Windows takes at least 300: release notes) */
 #define UDP6_MACHINE_GROUPS     128
 /* The sources of a group's merged filter MLD is told (MLD6_MAX_SOURCES); beyond them EXCLUDE with none */
 #define UDP6_MLD_SOURCES        256

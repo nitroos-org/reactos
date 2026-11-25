@@ -443,10 +443,23 @@ typedef struct _UDP4_GROUP {
     PULONG Sources;             /* sorted, no duplicates, network order; UDP4_TAG */
 } UDP4_GROUP, *PUDP4_GROUP;
 
+/* A socket's joins: the block starts with room for UDP4_FIRST_GROUPS and doubles up to UDP4_SOCKET_GROUPS, so a
+   socket with one group costs one small block and one with 1024 about 32 KB of nonpaged pool (amd64: 32 bytes a
+   join, plus 4 bytes a listed source) */
+#define UDP4_FIRST_GROUPS   4
 typedef struct _UDP4_MEMBERSHIPS {
     ULONG Count;
-    UDP4_GROUP Groups[UDP4_SOCKET_GROUPS];
+    ULONG Capacity;
+    UDP4_GROUP Groups[1];
 } UDP4_MEMBERSHIPS, *PUDP4_MEMBERSHIPS;
+#define UDP4_MEMBERSHIPS_SIZE(n) (FIELD_OFFSET(UDP4_MEMBERSHIPS, Groups) + (n) * sizeof(UDP4_GROUP))
+
+static
+ULONG
+Udp4NextCapacity(ULONG Capacity)
+{
+    return (Capacity * 2 > UDP4_SOCKET_GROUPS) ? UDP4_SOCKET_GROUPS : Capacity * 2;
+}
 
 /* The joins of all sockets together (core lock) */
 static ULONG Udp4Joins;
@@ -721,7 +734,7 @@ NTSTATUS
 Udp4Apply(PADDRESS_FILE AddrFile, ULONG IfIndex, ULONG Group, UCHAR Mode, ULONG NumSources, PULONG Copy,
           BOOLEAN MustBeNew, BOOLEAN CheckIfIndex)
 {
-    PUDP4_MEMBERSHIPS M, New = NULL;
+    PUDP4_MEMBERSHIPS M, New = NULL, Replaced = NULL, Grown = NULL;
     PULONG Old = NULL;
     BOOLEAN Leave = (Mode == NITRO_MCAST_INCLUDE && NumSources == 0);
     NTSTATUS Status = STATUS_SUCCESS;
@@ -729,14 +742,15 @@ Udp4Apply(PADDRESS_FILE AddrFile, ULONG IfIndex, ULONG Group, UCHAR Mode, ULONG 
 
     if (!Leave)
     {
-        New = ExAllocatePoolWithTag(NonPagedPool, sizeof(*New), UDP4_TAG);
+        New = ExAllocatePoolWithTag(NonPagedPool, UDP4_MEMBERSHIPS_SIZE(UDP4_FIRST_GROUPS), UDP4_TAG);
         if (!New)
         {
             if (Copy)
                 ExFreePoolWithTag(Copy, UDP4_TAG);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
-        RtlZeroMemory(New, sizeof(*New));
+        RtlZeroMemory(New, UDP4_MEMBERSHIPS_SIZE(UDP4_FIRST_GROUPS));
+        New->Capacity = UDP4_FIRST_GROUPS;
     }
 
     LockObject(AddrFile);
@@ -781,8 +795,23 @@ Udp4Apply(PADDRESS_FILE AddrFile, ULONG IfIndex, ULONG Group, UCHAR Mode, ULONG 
         {
             Status = STATUS_INSUFFICIENT_RESOURCES;
         }
+        else if (M->Count == M->Capacity &&
+                 !(Grown = ExAllocatePoolWithTag(NonPagedPool, UDP4_MEMBERSHIPS_SIZE(Udp4NextCapacity(M->Capacity)),
+                                                 UDP4_TAG)))
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        }
         else
         {
+            if (Grown)
+            {
+                /* every reader holds the object lock or the core lock, and both are held here */
+                Grown->Capacity = Udp4NextCapacity(M->Capacity);
+                Grown->Count = M->Count;
+                RtlCopyMemory(Grown->Groups, M->Groups, M->Count * sizeof(UDP4_GROUP));
+                Replaced = M;
+                AddrFile->Groups4 = M = Grown;
+            }
             M->Groups[M->Count].Group = Group;
             M->Groups[M->Count].IfIndex = IfIndex;
             M->Groups[M->Count].Mode = Mode;
@@ -825,6 +854,8 @@ Done:
 
     if (New)
         ExFreePoolWithTag(New, UDP4_TAG);
+    if (Replaced)
+        ExFreePoolWithTag(Replaced, UDP4_TAG);
     if (Copy)
         ExFreePoolWithTag(Copy, UDP4_TAG);
     if (Old)
