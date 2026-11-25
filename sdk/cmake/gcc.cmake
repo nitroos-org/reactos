@@ -417,8 +417,12 @@ if(NITRO_PDB_PUBLICS)
                           --signature "${NITRO_PDB_TIMESTAMP_VALUE}")
     # User-mode images that get a PDB as well (the kernel-mode images always do): "core" = the system libraries and servers that show
     # in the stacks of a driver developer, "all" = every user-mode module outside the tests, "none" or empty = none, or a list of
-    # module names. The 32-bit guest of SYSWOW64 is a separate configuration and has none.
-    set(NITRO_PDB_USER_MODULES "core" CACHE STRING "user-mode modules that get a PDB with NITRO_PDB_PUBLICS: core, all, none or a list of module names")
+    # module names. The default is every user-mode image of the installation medium: the 64-bit ones, the keyboard layouts and,
+    # with SYSWOW64, the 32-bit files of SysWOW64 (the nested 32-bit build gets the same settings; its PDB files lie below
+    # pdb/syswow64 and the manifest lists them next to the others).
+    set(NITRO_PDB_USER_MODULES "all" CACHE STRING "user-mode modules that get a PDB with NITRO_PDB_PUBLICS: all, core (the system libraries and servers), none or a list of module names")
+    # Where the PDB files are written (the nested 32-bit build of SYSWOW64 writes into the pdb directory of the 64-bit build)
+    set(NITRO_PDB_DIR "${REACTOS_BINARY_DIR}/pdb" CACHE PATH "directory of the PDB files written with NITRO_PDB_PUBLICS")
     set(NITRO_PDB_USER_ALL FALSE)
     if(NITRO_PDB_USER_MODULES STREQUAL "core")
         set(NITRO_PDB_USER_LIST ntdll kernel32 kernelbase advapi32 user32 gdi32 win32u msvcrt rpcrt4 ws2_32 conhost
@@ -432,8 +436,33 @@ if(NITRO_PDB_PUBLICS)
         string(REPLACE "," ";" NITRO_PDB_USER_LIST "${NITRO_PDB_USER_MODULES}")
     endif()
     message(STATUS "NITRO_PDB_PUBLICS: PDB publics for kernel-mode images, linker ${_nitro_ld_version}, image time stamp ${NITRO_PDB_TIMESTAMP_VALUE}, user-mode: ${NITRO_PDB_USER_MODULES}")
-    file(MAKE_DIRECTORY ${REACTOS_BINARY_DIR}/pdb)
+    file(MAKE_DIRECTORY ${NITRO_PDB_DIR})
 endif()
+
+# A PDB with the public symbols for a user-mode image of the selected set (NITRO_PDB_USER_MODULES): the linker writes it,
+# pefixup sets the image time stamp, pdbfix repairs the PDB. Called for the modules that set_module_type handles and by the
+# modules that are linked by hand (the keyboard layouts).
+function(nitro_user_pdb_publics MODULE)
+    if(NOT NITRO_PDB_PUBLICS)
+        return()
+    endif()
+    if(NOT (NITRO_PDB_USER_ALL OR MODULE IN_LIST NITRO_PDB_USER_LIST))
+        return()
+    endif()
+    if(CMAKE_CURRENT_SOURCE_DIR MATCHES "/modules/rostests(/|$)")
+        return()
+    endif()
+    file(RELATIVE_PATH _nitro_pdb_rel "${REACTOS_BINARY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+    file(MAKE_DIRECTORY "${NITRO_PDB_DIR}/${_nitro_pdb_rel}")
+    target_link_options(${MODULE} PRIVATE "-Wl,--pdb=${NITRO_PDB_DIR}/${_nitro_pdb_rel}/$<TARGET_FILE_BASE_NAME:${MODULE}>.pdb")
+    set_property(GLOBAL APPEND PROPERTY NITRO_PDB_MODULE_LIST "${MODULE}|${_nitro_pdb_rel}")
+    add_custom_command(TARGET ${MODULE} POST_BUILD
+        COMMAND native-pefixup --timestamp=${NITRO_PDB_TIMESTAMP_VALUE} $<TARGET_FILE:${MODULE}>
+        COMMAND native-pdbfix ${NITRO_PDBFIX_ARGS} "${NITRO_PDB_DIR}/${_nitro_pdb_rel}/$<TARGET_FILE_BASE_NAME:${MODULE}>.pdb"
+        VERBATIM)
+    set_property(TARGET ${MODULE} APPEND PROPERTY LINK_DEPENDS
+        $<TARGET_PROPERTY:native-pefixup,IMPORTED_LOCATION> $<TARGET_PROPERTY:native-pdbfix,IMPORTED_LOCATION>)
+endfunction()
 
 set(CMAKE_C_COMPILE_OBJECT "<CMAKE_C_COMPILER> <DEFINES> ${_compress_debug_sections_flag} <INCLUDES> <FLAGS> -o <OBJECT> -c <SOURCE>")
 # FIXME: Once the GCC toolchain bugs are fixed, add _compress_debug_sections_flag to CXX too
@@ -492,8 +521,8 @@ function(set_module_type_toolchain MODULE TYPE)
             # the file itself lies in the directory of the module below pdb/, because two modules can share a file name
             # (win32ss/drivers/miniport/vbe and pc98vid both build vgapnp.sys).
             file(RELATIVE_PATH _nitro_pdb_rel "${REACTOS_BINARY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
-            file(MAKE_DIRECTORY "${REACTOS_BINARY_DIR}/pdb/${_nitro_pdb_rel}")
-            target_link_options(${MODULE} PRIVATE "-Wl,--pdb=${REACTOS_BINARY_DIR}/pdb/${_nitro_pdb_rel}/$<TARGET_FILE_BASE_NAME:${MODULE}>.pdb")
+            file(MAKE_DIRECTORY "${NITRO_PDB_DIR}/${_nitro_pdb_rel}")
+            target_link_options(${MODULE} PRIVATE "-Wl,--pdb=${NITRO_PDB_DIR}/${_nitro_pdb_rel}/$<TARGET_FILE_BASE_NAME:${MODULE}>.pdb")
             set_property(GLOBAL APPEND PROPERTY NITRO_PDB_MODULE_LIST "${MODULE}|${_nitro_pdb_rel}")
         endif()
 
@@ -525,25 +554,14 @@ function(set_module_type_toolchain MODULE TYPE)
             # The PDB as the linker wrote it is not accepted by Microsoft's debugger libraries (stream 0 has content) and names the
             # directories of the build host: pdbfix repairs the first and replaces the second (see sdk/tools/pdbfix/pdbfix.c)
             add_custom_command(TARGET ${MODULE} POST_BUILD
-                COMMAND native-pdbfix ${NITRO_PDBFIX_ARGS} "${REACTOS_BINARY_DIR}/pdb/${_nitro_pdb_rel}/$<TARGET_FILE_BASE_NAME:${MODULE}>.pdb"
+                COMMAND native-pdbfix ${NITRO_PDBFIX_ARGS} "${NITRO_PDB_DIR}/${_nitro_pdb_rel}/$<TARGET_FILE_BASE_NAME:${MODULE}>.pdb"
                 VERBATIM)
             set_property(TARGET ${MODULE} APPEND PROPERTY LINK_DEPENDS $<TARGET_PROPERTY:native-pdbfix,IMPORTED_LOCATION>)
         endif()
-    elseif(NITRO_PDB_PUBLICS AND (TYPE STREQUAL win32dll OR TYPE STREQUAL win32ocx OR TYPE STREQUAL cpl OR TYPE STREQUAL win32cui
-                                  OR TYPE STREQUAL win32gui OR TYPE STREQUAL nativecui OR TYPE STREQUAL nativedll)
-           AND (NITRO_PDB_USER_ALL OR MODULE IN_LIST NITRO_PDB_USER_LIST)
-           AND NOT CMAKE_CURRENT_SOURCE_DIR MATCHES "/modules/rostests(/|$)")
-        # the same for a user-mode image of the selected set
-        file(RELATIVE_PATH _nitro_pdb_rel "${REACTOS_BINARY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
-        file(MAKE_DIRECTORY "${REACTOS_BINARY_DIR}/pdb/${_nitro_pdb_rel}")
-        target_link_options(${MODULE} PRIVATE "-Wl,--pdb=${REACTOS_BINARY_DIR}/pdb/${_nitro_pdb_rel}/$<TARGET_FILE_BASE_NAME:${MODULE}>.pdb")
-        set_property(GLOBAL APPEND PROPERTY NITRO_PDB_MODULE_LIST "${MODULE}|${_nitro_pdb_rel}")
-        add_custom_command(TARGET ${MODULE} POST_BUILD
-            COMMAND native-pefixup --timestamp=${NITRO_PDB_TIMESTAMP_VALUE} $<TARGET_FILE:${MODULE}>
-            COMMAND native-pdbfix ${NITRO_PDBFIX_ARGS} "${REACTOS_BINARY_DIR}/pdb/${_nitro_pdb_rel}/$<TARGET_FILE_BASE_NAME:${MODULE}>.pdb"
-            VERBATIM)
-        set_property(TARGET ${MODULE} APPEND PROPERTY LINK_DEPENDS
-            $<TARGET_PROPERTY:native-pefixup,IMPORTED_LOCATION> $<TARGET_PROPERTY:native-pdbfix,IMPORTED_LOCATION>)
+    elseif(TYPE STREQUAL win32dll OR TYPE STREQUAL win32ocx OR TYPE STREQUAL cpl OR TYPE STREQUAL win32cui
+           OR TYPE STREQUAL win32gui OR TYPE STREQUAL nativecui OR TYPE STREQUAL nativedll)
+        # a user-mode image of the selected set
+        nitro_user_pdb_publics(${MODULE})
     endif()
 endfunction()
 

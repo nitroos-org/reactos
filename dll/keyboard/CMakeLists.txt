@@ -141,6 +141,11 @@ foreach(_keyboard_layout ${_keyboard_layouts})
     endif()
     set_subsystem(${_keyboard_layout} native)
 
+    # PDB with the public symbols (NITRO_PDB_PUBLICS): these images are linked here, not through set_module_type
+    if(COMMAND nitro_user_pdb_publics)
+        nitro_user_pdb_publics(${_keyboard_layout})
+    endif()
+
     if(MSVC)
         # Merge the .text and .rdata section into the .data section
         target_link_options(${_keyboard_layout} PRIVATE "/ignore:4254;/SECTION:.data,ER;/MERGE:.text=.data;/MERGE:.rdata=.data;/MERGE:.bss=.data;/MERGE:.edata=.data")
