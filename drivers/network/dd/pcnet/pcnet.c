@@ -1319,6 +1319,61 @@ MiSyncReloadInitializationBlock(
   return TRUE;
 }
 
+static BOOLEAN
+NTAPI
+MiSyncLoadLogicalAddressFilter(
+    IN PVOID SynchronizeContext)
+/*
+ * FUNCTION: Write the logical address filter registers while the chip is suspended
+ * ARGUMENTS:
+ *     SynchronizeContext: Adapter context
+ * RETURNS:
+ *     TRUE when the filter is loaded; FALSE when the chip did not suspend (the caller then
+ *     initializes the chip again from the initialization block)
+ * NOTES:
+ *     - CSR8-CSR11 can be written while the chip is stopped or suspended. Suspend lets the chip
+ *       finish the frame it is working on and keeps the rings, the descriptors and the
+ *       frames in them as they are
+ */
+{
+  PADAPTER Adapter = (PADAPTER)SynchronizeContext;
+  USHORT Csr5, Data;
+  UINT i, Reg;
+
+  NdisRawWritePortUshort(Adapter->PortOffset + RAP, CSR5);
+  NdisRawReadPortUshort(Adapter->PortOffset + RDP, &Csr5);
+  NdisRawWritePortUshort(Adapter->PortOffset + RDP, Csr5 | CSR5_SPND);
+
+  /* The bit reads back as 1 when the chip has suspended */
+  for (i = 0; i < 100; i++)
+    {
+      NdisRawReadPortUshort(Adapter->PortOffset + RDP, &Data);
+      if (Data & CSR5_SPND)
+        break;
+      NdisStallExecution(1);
+    }
+
+  if (!(Data & CSR5_SPND))
+    {
+      /* Not suspended: leave the chip as it was and let the caller initialize it again */
+      NdisRawWritePortUshort(Adapter->PortOffset + RDP, Csr5 & ~CSR5_SPND);
+      return FALSE;
+    }
+
+  for (Reg = 0; Reg < 4; Reg++)
+    {
+      Data = (USHORT)Adapter->InitializationBlockVirt->LADR[Reg * 2] |
+             ((USHORT)Adapter->InitializationBlockVirt->LADR[Reg * 2 + 1] << 8);
+      NdisRawWritePortUshort(Adapter->PortOffset + RAP, CSR8 + Reg);
+      NdisRawWritePortUshort(Adapter->PortOffset + RDP, Data);
+    }
+
+  NdisRawWritePortUshort(Adapter->PortOffset + RAP, CSR5);
+  NdisRawWritePortUshort(Adapter->PortOffset + RDP, Csr5 & ~CSR5_SPND);
+
+  return TRUE;
+}
+
 VOID
 NTAPI
 MiApplyLogicalAddressFilter(
@@ -1332,8 +1387,9 @@ MiApplyLogicalAddressFilter(
  *     - Called with the adapter lock held
  *     - The filter is a hash: bit (CRC-32 of the address >> 26). All bits for all multicast, the
  *       bits of the multicast list's group addresses for multicast, none otherwise
- *     - The chip reads the filter from the initialization block only when it initializes: a changed
- *       filter initializes it again
+ *     - The chip reads the filter from the initialization block only when it initializes, so the
+ *       registers are written with the chip suspended (the frames in the rings stay). Only a chip
+ *       that does not suspend is initialized again
  */
 {
   UCHAR Ladr[8];
@@ -1361,7 +1417,8 @@ MiApplyLogicalAddressFilter(
     return;
 
   NdisMoveMemory(Adapter->InitializationBlockVirt->LADR, Ladr, sizeof(Ladr));
-  NdisMSynchronizeWithInterrupt(&Adapter->InterruptObject, MiSyncReloadInitializationBlock, Adapter);
+  if (!NdisMSynchronizeWithInterrupt(&Adapter->InterruptObject, MiSyncLoadLogicalAddressFilter, Adapter))
+    NdisMSynchronizeWithInterrupt(&Adapter->InterruptObject, MiSyncReloadInitializationBlock, Adapter);
 }
 
 NDIS_STATUS
