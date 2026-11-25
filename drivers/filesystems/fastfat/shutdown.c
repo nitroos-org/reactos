@@ -254,7 +254,14 @@ Return Value:
                                          FALSE );
 
 #ifdef __REACTOS__
-                    if (NT_SUCCESS( FlushStatus )) {
+                    //
+                    //  Only a volume that this mount marked dirty is marked clean: one that was
+                    //  only read from has not been written to, and the boot sector, the FsInfo
+                    //  sector and the first entry of the FAT stay as they are on the disk.
+                    //
+
+                    if (NT_SUCCESS( FlushStatus ) &&
+                        FlagOn( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY )) {
 
                         FatMarkVolumeClean( IrpContext, Vcb );
                     }
