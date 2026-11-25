@@ -332,6 +332,12 @@ HalpUnmapVirtualAddressVista(
     IN BOOLEAN FlushCurrentTLB
 );
 
+#if DBG && defined(_M_AMD64)
+VOID
+NTAPI
+HalpCheckUnmapClearsEntry(VOID);
+#endif
+
 PVOID
 NTAPI
 HalpMapPhysicalMemory64(

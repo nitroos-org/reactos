@@ -134,6 +134,11 @@ HalInitSystem(
             KeBugCheckEx(ACPI_BIOS_ERROR, Status, 0, 0, 0);
         }
 
+#if DBG && defined(_M_AMD64)
+        /* Debug builds: an unmapped HAL heap entry is zero, also above 4 GB */
+        HalpCheckUnmapClearsEntry();
+#endif
+
         /* Initialize the PICs */
         HalpInitializePICs(TRUE);
 
