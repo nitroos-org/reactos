@@ -2,7 +2,7 @@
  * PROJECT:     ReactOS API Tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     What a window draws through its DC is on the screen when the DC is released or the paint ends, for each
- *              kind of primitive, and nothing else of the window is copied there (NitroRedirection levels 0, 1 and 2)
+ *              kind of primitive, and nothing else of the window is copied there (window redirection: amd64; none on i386)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * At level 0 a window draws on the screen. At levels 1 and 2 (amd64) it draws into its surface, and what each
@@ -34,35 +34,16 @@ static int g_Level;
 static int g_PaintMode;   /* 0: the paint draws nothing, 1: a red line at y 200 */
 static LONG g_cPaint;
 
-/* The window redirection level in effect: NitroRedirection on an amd64 system without /NOREDIRECTION */
+/*
+ * The window redirection level of the system: 1 on amd64 (top-level windows draw into surfaces of their own), 0 on
+ * i386. Level 2 (layered and glass windows composed) is not the behaviour yet: its rows do not run.
+ */
 static int GetRedirectionLevel(void)
 {
-    HKEY hKey;
-    DWORD Value = 0, cb = sizeof(Value);
-    WCHAR Options[512] = L"";
     SYSTEM_INFO si;
 
     GetNativeSystemInfo(&si);
-    if (si.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_AMD64)
-        return 0;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        if (RegQueryValueExW(hKey, L"NitroRedirection", NULL, NULL, (BYTE *)&Value, &cb) != ERROR_SUCCESS || Value > 2)
-            Value = 0;
-        RegCloseKey(hKey);
-    }
-    if (Value && RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        cb = sizeof(Options) - sizeof(WCHAR);
-        if (RegQueryValueExW(hKey, L"SystemStartOptions", NULL, NULL, (BYTE *)Options, &cb) == ERROR_SUCCESS)
-        {
-            _wcsupr(Options);
-            if (wcsstr(Options, L"NOREDIRECTION"))
-                Value = 0;
-        }
-        RegCloseKey(hKey);
-    }
-    return (int)Value;
+    return si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 ? 1 : 0;
 }
 
 static void Pump(void)
@@ -647,7 +628,7 @@ START_TEST(RedirPresent)
     HDC hdcScreen;
 
     g_Level = GetRedirectionLevel();
-    trace("NitroRedirection level %d\n", g_Level);
+    trace("window redirection level %d\n", g_Level);
 
     hdcScreen = GetDC(NULL);
     if (GetDeviceCaps(hdcScreen, BITSPIXEL) < 24)

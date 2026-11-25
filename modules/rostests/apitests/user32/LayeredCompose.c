@@ -2,14 +2,14 @@
  * PROJECT:     ReactOS API Tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     Layered and glass windows on the screen: alpha, colour key, UpdateLayeredWindow, what is below
- *              changing, PrintWindow, hit testing (NitroRedirection levels 0, 1 and 2)
+ *              changing, PrintWindow, hit testing (window redirection levels 0, 1 and 2)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * The expectations are those of Windows 10 with the Desktop Window Manager (measured on the oracle 2026-11-09,
- * W3 and W4, where noted). NitroOS composes layered and glass windows only at NitroRedirection 2 (amd64): at
- * levels 0 and 1 SetLayeredWindowAttributes is not applied and the screen is blended once, so those checks are
- * todo there. Checks marked "level 2 only" are NitroOS behaviour not measured on Windows yet; they run only at
- * level 2.
+ * W3 and W4, where noted). NitroOS redirects top-level windows on amd64 (level 1) and not on i386 (level 0); it
+ * does not compose layered and glass windows yet (level 2): SetLayeredWindowAttributes is not applied and the
+ * screen is blended once, so those checks are todo. Checks marked "level 2 only" are NitroOS behaviour not
+ * measured on Windows yet; they run only at level 2.
  */
 
 #include "precomp.h"
@@ -23,35 +23,16 @@ static int g_Level;
 static LONG g_cPaint;
 static HBRUSH g_hbrRed;
 
-/* The window redirection level in effect: NitroRedirection on an amd64 system without /NOREDIRECTION */
+/*
+ * The window redirection level of the system: 1 on amd64 (top-level windows draw into surfaces of their own), 0 on
+ * i386. Level 2 (layered and glass windows composed) is not the behaviour yet: its rows do not run.
+ */
 static int GetRedirectionLevel(void)
 {
-    HKEY hKey;
-    DWORD Value = 0, cb = sizeof(Value);
-    WCHAR Options[512] = L"";
     SYSTEM_INFO si;
 
     GetNativeSystemInfo(&si);
-    if (si.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_AMD64)
-        return 0;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        if (RegQueryValueExW(hKey, L"NitroRedirection", NULL, NULL, (BYTE *)&Value, &cb) != ERROR_SUCCESS || Value > 2)
-            Value = 0;
-        RegCloseKey(hKey);
-    }
-    if (Value && RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        cb = sizeof(Options) - sizeof(WCHAR);
-        if (RegQueryValueExW(hKey, L"SystemStartOptions", NULL, NULL, (BYTE *)Options, &cb) == ERROR_SUCCESS)
-        {
-            _wcsupr(Options);
-            if (wcsstr(Options, L"NOREDIRECTION"))
-                Value = 0;
-        }
-        RegCloseKey(hKey);
-    }
-    return (int)Value;
+    return si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 ? 1 : 0;
 }
 
 static void Pump(void)

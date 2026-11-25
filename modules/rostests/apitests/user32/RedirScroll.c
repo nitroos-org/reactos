@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS API Tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     What a window shows after ScrollWindowEx and ScrollDC is the same at every NitroRedirection level
+ * PURPOSE:     What a window shows after ScrollWindowEx and ScrollDC is the same with and without window redirection
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * A pattern that depends on the pixel position is painted into a popup window (and a child window of it). The
@@ -27,35 +27,13 @@ static HBITMAP g_hbmPattern;
 static HDC g_hdcPattern;
 static int g_Level;
 
-/* The window redirection level in effect: NitroRedirection on an amd64 system without /NOREDIRECTION */
+/* The window redirection level of the system: 1 on amd64 (top-level windows draw into surfaces of their own), 0 on i386 */
 static int GetRedirectionLevel(void)
 {
-    HKEY hKey;
-    DWORD Value = 0, cb = sizeof(Value);
-    WCHAR Options[512] = L"";
     SYSTEM_INFO si;
 
     GetNativeSystemInfo(&si);
-    if (si.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_AMD64)
-        return 0;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        if (RegQueryValueExW(hKey, L"NitroRedirection", NULL, NULL, (BYTE *)&Value, &cb) != ERROR_SUCCESS || Value > 2)
-            Value = 0;
-        RegCloseKey(hKey);
-    }
-    if (Value && RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        cb = sizeof(Options) - sizeof(WCHAR);
-        if (RegQueryValueExW(hKey, L"SystemStartOptions", NULL, NULL, (BYTE *)Options, &cb) == ERROR_SUCCESS)
-        {
-            _wcsupr(Options);
-            if (wcsstr(Options, L"NOREDIRECTION"))
-                Value = 0;
-        }
-        RegCloseKey(hKey);
-    }
-    return (int)Value;
+    return si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 ? 1 : 0;
 }
 
 static COLORREF Pat(int x, int y)
@@ -804,7 +782,7 @@ START_TEST(RedirScroll)
     int i;
 
     g_Level = GetRedirectionLevel();
-    trace("NitroRedirection level %d\n", g_Level);
+    trace("window redirection level %d\n", g_Level);
     hdcScreen = GetDC(NULL);
     if (GetDeviceCaps(hdcScreen, BITSPIXEL) < 24)
     {
