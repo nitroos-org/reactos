@@ -1702,6 +1702,7 @@ MmMakeSegmentResident(
     _In_ ULONG Length,
     _In_opt_ PLARGE_INTEGER ValidDataLength,
     _In_ BOOLEAN SetDirty,
+    _In_ BOOLEAN WaitForOtherReads,
     _Out_opt_ PBOOLEAN OutOfPages)
 {
     /* Let's use a 64K granularity. */
@@ -1755,6 +1756,17 @@ MmMakeSegmentResident(
 
             CurrentOffset.QuadPart = ChunkOffset;
             ULONG_PTR Entry = MmGetPageEntrySectionSegment(Segment, &CurrentOffset);
+
+            /*
+             * Another thread is reading this page in.  A caller that holds the file's paging I/O resource (a
+             * fault, MiLockFileForPageIn) must not wait for that read: the read is the file system's paging
+             * read, which takes the same resource shared, and waits behind a thread that has asked for it
+             * exclusively (a non-cached read or write, a size change), and that thread waits for the caller.
+             * Leave the page to its reader; the faulting thread restarts and waits for the page without
+             * the resource.
+             */
+            if (MM_IS_WAIT_PTE(Entry) && !WaitForOtherReads)
+                continue;
 
             /* Let any pending read proceed */
             while (MM_IS_WAIT_PTE(Entry))
@@ -2458,11 +2470,13 @@ MiNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
          * A file system copying from the cache under its shared hold of the file (CcCopyRead, FsRtlCopyRead)
          * faults here when Mm took the view's page away after Cc made it resident: it must not wait for the
          * file, nor must a thread that holds only the file's paging resource.
+         * Pages that another thread is reading in are left to it, the faulting page too: the fault restarts
+         * and waits for such a page (MM_WAIT_ENTRY below) with neither the resource nor the segment held.
          */
         FileLock = MiLockFileForPageIn(Segment->FileObject);
 
         Status = MmMakeSegmentResident(Segment, Offset.QuadPart, PAGE_SIZE,
-                                       FcbHeader ? &FcbHeader->ValidDataLength : NULL, FALSE, NULL);
+                                       FcbHeader ? &FcbHeader->ValidDataLength : NULL, FALSE, FALSE, NULL);
 
         MiUnlockFileForPageIn(FileLock);
 
@@ -6813,6 +6827,21 @@ restart:
             Address = MiMapPageInHyperSpace(Process, PFN_FROM_SSE(Entry), &Irql);
             RtlZeroMemory(Address + (ZeroStart - PageOffset), (SIZE_T)(ZeroEnd - ZeroStart));
             MiUnmapPageInHyperSpace(Process, Address, Irql);
+
+            /*
+             * A page wholly in the range lies past the end of the file: its data is dead, and the page stays only
+             * because something maps it (a cache view that straddles the new end of file and is kept by the purge
+             * while it has dirty data below it).  It must not stay dirty: once the file grows again, a flush of
+             * that view would write these zeros as if they were data, over whatever a non-cached write has put
+             * there meanwhile, and the file system would take such a write past the valid data length for an
+             * extension of it.  Zero and clean is what the file holds there (nothing).  A page another thread is
+             * writing keeps its state: the writer's completion decides.
+             */
+            if ((ZeroStart == PageOffset) && (ZeroEnd == PageOffset + PAGE_SIZE) &&
+                IS_DIRTY_SSE(Entry) && !IS_WRITE_SSE(Entry))
+            {
+                MmSetPageEntrySectionSegment(Segment, &PageOff, CLEAN_SSE(Entry));
+            }
         }
     }
 
@@ -7442,7 +7471,7 @@ MmMakeDataSectionResident(
     ASSERT(Segment);
 
     BOOLEAN OutOfPages = FALSE;
-    NTSTATUS Status = MmMakeSegmentResident(Segment, Offset, Length, ValidDataLength, FALSE, &OutOfPages);
+    NTSTATUS Status = MmMakeSegmentResident(Segment, Offset, Length, ValidDataLength, FALSE, TRUE, &OutOfPages);
 
     /*
      * No page to read into. If the cache copies file data for a caller
@@ -7494,7 +7523,7 @@ MmMakeDataSectionResident(
             LastAttempt = (Now - Progress >= StallTime) || (Now - Start >= MaximumTime);
 
             OutOfPages = FALSE;
-            Status = MmMakeSegmentResident(Segment, Offset, Length, ValidDataLength, FALSE, &OutOfPages);
+            Status = MmMakeSegmentResident(Segment, Offset, Length, ValidDataLength, FALSE, TRUE, &OutOfPages);
         } while (OutOfPages && !LastAttempt);
     }
 

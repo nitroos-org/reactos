@@ -191,6 +191,7 @@ list(APPEND SOURCE
     MappedFileGrowth.c
     FileCloseLockedDup.c
     FileCutAfterClose.c
+    FileCutRegrowNoncached.c
     FileDeleteMapped.c
     FileFlushAllocCut.c
     FileFlushSelfWrite.c
