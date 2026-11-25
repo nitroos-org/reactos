@@ -56,6 +56,7 @@ list(APPEND SOURCE
     EventRegister.c
     EventProvider.c
     EventSetInformation.c
+    GetSecurityInfoSaclReopen.c
     GetSecurityInfoSequence.c
     ObjectLockStress.c
     OpenThreadTokenLeak.c

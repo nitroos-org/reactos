@@ -53,6 +53,7 @@ extern void func_EventRegister(void);
 extern void func_EventProvider(void);
 extern void func_EventSetInformation(void);
 extern void func_EventSetInformationFault(void);
+extern void func_GetSecurityInfoSaclReopen(void);
 extern void func_GetSecurityInfoSequence(void);
 extern void func_ObjectLockStress(void);
 extern void func_OpenThreadTokenLeak(void);
@@ -280,6 +281,7 @@ const struct test winetest_testlist[] =
     { "EventProvider", func_EventProvider },
     { "EventSetInformation", func_EventSetInformation },
     { "EventSetInformationFault", func_EventSetInformationFault },
+    { "GetSecurityInfoSaclReopen", func_GetSecurityInfoSaclReopen },
     { "GetSecurityInfoSequence", func_GetSecurityInfoSequence },
     { "ObjectLockStress", func_ObjectLockStress },
     { "OpenThreadTokenLeak", func_OpenThreadTokenLeak },
