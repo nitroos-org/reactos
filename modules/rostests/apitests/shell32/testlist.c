@@ -58,6 +58,7 @@ extern void func_SHCreateFileExtractIconW(void);
 extern void func_SHDefExtractIcon(void);
 extern void func_SHEnumerateUnreadMailAccountsW(void);
 extern void func_RecycleBinAcl(void);
+extern void func_RecycleBinOtherVolume(void);
 extern void func_SHEmptyRecycleBin(void);
 extern void func_SHEvaluateSystemCommandTemplate(void);
 extern void func_She(void);
@@ -151,6 +152,7 @@ const struct test winetest_testlist[] =
     { "SHDefExtractIcon", func_SHDefExtractIcon },
     { "SHEnumerateUnreadMailAccountsW", func_SHEnumerateUnreadMailAccountsW },
     { "RecycleBinAcl", func_RecycleBinAcl },
+    { "RecycleBinOtherVolume", func_RecycleBinOtherVolume },
     { "SHEmptyRecycleBin", func_SHEmptyRecycleBin },
     { "SHEvaluateSystemCommandTemplate", func_SHEvaluateSystemCommandTemplate },
     { "She", func_She },

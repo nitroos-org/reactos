@@ -578,6 +578,22 @@ RecycleBin5_OwnerDescriptor(
     return S_OK;
 }
 
+/* The descriptor of the folder that holds the per-user folders of a volume other than the system volume, which the
+ * shell makes as the first user who deletes there (Windows Server 2022, measured with a standard user and with an
+ * administrator on a second NTFS volume: the creator owns it, the DACL is protected and is not the root's; the same
+ * for both): the Administrators and SYSTEM full control, inherited, the Users only list, add subfolder and read,
+ * for the folder itself, and the label Low (NO_WRITE_UP) for what is made in it */
+static HRESULT
+RecycleBin5_RootDescriptor(
+    _Out_ PSECURITY_DESCRIPTOR *Descriptor)
+{
+    *Descriptor = NULL;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;NP;0x1201ad;;;BU)S:AI(ML;OICIIO;NW;;;LW)",
+                                                              SDDL_REVISION_1, Descriptor, NULL))
+        return HRESULT_FROM_WIN32(GetLastError());
+    return S_OK;
+}
+
 static HRESULT
 RecycleBin5_Create(
     _In_ LPCWSTR Folder,
@@ -606,10 +622,21 @@ RecycleBin5_Create(
     Separator = wcsstr(&BufferName[3], L"\\");
     if (Separator)
         *Separator = UNICODE_NULL;
-    if (!CreateDirectoryW(BufferName, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
     {
-        hr = HRESULT_FROM_WIN32(GetLastError());
-        goto cleanup;
+        SECURITY_ATTRIBUTES RootAttributes = { sizeof(RootAttributes), NULL, FALSE };
+        PSECURITY_DESCRIPTOR RootDescriptor = NULL;
+
+        /* The folder of the volume is made with its own descriptor, not the one of the volume root, when the
+         * volume stores ACLs (that is when the folder of a user is made below it); one that is there stays as it is */
+        if (Separator && OwnerSid && SUCCEEDED(RecycleBin5_RootDescriptor(&RootDescriptor)))
+            RootAttributes.lpSecurityDescriptor = RootDescriptor;
+        if (!CreateDirectoryW(BufferName, RootDescriptor ? &RootAttributes : NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            LocalFree(RootDescriptor);
+            goto cleanup;
+        }
+        LocalFree(RootDescriptor);
     }
     SetFileAttributesW(BufferName, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
     if (Separator)
