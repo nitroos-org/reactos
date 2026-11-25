@@ -793,8 +793,9 @@ ResumeFree:
       its messages, IntImeCanDestroyDefIME), and a top-level window that SetParent or a hide moved can be
       linked elsewhere at this moment. The handle table holds them all; the objects of every entry are
       mapped (each holds its desktop, IntReferenceDesktopForObject). Desktop and message windows own
-      nothing. */
-   if (!IntIsDesktopOwnedWindow(Window))
+      nothing, and neither does a window that was never made an owner (WndSetOwner marks every owner):
+      the pass over the handle table is left out for those, most windows (child windows, controls). */
+   if (!IntIsDesktopOwnedWindow(Window) && Window->HasOwned)
    {
       ULONG i;
 
