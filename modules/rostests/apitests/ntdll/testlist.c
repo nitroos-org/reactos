@@ -279,6 +279,7 @@ extern void func_SectionSparseCommitLimit(void);
 extern void func_SectionSparseStore(void);
 extern void func_SectionViewProtect(void);
 extern void func_SectionVirtualLockLeak(void);
+extern void func_StackGuardCommitLimit(void);
 extern void func_StackDeepRecursion(void);
 extern void func_BadSegmentFault(void);
 extern void func_ExceptionInfoLeak(void);
@@ -581,6 +582,7 @@ const struct test winetest_testlist[] =
     { "SectionSparseStore",             func_SectionSparseStore },
     { "SectionViewProtect",             func_SectionViewProtect },
     { "SectionVirtualLockLeak",         func_SectionVirtualLockLeak },
+    { "StackGuardCommitLimit",          func_StackGuardCommitLimit },
     { "StackDeepRecursion",             func_StackDeepRecursion },
     { "BadSegmentFault",                func_BadSegmentFault },
     { "ExceptionInfoLeak",              func_ExceptionInfoLeak },
