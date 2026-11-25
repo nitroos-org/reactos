@@ -85,6 +85,13 @@ struct nitro_smb2_auth_info
 
 int NitroSmb2GetAuthInfo(struct smb2_context *smb2, struct nitro_smb2_auth_info *info);
 
+/*
+ * PreviousSessionId of the SESSION_SETUP requests of the next connect: the
+ * session of this server that was lost (the server then ends it and drops its
+ * opens and locks, [MS-SMB2] 3.3.5.5.3), 0 for none. Returns 0 or -EINVAL.
+ */
+int NitroSmb2SetPreviousSessionId(struct smb2_context *smb2, uint64_t session_id);
+
 #ifdef __cplusplus
 }
 #endif

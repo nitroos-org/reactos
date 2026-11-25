@@ -1200,6 +1200,8 @@ send_session_setup_request(struct smb2_context *smb2,
         /* Session setup request. */
         memset(&req, 0, sizeof(struct smb2_session_setup_request));
         req.security_mode = (uint8_t)smb2_request_security_mode(smb2);
+        /* NitroOS: the session this one replaces after a lost connection */
+        req.previous_session_id = smb2->previous_session_id;
 
 #ifdef HAVE_SSPI
         /* NitroOS: the next token of the SSPI exchange */

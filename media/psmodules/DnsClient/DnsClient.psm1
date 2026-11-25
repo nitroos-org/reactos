@@ -60,7 +60,9 @@ function Resolve-DnsName {
         else {
             $ip = $null
             if ([System.Net.IPAddress]::TryParse($Name, [ref]$ip)) { $qname = [Microsoft.DnsClient.Commands.DnsNative]::ReverseName($ip); $types = @([uint16]12) }
-            else { $types = @([uint16]1, [uint16]28) }
+            # the default type (A_AAAA) lists the AAAA records before the A records, as Windows does (measured on Windows Server
+            # 2022 in a dual-stack and an IPv6-only network); Test-NetConnection takes the first address of this list
+            else { $types = @([uint16]28, [uint16]1) }
         }
         $failure = $null
         $any = $false

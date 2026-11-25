@@ -71,6 +71,10 @@ Local changes to upstream files (marked "NitroOS"; 1-3 inside #ifdef HAVE_SSPI)
                            requires encryption failed); query info buffers freed on warning statuses
                            in the stat/fstat/getinfo callbacks
      lib/smb2-cmd-query-info.c  the reply buffer freed on every decode failure (+ libsmb2-raw.h include)
+5. PreviousSessionId (commit "[SMBENGINE][LIBSMB2] Name the lost session when connecting again"):
+     include/libsmb2-private.h  struct smb2_context gets "uint64_t previous_session_id"
+     lib/libsmb2.c         send_session_setup_request puts it into the SESSION_SETUP request
+   set through NitroSmb2SetPreviousSessionId() (nitro/sspi.c, nitro/libsmb2-nitro.h).
 The same changes as patches against the pristine files: git log of this directory; a sync is
 "copy the new upstream files over include/ and lib/, then re-apply the local commits".
 
