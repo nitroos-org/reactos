@@ -1739,13 +1739,13 @@ ConnTake(PSMBENG_CONN Conn, PSMBENG_OP Op, BOOLEAN FromBacklog)
             PSMBENG_OP Target;
 
             SmbEngFreeOp(Op);
-            /* Not sent yet: drop it (the driver answered its caller already) */
+            /* Not sent yet: drop it, and answer it as cancelled. The driver may have answered its caller
+             * already (then it drops this answer), or it waits for the server's answer to the cancel
+             * (a waiting lock, SmbCancelRequestGracefully): there is none to wait for, so this is it */
             if ((Target = FindOp(&Conn->Pending, Id)) != NULL || (Target = FindOp(&Conn->Backlog, Id)) != NULL)
             {
                 RemoveEntryList(&Target->Link);
-                if (Target->Opcode == SmbUpConnect)
-                    SmbEngRemoveBinding(Target->BindingId, Target);
-                SmbEngFreeOp(Target);
+                FailOp(Conn, Target, STATUS_CANCELLED);
                 /* The last request that waited for a connect in progress was given up (a UNC open
                  * cancelled): the connect is abandoned, without a back-off, so that it neither keeps
                  * a socket to a server that does not answer nor holds up the next open */

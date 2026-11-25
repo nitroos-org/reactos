@@ -75,6 +75,12 @@ Local changes to upstream files (marked "NitroOS"; 1-3 inside #ifdef HAVE_SSPI)
      include/libsmb2-private.h  struct smb2_context gets "uint64_t previous_session_id"
      lib/libsmb2.c         send_session_setup_request puts it into the SESSION_SETUP request
    set through NitroSmb2SetPreviousSessionId() (nitro/sspi.c, nitro/libsmb2-nitro.h).
+6. Cancel of a queued request (commit "[LIBSMB2][SMBENGINE] Cancel a request that is still queued to be
+   written"):
+     lib/smb2-cmd-cancel.c smb2_cmd_cancel_async() also finds the request on the outqueue (queued, not
+                           written yet); the CANCEL goes out behind it. Upstream found only requests on
+                           the waitqueue (already written), so the cancel of a request queued a moment
+                           earlier was dropped.
 The same changes as patches against the pristine files: git log of this directory; a sync is
 "copy the new upstream files over include/ and lib/, then re-apply the local commits".
 
