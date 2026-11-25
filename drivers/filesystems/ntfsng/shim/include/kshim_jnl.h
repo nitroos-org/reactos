@@ -70,6 +70,17 @@ struct kj_desc {
 /* One run of the journal file ($LogFile) in KJ_PAGE units. */
 struct kj_ext { u64 page; u64 npages; u64 dev; };
 
+/*
+ * Where the allocation bitmaps ($MFT:$BITMAP, $Bitmap) are on the device, in bytes.  The in-place pass sets the bits a
+ * transaction sets before it writes anything else and clears the bits it clears only after everything else (see kj_apply), so
+ * that a reader that does not replay the journal never finds a record or a cluster in use whose bit is clear.  The core
+ * gives them under the volume lock before each commit (kshim_jnl_set_bitmaps); the journal takes them over when no journal
+ * I/O runs.  @n < 0 (or more than KJ_BM_MAX runs): not known, the pass keeps no such order.
+ */
+#define KJ_BM_MAX 64
+struct kj_brange { u64 off, len; };
+void kshim_jnl_set_bitmaps(struct block_device *b, const struct kj_brange *r, int n);
+
 struct kshim_jnl;
 
 /* Record in the system event log that the volume stopped accepting writes (err: a negative errno). */

@@ -134,6 +134,13 @@ struct kshim_jnl {
 	int pre_started, pre_fua, pre_err;
 	u32 pre_crc;
 	u8 *pre_buf;
+	/*
+	 * The allocation bitmaps on the device (kshim_jnl_set_bitmaps): pbm as the core last gave them (under the lock), bm what
+	 * the in-place pass uses (taken over from pbm only while no journal I/O runs: kj_bm_take).  nbm/npbm < 0: not known.
+	 */
+	struct kj_brange bm[KJ_BM_MAX], pbm[KJ_BM_MAX];
+	int nbm, npbm;
+	unsigned long bm_ordered;	/* in-place passes that set bitmap bits first / cleared them last */
 };
 
 enum { KJ_S_NONE = 0, KJ_S_RUNNING = 1, KJ_S_DONE = 2 };
@@ -512,10 +519,31 @@ static void kj_wait_reap(struct kshim_jnl *j)
 	kj_reap(j);
 }
 
+/* Volume lock held, no journal I/O in flight: the in-place pass uses the bitmap locations the core gave last. */
+static void kj_bm_take(struct kshim_jnl *j)
+{
+	if (j->npbm > 0)
+		memcpy(j->bm, j->pbm, (size_t)j->npbm * sizeof(j->bm[0]));
+	j->nbm = j->npbm;
+}
+
+void kshim_jnl_set_bitmaps(struct block_device *b, const struct kj_brange *r, int n)
+{
+	struct kshim_jnl *j = b->jnl;
+	if (!j)
+		return;
+	if (n > KJ_BM_MAX)
+		n = -1;
+	if (n > 0)
+		memcpy(j->pbm, r, (size_t)n * sizeof(j->pbm[0]));
+	j->npbm = n;
+}
+
 /* Everything committed is in place when this returns (the journal I/O ended, retained pages written) unless a write failed. */
 static void kj_settle(struct kshim_jnl *j)
 {
 	kj_wait_reap(j);
+	kj_bm_take(j);
 	kj_checkpoint(j);
 }
 
@@ -645,6 +673,7 @@ int kshim_jnl_activate(struct block_device *b, const struct kj_ext *ext, int nex
 	j->serial = serial;
 	j->seq = seq;
 	j->vol_rec_off = vol_rec_off;
+	j->nbm = j->npbm = -1;	/* bitmap locations not known until the core gives them */
 	while (kj_slot_page(j->capacity) < lf_pages)
 		j->capacity++;
 	/* Two slot areas must fit in $LogFile for retained transactions. */
@@ -1074,29 +1103,131 @@ static u8 kj_freed_records(const struct kj_ent *e)
 	return late & e->mask;
 }
 
-/* In place, in block order (v sorted), adjacent pages in one transfer; freed MFT records after a flush (kj_freed_records). */
+/* The sectors of page @blk that hold allocation bitmaps (kshim_jnl_set_bitmaps). */
+static u8 kj_bm_mask(const struct kshim_jnl *j, u64 blk)
+{
+	u64 p0 = blk * KJ_PAGE, p1 = p0 + KJ_PAGE;
+	u8 m = 0;
+	for (int i = 0; i < j->nbm; i++) {
+		u64 a = max_t(u64, p0, j->bm[i].off), z = min_t(u64, p1, j->bm[i].off + j->bm[i].len);
+		for (u64 s = a; s < z; s += KJ_SECT)
+			m |= (u8)(1u << ((s - p0) / KJ_SECT));
+	}
+	return m;
+}
+
+/*
+ * In place, in block order (v sorted), adjacent pages in one transfer, in up to four parts with a device flush between them,
+ * so that a reader that does not replay the journal (the boot loader, another system, an offline tool) never finds, after a
+ * power cut inside the pass, a record or a cluster in use whose bit is clear (it could hand it out again), nor a name without
+ * its record:
+ *   1. the allocation bitmap pages with the bits the transaction sets added to what the volume holds (bits it clears stay set);
+ *   2. every other page, except sectors of MFT records the transaction frees (kj_freed_records);
+ *   3. those freed records;
+ *   4. the bitmap pages as the transaction has them (the bits it clears).
+ * A cut between parts leaves at worst something marked in use that is not (a leak a check frees).  Each part is written only
+ * when it has something to write; a bitmap sector that already holds its new value is not written at all.  Without the bitmap
+ * locations (not given, no memory, a device read that fails) the bitmap pages go with part 2, as any other page.  Replay at
+ * mount installs the whole transaction whatever part of the pass reached the medium.
+ */
+static int kj_apply_part(struct block_device *b, struct kj_ent **v, unsigned long n, unsigned long stop);
+
 static int kj_apply(struct block_device *b, struct kj_ent **v, unsigned long n)
 {
+	return kj_apply_part(b, v, n, n);
+}
+
+/* kj_apply; @stop < @n (the fault injection of a checked build only): part 2 ends after @stop pages and nothing follows. */
+static int kj_apply_part(struct block_device *b, struct kj_ent **v, unsigned long n, unsigned long stop)
+{
+	struct kshim_jnl *j = b->jnl;
 	struct kj_batch w;
-	unsigned long late = 0;
+	unsigned long late = 0, set = 0, clear = 0;
+	u8 *bm = NULL, *fin = NULL, *tmp = NULL;
 	kj_batch_init(&w, b, n);
-	for (unsigned long i = 0; i < n && !w.err; i++) {
-		u8 f = kj_freed_records(v[i]);
+	if (j && j->nbm > 0 && n) {
+		bm = kzalloc(2 * n, GFP_NOFS);
+		tmp = kmalloc(KJ_PAGE, GFP_NOFS);
+		if (!bm || !tmp) {
+			kfree(bm);
+			kfree(tmp);
+			bm = tmp = NULL;
+		}
+		fin = bm ? bm + n : NULL;
+	}
+	if (bm) {
+		/* Part 1: bm[i] the bitmap sectors of the page, fin[i] those whose bits the transaction clears (part 4). */
+		for (unsigned long i = 0; i < n && !w.err; i++) {
+			u8 m = kj_bm_mask(j, v[i]->blk) & v[i]->mask, up = 0;
+			if (!m)
+				continue;
+			if (kj_dev_read(b, v[i]->blk * KJ_PAGE, tmp, KJ_PAGE))
+				continue;	/* not known what the volume holds: an ordinary page of part 2 */
+			bm[i] = m;
+			for (int s = 0; s < 8; s++) {
+				u8 *d = tmp + s * KJ_SECT;
+				const u8 *nw = v[i]->data + s * KJ_SECT;
+				int grows = 0, shrinks = 0;
+				if (!(m & (1u << s)))
+					continue;
+				for (int k = 0; k < KJ_SECT; k++) {
+					u8 u = d[k] | nw[k];
+					grows |= u != d[k];
+					shrinks |= u != nw[k];
+					d[k] = u;
+				}
+				if (grows)
+					up |= (u8)(1u << s);
+				if (shrinks)
+					fin[i] |= (u8)(1u << s);
+			}
+			if (up) {
+				kshim_home_mark(b, v[i]->blk * KJ_PAGE, KJ_PAGE);
+				for (int s = 0; s < 8; s++)
+					if (up & (1u << s))
+						kj_batch_add(&w, v[i]->blk * KJ_PAGE + s * KJ_SECT, tmp + s * KJ_SECT, KJ_SECT);
+				set++;
+			}
+			clear += fin[i] != 0;
+		}
+		kj_batch_flush(&w);
+		if (set && !w.err && kj_dev_flush(b))
+			w.err = -EIO;
+	}
+	/* Part 2 */
+	for (unsigned long i = 0; i < stop && !w.err; i++) {
+		u8 o = bm ? bm[i] : 0, f = kj_freed_records(v[i]) & ~o;
 		late += f != 0;
-		if (v[i]->mask & ~f)
-			kj_apply_ent_m(&w, v[i], v[i]->mask & ~f);
+		if (v[i]->mask & ~f & ~o)
+			kj_apply_ent_m(&w, v[i], v[i]->mask & ~f & ~o);
 	}
 	kj_batch_flush(&w);
+	if (stop < n)
+		late = clear = 0;
+	/* Part 3 */
 	if (late && !w.err) {
 		if (kj_dev_flush(b))
 			w.err = -EIO;
 		for (unsigned long i = 0; i < n && !w.err; i++) {
-			u8 f = kj_freed_records(v[i]);
+			u8 f = kj_freed_records(v[i]) & ~(bm ? bm[i] : 0);
 			if (f)
 				kj_apply_ent_m(&w, v[i], f);
 		}
 		kj_batch_flush(&w);
 	}
+	/* Part 4 */
+	if (clear && !w.err) {
+		if (kj_dev_flush(b))
+			w.err = -EIO;
+		for (unsigned long i = 0; i < n && !w.err; i++)
+			if (fin[i])
+				kj_apply_ent_m(&w, v[i], fin[i]);
+		kj_batch_flush(&w);
+	}
+	if (j && (set || clear))
+		j->bm_ordered++;
+	kfree(bm);
+	kfree(tmp);
 	kfree(w.buf);
 	return w.err;
 }
@@ -1180,7 +1311,7 @@ static void kj_fault_at(struct block_device *b, struct kshim_jnl *j, unsigned lo
 	if (!kshim_jnl_fault || j->commits + 1 < kshim_jnl_fault || n < 2 || kshim_jnl_fault_stage != stage)
 		return;
 	if (stage == 0)
-		kj_apply(b, v, n / 2);
+		kj_apply_part(b, v, n, n / 2);	/* half way: the bits it sets, then half of the other pages */
 	else if (stage == 3)
 		kj_apply(b, v, n);
 	kj_dev_flush(b);
@@ -1305,7 +1436,7 @@ static int kj_tx_apply(struct block_device *b, struct kshim_jnl *j, struct kj_en
 #if DBG
 	if (j->apply_fault && n >= 2) {
 		j->apply_fault = 0;
-		kj_apply(b, v, n / 2);
+		kj_apply_part(b, v, n, n / 2);
 		kj_dev_flush(b);
 		printk(KERN_ERR "journal: in-place write failure injected in seq %llu: %lu of %lu pages in place\n",
 		       (unsigned long long)j->seq, n / 2, n);
@@ -1541,6 +1672,7 @@ int kshim_jnl_seal(struct block_device *b, u64 aux, int retain_ok)
 	if (__atomic_load_n(&j->sstate, __ATOMIC_ACQUIRE) == KJ_S_RUNNING)
 		return -EBUSY;
 	kj_reap(j);
+	kj_bm_take(j);	/* no journal I/O runs now; the I/O of this seal uses them */
 	if (j->failed)
 		return -EIO;
 	if (!j->npages && !j->degraded) {
@@ -1825,9 +1957,9 @@ void kshim_jnl_report(struct block_device *b)
 	struct kshim_jnl *j = b->jnl;
 	if (!j)
 		return;
-	printk(KERN_WARNING "journal: %lu commits, %lu pages, largest %lu, %lu in-place fallbacks (%lu overflowed the journal), %lu dropped, seq %llu, pending %lu, %lu unlocked commits, %lu retained, %lu checkpoints\n",
+	printk(KERN_WARNING "journal: %lu commits, %lu pages, largest %lu, %lu in-place fallbacks (%lu overflowed the journal), %lu dropped, seq %llu, pending %lu, %lu unlocked commits, %lu retained, %lu checkpoints, %lu in-place passes ordered around bitmaps (%d bitmap runs)\n",
 	       j->commits, j->committed_pages, j->max_tx, j->fallbacks, j->overflows, j->dropped, (unsigned long long)j->seq,
-	       j->npages + j->snpages + j->rnpages, j->unlocked_commits, j->retained_commits, j->checkpoints);
+	       j->npages + j->snpages + j->rnpages, j->unlocked_commits, j->retained_commits, j->checkpoints, j->bm_ordered, j->nbm);
 #if DBG
 	printk(KERN_WARNING "journal: unlocked journal I/O about %lu ms in total\n", j->io_us / 1000);
 #endif

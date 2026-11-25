@@ -86,6 +86,7 @@ struct ngc_vol {
 	int checked;                    /* the mount-time consistency check ran to its verdict */
 	int unmarked;                   /* it found records or clusters in use that their bitmap marks free (no damage else):
 					   the write pass sets those bits (ngc_mark_unmarked) */
+	struct kj_brange bmr[KJ_BM_MAX];	/* scratch of ngc_jnl_bitmaps (volume lock) */
 	char why[160];
 	int failed;                     /* a consistency point was abandoned for good: every later one fails */
 	int label_read;                 /* label holds $VOLUME_NAME as on disk */
@@ -1901,6 +1902,46 @@ static int ngc_writeback_failed(struct ngc_vol *v, int err)
  * The part of a consistency point before the journal: every dirty mapping and inode is written back (into the live
  * overlay).  Callers hold the volume lock between core operations, so the state written is whole.
  */
+/*
+ * Where $MFT:$BITMAP and $Bitmap are on the device, for the order of the journal's in-place pass (kshim_jnl_set_bitmaps):
+ * under the volume lock, before each commit.  A resident bitmap (a tiny volume) lives in an MFT record and goes with the
+ * records; a runlist that is not mapped, or one of too many runs, leaves the locations unknown (no such order).
+ */
+static void ngc_jnl_bitmaps(struct ngc_vol *v)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct inode *bi[2] = { vol->mftbmp_ino, vol->lcnbmp_ino };
+	struct kj_brange *r = v->bmr;
+	int n = 0;
+	if (!v->bdev->jnl)
+		return;
+	for (int k = 0; k < 2 && n >= 0; k++) {
+		struct ntfs_inode *ni;
+		struct runlist_element *rl;
+		if (!bi[k])
+			continue;
+		ni = NTFS_I(bi[k]);
+		if (!NInoNonResident(ni))
+			continue;
+		down_read(&ni->runlist.lock);
+		for (rl = ni->runlist.rl; rl && rl->length; rl++) {
+			if (rl->lcn == LCN_HOLE)
+				continue;
+			if (rl->lcn < 0 || n == KJ_BM_MAX) {
+				n = -1;
+				break;
+			}
+			r[n].off = (u64)rl->lcn << vol->cluster_size_bits;
+			r[n].len = (u64)rl->length << vol->cluster_size_bits;
+			n++;
+		}
+		if (!ni->runlist.rl)
+			n = -1;
+		up_read(&ni->runlist.lock);
+	}
+	kshim_jnl_set_bitmaps(v->bdev, r, n);
+}
+
 static int ngc_commit_prep(struct ngc_vol *v)
 {
 	unsigned long long t0 = ngos_ticks();
@@ -1927,6 +1968,7 @@ static int ngc_commit_prep(struct ngc_vol *v)
 		return ngc_writeback_failed(v, err);
 	if (v->bdev->jnl && NVolErrors(vol))
 		kshim_jnl_mark_errors(v->bdev);
+	ngc_jnl_bitmaps(v);
 	return 0;
 }
 
