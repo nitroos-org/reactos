@@ -509,8 +509,16 @@ static void fill_ip_interface(const NETIO_IF *If, ADDRESS_FAMILY Family, const T
       Out->Metric = Manual;
     }
     else
+    {
       /* the stack's speed (100 bit/s units) does not saturate, MIB_IFROW::dwSpeed does at 4294967295 bit/s */
-      Out->Metric = automatic_metric(Cfg && Cfg->LinkSpeed ? (ULONG64)Cfg->LinkSpeed * 100 : If->Row.dwSpeed);
+      ULONG64 Speed = Cfg && Cfg->LinkSpeed ? (ULONG64)Cfg->LinkSpeed * 100 : If->Row.dwSpeed;
+
+      /* Windows Server 2022 (measured): while the cable is out both families have metric 5, the one of an unknown
+         speed (GetAdaptersAddresses says -1) */
+      if (!If->Loopback && !If->Connected)
+        Speed = (ULONG64)-1;
+      Out->Metric = automatic_metric(Speed);
+    }
     Out->UseNeighborUnreachabilityDetection = TRUE;
     Out->SupportsNeighborDiscovery = TRUE;
     Out->SupportsRouterDiscovery = TRUE;

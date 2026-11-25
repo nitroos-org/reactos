@@ -158,6 +158,9 @@ TDI_STATUS InfoTdiQueryGetInterfaceMIB(TDIEntityID ID,
         }
 
         GetInterfaceSpeed( Interface, (PUINT)&OutData->if_speed );
+        /* No link, no speed (measured on Windows Server 2022: GetIfEntry dwSpeed is 0 while the cable is out) */
+        if (OutData->if_operstatus == MIB_IF_OPER_STATUS_NON_OPERATIONAL)
+            OutData->if_speed = 0;
         TI_DbgPrint(DEBUG_INFO,
             ("IF Speed = %d * 100bps\n", OutData->if_speed));
         memcpy(OutData->if_physaddr, Interface->Address, Interface->AddressLength);

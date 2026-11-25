@@ -777,7 +777,10 @@ GetAdaptersAddressesImpl(
                 else
                 {
                     CurrentAA->Mtu = Entry->if_mtu;
-                    ((IP_ADAPTER_ADDRESSES_LH*)CurrentAA)->TransmitLinkSpeed = Entry->if_speed;
+                    /* Windows Server 2022 (measured): the speed of an interface whose cable is out is -1 (unknown) here,
+                       0 in GetIfEntry and GetIfEntry2 */
+                    ((IP_ADAPTER_ADDRESSES_LH*)CurrentAA)->TransmitLinkSpeed =
+                        (Entry->if_operstatus >= IF_OPER_STATUS_CONNECTING) ? Entry->if_speed : (ULONG64)-1;
                 }
                 ((IP_ADAPTER_ADDRESSES_LH*)CurrentAA)->ReceiveLinkSpeed =
                     ((IP_ADAPTER_ADDRESSES_LH*)CurrentAA)->TransmitLinkSpeed;
