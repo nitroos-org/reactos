@@ -1003,6 +1003,75 @@ AtaReqInformationalExceptionsControlModePage(
     return sizeof(*PageData);
 }
 
+/* The drive can enable and disable its volatile write cache (word 82 bit 5) and its read look-ahead (word 82 bit 6) */
+static
+BOOLEAN
+AtaReqCanChangeWriteCache(
+    _In_ PATAPORT_DEVICE_EXTENSION DevExt)
+{
+    PIDENTIFY_DEVICE_DATA IdentifyData = &DevExt->IdentifyDeviceData;
+
+    return IdentifyData->CommandSetSupport.WordValid == 1 && IdentifyData->CommandSetSupport.WriteCache;
+}
+
+static
+BOOLEAN
+AtaReqCanChangeReadLookAhead(
+    _In_ PATAPORT_DEVICE_EXTENSION DevExt)
+{
+    PIDENTIFY_DEVICE_DATA IdentifyData = &DevExt->IdentifyDeviceData;
+
+    return IdentifyData->CommandSetSupport.WordValid == 1 && IdentifyData->CommandSetSupport.LookAhead;
+}
+
+/*
+ * The pages in [Start, End) of a reply to MODE SENSE with Pc = changeable values (SPC-5 6.14): every bit zero but those
+ * the device accepts a change of, which are WCE and DRA of the caching page when the drive has the features
+ * (SAT-5 10.4.4)
+ */
+static
+VOID
+AtaReqMakeChangeablePages(
+    _In_ PATAPORT_DEVICE_EXTENSION DevExt,
+    _In_ PUCHAR Start,
+    _In_ PUCHAR End)
+{
+    PUCHAR Page = Start;
+
+    while (Page + 2 <= End)
+    {
+        ULONG HeaderLength, DataLength;
+
+        if (Page[0] & 0x40)
+        {
+            HeaderLength = 4;
+            DataLength = (Page[2] << 8) | Page[3];
+        }
+        else
+        {
+            HeaderLength = 2;
+            DataLength = Page[1];
+        }
+        if (Page + HeaderLength + DataLength > End)
+            break;
+
+        RtlZeroMemory(Page + HeaderLength, DataLength);
+
+        /* the DRA bit is in byte 12 of the page */
+        if ((Page[0] & 0x7F) == MODE_PAGE_CACHING && HeaderLength + DataLength >= 13)
+        {
+            PMODE_CACHING_PAGE_SPC5 PageData = (PMODE_CACHING_PAGE_SPC5)Page;
+
+            if (AtaReqCanChangeWriteCache(DevExt))
+                PageData->WriteCacheEnable = 1;
+            if (AtaReqCanChangeReadLookAhead(DevExt))
+                PageData->DisableReadAHead = 1;
+        }
+
+        Page += HeaderLength + DataLength;
+    }
+}
+
 static
 ATA_COMPLETION_ACTION
 AtaReqCompleteModeSense(
@@ -1014,6 +1083,7 @@ AtaReqCompleteModeSense(
     PUCHAR Buffer;
     BOOLEAN Is6ByteCommand, IsWriteProtected;
     PCDB Cdb;
+    PUCHAR PagesStart;
     union _HEADER
     {
         PMODE_PARAMETER_HEADER Header6;
@@ -1100,6 +1170,7 @@ AtaReqCompleteModeSense(
     }
 
     PageCode = Cdb->MODE_SENSE.PageCode;
+    PagesStart = Buffer;
 
     /* Return SCSI mode pages */
     if (PageCode == MODE_PAGE_CONTROL || PageCode == MODE_SENSE_RETURN_ALL)
@@ -1123,6 +1194,10 @@ AtaReqCompleteModeSense(
     {
         Buffer += AtaReqInformationalExceptionsControlModePage(DevExt, Buffer);
     }
+
+    /* The changeable values (Pc = 1): a bit is set where the value can be changed, which is the caching page's WCE and DRA only */
+    if (Cdb->MODE_SENSE.Pc == (MODE_SENSE_CHANGEABLE_VALUES >> 6))
+        AtaReqMakeChangeablePages(DevExt, PagesStart, Buffer);
 
     ModeDataLength = Buffer - (PUCHAR)DevExt->Device.LocalBuffer;
 
@@ -1203,6 +1278,61 @@ AtaReqScsiModeSense(
     return SRB_STATUS_PENDING;
 }
 
+/* The pending SET FEATURES commands of a MODE SELECT, in Request->TranslationState */
+#define MODE_SELECT_WCE_PENDING     0x01
+#define MODE_SELECT_WCE_ON          0x02
+#define MODE_SELECT_DRA_PENDING     0x04
+#define MODE_SELECT_DRA_OFF         0x08    /* DRA set: the read look-ahead is disabled */
+
+/* The next SET FEATURES of a MODE SELECT as a non-data command; FALSE when there is none */
+static
+BOOLEAN
+AtaReqBuildNextModeSelectCommand(
+    _In_ PATA_DEVICE_REQUEST Request)
+{
+    UCHAR State = Request->TranslationState;
+
+    RtlZeroMemory(&Request->TaskFile, sizeof(Request->TaskFile));
+    Request->TaskFile.Command = IDE_COMMAND_SET_FEATURE;
+
+    if (State & MODE_SELECT_WCE_PENDING)
+    {
+        Request->TaskFile.Feature = (State & MODE_SELECT_WCE_ON) ? IDE_FEATURE_ENABLE_WRITE_CACHE
+                                                                 : IDE_FEATURE_DISABLE_WRITE_CACHE;
+        Request->TranslationState &= ~MODE_SELECT_WCE_PENDING;
+        return TRUE;
+    }
+    if (State & MODE_SELECT_DRA_PENDING)
+    {
+        /* 55h disables the read look-ahead, AAh enables it */
+        Request->TaskFile.Feature = (State & MODE_SELECT_DRA_OFF) ? 0x55 : 0xAA;
+        Request->TranslationState &= ~MODE_SELECT_DRA_PENDING;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static
+ATA_COMPLETION_ACTION
+AtaReqCompleteModeSelect(
+    _In_ PATA_DEVICE_REQUEST Request)
+{
+    /* a failed SET FEATURES ends the request with its error */
+    if (SRB_STATUS(Request->SrbStatus) != SRB_STATUS_SUCCESS)
+        return COMPLETE_IRP;
+
+    Request->Flags = 0;
+    if (AtaReqBuildNextModeSelectCommand(Request))
+        return COMPLETE_START_AGAIN;
+
+    return COMPLETE_IRP;
+}
+
+/*
+ * MODE SELECT (6) and (10) for the caching page (SAT-5 10.4): WCE enables or disables the volatile write cache (SET
+ * FEATURES 02h and 82h), DRA the read look-ahead (55h and AAh). Every other bit must stay as MODE SENSE reports it, and
+ * every other page is refused. The parameter list is read from the data buffer of the request.
+ */
 static
 UCHAR
 AtaReqScsiModeSelect(
@@ -1211,8 +1341,133 @@ AtaReqScsiModeSelect(
     _In_ PSCSI_REQUEST_BLOCK Srb,
     _In_ BOOLEAN Is6ByteCommand)
 {
-    // TODO: Implement
-    return AtaReqTerminateInvalidField(Srb);
+    PCDB Cdb = (PCDB)Srb->Cdb;
+    SCSI_SENSE_CODE SenseCode;
+    PMDL Mdl;
+    PUCHAR BaseAddress, List;
+    ULONG ListLength, HeaderLength, BlockDescriptorLength, Offset;
+    UCHAR Pending = 0;
+
+    if (Is6ByteCommand)
+    {
+        /* Saving the pages (SP) is not possible */
+        if (Cdb->MODE_SELECT.SPBit)
+            return AtaReqTerminateInvalidField(Srb);
+
+        ListLength = Cdb->MODE_SELECT.ParameterListLength;
+        HeaderLength = sizeof(MODE_PARAMETER_HEADER);
+    }
+    else
+    {
+        if (Cdb->MODE_SELECT10.SPBit)
+            return AtaReqTerminateInvalidField(Srb);
+
+        ListLength = (Cdb->MODE_SELECT10.ParameterListLength[0] << 8) | Cdb->MODE_SELECT10.ParameterListLength[1];
+        HeaderLength = sizeof(MODE_PARAMETER_HEADER10);
+    }
+
+    /* A parameter list length of zero is not an error and does nothing */
+    if (ListLength == 0)
+        return SRB_STATUS_SUCCESS;
+
+    if (ListLength < HeaderLength || ListLength > Srb->DataTransferLength)
+        goto ListLengthError;
+
+    Mdl = Request->Irp->MdlAddress;
+    if (Mdl == NULL)
+        return AtaReqTerminateInvalidField(Srb);
+    BaseAddress = MmGetSystemAddressForMdlSafe(Mdl, HighPagePriority);
+    if (BaseAddress == NULL)
+        return SRB_STATUS_INSUFFICIENT_RESOURCES;
+    List = BaseAddress + ((ULONG_PTR)Srb->DataBuffer - (ULONG_PTR)MmGetMdlVirtualAddress(Mdl));
+
+    if (Is6ByteCommand)
+        BlockDescriptorLength = ((PMODE_PARAMETER_HEADER)List)->BlockDescriptorLength;
+    else
+        BlockDescriptorLength = (((PMODE_PARAMETER_HEADER10)List)->BlockDescriptorLength[0] << 8) |
+                                ((PMODE_PARAMETER_HEADER10)List)->BlockDescriptorLength[1];
+
+    Offset = HeaderLength + BlockDescriptorLength;
+    if (Offset > ListLength)
+        goto ListLengthError;
+
+    /* the pages */
+    while (Offset < ListLength)
+    {
+        PUCHAR Page = List + Offset;
+        ULONG PageLength;
+
+        if (ListLength - Offset < 2)
+            goto ListLengthError;
+
+        /* PS must be zero in a MODE SELECT, and the pages with a subpage format are not supported */
+        if (Page[0] & 0xC0)
+            goto InvalidParameter;
+
+        PageLength = Page[1];
+        if (ListLength - Offset < 2 + PageLength)
+            goto ListLengthError;
+
+        if ((Page[0] & 0x3F) != MODE_PAGE_CACHING || PageLength != sizeof(MODE_CACHING_PAGE_SPC5) - 2)
+            goto InvalidParameter;
+
+        {
+            UCHAR Current[sizeof(MODE_CACHING_PAGE_SPC5)];
+            PMODE_CACHING_PAGE_SPC5 New = (PMODE_CACHING_PAGE_SPC5)Page, Old = (PMODE_CACHING_PAGE_SPC5)Current;
+            UCHAR Mask[sizeof(MODE_CACHING_PAGE_SPC5)];
+            ULONG i;
+
+            /* what MODE SENSE says now, and which of its bits can change */
+            RtlZeroMemory(Current, sizeof(Current));
+            AtaReqCachingModePage(DevExt, Current);
+            RtlCopyMemory(Mask, Current, sizeof(Mask));
+            AtaReqMakeChangeablePages(DevExt, Mask, Mask + sizeof(Mask));
+
+            /* every bit that cannot change must be the one that MODE SENSE reports */
+            for (i = 2; i < sizeof(Current); i++)
+            {
+                if ((Page[i] & ~Mask[i]) != (Current[i] & ~Mask[i]))
+                    goto InvalidParameter;
+            }
+
+            if (New->WriteCacheEnable != Old->WriteCacheEnable)
+            {
+                Pending |= MODE_SELECT_WCE_PENDING;
+                if (New->WriteCacheEnable)
+                    Pending |= MODE_SELECT_WCE_ON;
+            }
+            if (New->DisableReadAHead != Old->DisableReadAHead)
+            {
+                Pending |= MODE_SELECT_DRA_PENDING;
+                if (New->DisableReadAHead)
+                    Pending |= MODE_SELECT_DRA_OFF;
+            }
+        }
+
+        Offset += 2 + PageLength;
+    }
+
+    /* nothing differs from what the drive does: nothing to send */
+    if (Pending == 0)
+        return SRB_STATUS_SUCCESS;
+
+    Request->Flags = 0;
+    Request->TranslationState = Pending;
+    Request->Complete = AtaReqCompleteModeSelect;
+    if (!AtaReqBuildNextModeSelectCommand(Request))
+        return SRB_STATUS_SUCCESS;
+
+    return SRB_STATUS_PENDING;
+
+InvalidParameter:
+    return AtaReqTerminateInvalidFieldParameter(Srb);
+
+ListLengthError:
+    SenseCode.SrbStatus = SRB_STATUS_INVALID_REQUEST;
+    SenseCode.SenseKey = SCSI_SENSE_ILLEGAL_REQUEST;
+    SenseCode.AdditionalSenseCode = SCSI_ADSENSE_PARAMETER_LIST_LENGTH;
+    SenseCode.AdditionalSenseCodeQualifier = 0;
+    return AtaReqSetFixedSenseData(Srb, SenseCode);
 }
 
 CODE_SEG("PAGE")
