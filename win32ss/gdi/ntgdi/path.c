@@ -355,6 +355,25 @@ PATH_ReserveEntries(
     return TRUE;
 }
 
+/* The conversion of a FLOATOBJ to a LONG that PATH_ScaleNormalizedPoint needs: to the nearest, as the emulation of i386
+ * does. FLOATOBJ is a plain float on the other architectures, whose conversion truncates, which put the points of an arc
+ * (the ends of Arc, Pie and Chord) a pixel off on amd64. */
+#ifdef _M_IX86
+#define PATH_bFloatObjToLong(pf, pl) FLOATOBJ_bConvertToLong(pf, pl)
+#else
+static
+BOOL
+PATH_bFloatObjToLong(FLOATOBJ *pf, PLONG pl)
+{
+    FLOAT f = (FLOAT)*pf;
+
+    if (!(f > -1073741824.0f && f < 1073741824.0f))
+        return FALSE;
+    *pl = (LONG)(f < 0 ? f - 0.5f : f + 0.5f);
+    return TRUE;
+}
+#endif
+
 /* PATH_ScaleNormalizedPoint
  *
  * Scales a normalized point (x, y) with respect to the box whose corners are
@@ -381,7 +400,7 @@ PATH_ScaleNormalizedPoint(
     FLOATOBJ_Div(&tmp, (FLOATOBJ*)&gef2);
     FLOATOBJ_MulLong(&tmp, corners[1].x - corners[0].x);
     FLOATOBJ_AddLong(&tmp, corners[0].x);
-    if (!FLOATOBJ_bConvertToLong(&tmp, &pPoint->x))
+    if (!PATH_bFloatObjToLong(&tmp, &pPoint->x))
         return FALSE;
 
     /* pPoint->y = (double)corners[0].y + (double)(corners[1].y - corners[0].y) * 0.5 * (y + 1.0); */
@@ -390,7 +409,7 @@ PATH_ScaleNormalizedPoint(
     FLOATOBJ_Div(&tmp, (FLOATOBJ*)&gef2);
     FLOATOBJ_MulLong(&tmp, corners[1].y - corners[0].y);
     FLOATOBJ_AddLong(&tmp, corners[0].y);
-    if (!FLOATOBJ_bConvertToLong(&tmp, &pPoint->y))
+    if (!PATH_bFloatObjToLong(&tmp, &pPoint->y))
         return FALSE;
     return TRUE;
 }
