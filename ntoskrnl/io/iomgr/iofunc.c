@@ -2192,21 +2192,21 @@ NtLockFile(IN HANDLE FileHandle,
 }
 
 /*
- * @implemented
+ * The directory query: QueryFlags are the SL_ flags of the IRP_MN_QUERY_DIRECTORY request
+ * (SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, SL_INDEX_SPECIFIED, SL_RETURN_ON_DISK_ENTRIES_ONLY, SL_NO_CURSOR_UPDATE_QUERY).
  */
+static
 NTSTATUS
-NTAPI
-NtQueryDirectoryFile(IN HANDLE FileHandle,
-                     IN HANDLE EventHandle OPTIONAL,
-                     IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
-                     IN PVOID ApcContext OPTIONAL,
-                     OUT PIO_STATUS_BLOCK IoStatusBlock,
-                     OUT PVOID FileInformation,
-                     IN ULONG Length,
-                     IN FILE_INFORMATION_CLASS FileInformationClass,
-                     IN BOOLEAN ReturnSingleEntry,
-                     IN PUNICODE_STRING FileName OPTIONAL,
-                     IN BOOLEAN RestartScan)
+IopQueryDirectoryFile(IN HANDLE FileHandle,
+                      IN HANDLE EventHandle OPTIONAL,
+                      IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+                      IN PVOID ApcContext OPTIONAL,
+                      OUT PIO_STATUS_BLOCK IoStatusBlock,
+                      OUT PVOID FileInformation,
+                      IN ULONG Length,
+                      IN FILE_INFORMATION_CLASS FileInformationClass,
+                      IN ULONG QueryFlags,
+                      IN PUNICODE_STRING FileName OPTIONAL)
 {
     PIRP Irp;
     PDEVICE_OBJECT DeviceObject;
@@ -2440,9 +2440,7 @@ NtQueryDirectoryFile(IN HANDLE FileHandle,
     StackPtr->Parameters.QueryDirectory.FileName = AuxBuffer;
     StackPtr->Parameters.QueryDirectory.FileIndex = 0;
     StackPtr->Parameters.QueryDirectory.Length = Length;
-    StackPtr->Flags = 0;
-    if (RestartScan) StackPtr->Flags = SL_RESTART_SCAN;
-    if (ReturnSingleEntry) StackPtr->Flags |= SL_RETURN_SINGLE_ENTRY;
+    StackPtr->Flags = (UCHAR)QueryFlags;
 
     /* Set deferred I/O */
     Irp->Flags |= IRP_DEFER_IO_COMPLETION;
@@ -2455,6 +2453,60 @@ NtQueryDirectoryFile(IN HANDLE FileHandle,
                                         PreviousMode,
                                         LockedForSynch,
                                         IopOtherTransfer);
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+NtQueryDirectoryFile(IN HANDLE FileHandle,
+                     IN HANDLE EventHandle OPTIONAL,
+                     IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+                     IN PVOID ApcContext OPTIONAL,
+                     OUT PIO_STATUS_BLOCK IoStatusBlock,
+                     OUT PVOID FileInformation,
+                     IN ULONG Length,
+                     IN FILE_INFORMATION_CLASS FileInformationClass,
+                     IN BOOLEAN ReturnSingleEntry,
+                     IN PUNICODE_STRING FileName OPTIONAL,
+                     IN BOOLEAN RestartScan)
+{
+    ULONG QueryFlags = 0;
+
+    if (RestartScan) QueryFlags = SL_RESTART_SCAN;
+    if (ReturnSingleEntry) QueryFlags |= SL_RETURN_SINGLE_ENTRY;
+
+    return IopQueryDirectoryFile(FileHandle, EventHandle, ApcRoutine, ApcContext, IoStatusBlock, FileInformation,
+                                 Length, FileInformationClass, QueryFlags, FileName);
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+NtQueryDirectoryFileEx(IN HANDLE FileHandle,
+                       IN HANDLE EventHandle OPTIONAL,
+                       IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+                       IN PVOID ApcContext OPTIONAL,
+                       OUT PIO_STATUS_BLOCK IoStatusBlock,
+                       OUT PVOID FileInformation,
+                       IN ULONG Length,
+                       IN FILE_INFORMATION_CLASS FileInformationClass,
+                       IN ULONG QueryFlags,
+                       IN PUNICODE_STRING FileName OPTIONAL)
+{
+    PAGED_CODE();
+
+    /*
+     * The flags go to the file system as they are, as on Windows (measured on Windows Server 2022: a bit the
+     * file system does not know is no error, and only the low byte reaches it). The call has no argument for a
+     * start index and NTFS goes on from where it was with SL_INDEX_SPECIFIED, so the bit is not passed on:
+     * the request's FileIndex is 0 and would send a file system back to the first entry.
+     */
+    return IopQueryDirectoryFile(FileHandle, EventHandle, ApcRoutine, ApcContext, IoStatusBlock, FileInformation,
+                                 Length, FileInformationClass, (UCHAR)QueryFlags & ~SL_INDEX_SPECIFIED, FileName);
 }
 
 /*

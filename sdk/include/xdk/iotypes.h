@@ -1835,8 +1835,10 @@ typedef struct _IO_COMPLETION_CONTEXT {
 #define SL_RESTART_SCAN                   0x01
 #define SL_RETURN_SINGLE_ENTRY            0x02
 #define SL_INDEX_SPECIFIED                0x04
+#define SL_RETURN_ON_DISK_ENTRIES_ONLY    0x08
+#define SL_NO_CURSOR_UPDATE_QUERY         0x10
 
-#define SL_WATCH_TREE                     0x01
+#define SL_WATCH_TREE                    0x01
 
 #define SL_ALLOW_RAW_MOUNT                0x01
 

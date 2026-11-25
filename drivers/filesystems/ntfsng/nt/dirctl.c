@@ -431,7 +431,8 @@ static NTSTATUS NgQueryDirectory(PIRP Irp, PIO_STACK_LOCATION Stack, PNG_VCB Vcb
     FILE_INFORMATION_CLASS Class;
     PUNICODE_STRING Pattern;
     ULONG Length, Used = 0, LastOffset = 0, Written = 0;
-    BOOLEAN Restart, Single;
+    BOOLEAN Restart, Single, NoCursorUpdate;
+    ULONG SavedIndex;
     PUCHAR Buffer;
     PUCHAR MatchTab = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -472,6 +473,10 @@ static NTSTATUS NgQueryDirectory(PIRP Irp, PIO_STACK_LOCATION Stack, PNG_VCB Vcb
     /* A directory removed with POSIX semantics while this handle stayed open has no entries to list. */
     if (Fcb->Deleted && (!Ccb->Enumerated || Restart))
         return STATUS_NO_MORE_FILES;
+    /* SL_NO_CURSOR_UPDATE_QUERY (NtQueryDirectoryFileEx): the query starts at the first entry and the handle's cursor
+       stays where it was (measured on Windows Server 2022) */
+    NoCursorUpdate = (Stack->Flags & SL_NO_CURSOR_UPDATE_QUERY) != 0;
+    SavedIndex = Ccb->Enumerated ? Ccb->NextIndex : 0;
     if (!Ccb->Enumerated || Restart)
     {
         NG_SNAP Snap;
@@ -495,16 +500,26 @@ static NTSTATUS NgQueryDirectory(PIRP Irp, PIO_STACK_LOCATION Stack, PNG_VCB Vcb
     }
     if (Stack->Flags & SL_INDEX_SPECIFIED)
         Ccb->NextIndex = Stack->Parameters.QueryDirectory.FileIndex;
+    if (NoCursorUpdate)
+        Ccb->NextIndex = 0;
 
     Status = NgQueryBuffer(Irp, Length, &Buffer);
     if (!NT_SUCCESS(Status))
+    {
+        if (NoCursorUpdate)
+            Ccb->NextIndex = SavedIndex;
         return Status;
+    }
     if (!Ccb->PatternIsStar)
     {
         /* Work table of the matcher: (pattern length + 1) x (longest name + 1). */
         MatchTab = ExAllocatePoolWithTag(PagedPool, (Ccb->Pattern.Length / sizeof(WCHAR) + 1) * 256, TAG_NTFSNG);
         if (!MatchTab)
+        {
+            if (NoCursorUpdate)
+                Ccb->NextIndex = SavedIndex;
             return STATUS_INSUFFICIENT_RESOURCES;
+        }
     }
 
     while (Ccb->NextIndex < Ccb->EntryCount)
@@ -563,6 +578,8 @@ static NTSTATUS NgQueryDirectory(PIRP Irp, PIO_STACK_LOCATION Stack, PNG_VCB Vcb
 
     if (MatchTab)
         ExFreePoolWithTag(MatchTab, TAG_NTFSNG);
+    if (NoCursorUpdate)
+        Ccb->NextIndex = SavedIndex;
     if (!Written)
     {
         if (Status == STATUS_BUFFER_OVERFLOW)

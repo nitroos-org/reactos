@@ -142,6 +142,7 @@ list(APPEND SOURCE
     NtOpenThreadToken.c
     NtProtectVirtualMemory.c
     NtQueryDirectoryFile.c
+    NtQueryDirectoryFileEx.c
     DefineDosDevice.c
     NtFlushBuffersFile.c
     NtFlushBuffersFileEx.c

@@ -112,6 +112,7 @@ extern void func_NtOpenThread(void);
 extern void func_NtOpenThreadToken(void);
 extern void func_NtProtectVirtualMemory(void);
 extern void func_NtQueryDirectoryFile(void);
+extern void func_NtQueryDirectoryFileEx(void);
 extern void func_DefineDosDevice(void);
 extern void func_NtFlushBuffersFile(void);
 extern void func_NtFsControlFilePipe(void);
@@ -416,6 +417,7 @@ const struct test winetest_testlist[] =
     { "NtOpenThreadToken",              func_NtOpenThreadToken },
     { "NtProtectVirtualMemory",         func_NtProtectVirtualMemory },
     { "NtQueryDirectoryFile",           func_NtQueryDirectoryFile },
+    { "NtQueryDirectoryFileEx",         func_NtQueryDirectoryFileEx },
     { "DefineDosDevice",                func_DefineDosDevice },
     { "NtFlushBuffersFile",             func_NtFlushBuffersFile },
     { "NtFsControlFilePipe",            func_NtFsControlFilePipe },
