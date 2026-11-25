@@ -1,7 +1,8 @@
 #pragma once
 
 /* Redirected window surfaces (redir.c, windc.c, gdi/ntgdi/redirgdi.c) */
-extern ULONG gRedirLevel;
+extern BOOLEAN gRedirOn;        /* top-level windows draw into surfaces of their own (amd64) */
+extern BOOLEAN gRedirCompose;   /* layered and glass windows composed too: not the behaviour yet, never set */
 extern PKTIMER gRedirTimer;
 extern PKTIMER gRedirTailTimer;
 

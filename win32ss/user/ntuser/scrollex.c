@@ -153,7 +153,7 @@ UserScrollDC(
    }
 
    /* A window DC that draws into a redirected window's surface: its release is one of a scroll (redir.c) */
-   if (gRedirLevel)
+   if (gRedirOn)
    {
       PDCE Dce = DceGetDceFromDC(hDC);
 

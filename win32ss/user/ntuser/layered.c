@@ -23,14 +23,15 @@ typedef struct _LRD_PROP
 /*
  * A layered window that has had neither SetLayeredWindowAttributes nor UpdateLayeredWindow is not shown (MSDN, "Layered
  * Windows"): it has no pixels on the screen and does not hide what is below it. It still is a window (hit-testing is
- * unchanged). Levels 0 and 1 only: level 2 has this in its compositor (redir.c).
+ * unchanged). Not with the composition of translucent windows (level 2, not the behaviour yet): it has this in its
+ * compositor (redir.c).
  */
 BOOL FASTCALL
 UserIsLayeredUnset(PWND pWnd)
 {
    PLRD_PROP pLrdProp;
 
-   if (gRedirLevel >= 2 || !(pWnd->ExStyle & WS_EX_LAYERED))
+   if (gRedirCompose || !(pWnd->ExStyle & WS_EX_LAYERED))
       return FALSE;
    pLrdProp = UserGetProp(pWnd, AtomLayer, TRUE);
    return !pLrdProp || (!pLrdProp->is_Layered && !pLrdProp->bUlwSeen);
@@ -59,7 +60,7 @@ co_UserLayeredStyleChanged(PWND pWnd)
       return;
 
    UserRefObjectCo(pWnd, &Ref);
-   if (gRedirLevel >= 2)
+   if (gRedirCompose)
    {
       /* Level 2: what the screen shows follows from a compose pass (it hides or shows the window) */
       UserRedirLayoutChanged(pWnd, &pWnd->rcWindow);
@@ -190,7 +191,7 @@ IntSetLayeredWindowAttributes(PWND pWnd,
       pLrdProp->is_Layered = 1;
 
       /* Levels 0 and 1: the window was not drawn until now (it may have had UpdateLayeredWindow content: then it was) */
-      if (!was_Layered && !pLrdProp->bUlwSeen && gRedirLevel < 2)
+      if (!was_Layered && !pLrdProp->bUlwSeen && !gRedirCompose)
          UserLayeredShownChanged(pWnd);
 
       /* Level 2 (redir.c): the compositor applies the alpha and the colour key to what the window paints */
@@ -199,7 +200,7 @@ IntSetLayeredWindowAttributes(PWND pWnd,
       if (!was_Layered)
          co_UserRedrawWindow(pWnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
    }
-   /* Levels 0 and 1: nothing applies them (no backing store); level 2 composes them */
+   /* Nothing applies them (no backing store for layered windows); level 2 (redir.c, not the behaviour yet) composes them */
    return TRUE;
 }
 
@@ -368,7 +369,7 @@ IntUpdateLayeredWindowI( PWND pWnd,
    }
 
    /* Levels 0 and 1: from now on the window is drawn (the content below is drawn through its own DC) */
-   if (info->hdcSrc && gRedirLevel < 2)
+   if (info->hdcSrc && !gRedirCompose)
       IntLayeredMarkUlwSeen(pWnd);
 
    if (Redirect &&
@@ -392,7 +393,7 @@ IntUpdateLayeredWindowI( PWND pWnd,
       HBITMAP hOldBitmap, hOldBitmap1, hbmSrc, hbmDst;
       DIBSECTION dibs;
 
-      /* Level 2, no surface after all (no memory): a snapshot taken now, as at level 1 */
+      /* Level 2, no surface after all (no memory): a snapshot taken now, as without composition */
       if (Redirect && !UseBackdrop && (info->dwFlags & ULW_ALPHA) && (pWnd->style & WS_VISIBLE) && !(pWnd->style & WS_CHILD))
       {
          NewRect = pWnd->rcWindow;

@@ -821,8 +821,8 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
 
    if (IntGdiSetHookFlags(Dce->hDC, DCHF_VALIDATEVISRGN)) bUpdateVisRgn = TRUE;
 
-   /* NitroRedirection: a DC of a redirected window draws into its top-level window's surface */
-   if (gRedirLevel || Dce->pRedir)
+   /* A DC of a redirected window draws into its top-level window's surface (redir.c) */
+   if (gRedirOn || Dce->pRedir)
    {
       PWND RedirRoot = UserRedirRootFor(Wnd);
       PVOID pRedir = RedirRoot ? UserRedirGet(RedirRoot) : NULL;
@@ -873,7 +873,7 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
       Not when it draws into a surface at level 2: the copies keep their alpha there and the compositor blends a glass
       top-level window; a glass child of an opaque top-level is drawn opaque (DWM glass is for top-level windows: verify). */
    {
-      BOOL bGlass = Wnd && !(gRedirLevel >= 2 && Dce->pRedir) && UserGetProp(Wnd, gpsi->atomFrostedWindowProp, TRUE) != NULL;
+      BOOL bGlass = Wnd && !(gRedirCompose && Dce->pRedir) && UserGetProp(Wnd, gpsi->atomFrostedWindowProp, TRUE) != NULL;
 
       if (bGlass || Dce->bGlass)
       {

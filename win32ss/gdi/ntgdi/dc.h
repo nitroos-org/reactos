@@ -144,7 +144,7 @@ typedef struct _DC
 } DC;
 
 /*
- * A window DC of a redirected window (NitroRedirection, ntuser/redir.c) stays DCTYPE_DIRECT but draws
+ * A window DC of a redirected window (ntuser/redir.c) stays DCTYPE_DIRECT but draws
  * into the window's redirection surface instead of the screen: no pointer exclusion, no device lock,
  * no re-selection of the primary surface. DC_IS_SCREEN tells the DCs that really draw on the screen.
  */
@@ -163,7 +163,7 @@ BOOL NTAPI GreRedirPresent(_In_ struct _SURFACE *psurf, _In_ struct _REGION *prg
 BOOL NTAPI GreRedirSeedFromScreen(_In_ struct _SURFACE *psurf, _In_ struct _REGION *prgnScreen, _In_ LONG xWnd, _In_ LONG yWnd);
 BOOL NTAPI GreRedirCopyToDC(_In_ struct _SURFACE *psurf, _In_ HDC hdcDest, _In_ LONG xSrc, _In_ LONG ySrc, _In_ LONG cx, _In_ LONG cy);
 
-/* Level 2 composition (NitroRedirection 2): one window's surface drawn into the frame buffer of a compose pass */
+/* Composition of translucent windows (level 2, not the behaviour yet: redir.c): one window's surface drawn into the frame buffer of a compose pass */
 #define REDIRMODE_COPY      0       /* opaque */
 #define REDIRMODE_ALPHA     1       /* constant alpha over what is below; the surface's own alpha is not used */
 #define REDIRMODE_PREMUL    2       /* premultiplied per-pixel alpha, times the constant alpha (UpdateLayeredWindow) */
