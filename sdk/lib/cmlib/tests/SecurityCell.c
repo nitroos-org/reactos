@@ -51,6 +51,9 @@ static void InitCache(PCMHIVE Cm)
 #endif
 }
 
+/* cmkeydel.c; not in cmlib.h */
+BOOLEAN NTAPI CmpFreeKeyBody(IN PHHIVE Hive, IN HCELL_INDEX Cell);
+
 static PCM_KEY_SECURITY Sk(PHHIVE Hive, HCELL_INDEX Cell)
 {
     return CmpGetCheckedSecurityCell(Hive, Cell, NULL);

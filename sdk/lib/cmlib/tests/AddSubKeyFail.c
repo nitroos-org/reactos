@@ -176,7 +176,7 @@ static HCELL_INDEX NewKey(ULONG n, HCELL_INDEX Parent)
                           Volatile, HCELL_NIL);
     if (Cell == HCELL_NIL)
         return Cell;
-    Node = HvGetCell(&g_Hive, Cell);
+    Node = (PCM_KEY_NODE)HvGetCell(&g_Hive, Cell);
     RtlZeroMemory(Node, FIELD_OFFSET(CM_KEY_NODE, Name));
     Node->Signature = CM_KEY_NODE_SIGNATURE;
     Node->Parent = Parent;
@@ -207,7 +207,7 @@ static BOOLEAN NameIs(PCM_KEY_NODE Node, ULONG n)
 /* The index lists Count keys, each reachable by number, in ascending name order */
 static void VerifyOrder(ULONG Count, const char *Where)
 {
-    PCM_KEY_NODE P = HvGetCell(&g_Hive, g_Parent);
+    PCM_KEY_NODE P = (PCM_KEY_NODE)HvGetCell(&g_Hive, g_Parent);
     PCM_KEY_NODE Prev = NULL, Cur;
     ULONG i;
 
@@ -219,7 +219,7 @@ static void VerifyOrder(ULONG Count, const char *Where)
         CHECK(C != HCELL_NIL, "%s: no key at number %lu", Where, (unsigned long)i);
         if (C == HCELL_NIL)
             return;
-        Cur = HvGetCell(&g_Hive, C);
+        Cur = (PCM_KEY_NODE)HvGetCell(&g_Hive, C);
         CHECK(Cur->Parent == g_Parent, "%s: parent of number %lu", Where, (unsigned long)i);
         if (Prev)
             CHECK(memcmp(Prev->Name, Cur->Name, 6) < 0, "%s: order at %lu", Where, (unsigned long)i);
@@ -277,7 +277,7 @@ static int Run(ULONG Version)
             CHECK(g_Failures >= 1, "failed without a failed allocation");
             /* the index is as it was: n keys, none of them Num */
             {
-                PCM_KEY_NODE P = HvGetCell(&g_Hive, g_Parent);
+                PCM_KEY_NODE P = (PCM_KEY_NODE)HvGetCell(&g_Hive, g_Parent);
                 KeyName(Num, Buffer, &Name);
                 CHECK(CmpFindSubKeyByName(&g_Hive, P, &Name) == HCELL_NIL, "failed key %lu is linked", (unsigned long)Num);
                 VerifyOrder(n, "after a failed add");
@@ -291,7 +291,7 @@ static int Run(ULONG Version)
     }
 
     {
-        PCM_KEY_NODE P = HvGetCell(&g_Hive, g_Parent);
+        PCM_KEY_NODE P = (PCM_KEY_NODE)HvGetCell(&g_Hive, g_Parent);
         ULONG i;
         CHECK(P->SubKeyCounts[Volatile] == MaxKeys, "final count %lu", (unsigned long)P->SubKeyCounts[Volatile]);
         for (i = 0; i < MaxKeys; i++)
@@ -304,7 +304,7 @@ static int Run(ULONG Version)
             HCELL_INDEX C = CmpFindSubKeyByNumber(&g_Hive, P, i);
             CHECK(C != HCELL_NIL, "final: number %lu", (unsigned long)i);
             if (C == HCELL_NIL) break;
-            CHECK(NameIs(HvGetCell(&g_Hive, C), i), "final: order at %lu", (unsigned long)i);
+            CHECK(NameIs((PCM_KEY_NODE)HvGetCell(&g_Hive, C), i), "final: order at %lu", (unsigned long)i);
         }
     }
 
