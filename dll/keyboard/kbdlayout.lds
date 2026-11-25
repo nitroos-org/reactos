@@ -28,6 +28,12 @@ SECTIONS
     *(.edata)
   }
 
+  /* the debug directory with the CodeView record of the PDB (-Wl,--pdb): the linker adds it as a section of its own */
+  .buildid BLOCK(__section_alignment__) :
+  {
+    *(.buildid)
+  }
+
   /DISCARD/ :
   {
     *(*)
