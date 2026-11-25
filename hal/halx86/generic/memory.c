@@ -241,7 +241,8 @@ HalpUnmapVirtualAddressVista(IN PVOID VirtualAddress,
     PointerPte = HalAddressToPte(VirtualAddress);
     for (i = 0; i < PageCount; i++)
     {
-        *(PULONG)PointerPte = 0;
+        /* Clear the whole entry: on amd64 it is 64 bits (frame bits above 4 GB, NX) */
+        RtlZeroMemory(PointerPte, sizeof(*PointerPte));
         PointerPte++;
     }
 
@@ -252,4 +253,31 @@ HalpUnmapVirtualAddressVista(IN PVOID VirtualAddress,
     /* Put the heap back */
     if (HalpHeapStart > VirtualAddress) HalpHeapStart = VirtualAddress;
 }
+
+#if DBG && defined(_M_AMD64)
+CODE_SEG("INIT")
+VOID
+NTAPI
+HalpCheckUnmapClearsEntry(VOID)
+{
+    PHYSICAL_ADDRESS Address;
+    PHARDWARE_PTE PointerPte;
+    PVOID VirtualAddress;
+    ULONG64 Mapped, Unmapped;
+
+    /* Map a page at 4 GB (frame bit 20 is in the high dword of the entry), mark it no-execute, unmap it */
+    Address.QuadPart = 0x100000000ULL;
+    VirtualAddress = HalpMapPhysicalMemory64(Address, 1);
+    if (VirtualAddress == NULL)
+        return;
+    PointerPte = HalAddressToPte(VirtualAddress);
+    PointerPte->NoExecute = 1;
+    Mapped = *(volatile ULONG64 *)PointerPte;
+    HalpUnmapVirtualAddress(VirtualAddress, 1);
+    Unmapped = *(volatile ULONG64 *)PointerPte;
+
+    DbgPrint("HAL: PTE after map %016I64x, after unmap %016I64x\n", Mapped, Unmapped);
+    ASSERT(Unmapped == 0);
+}
+#endif
 
