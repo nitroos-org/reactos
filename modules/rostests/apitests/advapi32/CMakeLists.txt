@@ -88,6 +88,7 @@ list(APPEND SOURCE
     LsaLogonUserLocalGroups.c
     LsaClientAccess.c
     LsaPortClients.c
+    LsaRemoveAccountRights.c
     LsaPrivateDataCaller.c
     LsaSubmitLength.c
     LsaLogonUserS4U.c

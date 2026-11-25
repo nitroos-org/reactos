@@ -1724,6 +1724,42 @@ LsarpOpenAccount(
 }
 
 
+/* Whether an account holds neither a privilege nor an account right */
+static
+BOOLEAN
+LsarpAccountHasNoRights(
+    IN PLSA_DB_OBJECT AccountObject)
+{
+    PPRIVILEGE_SET PrivilegeSet;
+    ACCESS_MASK SystemAccess = 0;
+    ULONG Size = 0;
+    NTSTATUS Status;
+
+    Status = LsapGetObjectAttribute(AccountObject, L"Privilgs", NULL, &Size);
+    if (NT_SUCCESS(Status) && Size >= sizeof(ULONG))
+    {
+        PrivilegeSet = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Size);
+        if (PrivilegeSet == NULL)
+            return FALSE;
+
+        Status = LsapGetObjectAttribute(AccountObject, L"Privilgs", PrivilegeSet, &Size);
+        if (!NT_SUCCESS(Status) || PrivilegeSet->PrivilegeCount != 0)
+        {
+            RtlFreeHeap(RtlGetProcessHeap(), 0, PrivilegeSet);
+            return FALSE;
+        }
+        RtlFreeHeap(RtlGetProcessHeap(), 0, PrivilegeSet);
+    }
+
+    Size = sizeof(ACCESS_MASK);
+    Status = LsapGetObjectAttribute(AccountObject, L"ActSysAc", &SystemAccess, &Size);
+    if (NT_SUCCESS(Status) && SystemAccess != 0)
+        return FALSE;
+
+    return TRUE;
+}
+
+
 /* Function 17 */
 NTSTATUS
 WINAPI
@@ -3527,10 +3563,11 @@ LsarRemoveAccountRights(
     PLSA_DB_OBJECT PolicyObject;
     PLSA_DB_OBJECT AccountObject = NULL;
     ULONG PrivilegesToRemove = 0, RightsToRemove = 0;
-    ACCESS_MASK SystemAccess = 0;
+    ACCESS_MASK SystemAccess = 0, OldAccess;
     ULONG Size, Value, i, j, Index;
     PPRIVILEGE_SET PrivilegeSet = NULL;
     ULONG PrivilegeCount;
+    BOOLEAN Changed = FALSE;
     PLUID pLuid;
     NTSTATUS Status;
 
@@ -3577,9 +3614,20 @@ LsarRemoveAccountRights(
                               AccountSid,
                               ACCOUNT_ADJUST_PRIVILEGES | ACCOUNT_ADJUST_SYSTEM_ACCESS,
                               &AccountObject);
-    if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_NOT_FOUND)
+    if (!NT_SUCCESS(Status))
     {
-        ERR("LsarpOpenAccount returned 0x%08lx\n", Status);
+        /* An account that is not there is STATUS_OBJECT_NAME_NOT_FOUND (measured on Windows Server 2022), with
+           or without AllRights */
+        if (Status != STATUS_OBJECT_NAME_NOT_FOUND)
+            ERR("LsarpOpenAccount returned 0x%08lx\n", Status);
+        goto done;
+    }
+
+    if (AllRights != FALSE)
+    {
+        /* All rights: the list is not looked at and the account goes */
+        Status = LsapDeleteDbObject(AccountObject);
+        AccountObject = NULL;
         goto done;
     }
 
@@ -3635,15 +3683,14 @@ LsarRemoveAccountRights(
                 if (Index != -1)
                 {
                     /* Remove the privilege */
-                    if ((PrivilegeSet->PrivilegeCount > 1) &&
-                        (Index < PrivilegeSet->PrivilegeCount - 1))
+                    if (Index < PrivilegeSet->PrivilegeCount - 1)
                         RtlMoveMemory(&(PrivilegeSet->Privilege[Index]),
                                       &(PrivilegeSet->Privilege[Index + 1]),
-                                      (Index - PrivilegeSet->PrivilegeCount - 1) * sizeof(LUID));
+                                      (PrivilegeSet->PrivilegeCount - 1 - Index) * sizeof(LUID_AND_ATTRIBUTES));
 
                     /* Wipe the last entry */
                     RtlZeroMemory(&(PrivilegeSet->Privilege[PrivilegeSet->PrivilegeCount - 1]),
-                                  sizeof(LUID));
+                                  sizeof(LUID_AND_ATTRIBUTES));
 
                     PrivilegeSet->PrivilegeCount--;
                 }
@@ -3664,6 +3711,7 @@ LsarRemoveAccountRights(
                     ERR("LsapSetObjectAttribute() failed (Status 0x%08lx)\n", Status);
                     goto done;
                 }
+                Changed = TRUE;
             }
         }
 
@@ -3676,13 +3724,17 @@ LsarRemoveAccountRights(
                                         &SystemAccess,
                                         &Size);
         if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+        {
             Size = 0;
+            Status = STATUS_SUCCESS;
+        }
         else if (!NT_SUCCESS(Status))
             goto done;
 
         if ((Size != 0) && (RightsToRemove != 0))
         {
             TRACE("Rights: 0x%lx\n", SystemAccess);
+            OldAccess = SystemAccess;
 
             /* Set the new access rights */
             for (i = 0; i < UserRights->Entries; i++)
@@ -3692,16 +3744,25 @@ LsarRemoveAccountRights(
                     SystemAccess &= ~Value;
             }
             TRACE("New Rights: 0x%lx\n", SystemAccess);
+            if (SystemAccess != OldAccess)
+                Changed = TRUE;
 
             /* Set the system access flags */
             Status = LsapSetObjectAttribute(AccountObject,
                                             L"ActSysAc",
                                             &SystemAccess,
                                             sizeof(ACCESS_MASK));
+            if (!NT_SUCCESS(Status))
+                goto done;
         }
-    }
-    else
-    {
+
+        /* An account without a privilege and without an account right is not there any more (measured on
+           Windows Server 2022: the last right removed, LsaEnumerateAccountRights says STATUS_OBJECT_NAME_NOT_FOUND) */
+        if (Changed && LsarpAccountHasNoRights(AccountObject))
+        {
+            Status = LsapDeleteDbObject(AccountObject);
+            AccountObject = NULL;
+        }
     }
 
 done:
