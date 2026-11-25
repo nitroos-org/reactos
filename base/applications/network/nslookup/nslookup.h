@@ -98,6 +98,7 @@ typedef struct _STATE
 extern STATE    State;
 extern HANDLE   ProcessHeap;
 extern BOOL     g_bQuietTimeout;
+extern BOOL     g_bTcpFailed;
 
 /* The port the DNS server is asked on. "set port=" and -port= are kept and shown (State.port) but, as on Windows, not used. */
 #define DNS_SERVER_PORT 53

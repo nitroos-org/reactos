@@ -876,7 +876,11 @@ static void PerformPlainLookup( PCHAR pName )
         PrintRcodeError( pName, Rcode4 );
         break;
     case LQ_TIMEOUT:
-        _tprintf( _T("*** Request to %s timed-out\n"), State.DefaultServer );
+        /* a stream that could not be made (the vc option): Windows names no cause (measured: connection refused) */
+        if( g_bTcpFailed )
+            _tprintf( _T("*** %s can't find %s: Unspecified error\n"), State.DefaultServer, pName );
+        else
+            _tprintf( _T("*** Request to %s timed-out\n"), State.DefaultServer );
         break;
     case LQ_BAD:
         _tprintf( _T("*** Invalid reply from %s: too short or malformed\n"), State.DefaultServer );

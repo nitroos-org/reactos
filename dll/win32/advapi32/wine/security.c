@@ -98,31 +98,52 @@ static const WELLKNOWNSID WellKnownSids[] =
     { {'H','I'}, WinHighLabelSid, { SID_REVISION, 1, { SECURITY_MANDATORY_LABEL_AUTHORITY}, { SECURITY_MANDATORY_HIGH_RID } } },
     { {'S','I'}, WinSystemLabelSid, { SID_REVISION, 1, { SECURITY_MANDATORY_LABEL_AUTHORITY}, { SECURITY_MANDATORY_SYSTEM_RID } } },
     { {'A','C'}, WinBuiltinAnyPackageSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_APP_PACKAGE_BASE_RID, SECURITY_BUILTIN_PACKAGE_ANY_PACKAGE } } },
+    /* The types that Windows Server 2022 builds with CreateWellKnownSid and that have no string alias (measured) */
+    { {0,0}, WinIUserSid, { SID_REVISION, 1, { SECURITY_NT_AUTHORITY }, { 17 } } },
+    { {0,0}, WinUntrustedLabelSid, { SID_REVISION, 1, { SECURITY_MANDATORY_LABEL_AUTHORITY }, { SECURITY_MANDATORY_UNTRUSTED_RID } } },
+    { {0,0}, WinEnterpriseReadonlyControllersSid, { SID_REVISION, 1, { SECURITY_NT_AUTHORITY }, { 22 } } },
+    { {0,0}, WinConsoleLogonSid, { SID_REVISION, 1, { SECURITY_LOCAL_SID_AUTHORITY }, { 1 } } },
+    { {0,0}, WinThisOrganizationCertificateSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { 65, 1 } } },
+    { {0,0}, WinCapabilityInternetClientSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { 3, 1 } } },
+    { {0,0}, WinCapabilityInternetClientServerSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { 3, 2 } } },
+    { {0,0}, WinCapabilityPrivateNetworkClientServerSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { 3, 3 } } },
+    { {0,0}, WinCapabilityPicturesLibrarySid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { 3, 4 } } },
+    { {0,0}, WinCapabilityVideosLibrarySid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { 3, 5 } } },
+    { {0,0}, WinCapabilityMusicLibrarySid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { 3, 6 } } },
+    { {0,0}, WinCapabilityDocumentsLibrarySid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { 3, 7 } } },
+    { {0,0}, WinCapabilitySharedUserCertificatesSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { 3, 9 } } },
+    { {0,0}, WinCapabilityEnterpriseAuthenticationSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { 3, 8 } } },
+    { {0,0}, WinCapabilityRemovableStorageSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { 3, 10 } } },
+    { {0,0}, WinLocalAccountSid, { SID_REVISION, 1, { SECURITY_NT_AUTHORITY }, { 113 } } },
+    { {0,0}, WinLocalAccountAndAdministratorSid, { SID_REVISION, 1, { SECURITY_NT_AUTHORITY }, { 114 } } },
+    /* 108 and 109 (capabilities 11 and 12) have no name in our headers */
+    { {0,0}, (WELL_KNOWN_SID_TYPE)108, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { 3, 11 } } },
+    { {0,0}, (WELL_KNOWN_SID_TYPE)109, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { 3, 12 } } },
 };
 
 /*
  * Aliases of the SID string syntax that WellKnownSids has no entry for
  * (https://learn.microsoft.com/windows/win32/secauthz/sid-strings, rows measured on Windows Server 2022).
- * They are known to the SID strings only: CreateWellKnownSid and IsWellKnownSid do not see this table (some of these SIDs
- * have a WELL_KNOWN_SID_TYPE that they do not build), so the type column is not used.
+ * They are known to the SID strings as well as to CreateWellKnownSid and IsWellKnownSid (the SIDs of this table are the
+ * ones whose type of Windows has a string alias but no entry in the table above).
  */
 static const WELLKNOWNSID SddlOnlyAliases[] =
 {
-    { {'W','R'}, WinNullSid, { SID_REVISION, 1, { SECURITY_NT_AUTHORITY }, { 33 } } },                                      /* write restricted code */
-    { {'I','S'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 568 } } },        /* IIS_IUSRS */
-    { {'C','D'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 574 } } },        /* certificate service DCOM access */
-    { {'C','Y'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 569 } } },        /* cryptographic operators */
-    { {'E','R'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 573 } } },        /* event log readers */
-    { {'R','A'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 575 } } },        /* RDS remote access servers */
-    { {'E','S'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 576 } } },        /* RDS endpoint servers */
-    { {'M','S'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 577 } } },        /* RDS management servers */
-    { {'H','A'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 578 } } },        /* Hyper-V administrators */
-    { {'A','A'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 579 } } },        /* access control assistance operators */
-    { {'R','M'}, WinNullSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 580 } } },        /* remote management users */
-    { {'U','D'}, WinNullSid, { SID_REVISION, 6, { SECURITY_NT_AUTHORITY }, { 84, 0, 0, 0, 0, 0 } } },                          /* user-mode drivers */
-    { {'M','P'}, WinNullSid, { SID_REVISION, 1, { SECURITY_MANDATORY_LABEL_AUTHORITY }, { 0x2100 } } },                      /* medium plus mandatory level */
-    { {'A','S'}, WinNullSid, { SID_REVISION, 1, { { 0, 0, 0, 0, 0, 18 } }, { 1 } } },                                           /* authentication authority asserted */
-    { {'S','S'}, WinNullSid, { SID_REVISION, 1, { { 0, 0, 0, 0, 0, 18 } }, { 2 } } },                                           /* service asserted */
+    { {'W','R'}, WinWriteRestrictedCodeSid, { SID_REVISION, 1, { SECURITY_NT_AUTHORITY }, { 33 } } },                                      /* write restricted code */
+    { {'I','S'}, WinBuiltinIUsersSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 568 } } },        /* IIS_IUSRS */
+    { {'C','D'}, WinBuiltinCertSvcDComAccessGroup, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 574 } } },        /* certificate service DCOM access */
+    { {'C','Y'}, WinBuiltinCryptoOperatorsSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 569 } } },        /* cryptographic operators */
+    { {'E','R'}, WinBuiltinEventLogReadersGroup, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 573 } } },        /* event log readers */
+    { {'R','A'}, WinBuiltinRDSRemoteAccessServersSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 575 } } },        /* RDS remote access servers */
+    { {'E','S'}, WinBuiltinRDSEndpointServersSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 576 } } },        /* RDS endpoint servers */
+    { {'M','S'}, WinBuiltinRDSManagementServersSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 577 } } },        /* RDS management servers */
+    { {'H','A'}, WinBuiltinHyperVAdminsSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 578 } } },        /* Hyper-V administrators */
+    { {'A','A'}, WinBuiltinAccessControlAssistanceOperatorsSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 579 } } },        /* access control assistance operators */
+    { {'R','M'}, WinBuiltinRemoteManagementUsersSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, 580 } } },        /* remote management users */
+    { {'U','D'}, WinUserModeDriversSid, { SID_REVISION, 6, { SECURITY_NT_AUTHORITY }, { 84, 0, 0, 0, 0, 0 } } },                          /* user-mode drivers */
+    { {'M','P'}, WinMediumPlusLabelSid, { SID_REVISION, 1, { SECURITY_MANDATORY_LABEL_AUTHORITY }, { 0x2100 } } },                      /* medium plus mandatory level */
+    { {'A','S'}, WinAuthenticationAuthorityAssertedSid, { SID_REVISION, 1, { { 0, 0, 0, 0, 0, 18 } }, { 1 } } },                                           /* authentication authority asserted */
+    { {'S','S'}, WinAuthenticationServiceAssertedSid, { SID_REVISION, 1, { { 0, 0, 0, 0, 0, 18 } }, { 2 } } },                                           /* service asserted */
 };
 
 /* these SIDs must be constructed as relative to the machine SID - only the RID is well-known */
@@ -147,6 +168,13 @@ static const WELLKNOWNRID WellKnownRids[] = {
     { {'E','A'}, WinAccountEnterpriseAdminsSid, DOMAIN_GROUP_RID_ENTERPRISE_ADMINS },
     { {'P','A'}, WinAccountPolicyAdminsSid,     DOMAIN_GROUP_RID_POLICY_ADMINS },
     { {'R','S'}, WinAccountRasAndIasServersSid, DOMAIN_ALIAS_RID_RAS_SERVERS },
+    { {0,0}, WinCacheablePrincipalsGroupSid,    571 },
+    { {0,0}, WinNonCacheablePrincipalsGroupSid, 572 },
+    { {0,0}, WinAccountReadonlyControllersSid,  521 },
+    { {0,0}, WinNewEnterpriseReadonlyControllersSid, 498 },
+    { {0,0}, WinAccountCloneableControllersSid, 522 },
+    { {0,0}, WinAccountProtectedUsersSid,       525 },
+    { {0,0}, (WELL_KNOWN_SID_TYPE)110,          503 }, /* no name in our headers */
 };
 
 /*
@@ -796,6 +824,20 @@ CopySid( DWORD nDestinationSidLength, PSID pDestinationSid, PSID pSourceSid )
 	return set_ntstatus(RtlCopySid(nDestinationSidLength, pDestinationSid, pSourceSid));
 }
 
+/* The fixed SID of a well-known SID type: the table of the types and the one of the SID string aliases */
+static const WELLKNOWNSID *FindWellKnownSid(WELL_KNOWN_SID_TYPE Type)
+{
+    unsigned int i;
+
+    for (i = 0; i < sizeof(WellKnownSids) / sizeof(WellKnownSids[0]); i++)
+        if (WellKnownSids[i].Type == Type)
+            return &WellKnownSids[i];
+    for (i = 0; i < sizeof(SddlOnlyAliases) / sizeof(SddlOnlyAliases[0]); i++)
+        if (SddlOnlyAliases[i].Type == Type)
+            return &SddlOnlyAliases[i];
+    return NULL;
+}
+
 /*
  * @unimplemented
  */
@@ -806,6 +848,7 @@ CreateWellKnownSid(IN WELL_KNOWN_SID_TYPE WellKnownSidType,
                    OUT PSID pSid,
                    IN OUT DWORD* cbSid)
 {
+    const WELLKNOWNSID *fixed;
     unsigned int i;
     TRACE("(%d, %s, %p, %p)\n", WellKnownSidType, debugstr_sid(DomainSid), pSid, cbSid);
 
@@ -815,25 +858,25 @@ CreateWellKnownSid(IN WELL_KNOWN_SID_TYPE WellKnownSidType,
         return FALSE;
     }
 
-    for (i = 0; i < sizeof(WellKnownSids)/sizeof(WellKnownSids[0]); i++) {
-        if (WellKnownSids[i].Type == WellKnownSidType) {
-            DWORD length = GetSidLengthRequired(WellKnownSids[i].Sid.SubAuthorityCount);
+    fixed = FindWellKnownSid(WellKnownSidType);
+    if (fixed)
+    {
+        DWORD length = GetSidLengthRequired(fixed->Sid.SubAuthorityCount);
 
-            if (*cbSid < length)
-            {
-                *cbSid = length;
-                SetLastError(ERROR_INSUFFICIENT_BUFFER);
-                return FALSE;
-            }
-            if (!pSid)
-            {
-                SetLastError(ERROR_INVALID_PARAMETER);
-                return FALSE;
-            }
-            CopyMemory(pSid, &WellKnownSids[i].Sid.Revision, length);
+        if (*cbSid < length)
+        {
             *cbSid = length;
-            return TRUE;
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            return FALSE;
         }
+        if (!pSid)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        CopyMemory(pSid, &fixed->Sid.Revision, length);
+        *cbSid = length;
+        return TRUE;
     }
 
     if (DomainSid == NULL || *GetSidSubAuthorityCount(DomainSid) == SID_MAX_SUB_AUTHORITIES)
@@ -878,6 +921,7 @@ WINAPI
 IsWellKnownSid(IN PSID pSid,
                IN WELL_KNOWN_SID_TYPE WellKnownSidType)
 {
+    const WELLKNOWNSID *fixed;
     unsigned int i;
     TRACE("(%s, %d)\n", debugstr_sid(pSid), WellKnownSidType);
 
@@ -893,12 +937,23 @@ IsWellKnownSid(IN PSID pSid,
                Sid->SubAuthority[0] == SECURITY_LOGON_IDS_RID;
     }
 
-    for (i = 0; i < sizeof(WellKnownSids) / sizeof(WellKnownSids[0]); i++)
+    fixed = FindWellKnownSid(WellKnownSidType);
+    if (fixed)
+        return EqualSid(pSid, (PSID)(&fixed->Sid.Revision));
+
+    /* The accounts of a domain: S-1-5-21-a-b-c-RID with the RID of the type, of any domain (measured) */
+    for (i = 0; i < sizeof(WellKnownRids) / sizeof(WellKnownRids[0]); i++)
     {
-        if (WellKnownSids[i].Type == WellKnownSidType)
+        if (WellKnownRids[i].Type == WellKnownSidType)
         {
-            if (EqualSid(pSid, (PSID)(&WellKnownSids[i].Sid.Revision)))
-                return TRUE;
+            static const SID_IDENTIFIER_AUTHORITY NtAuthority = { SECURITY_NT_AUTHORITY };
+            PISID Sid = pSid;
+
+            return Sid != NULL && RtlValidSid(pSid) &&
+                   Sid->SubAuthorityCount == 5 &&
+                   !memcmp(&Sid->IdentifierAuthority, &NtAuthority, sizeof(NtAuthority)) &&
+                   Sid->SubAuthority[0] == SECURITY_NT_NON_UNIQUE &&
+                   Sid->SubAuthority[4] == WellKnownRids[i].Rid;
         }
     }
 
@@ -3001,6 +3056,18 @@ static BOOL IsNumericSidText(LPCWSTR p)
     return (p[0] == 'S' || p[0] == 's') && p[1] == '-';
 }
 
+/* The owner or group field of a descriptor that is empty: it names nothing (ERROR_NONE_MAPPED) when it ends the
+ * string and is a bad SID when another section follows (measured on Windows Server 2022) */
+static BOOL IsEmptySidField(LPCWSTR p, BOOL MoreSections)
+{
+    while (*p == ' ')
+        p++;
+    if (*p)
+        return FALSE;
+    SetLastError(MoreSections ? ERROR_INVALID_SID : ERROR_NONE_MAPPED);
+    return TRUE;
+}
+
 /*
  * A SID written as a two-letter alias ends with the alias: only blanks may follow it before the ')' of the ACE (or the
  * end of the field). Text glued to the alias ("LAx") is not an alias plus something to ignore, it is not a SID, and the
@@ -3010,7 +3077,7 @@ static BOOL AliasFieldEndsCleanly(LPCWSTR p)
 {
     while (*p == ' ')
         p++;
-    if (!p[0] || !p[1] || IsNumericSidText(p))
+    if (!p[0] || !p[1] || IsNumericSidText(p) || *p == ')' || *p == ';')
         return TRUE; /* nothing to check here: the parser refuses what it cannot read */
     p += 2;
     while (*p == ' ')
@@ -3024,7 +3091,7 @@ static BOOL AliasFieldEndsCleanly(LPCWSTR p)
  * dacl_flags(string_ace1)(string_ace2)... (string_acen)
  */
 static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, BOOL sacl, LPDWORD lpdwFlags,
-    PACL pAcl, LPDWORD cBytes, BOOL *pIsNull)
+    PACL pAcl, LPDWORD cBytes, BOOL *pIsNull, BOOL MoreText)
 {
     BOOL nullAcl, badFlags;
     DWORD val;
@@ -3035,6 +3102,7 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, BOOL sacl, LPDWORD lpdwFlags,
     PACCESS_ALLOWED_ACE pAce = NULL; /* pointer to current ACE */
     BYTE aceType = 0;
     BOOL hasObjectAce = FALSE;
+    BYTE ScratchSid[SECURITY_MAX_SID_SIZE];
     DWORD error = ERROR_INVALID_ACL;
 
     TRACE("%s\n", debugstr_w(StringAcl));
@@ -3081,7 +3149,11 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, BOOL sacl, LPDWORD lpdwFlags,
 	if (pAce)
             pAce->Header.AceFlags = (BYTE) val;
         if (*StringAcl != ';')
+        {
+            if (*StringAcl == ')')
+                error = ERROR_INVALID_PARAMETER;
             goto lerr;
+        }
         StringAcl++;
 
         /* Parse ACE rights */
@@ -3089,7 +3161,16 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, BOOL sacl, LPDWORD lpdwFlags,
 	if (pAce)
             pAce->Mask = val;
         if (*StringAcl != ';')
+        {
+            /* the ACE ended in its rights (fewer fields): a bad parameter; other text here is a bad ACL */
+            LPCWSTR end = StringAcl;
+
+            while (*end && *end != ';' && *end != ')')
+                end++;
+            if (*end == ')')
+                error = ERROR_INVALID_PARAMETER;
             goto lerr;
+        }
         StringAcl++;
 
         /* Parse the object GUID and the inherited object GUID: only object ACEs have them */
@@ -3099,11 +3180,31 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, BOOL sacl, LPDWORD lpdwFlags,
             BOOL isObject = IsObjectAceType(pAce ? pAce->Header.AceType : aceType);
             DWORD sidoff = 8, objflags = 0, k;
 
-            if (!ParseAceStringGuid(&StringAcl, &guids[0], &present[0]) || *StringAcl != ';')
+            if (!ParseAceStringGuid(&StringAcl, &guids[0], &present[0]))
+            {
+                if (*StringAcl == ')')
+                    error = ERROR_INVALID_PARAMETER;
                 goto lerr;
+            }
+            if (*StringAcl != ';')
+            {
+                if (*StringAcl == ')')
+                    error = ERROR_INVALID_PARAMETER;
+                goto lerr;
+            }
             StringAcl++;
-            if (!ParseAceStringGuid(&StringAcl, &guids[1], &present[1]) || *StringAcl != ';')
+            if (!ParseAceStringGuid(&StringAcl, &guids[1], &present[1]))
+            {
+                if (*StringAcl == ')')
+                    error = ERROR_INVALID_PARAMETER;
                 goto lerr;
+            }
+            if (*StringAcl != ';')
+            {
+                if (*StringAcl == ')')
+                    error = ERROR_INVALID_PARAMETER;
+                goto lerr;
+            }
             StringAcl++;
 
             if (!isObject && (present[0] || present[1]))
@@ -3144,21 +3245,54 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, BOOL sacl, LPDWORD lpdwFlags,
                     goto lerr;
                 }
             }
-            if (!ParseStringSidToSid(StringAcl, pAce ? (PSID)((LPBYTE)pAce + sidoff) : NULL, &sidlen))
+            /* the SID is read in the size pass too, into a scratch buffer: the first bad field of the string is the one
+             * reported, whatever the later ones are */
+            if (!ParseStringSidToSid(StringAcl, pAce ? (PSID)((LPBYTE)pAce + sidoff) : (PSID)ScratchSid, &sidlen))
             {
                 LPCWSTR sidtext = StringAcl;
+                LPCWSTR scan;
 
                 /* an alias that names nothing here (a domain account on a machine that is no domain member, an unknown
                  * one) is a bad SID, not a bad ACL */
                 while (*sidtext == ' ')
                     sidtext++;
-                if (*sidtext && *sidtext != ')' && *sidtext != ';' && !IsNumericSidText(sidtext) &&
-                    GetLastError() == ERROR_INVALID_SID)
+                for (scan = sidtext; *scan && *scan != ')' && *scan != ';'; scan++)
+                    ;
+                if (*scan == ';')
+                {
+                    /* a ';' in the field: one field too many */
+                    error = ERROR_INVALID_PARAMETER;
+                }
+                else if (!*sidtext || *sidtext == ')')
+                {
+                    /* An empty SID field names nothing (ERROR_NONE_MAPPED) when only blanks follow the ACE and the
+                     * string goes no further, it is a bad SID when text follows, and a bad parameter when a ';'
+                     * follows (measured on Windows Server 2022) */
+                    LPCWSTR after = *sidtext ? sidtext + 1 : sidtext;
+
+                    while (*after == ' ')
+                        after++;
+                    if (*after == ';')
+                        error = ERROR_INVALID_PARAMETER;
+                    else if (*after || MoreText)
+                        error = ERROR_INVALID_SID;
+                    else
+                        error = ERROR_NONE_MAPPED;
+                }
+                else if (GetLastError() == ERROR_INVALID_SID)
                     error = ERROR_INVALID_SID;
                 goto lerr;
             }
+            /* a ';' before the ')' is one field too many */
             while (*StringAcl && *StringAcl != ')')
+            {
+                if (*StringAcl == ';')
+                {
+                    error = ERROR_INVALID_PARAMETER;
+                    goto lerr;
+                }
                 StringAcl++;
+            }
 
             if (*StringAcl != ')')
                 goto lerr;
@@ -3227,6 +3361,8 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
     LPCWSTR lptoken;
     LPBYTE lpNext = NULL;
     DWORD len;
+    BOOL MoreSections;
+    BYTE ScratchSid[SECURITY_MAX_SID_SIZE];
 
     *cBytes = sizeof(SECURITY_DESCRIPTOR_RELATIVE);
 
@@ -3256,6 +3392,8 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
 	while (*lptoken && *lptoken != ':')
             lptoken++;
 
+	/* another section follows this token */
+        MoreSections = *lptoken != 0;
 	if (*lptoken)
             lptoken--;
 
@@ -3274,7 +3412,9 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
                     SetLastError(ERROR_INVALID_PARAMETER);
                     goto lend;
                 }
-                if (!ParseStringSidToSid(tok, lpNext, &bytes))
+                if (IsEmptySidField(tok, MoreSections))
+                    goto lend;
+                if (!ParseStringSidToSid(tok, lpNext ? lpNext : ScratchSid, &bytes))
                     goto lend;
 
                 if (SecurityDescriptor)
@@ -3297,7 +3437,9 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
                     SetLastError(ERROR_INVALID_PARAMETER);
                     goto lend;
                 }
-                if (!ParseStringSidToSid(tok, lpNext, &bytes))
+                if (IsEmptySidField(tok, MoreSections))
+                    goto lend;
+                if (!ParseStringSidToSid(tok, lpNext ? lpNext : ScratchSid, &bytes))
                     goto lend;
 
                 if (SecurityDescriptor)
@@ -3317,7 +3459,7 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
                 DWORD bytes;
                 BOOL isNull;
 
-                if (!ParseStringAclToAcl(tok, FALSE, &flags, (PACL)lpNext, &bytes, &isNull))
+                if (!ParseStringAclToAcl(tok, FALSE, &flags, (PACL)lpNext, &bytes, &isNull, MoreSections))
                     goto lend;
 
                 if (SecurityDescriptor)
@@ -3343,7 +3485,7 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
                 DWORD bytes;
                 BOOL isNull;
 
-                if (!ParseStringAclToAcl(tok, TRUE, &flags, (PACL)lpNext, &bytes, &isNull))
+                if (!ParseStringAclToAcl(tok, TRUE, &flags, (PACL)lpNext, &bytes, &isNull, MoreSections))
                     goto lend;
 
                 if (SecurityDescriptor)

@@ -149,6 +149,7 @@ list(APPEND SOURCE
     TraverseRestricted.c
     TokenLogonSid.c
     WriteRestrictedToken.c
+    WellKnownSidTypes.c
     TokenQueryParity.c
     OpenProcessTokenLimited.c
     ServiceAccessCheck.c

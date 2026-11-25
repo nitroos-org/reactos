@@ -13,6 +13,9 @@
    when no query brought an address */
 BOOL g_bQuietTimeout = FALSE;
 
+/* Set when the last query was made over TCP (the vc option) and the exchange failed */
+BOOL g_bTcpFailed = FALSE;
+
 /* The query again over TCP (RFC 1035, 4.2.2: a two byte length before each message), for an answer that did not
    fit a datagram (the TC bit): Windows' nslookup does the same. Returns the length of the answer or 0 when the
    exchange failed (the truncated datagram answer is then what there is). */
@@ -81,6 +84,33 @@ fail:
     return 0;
 }
 
+/* The address of the DNS server for a stream socket */
+static BOOL ServerAddress( PSOCKADDR_STORAGE pAddr, int *pLen )
+{
+    RtlZeroMemory( pAddr, sizeof(*pAddr) );
+    if( strchr( State.DefaultServerAddress, ':' ) != NULL )
+    {
+        PSOCKADDR_IN6 pAddr6 = (PSOCKADDR_IN6)pAddr;
+        INT AddrLen = sizeof(*pAddr6);
+
+        if( WSAStringToAddressA( State.DefaultServerAddress, AF_INET6, NULL, (PSOCKADDR)pAddr6, &AddrLen ) != 0 )
+            return FALSE;
+        pAddr6->sin6_family = AF_INET6;
+        pAddr6->sin6_port = htons( DNS_SERVER_PORT );
+        *pLen = sizeof(*pAddr6);
+    }
+    else
+    {
+        PSOCKADDR_IN pAddr4 = (PSOCKADDR_IN)pAddr;
+
+        pAddr4->sin_family = AF_INET;
+        pAddr4->sin_port = htons( DNS_SERVER_PORT );
+        pAddr4->sin_addr.s_addr = inet_addr( State.DefaultServerAddress );
+        *pLen = sizeof(*pAddr4);
+    }
+    return TRUE;
+}
+
 BOOL SendRequest( PCHAR pInBuffer,
                   ULONG InBufferLength,
                   PCHAR pOutBuffer,
@@ -109,6 +139,27 @@ BOOL SendRequest( PCHAR pInBuffer,
 
     /* If D2 flags is enabled, then display D2 information. */
     if( State.d2 ) PrintD2( pInBuffer, InBufferLength );
+
+    g_bTcpFailed = FALSE;
+
+    /* With the vc option every query goes over TCP, none over UDP (measured on Windows Server 2022) */
+    if( State.vc )
+    {
+        SOCKADDR_STORAGE Dest;
+        int Len = 0;
+        ULONG Tcp = 0;
+
+        if( ServerAddress( &Dest, &Len ) )
+            Tcp = SendRequestTcp( pInBuffer, InBufferLength, pOutBuffer, *pOutBufferLength, (PSOCKADDR)&Dest, Len );
+        if( !Tcp || ntohs( ((PSHORT)&pOutBuffer[0])[0] ) != RequestID )
+        {
+            g_bTcpFailed = TRUE;
+            return FALSE;
+        }
+        if( State.debug ) PrintDebug( pOutBuffer, Tcp );
+        *pOutBufferLength = Tcp;
+        return TRUE;
+    }
 
     /* Create the sockets for both send and receive. */
     s = socket( bIPv6 ? AF_INET6 : AF_INET, SOCK_DGRAM, IPPROTO_UDP );

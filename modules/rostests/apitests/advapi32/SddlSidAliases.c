@@ -335,10 +335,79 @@ static void TestAliasSyntax(void)
     ExpectConversion(L"D:(A;;GA;;;BA)(A;;GA;;;DA)(A;;GR;;;WD)", FALSE, ERROR_INVALID_SID);
 }
 
+/* An empty or malformed SID field (Windows Server 2022): an empty one names nothing when the string ends with it, it is
+ * a bad SID when more text follows, and a bad parameter when the ACE has a field too many or too few */
+static void TestEmptySidField(void)
+{
+    static const struct
+    {
+        const WCHAR *Sddl;
+        DWORD Error;
+    } Rows[] =
+    {
+        { L"D:(A;;GA;;;)", ERROR_NONE_MAPPED },
+        { L"D:(A;;GA;;; )", ERROR_NONE_MAPPED },
+        { L"D:(A;;GA;;;  )", ERROR_NONE_MAPPED },
+        { L"D:(A;;GA;;;", ERROR_NONE_MAPPED },
+        { L"D:(D;;GA;;;)", ERROR_NONE_MAPPED },
+        { L"D:(OA;;GA;;;)", ERROR_NONE_MAPPED },
+        { L"D:P(A;;GA;;;)", ERROR_NONE_MAPPED },
+        { L"D:AI(A;;GA;;;)", ERROR_NONE_MAPPED },
+        { L"D:(A;CI;GA;;;)", ERROR_NONE_MAPPED },
+        { L"D:(A;;;;;)", ERROR_NONE_MAPPED },
+        { L"S:(AU;;GA;;;)", ERROR_NONE_MAPPED },
+        { L"S:(AL;;GA;;;)", ERROR_NONE_MAPPED },
+        { L"S:(ML;;NW;;;)", ERROR_NONE_MAPPED },
+        { L"D:(A;;GA;;;WD)(A;;GA;;;)", ERROR_NONE_MAPPED },
+        { L"D:(A;;GA;;;)(A;;GA;;;WD)", ERROR_INVALID_SID },
+        { L"D:(A;;GA;;;)(A;;GA;;;)", ERROR_INVALID_SID },
+        { L"D:(A;;GA;;;)S:(AU;;GA;;;WD)", ERROR_INVALID_SID },
+        { L"D:(A;;GA;;;)G:WD", ERROR_INVALID_SID },
+        { L"D:(A;;GA;;;)x", ERROR_INVALID_SID },
+        { L"D:(A;;GA;;;) x", ERROR_INVALID_SID },
+        { L"D:(A;;GA;;;) (A;;GA;;;WD)", ERROR_INVALID_SID },
+        { L"D:(A;;GA;;;ZZ", ERROR_INVALID_SID },
+        { L"D:(A;;GA;;;S-1-5-33;", ERROR_INVALID_PARAMETER },
+        { L"D:(A;;GA;;;;WD)", ERROR_INVALID_PARAMETER },
+        { L"D:(A;;GA;;;S-1-;)", ERROR_INVALID_PARAMETER },
+        { L"D:(A;;GA;;;WD)(A;;GA;;)", ERROR_INVALID_PARAMETER },
+        { L"D:(A;;GA;;;WD)(A;;GA)", ERROR_INVALID_PARAMETER },
+        { L"D:(A;;GA;;;);", ERROR_INVALID_PARAMETER },
+        { L"D:(A;;GA;;;;)", ERROR_INVALID_PARAMETER },
+        { L"D:(A;;GA;;;WD;)", ERROR_INVALID_PARAMETER },
+        { L"D:(A;;GA;;)", ERROR_INVALID_PARAMETER },
+        { L"D:(A;;GA)", ERROR_INVALID_PARAMETER },
+        { L"D:(A;)", ERROR_INVALID_PARAMETER },
+        { L"D:(A;;GA;;;S-1-)", ERROR_INVALID_SID },
+        { L"D:(A;;GA;;;S-1-5-)", ERROR_INVALID_SID },
+        { L"D:(A;;GA;;;S-1-5-33x)", ERROR_INVALID_SID },
+        { L"D:(A;;GA;;;S-2-5-33)", ERROR_INVALID_SID },
+        { L"D:(A;;GA;;;S-1-5-33-)", ERROR_INVALID_SID },
+        { L"D:(A;;GA;;;S)", ERROR_INVALID_SID },
+        { L"D:(A;;GA;;;XX)", ERROR_INVALID_SID },
+        { L"O:", ERROR_NONE_MAPPED },
+        { L"G:", ERROR_NONE_MAPPED },
+        { L"O:WDG:", ERROR_NONE_MAPPED },
+        { L"G:WDO:", ERROR_NONE_MAPPED },
+        { L"O:G:WD", ERROR_INVALID_SID },
+        { L"G:O:WD", ERROR_INVALID_SID },
+        { L"O:G:", ERROR_INVALID_SID },
+        { L"O:;G:", ERROR_INVALID_SID },
+        { L"O:XX", ERROR_INVALID_SID },
+        { L"O:S-1-", ERROR_INVALID_SID },
+        { L"O:S-1-5-33x", ERROR_INVALID_SID },
+    };
+    size_t i;
+
+    for (i = 0; i < ARRAYSIZE(Rows); i++)
+        ExpectConversion(Rows[i].Sddl, FALSE, Rows[i].Error);
+}
+
 START_TEST(SddlSidAliases)
 {
     TestAliasTable();
     TestDomainAliases();
     TestMachineAccounts();
     TestAliasSyntax();
+    TestEmptySidField();
 }
