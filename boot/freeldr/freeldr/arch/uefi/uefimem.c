@@ -30,6 +30,10 @@ AddMemoryDescriptor(
 extern EFI_SYSTEM_TABLE* GlobalSystemTable;
 extern EFI_HANDLE GlobalImageHandle;
 
+/* The framebuffer of the firmware's GOP (uefivid.c), 0 without one */
+extern ULONG_PTR VramAddress;
+extern ULONG VramSize;
+
 EFI_MEMORY_DESCRIPTOR* EfiMemoryMap = NULL;
 UINT32 FreeldrDescCount;
 PVOID OsLoaderBase;
@@ -100,6 +104,50 @@ UefiSetMemory(
                                            BasePage,
                                            PageCount,
                                            MemoryType);
+}
+
+/*
+ * The framebuffer that the firmware handed over (GOP) is not memory the kernel may use. Firmware that allocates its
+ * framebuffer from free or boot services memory lists those pages as such: the part of a range that overlaps the
+ * framebuffer is described as permanent firmware memory instead. A framebuffer in a reserved or I/O range is not
+ * in the list at all (see the caller) and stays out of it.
+ */
+static
+VOID
+UefiSetMemoryExceptFramebuffer(
+    _Inout_ PFREELDR_MEMORY_DESCRIPTOR MemoryMap,
+    _In_ ULONG_PTR BaseAddress,
+    _In_ PFN_COUNT SizeInPages,
+    _In_ TYPE_OF_MEMORY MemoryType)
+{
+    ULONG_PTR Start, End, FbStart, FbEnd, OverlapStart, OverlapEnd;
+
+    if (((MemoryType != LoaderFree) && (MemoryType != LoaderFirmwareTemporary)) ||
+        (VramAddress == 0) || (VramSize == 0))
+    {
+        UefiSetMemory(MemoryMap, BaseAddress, SizeInPages, MemoryType);
+        return;
+    }
+
+    Start = BaseAddress / EFI_PAGE_SIZE;
+    End = Start + SizeInPages;
+    FbStart = VramAddress / EFI_PAGE_SIZE;
+    FbEnd = (VramAddress + VramSize + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
+
+    if ((FbStart >= End) || (FbEnd <= Start))
+    {
+        UefiSetMemory(MemoryMap, BaseAddress, SizeInPages, MemoryType);
+        return;
+    }
+
+    OverlapStart = (Start > FbStart) ? Start : FbStart;
+    OverlapEnd = (End < FbEnd) ? End : FbEnd;
+
+    if (Start < OverlapStart)
+        UefiSetMemory(MemoryMap, Start * EFI_PAGE_SIZE, (PFN_COUNT)(OverlapStart - Start), MemoryType);
+    UefiSetMemory(MemoryMap, OverlapStart * EFI_PAGE_SIZE, (PFN_COUNT)(OverlapEnd - OverlapStart), LoaderFirmwarePermanent);
+    if (OverlapEnd < End)
+        UefiSetMemory(MemoryMap, OverlapEnd * EFI_PAGE_SIZE, (PFN_COUNT)(End - OverlapEnd), MemoryType);
 }
 
 static
@@ -217,10 +265,10 @@ UefiMemGetMemoryMap(ULONG *MemoryMapSize)
         /* We really don't want to touch these reserved spots at all */
         if (MemoryType != LoaderReserve)
         {
-            UefiSetMemory(FreeldrMem,
-                          MapEntry->PhysicalStart,
-                          MapEntry->NumberOfPages,
-                          MemoryType);
+            UefiSetMemoryExceptFramebuffer(FreeldrMem,
+                                           MapEntry->PhysicalStart,
+                                           MapEntry->NumberOfPages,
+                                           MemoryType);
         }
 
         MapEntry = NEXT_MEMORY_DESCRIPTOR(MapEntry, DescriptorSize);

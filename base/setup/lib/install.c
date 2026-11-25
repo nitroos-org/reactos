@@ -634,8 +634,21 @@ PrepareCopyInfFile(
 
     DPRINT("FullPath(1): '%S'\n", PathBuffer);
 
-    /* Create the install directory */
-    Status = SetupCreateDirectory(PathBuffer);
+    /*
+     * Create the install directory. A new one is made with the descriptor of the Windows directory, on a volume whose
+     * root has the descriptor of a system volume, so that what is copied into it is born with the entries it inherits
+     * and winlogon has nothing to repair at its first start. An install over an existing directory leaves both alone
+     * (an install of an older build is repaired by winlogon).
+     */
+    if (!DoesDirExist(NULL, PathBuffer))
+    {
+        SetupSecureSystemVolumeRoot(pSetupData->DestinationRootPath.Buffer);
+        Status = SetupCreateSystemDirectory(PathBuffer);
+    }
+    else
+    {
+        Status = SetupCreateDirectory(PathBuffer);
+    }
     if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_COLLISION)
     {
         DPRINT1("Creating directory '%S' failed: Status = 0x%08lx\n", PathBuffer, Status);

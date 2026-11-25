@@ -626,10 +626,10 @@ RecycleBin5_OwnerDescriptor(
         LocalFree(StringSid);
         return HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER);
     }
-    /* The order of Windows Server 2022's $Recycle.Bin\<SID> (measured): SYSTEM, Administrators, the user; and the label
-     * Low, NO_WRITE_UP, inherit-only for what is put into the folder (the items get S:AI(ML;ID;NW;;;LW), a moved file
-     * keeps its own) */
-    wsprintfW(Sddl, L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)S:AI(ML;OICIIO;NW;;;LW)", StringSid);
+    /* The order of Windows Server 2022's $Recycle.Bin\<SID> (measured on the system volume and on a second volume):
+     * Administrators, SYSTEM, the user; and the label Low, NO_WRITE_UP, inherit-only for what is put into the folder
+     * (the items get S:AI(ML;ID;NW;;;LW), a moved file keeps its own) */
+    wsprintfW(Sddl, L"D:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FA;;;%s)S:AI(ML;OICIIO;NW;;;LW)", StringSid);
     LocalFree(StringSid);
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(Sddl, SDDL_REVISION_1, Descriptor, NULL))
         return HRESULT_FROM_WIN32(GetLastError());

@@ -40,6 +40,7 @@ list(APPEND SOURCE
     CreateService.c
     CreateProcessAsUserToken.c
     CreateProcessAsUserRights.c
+    CreateProcessAsUserTokenSd.c
     CreateProcessWithLogon.c
     CreateProcessWithToken.c
     CreateEnvironmentBlockProfile.c
@@ -82,6 +83,7 @@ list(APPEND SOURCE
     LsassServerLeak.c
     LsaLogonUserFailure.c
     LsaLogonUserLocalGroups.c
+    LsaClientAccess.c
     LsaPortClients.c
     LsaPrivateDataCaller.c
     LsaSubmitLength.c

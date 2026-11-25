@@ -36,6 +36,7 @@ extern void func_ConvertStringSidToSid(void);
 extern void func_CreateService(void);
 extern void func_CreateProcessAsUserToken(void);
 extern void func_CreateProcessAsUserRights(void);
+extern void func_CreateProcessAsUserTokenSd(void);
 extern void func_CreateProcessWithLogon(void);
 extern void func_CreateProcessWithToken(void);
 extern void func_CreateEnvironmentBlockProfile(void);
@@ -82,6 +83,7 @@ extern void func_LsassLeak(void);
 extern void func_LsassServerLeak(void);
 extern void func_LsaLogonUserFailure(void);
 extern void func_LsaLogonUserLocalGroups(void);
+extern void func_LsaClientAccess(void);
 extern void func_LsaPortClients(void);
 extern void func_LsaPrivateDataCaller(void);
 extern void func_LsaSubmitLength(void);
@@ -260,6 +262,7 @@ const struct test winetest_testlist[] =
     { "CreateService", func_CreateService },
     { "CreateProcessAsUserToken", func_CreateProcessAsUserToken },
     { "CreateProcessAsUserRights", func_CreateProcessAsUserRights },
+    { "CreateProcessAsUserTokenSd", func_CreateProcessAsUserTokenSd },
     { "CreateProcessWithLogon", func_CreateProcessWithLogon },
     { "CreateProcessWithToken", func_CreateProcessWithToken },
     { "CreateEnvironmentBlockProfile", func_CreateEnvironmentBlockProfile },
@@ -305,6 +308,7 @@ const struct test winetest_testlist[] =
     { "LsassServerLeak", func_LsassServerLeak },
     { "LsaLogonUserFailure", func_LsaLogonUserFailure },
     { "LsaLogonUserLocalGroups", func_LsaLogonUserLocalGroups },
+    { "LsaClientAccess", func_LsaClientAccess },
     { "LsaPortClients", func_LsaPortClients },
     { "LsaPrivateDataCaller", func_LsaPrivateDataCaller },
     { "LsaSubmitLength", func_LsaSubmitLength },

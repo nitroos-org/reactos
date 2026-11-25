@@ -70,6 +70,11 @@ LsapAddNotification(
 
     TRACE("LsapAddNotification(%p)\n", pRequestMsg);
 
+    /* Only a client with POLICY_NOTIFICATION access to the policy may register an event */
+    Status = LsapCheckClientPolicyNotificationAccess(&pRequestMsg->h.ClientId);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
     /* Allocate a new notification list entry */
     pEntry = RtlAllocateHeap(RtlGetProcessHeap(),
                              HEAP_ZERO_MEMORY,
@@ -109,6 +114,27 @@ LsapAddNotification(
     {
         ERR("NtDuplicateObject() failed (Status 0x%08lx)\n", Status);
         goto done;
+    }
+
+    /* The handle must be an event (STATUS_INVALID_HANDLE for any other object, as on Windows) */
+    {
+        union
+        {
+            OBJECT_TYPE_INFORMATION Info;
+            BYTE Buffer[sizeof(OBJECT_TYPE_INFORMATION) + 32 * sizeof(WCHAR)];
+        } Type;
+        ULONG Length;
+
+        RtlZeroMemory(&Type, sizeof(Type));
+        if (!NT_SUCCESS(NtQueryObject(pEntry->MappedEventHandle, ObjectTypeInformation, &Type, sizeof(Type), &Length)) ||
+            Type.Info.TypeName.Length != 5 * sizeof(WCHAR) ||
+            _wcsnicmp(Type.Info.TypeName.Buffer, L"Event", 5) != 0)
+        {
+            NtClose(pEntry->MappedEventHandle);
+            pEntry->MappedEventHandle = NULL;
+            Status = STATUS_INVALID_HANDLE;
+            goto done;
+        }
     }
 
     /* Insert the new entry into the notification list */

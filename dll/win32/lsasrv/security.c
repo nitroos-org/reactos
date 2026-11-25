@@ -775,4 +775,188 @@ done:
     return Status;
 }
 
+
+/*
+ * The token of the client of a request on the authentication port, as the impersonation token (identification level) that
+ * AccessCheck takes: the token its thread impersonates, or that of its process when the thread impersonates nobody. The
+ * token of lsass itself is never used: a client whose token cannot be opened is refused.
+ */
+static
+NTSTATUS
+LsapOpenClientAccessToken(
+    _In_ PCLIENT_ID ClientId,
+    _Out_ PHANDLE AccessToken,
+    _Out_opt_ PLUID AuthenticationId)
+{
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    SECURITY_QUALITY_OF_SERVICE Qos;
+    TOKEN_STATISTICS Statistics;
+    HANDLE ThreadHandle = NULL, ProcessHandle = NULL, SourceToken = NULL;
+    ULONG Length;
+    NTSTATUS Status;
+
+    *AccessToken = NULL;
+
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    Status = NtOpenThread(&ThreadHandle, THREAD_QUERY_INFORMATION, &ObjectAttributes, ClientId);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    Status = NtOpenThreadTokenEx(ThreadHandle, TOKEN_QUERY | TOKEN_DUPLICATE, TRUE, 0, &SourceToken);
+    if (Status == STATUS_NO_TOKEN)
+    {
+        SourceToken = NULL;
+        InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+        Status = NtOpenProcess(&ProcessHandle, PROCESS_QUERY_INFORMATION, &ObjectAttributes, ClientId);
+        if (NT_SUCCESS(Status))
+            Status = NtOpenProcessToken(ProcessHandle, TOKEN_QUERY | TOKEN_DUPLICATE, &SourceToken);
+    }
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    Status = NtQueryInformationToken(SourceToken, TokenStatistics, &Statistics, sizeof(Statistics), &Length);
+    if (!NT_SUCCESS(Status))
+        goto done;
+    if (AuthenticationId)
+        RtlCopyLuid(AuthenticationId, &Statistics.AuthenticationId);
+
+    Qos.Length = sizeof(Qos);
+    Qos.ImpersonationLevel = SecurityIdentification;
+    Qos.ContextTrackingMode = SECURITY_STATIC_TRACKING;
+    Qos.EffectiveOnly = FALSE;
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    ObjectAttributes.SecurityQualityOfService = &Qos;
+    Status = NtDuplicateToken(SourceToken, TOKEN_QUERY, &ObjectAttributes, FALSE, TokenImpersonation, AccessToken);
+
+done:
+    if (!NT_SUCCESS(Status))
+        Status = STATUS_ACCESS_DENIED;
+    if (SourceToken != NULL)
+        NtClose(SourceToken);
+    if (ProcessHandle != NULL)
+        NtClose(ProcessHandle);
+    if (ThreadHandle != NULL)
+        NtClose(ThreadHandle);
+    return Status;
+}
+
+
+/*
+ * The data of a logon session may be read by the owner of the session (the logon session of the caller's own token) and by
+ * the Administrators and SYSTEM, which has that group. Measured on Windows Server 2022: a standard user, LocalService and
+ * NetworkService get STATUS_ACCESS_DENIED for every session but their own, an administrator and SYSTEM for none.
+ */
+NTSTATUS
+LsapCheckClientLogonSessionAccess(
+    _In_ PCLIENT_ID ClientId,
+    _In_ PLUID LogonId)
+{
+    SID_IDENTIFIER_AUTHORITY Authority = {SECURITY_NT_AUTHORITY};
+    PSID AdministratorsSid = NULL;
+    LUID ClientLogonId;
+    HANDLE Token = NULL;
+    BOOL IsMember = FALSE;
+    NTSTATUS Status;
+
+    Status = LsapOpenClientAccessToken(ClientId, &Token, &ClientLogonId);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = STATUS_ACCESS_DENIED;
+    if (RtlEqualLuid(&ClientLogonId, LogonId))
+    {
+        Status = STATUS_SUCCESS;
+    }
+    else if (NT_SUCCESS(RtlAllocateAndInitializeSid(&Authority,
+                                                    2,
+                                                    SECURITY_BUILTIN_DOMAIN_RID,
+                                                    DOMAIN_ALIAS_RID_ADMINS,
+                                                    0, 0, 0, 0, 0, 0,
+                                                    &AdministratorsSid)))
+    {
+        if (CheckTokenMembership(Token, AdministratorsSid, &IsMember) && IsMember)
+            Status = STATUS_SUCCESS;
+        RtlFreeSid(AdministratorsSid);
+    }
+
+    NtClose(Token);
+    return Status;
+}
+
+
+/*
+ * A client may register an event for the policy change notification when its token has POLICY_NOTIFICATION access to the
+ * policy object: its descriptor gives it to the Administrators, LocalService and NetworkService (and SYSTEM through the
+ * Administrators). Measured on Windows Server 2022: an administrator, SYSTEM, LocalService and NetworkService register
+ * without a limit (4096 events in one process), a standard user gets STATUS_ACCESS_DENIED.
+ */
+NTSTATUS
+LsapCheckClientPolicyNotificationAccess(
+    _In_ PCLIENT_ID ClientId)
+{
+    static GENERIC_MAPPING PolicyMapping = {POLICY_READ, POLICY_WRITE, POLICY_EXECUTE, POLICY_ALL_ACCESS};
+    union
+    {
+        PRIVILEGE_SET Set;
+        BYTE Buffer[sizeof(PRIVILEGE_SET) + 4 * sizeof(LUID_AND_ATTRIBUTES)];
+    } Privileges;
+    PLSA_DB_OBJECT PolicyObject = NULL;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    ULONG SdLength = 0;
+    DWORD PrivilegesLength = sizeof(Privileges), Granted = 0;
+    BOOL AccessStatus = FALSE;
+    HANDLE Token = NULL;
+    NTSTATUS Status;
+
+    Status = LsapOpenClientAccessToken(ClientId, &Token, NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = LsapOpenDbObject(NULL, NULL, L"Policy", LsaDbPolicyObject, POLICY_LOOKUP_NAMES, TRUE, &PolicyObject);
+    if (!NT_SUCCESS(Status))
+    {
+        Status = STATUS_ACCESS_DENIED;
+        goto done;
+    }
+
+    Status = LsapGetObjectAttribute(PolicyObject, L"SecDesc", NULL, &SdLength);
+    if ((Status != STATUS_BUFFER_OVERFLOW && !NT_SUCCESS(Status)) || SdLength == 0)
+    {
+        Status = STATUS_ACCESS_DENIED;
+        goto done;
+    }
+
+    Sd = RtlAllocateHeap(RtlGetProcessHeap(), 0, SdLength);
+    if (Sd == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto done;
+    }
+
+    Status = LsapGetObjectAttribute(PolicyObject, L"SecDesc", Sd, &SdLength);
+    if (!NT_SUCCESS(Status) || !RtlValidRelativeSecurityDescriptor(Sd, SdLength, 0))
+    {
+        Status = STATUS_ACCESS_DENIED;
+        goto done;
+    }
+
+    if (AccessCheck(Sd, Token, POLICY_NOTIFICATION, &PolicyMapping, &Privileges.Set, &PrivilegesLength, &Granted, &AccessStatus) &&
+        AccessStatus)
+    {
+        Status = STATUS_SUCCESS;
+    }
+    else
+    {
+        Status = STATUS_ACCESS_DENIED;
+    }
+
+done:
+    if (Sd != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Sd);
+    if (PolicyObject != NULL)
+        LsapCloseDbObject(PolicyObject);
+    NtClose(Token);
+    return Status;
+}
+
 /* EOF */
