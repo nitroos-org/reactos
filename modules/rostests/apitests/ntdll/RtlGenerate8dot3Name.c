@@ -173,4 +173,94 @@ START_TEST(RtlGenerate8dot3Name)
             ok(RtlEqualUnicodeString(&Expected, &ShortName, FALSE), "%u:: Generated: %.*S. Expected: %.*S\n", i, ShortName.Length / sizeof(WCHAR), ShortName.Buffer, Expected.Length / sizeof(WCHAR), Expected.Buffer);
         }
     }
+
+    /*
+     * One name whose candidates are all taken, one after the other: ~1 to ~4,
+     * then two letters, four hexadecimal digits of the hash and ~1 again, and
+     * from ~10 on the base name gives up characters so that base name and
+     * "~<index>" stay within eight characters (measured on Windows Server 2022
+     * with literal short names that occupied every candidate in turn up to
+     * ~1300; the hash value itself is not compared here).
+     */
+    {
+        WCHAR Buffer[12];
+        GENERATE_NAME_CONTEXT Context;
+        UNICODE_STRING LongName, ShortName;
+        WCHAR Prefix[7] = L"";
+        ULONG Call, Index = 0;
+        BOOLEAN SawHash = FALSE;
+
+        RtlZeroMemory(&Context, sizeof(Context));
+        RtlInitUnicodeString(&LongName, L"longnamefile0005.txt");
+        ShortName.Buffer = Buffer;
+        ShortName.MaximumLength = sizeof(Buffer);
+
+        for (Call = 1; Call <= 1300 + 4; Call++)
+        {
+            WCHAR Expected[16];
+            WCHAR Digits[8];
+            ULONG DigitCount = 0, Value, Room;
+
+            ShortName.Length = 0;
+            RtlFillMemory(Buffer, sizeof(Buffer), 0xCC);
+            RtlGenerate8dot3Name(&LongName, FALSE, &Context, &ShortName);
+
+            if (Call <= 4)
+            {
+                Index = Call;
+            }
+            else
+            {
+                if (Call == 5)
+                {
+                    /* The hash form: LO<4 hex digits>~1.TXT */
+                    ok(ShortName.Length == 12 * sizeof(WCHAR), "call %lu: length %u\n", Call, ShortName.Length);
+                    ok(ShortName.Buffer[0] == L'L' && ShortName.Buffer[1] == L'O', "call %lu: %.*S\n", Call, ShortName.Length / sizeof(WCHAR), ShortName.Buffer);
+                    RtlCopyMemory(Prefix, ShortName.Buffer, 6 * sizeof(WCHAR));
+                    Prefix[6] = 0;
+                    SawHash = TRUE;
+                }
+                Index = Call - 4;
+            }
+
+            for (Value = Index; Value; Value /= 10)
+                Digits[DigitCount++] = L'0' + (Value % 10);
+
+            if (SawHash)
+            {
+                ULONG n = 0, c;
+
+                Room = 8 - (DigitCount + 1);
+                if (Room > 6)
+                    Room = 6;
+                for (c = 0; c < Room; c++)
+                    Expected[n++] = Prefix[c];
+                Expected[n++] = L'~';
+                while (DigitCount)
+                    Expected[n++] = Digits[--DigitCount];
+                Expected[n++] = L'.'; Expected[n++] = L'T'; Expected[n++] = L'X'; Expected[n++] = L'T';
+                Expected[n] = 0;
+            }
+            else
+            {
+                ULONG n = 0, c;
+
+                for (c = 0; c < 6; c++)
+                    Expected[n++] = L"LONGNA"[c];
+                Expected[n++] = L'~';
+                while (DigitCount)
+                    Expected[n++] = Digits[--DigitCount];
+                Expected[n++] = L'.'; Expected[n++] = L'T'; Expected[n++] = L'X'; Expected[n++] = L'T';
+                Expected[n] = 0;
+            }
+
+            if (ShortName.Length / sizeof(WCHAR) != wcslen(Expected) ||
+                memcmp(ShortName.Buffer, Expected, ShortName.Length) != 0)
+            {
+                ok(0, "call %lu: Generated: %.*S. Expected: %S\n", Call, ShortName.Length / sizeof(WCHAR), ShortName.Buffer, Expected);
+                break;
+            }
+        }
+        ok(Call == 1300 + 4 + 1, "stopped at call %lu\n", Call);
+    }
 }

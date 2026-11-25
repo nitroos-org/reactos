@@ -228,15 +228,23 @@ int NgAssignNewSecurity(PNG_VCB Vcb, ngc_node *Node, PSECURITY_DESCRIPTOR Parent
     PSECURITY_DESCRIPTOR New = NULL;
     SECURITY_DESCRIPTOR_CONTROL Parent, Creator;
     ULONG AutoInherit = 0;
+    BOOLEAN CreatorDacl;
     NTSTATUS Status;
     int Err;
 
     if (!As)
         return 0;
-    /* Auto-inheritance of the DACL only below an ACL marked auto-inherited, and only for an ACL the create does not supply. */
+    /*
+     * Measured on Windows Server 2022 (NTFS): what a new file inherits is always marked INHERITED_ACE, whether or not the
+     * parent's DACL is auto-inherited; the new descriptor carries SE_DACL_AUTO_INHERITED only when the parent does (below a
+     * directory made with an explicit DACL the ACEs are marked and the control bit is not set). A DACL the create supplies
+     * is used as it is, the descriptor is protected, and nothing is inherited.
+     */
     Parent = ParentSd ? ((PISECURITY_DESCRIPTOR)ParentSd)->Control : 0;
     Creator = As->SecurityDescriptor ? ((PISECURITY_DESCRIPTOR)As->SecurityDescriptor)->Control : 0;
-    if ((Parent & SE_DACL_AUTO_INHERITED) && !(Creator & SE_DACL_PRESENT))
+    CreatorDacl = (Creator & SE_DACL_PRESENT) && !(Creator & SE_DACL_DEFAULTED);
+    /* A DACL marked defaulted still gives way to inheritance, unmarked, as it did (not measured the same way: see the ticket) */
+    if (!(Creator & SE_DACL_PRESENT) && ParentSd)
         AutoInherit |= SEF_DACL_AUTO_INHERIT;
     /*
      * The SACL is auto-inherited below a parent that has an auto-inherited SACL and also when the create supplies one
@@ -253,6 +261,10 @@ int NgAssignNewSecurity(PNG_VCB Vcb, ngc_node *Node, PSECURITY_DESCRIPTOR Parent
         *Rejected = Status;
         return -NGC_EINVAL;
     }
+    if (CreatorDacl)
+        ((PISECURITY_DESCRIPTOR)New)->Control |= SE_DACL_PROTECTED;
+    else if (ParentSd && !(Creator & SE_DACL_PRESENT) && !(Parent & SE_DACL_AUTO_INHERITED))
+        ((PISECURITY_DESCRIPTOR)New)->Control &= ~SE_DACL_AUTO_INHERITED;
     NgMapGenericDacl(New);
     Err = ngc_set_security(Vcb->Core, Node, New, RtlLengthSecurityDescriptor(New));
     SeDeassignSecurity(&New);

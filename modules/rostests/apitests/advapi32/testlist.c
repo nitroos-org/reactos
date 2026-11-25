@@ -155,6 +155,7 @@ extern void func_KsecUnknownIoctl(void);
 extern void func_RngKnownAnswer(void);
 extern void func_RngCallersFailure(void);
 extern void func_SaferIdentifyLevel(void);
+extern void func_FileInheritedAce(void);
 extern void func_TokenFilteredFlags(void);
 extern void func_TokenDefaultDacl(void);
 extern void func_TokenElevation(void);
@@ -376,6 +377,7 @@ const struct test winetest_testlist[] =
     { "RngKnownAnswer", func_RngKnownAnswer },
     { "RngCallersFailure", func_RngCallersFailure },
     { "SaferIdentifyLevel", func_SaferIdentifyLevel },
+    { "FileInheritedAce", func_FileInheritedAce },
     { "TokenFilteredFlags", func_TokenFilteredFlags },
     { "TokenDefaultDacl", func_TokenDefaultDacl },
     { "TokenElevation", func_TokenElevation },

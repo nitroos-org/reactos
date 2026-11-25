@@ -59,6 +59,7 @@ extern void func_SHDefExtractIcon(void);
 extern void func_SHEnumerateUnreadMailAccountsW(void);
 extern void func_RecycleBinAcl(void);
 extern void func_RecycleBinOtherVolume(void);
+extern void func_RecycleBinLazy(void);
 extern void func_SHEmptyRecycleBin(void);
 extern void func_SHEvaluateSystemCommandTemplate(void);
 extern void func_She(void);
@@ -153,6 +154,7 @@ const struct test winetest_testlist[] =
     { "SHEnumerateUnreadMailAccountsW", func_SHEnumerateUnreadMailAccountsW },
     { "RecycleBinAcl", func_RecycleBinAcl },
     { "RecycleBinOtherVolume", func_RecycleBinOtherVolume },
+    { "RecycleBinLazy", func_RecycleBinLazy },
     { "SHEmptyRecycleBin", func_SHEmptyRecycleBin },
     { "SHEvaluateSystemCommandTemplate", func_SHEvaluateSystemCommandTemplate },
     { "She", func_She },

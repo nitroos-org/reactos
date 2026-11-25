@@ -127,6 +127,46 @@ cleanup:
     return ret;
 }
 
+/* A bin that has no folder yet: nothing to list */
+class RecycleBin5EmptyEnum : public IRecycleBinEnumList
+{
+public:
+    RecycleBin5EmptyEnum() : m_ref(1) { }
+    virtual ~RecycleBin5EmptyEnum() { }
+    STDMETHODIMP QueryInterface(REFIID riid, void **ppvObject) override
+    {
+        if (!ppvObject)
+            return E_POINTER;
+        if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_IRecycleBinEnumList))
+        {
+            *ppvObject = static_cast<IRecycleBinEnumList *>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppvObject = NULL;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&m_ref); }
+    STDMETHODIMP_(ULONG) Release() override
+    {
+        ULONG refCount = InterlockedDecrement(&m_ref);
+        if (refCount == 0)
+            delete this;
+        return refCount;
+    }
+    STDMETHODIMP Next(DWORD, IRecycleBinFile **, DWORD *pceltFetched) override
+    {
+        if (pceltFetched)
+            *pceltFetched = 0;
+        return S_FALSE;
+    }
+    STDMETHODIMP Skip(DWORD) override { return S_OK; }
+    STDMETHODIMP Reset() override { return S_OK; }
+
+private:
+    LONG m_ref;
+};
+
 class RecycleBin5 : public IRecycleBin5
 {
 public:
@@ -165,10 +205,13 @@ public:
     STDMETHODIMP OnClosing(_In_ IRecycleBinEnumList *prbel) override;
 
 protected:
+    HRESULT EnsureCreated();
+
     LONG m_ref;
     HANDLE m_hInfo;
     HANDLE m_hInfoMapped;
     DWORD m_EnumeratorCount;
+    PSID m_OwnerSid; /* the user's SID, kept until the folder is made (the first delete on the volume) */
     CStringW m_VolumePath;
     CStringW m_Folder; /* [drive]:\[RECYCLE_BIN_DIRECTORY]\{SID} */
 };
@@ -208,6 +251,8 @@ RecycleBin5::~RecycleBin5()
         CloseHandle(m_hInfo);
     if (m_hInfoMapped)
         CloseHandle(m_hInfoMapped);
+    if (m_OwnerSid)
+        HeapFree(GetProcessHeap(), 0, m_OwnerSid);
 }
 
 STDMETHODIMP_(ULONG) RecycleBin5::Release()
@@ -243,6 +288,11 @@ STDMETHODIMP RecycleBin5::DeleteFile(_In_ LPCWSTR szFileName)
 
     if (m_EnumeratorCount != 0)
         return HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION);
+
+    /* The folder of the bin is made by the first delete on the volume, not when the bin is looked at */
+    hr = EnsureCreated();
+    if (FAILED(hr))
+        return hr;
 
     /* Get full file name */
     while (TRUE)
@@ -438,6 +488,12 @@ STDMETHODIMP RecycleBin5::EnumObjects(_Out_ IRecycleBinEnumList **ppEnumList)
     TRACE("(%p, %p)\n", this, ppEnumList);
 
     IUnknown *pUnk;
+    if (m_hInfo == INVALID_HANDLE_VALUE)
+    {
+        /* Nothing was ever deleted to this volume's bin: it has no folder yet, and reading it makes none */
+        *ppEnumList = new RecycleBin5EmptyEnum();
+        return *ppEnumList ? S_OK : E_OUTOFMEMORY;
+    }
     HRESULT hr = RecycleBin5Enum_Constructor(this, m_hInfo, m_hInfoMapped, m_Folder, &pUnk);
     if (!SUCCEEDED(hr))
         return hr;
@@ -502,6 +558,8 @@ STDMETHODIMP RecycleBin5::RemoveFromDatabase(
 
     if (m_EnumeratorCount != 0)
         return HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION);
+    if (m_hInfo == INVALID_HANDLE_VALUE || !m_hInfoMapped)
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
 
     pHeader = (PINFO2_HEADER)MapViewOfFile(m_hInfoMapped, FILE_MAP_WRITE, 0, 0, 0);
     if (!pHeader)
@@ -759,7 +817,31 @@ RecycleBin5::RecycleBin5()
     , m_hInfo(NULL)
     , m_hInfoMapped(NULL)
     , m_EnumeratorCount(0)
+    , m_OwnerSid(NULL)
 {
+}
+
+/* The folder, desktop.ini and INFO2 of the bin are made when something is deleted to it */
+HRESULT RecycleBin5::EnsureCreated()
+{
+    HRESULT hr;
+
+    if (m_hInfo && m_hInfo != INVALID_HANDLE_VALUE)
+        return S_OK;
+
+    hr = RecycleBin5_Create(m_Folder, m_OwnerSid);
+    if (FAILED(hr))
+        return hr;
+
+    CStringW InfoName = m_Folder;
+    InfoName += L"\\" RECYCLE_BIN_FILE_NAME;
+    m_hInfo = CreateFileW(InfoName, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (m_hInfo == INVALID_HANDLE_VALUE)
+        return HRESULT_FROM_WIN32(GetLastError());
+    m_hInfoMapped = CreateFileMappingW(m_hInfo, NULL, PAGE_READWRITE | SEC_COMMIT, 0, 0, NULL);
+    if (!m_hInfoMapped)
+        return HRESULT_FROM_WIN32(GetLastError());
+    return S_OK;
 }
 
 HRESULT RecycleBin5::Init(_In_ LPCWSTR VolumePath)
@@ -838,12 +920,20 @@ HRESULT RecycleBin5::Init(_In_ LPCWSTR VolumePath)
     if (m_hInfo == INVALID_HANDLE_VALUE &&
         (GetLastError() == ERROR_PATH_NOT_FOUND || GetLastError() == ERROR_FILE_NOT_FOUND))
     {
+        /* Windows makes the folder at the first delete on the volume: keep what that needs and write nothing now */
+        if (TokenUserInfo)
+        {
+            DWORD SidLength = GetLengthSid(TokenUserInfo->User.Sid);
+            m_OwnerSid = (PSID)HeapAlloc(GetProcessHeap(), 0, SidLength);
+            if (!m_OwnerSid || !CopySid(SidLength, m_OwnerSid, TokenUserInfo->User.Sid))
+            {
+                hr = E_OUTOFMEMORY;
+                goto cleanup;
+            }
+        }
         m_Folder = m_Folder.Left(len);
-        hr = RecycleBin5_Create(m_Folder, TokenUserInfo ? TokenUserInfo->User.Sid : NULL);
-        m_Folder += L"\\" RECYCLE_BIN_FILE_NAME;
-        if (!SUCCEEDED(hr))
-            goto cleanup;
-        m_hInfo = CreateFileW(m_Folder, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        hr = S_OK;
+        goto cleanup;
     }
 
     if (m_hInfo == INVALID_HANDLE_VALUE)
