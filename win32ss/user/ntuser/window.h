@@ -166,6 +166,9 @@ static inline
 VOID
 WndSetOwner(_Inout_ PWND pwnd, _In_opt_ PWND pwndOwner)
 {
+    /* Every owner link is made here: a window that never got this mark owns no window (co_UserFreeWindow) */
+    if (pwndOwner)
+        pwndOwner->HasOwned = TRUE;
     ReplaceWndPtr(&pwnd->spwndOwner, pwndOwner);
 }
 

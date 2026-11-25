@@ -773,6 +773,7 @@ typedef struct _WND
     UINT InternalPosInitialized:1;
     UINT HideFocus:1; /* WS_EX_UISTATEFOCUSRECTHIDDEN ? */
     UINT HideAccel:1; /* WS_EX_UISTATEKBACCELHIDDEN ? */
+    UINT HasOwned:1; /* win32k: this window has been the owner of a window at some time (WndSetOwner) */
 
     /* Scrollbar info */
     KFIELD(PSBINFOEX, pSBInfoex); // convert to PSBINFO
