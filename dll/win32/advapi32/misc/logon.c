@@ -848,7 +848,6 @@ CreateProcessAsUserCommon(
     BOOL Success;
     TOKEN_TYPE Type;
     ULONG ReturnLength;
-    OBJECT_ATTRIBUTES ObjectAttributes;
     PSECURITY_DESCRIPTOR DefaultSd = NULL, ProcessSd, ThreadSd;
     SECURITY_DESCRIPTOR MergedProcessSd, MergedThreadSd;
     HANDLE hTokenDup = NULL, AssignToken = NULL;
@@ -1003,46 +1002,20 @@ CreateProcessAsUserCommon(
         }
 
         /*
-         * Duplicate the token for this new process. This token
-         * object will get a default security descriptor that we
-         * have created ourselves in ADVAPI32.
+         * The process is given a primary copy that the kernel makes from the caller's own handle,
+         * whether the handle has TOKEN_DUPLICATE or not: Windows takes a handle with
+         * TOKEN_ASSIGN_PRIMARY (measured on Windows Server 2022, primary and impersonation
+         * tokens alike), and the kernel checks TOKEN_ASSIGN_PRIMARY, the level, the privilege or
+         * the child-of-own-token rule. The descriptor of the copy comes from the token itself
+         * (owner, primary group, default DACL and the query right of the Administrators), as the
+         * first process of a secondary logon has it on Windows; a duplicate made here with a
+         * descriptor of our own gave only the owner and SYSTEM access. The label steps below
+         * impersonate the new thread instead of a token handle of ours.
          */
-        InitializeObjectAttributes(&ObjectAttributes,
-                                   NULL,
-                                   0,
-                                   NULL,
-                                   DefaultSd);
-        Status = NtDuplicateToken(hToken,
-                                  0,
-                                  &ObjectAttributes,
-                                  FALSE,
-                                  TokenPrimary,
-                                  &hTokenDup);
-        if (Status == STATUS_ACCESS_DENIED)
-        {
-            /*
-             * The handle has no TOKEN_DUPLICATE. Windows takes such a handle when it has
-             * TOKEN_ASSIGN_PRIMARY (measured on Windows Server 2022, primary and impersonation
-             * tokens alike), so the process is given a copy the kernel makes from the caller's
-             * own handle: the kernel checks TOKEN_ASSIGN_PRIMARY, the level, the privilege or
-             * the child-of-own-token rule. The label steps below then impersonate the new
-             * thread instead of a token handle of ours.
-             */
-            hTokenDup = NULL;
-            AssignToken = hToken;
-            KernelCopy = TRUE;
-            Status = STATUS_SUCCESS;
-        }
-        else if (!NT_SUCCESS(Status))
-        {
-            ERR("NtDuplicateToken() failed, Status 0x%08x\n", Status);
-            Success = FALSE;
-            goto Quit;
-        }
-        else
-        {
-            AssignToken = hTokenDup;
-        }
+        hTokenDup = NULL;
+        AssignToken = hToken;
+        KernelCopy = TRUE;
+        Status = STATUS_SUCCESS;
 
         /*
          * Now it's time to set the primary token into

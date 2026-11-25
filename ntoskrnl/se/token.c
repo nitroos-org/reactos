@@ -1510,9 +1510,10 @@ SeSubProcessToken(
  * @remarks
  * The copy's own descriptor is made from the token itself: its owner, primary group
  * and default DACL, as Windows Server 2022 gives the token of a process created with
- * a token (measured: O:<owner>G:<primary group>D:<the default DACL>). It does not
- * depend on the caller, who therefore gets no access to the copy that the token
- * does not grant it.
+ * a token (measured: O:<owner>G:<primary group>D:<the default DACL>, then the query
+ * entry of the Administrators when the default DACL has no entry for them, as for the
+ * first process of a secondary logon). It does not depend on the caller, who therefore
+ * gets no access to the copy that the token does not grant it.
  */
 NTSTATUS
 NTAPI
@@ -1545,6 +1546,14 @@ SeCopyTokenForNewProcess(
                               PagedPool);
     if (!NT_SUCCESS(Status))
         return Status;
+
+    /* The descriptor of a token made from a default DACL also lets the Administrators query it (as ObAssignSecurity gives it) */
+    Status = SeAssignTokenAdminQuery(&Descriptor, &SeTokenObjectType->TypeInfo.GenericMapping);
+    if (!NT_SUCCESS(Status))
+    {
+        SeDeassignSecurity(&Descriptor);
+        return Status;
+    }
 
     InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, Descriptor);
     Status = SepDuplicateToken(Source,
