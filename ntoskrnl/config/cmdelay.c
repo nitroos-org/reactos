@@ -66,7 +66,7 @@ NTAPI
 CmpDelayCloseWorker(IN PVOID Context)
 {
     PCM_DELAYED_CLOSE_ENTRY ListEntry;
-    ULONG i, ConvKey;
+    ULONG i, ConvKey, Limit;
     PAGED_CODE();
 
     /* Sanity check */
@@ -78,8 +78,20 @@ CmpDelayCloseWorker(IN PVOID Context)
     /* Acquire the delayed close table lock */
     KeAcquireGuardedMutex(&CmpDelayedCloseTableLock);
 
+    /*
+     * Release at least a quarter of the table size per run, and everything that is over the limit when the run starts:
+     * the timer now waits its five seconds, so a run that frees a fixed 512 entries leaves a table that a scan of many
+     * keys filled (tens of thousands of key control blocks) over its limit for minutes.
+     */
+    Limit = CmpDelayedCloseSize >> 2;
+    if (CmpDelayedCloseElements > CmpDelayedCloseSize &&
+        CmpDelayedCloseElements - CmpDelayedCloseSize > Limit)
+    {
+        Limit = CmpDelayedCloseElements - CmpDelayedCloseSize;
+    }
+
     /* Iterate */
-    for (i = 0; i < (CmpDelayedCloseSize >> 2); i++)
+    for (i = 0; i < Limit; i++)
     {
         /* Break out of the loop if there is nothing to process */
         if (CmpDelayedCloseElements <= CmpDelayedCloseSize) break;
