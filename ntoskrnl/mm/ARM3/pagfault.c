@@ -244,9 +244,10 @@ MiCheckForUserStackOverflow(IN PVOID Address,
         return STATUS_PAGE_FAULT_GUARD_PAGE;
     }
 
-    /* Fail, we couldn't move the guard page */
+    /* Fail, we couldn't move the guard page. The commit limit is an ordinary
+       condition (not even a page could be committed): the thread gets the
+       stack overflow exception */
     DPRINT1("Guard page failure: %lx\n", Status);
-    ASSERT(FALSE);
     return STATUS_STACK_OVERFLOW;
 }
 
