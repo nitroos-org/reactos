@@ -33,7 +33,7 @@ typedef struct
 typedef struct
 {
     LONG Calls, Initial, InitialWithRow, InitialOnCaller;
-    LONG V4Adds, V4Deletes, V6Rows;
+    LONG V4Adds, V4Deletes, V6Rows, V4Rows;
     DWORD RegisterThread;
     ULONG TestAddress;
     int Kind;
@@ -60,12 +60,16 @@ static VOID WINAPI Callback(PVOID Context, PVOID Row, ULONG Type)
         return;
     if (((UNI_HEAD *)Row)->Address.si_family == AF_INET6)
         InterlockedIncrement(&State->V6Rows);
-    else if (((UNI_HEAD *)Row)->Address.Ipv4.sin_addr.s_addr == State->TestAddress)
+    else
     {
-        if (Type == NOTIF_ADD)
-            InterlockedIncrement(&State->V4Adds);
-        else if (Type == NOTIF_DELETE)
-            InterlockedIncrement(&State->V4Deletes);
+        InterlockedIncrement(&State->V4Rows);
+        if (((UNI_HEAD *)Row)->Address.Ipv4.sin_addr.s_addr == State->TestAddress)
+        {
+            if (Type == NOTIF_ADD)
+                InterlockedIncrement(&State->V4Adds);
+            else if (Type == NOTIF_DELETE)
+                InterlockedIncrement(&State->V4Deletes);
+        }
     }
 }
 
@@ -182,7 +186,9 @@ static void TestFamilies(void)
         ok(Unspec.V4Adds == 1, "AF_UNSPEC: %ld additions of the test address\n", Unspec.V4Adds);
         ok(V4.V4Adds == 1, "AF_INET: %ld additions of the test address\n", V4.V4Adds);
         Sleep(300);
-        ok(V6.Calls == 0, "AF_INET6: %ld calls for an IPv4 address\n", V6.Calls);
+        /* Straight after the boot an IPv6 address of the computer can change a parameter at the same time (a call
+         * of type "parameter change" with an AF_INET6 row): that is a call of its own, not one for the IPv4 address */
+        ok(V6.V4Rows == 0, "AF_INET6: %ld calls for an IPv4 address\n", V6.V4Rows);
 
         DeleteIPAddress(Context);
         for (Tries = 0; Tries < 100 && (Unspec.V4Deletes == 0 || V4.V4Deletes == 0); Tries++)
