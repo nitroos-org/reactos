@@ -48,6 +48,16 @@ CmpIsDriverInList(
 
 #endif /* _BLDR_ */
 
+/**
+ * Asks whether a device that a Critical Device Database key names (the key's
+ * name, e.g. L"PCI#VEN_1AF4&DEV_1001", Length in characters) is present in
+ * this machine. Supplied by the boot loader, which can look at the buses.
+ **/
+typedef BOOLEAN
+(NTAPI *PCM_CRITICAL_DEVICE_PRESENT)(
+    _In_ PCWSTR KeyName,
+    _In_ ULONG Length);
+
 CODE_SEG("INIT")
 BOOLEAN
 NTAPI
@@ -56,6 +66,7 @@ CmpFindDrivers(
     _In_ HCELL_INDEX ControlSet,
     _In_ SERVICE_LOAD_TYPE LoadType,
     _In_opt_ PCWSTR BootFileSystem,
+    _In_opt_ PCM_CRITICAL_DEVICE_PRESENT CriticalDevicePresent,
     _Inout_ PLIST_ENTRY DriverListHead);
 
 CODE_SEG("INIT")

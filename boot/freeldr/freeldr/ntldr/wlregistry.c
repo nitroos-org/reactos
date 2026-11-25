@@ -614,6 +614,7 @@ WinLdrScanRegistry(
                              HKEY_TO_HCI(CurrentControlSetKey),
                              BootLoad,
                              BootFileSystem,
+                             WinLdrPciDeviceIdPresent,
                              BootDriverListHead);
     if (!Success)
         goto Quit;

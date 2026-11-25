@@ -112,6 +112,22 @@ WinLdrLoadNLSData(
     _In_ PCUNICODE_STRING LangFileName, // CaseTable
     _In_ PCUNICODE_STRING OemHalFileName);
 
+// wlpci.c
+/**
+ * Is a PCI device that matches the id present? The id is a Critical Device
+ * Database key name or a hardware id ("PCI#VEN_1AF4&DEV_1001", "PCI\CC_010802",
+ * "PCI\VEN_104B&CC_0100", ...: any of the fields VEN_ DEV_ SUBSYS_ REV_ CC_,
+ * all of which must match). An id that is not a PCI id: FALSE. When the PCI
+ * buses cannot be looked at (no configuration access, or more devices than
+ * the table holds) every PCI id is reported present, as if all drivers were
+ * boot-start.
+ **/
+BOOLEAN
+NTAPI
+WinLdrPciDeviceIdPresent(
+    _In_ PCWSTR Id,
+    _In_ ULONG Length);
+
 BOOLEAN
 WinLdrAddDriverToList(
     _Inout_ PLIST_ENTRY DriverListHead,

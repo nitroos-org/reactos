@@ -68,6 +68,7 @@ list(APPEND FREELDR_NTLDR_SOURCE
     ntldr/setupldr.c
     ntldr/winldr.c
     ntldr/wlmemory.c
+    ntldr/wlpci.c
     ntldr/wlregistry.c)
 
 if(ARCH STREQUAL "i386")
