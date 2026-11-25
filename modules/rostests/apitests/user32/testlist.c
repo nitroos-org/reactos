@@ -99,6 +99,7 @@ extern void func_HookChainUnhookUaf(void);
 extern void func_ForegroundIdleHook(void);
 extern void func_HookFamilies(void);
 extern void func_HungWindow(void);
+extern void func_WindowNestingLimit(void);
 extern void func_WindowPosChanged(void);
 extern void func_WindowRgnHandles(void);
 extern void func_PowerSettingNotification(void);
@@ -323,6 +324,7 @@ const struct test winetest_testlist[] =
     { "ForegroundIdleHook", func_ForegroundIdleHook },
     { "HookFamilies", func_HookFamilies },
     { "HungWindow", func_HungWindow },
+    { "WindowNestingLimit", func_WindowNestingLimit },
     { "WindowPosChanged", func_WindowPosChanged },
     { "WindowRgnHandles", func_WindowRgnHandles },
     { "PowerSettingNotification", func_PowerSettingNotification },

@@ -70,6 +70,7 @@ list(APPEND SOURCE
     ForegroundIdleHook.c
     HookFamilies.c
     HungWindow.c
+    WindowNestingLimit.c
     WindowPosChanged.c
     WindowRgnHandles.c
     PowerSettingNotification.c
