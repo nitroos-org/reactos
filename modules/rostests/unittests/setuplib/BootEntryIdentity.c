@@ -225,10 +225,45 @@ test_mark(void)
     IniCacheDestroy(Cache);
 }
 
+/* MarkKeyless FALSE: an entry that names no partition is left alone, one of this partition gets its range updated */
+static void
+test_mark_not_keyless(void)
+{
+    PINI_SECTION Os;
+    PINICACHE Cache = LoadIni(&Os);
+    PCWSTR Value;
+    NTSTATUS Status;
+
+    if (!Cache || !Os)
+        return;
+
+    Status = FreeLdrMarkEntriesInCacheEx(Cache, Os, L"multi(0)disk(0)rdisk(0)partition(3)\\ReactOS",
+                                         PART_A, DISK_A, L"100-200", FALSE);
+    ok(NT_SUCCESS(Status), "mark (not keyless) returned 0x%08lx\n", Status);
+    ok(Get(Cache, L"Plain", L"SystemPathPartitionGuid") == NULL, "the entry without a key got one\n");
+    Value = Get(Cache, L"ReactOS", L"SystemPathPartitionRange");
+    ok(Value && !wcscmp(Value, L"100-200"), "range of the entry with this GUID: '%S'\n", Value);
+
+    Status = FreeLdrMarkEntriesInCacheEx(Cache, Os, L"multi(0)disk(0)rdisk(0)partition(3)\\ReactOS",
+                                         PART_A, DISK_A, L"100-200", TRUE);
+    ok(NT_SUCCESS(Status), "mark returned 0x%08lx\n", Status);
+    Value = Get(Cache, L"Plain", L"SystemPathPartitionGuid");
+    ok(Value && !wcscmp(Value, PART_A), "GUID after the keyless mark: '%S'\n", Value);
+
+    ok(FreeLdrMarkEntryByNameInCache(Cache, L"Ram", PART_B, DISK_A, L"5-6") == STATUS_SUCCESS, "mark by name\n");
+    Value = Get(Cache, L"Ram", L"SystemPathPartitionGuid");
+    ok(Value && !wcscmp(Value, PART_B), "GUID after the mark by name: '%S'\n", Value);
+    ok(FreeLdrMarkEntryByNameInCache(Cache, L"NoSuchSection", PART_B, DISK_A, L"5-6") == STATUS_OBJECT_NAME_NOT_FOUND,
+       "mark by name of no section\n");
+
+    IniCacheDestroy(Cache);
+}
+
 START_TEST(BootEntryIdentity)
 {
     ProcessHeap = RtlGetProcessHeap();
 
     test_rebase();
     test_mark();
+    test_mark_not_keyless();
 }

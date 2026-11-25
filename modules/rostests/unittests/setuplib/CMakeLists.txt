@@ -13,6 +13,7 @@ list(APPEND SOURCE
     FreeLdrIniUpdate.c
     GptLayout.c
     IsValidInstallDirectory.c
+    KeylessEntries.c
     UnattendParse.c
     testlist.c
     precomp.h)

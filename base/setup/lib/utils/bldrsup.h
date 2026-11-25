@@ -186,6 +186,70 @@ FreeLdrMarkEntriesWithIdentity(
     _In_ PCWSTR DiskGuid,
     _In_ PCWSTR Range);
 
+/*
+ * The same with MarkKeyless: FALSE leaves an entry that has no GUID key alone (it may belong to an installation
+ * Setup could not identify: its position is not evidence) and only brings the keys of an entry that carries
+ * this partition's GUID up to date.
+ */
+NTSTATUS
+FreeLdrMarkEntriesInCacheEx(
+    _In_ PINICACHE IniCache,
+    _In_ PINI_SECTION OsIniSection,
+    _In_ PCWSTR ArcPath,
+    _In_ PCWSTR PartitionGuid,
+    _In_ PCWSTR DiskGuid,
+    _In_ PCWSTR Range,
+    _In_ BOOLEAN MarkKeyless);
+
+NTSTATUS
+FreeLdrMarkEntriesWithIdentityEx(
+    _In_ PVOID Handle,
+    _In_ PCWSTR ArcPath,
+    _In_ PCWSTR PartitionGuid,
+    _In_ PCWSTR DiskGuid,
+    _In_ PCWSTR Range,
+    _In_ BOOLEAN MarkKeyless);
+
+/* The entry (section) SectionName gets the three keys, whatever it had */
+NTSTATUS
+FreeLdrMarkEntryByNameInCache(
+    _In_ PINICACHE IniCache,
+    _In_ PCWSTR SectionName,
+    _In_ PCWSTR PartitionGuid,
+    _In_ PCWSTR DiskGuid,
+    _In_ PCWSTR Range);
+
+NTSTATUS
+FreeLdrMarkEntryByName(
+    _In_ PVOID Handle,
+    _In_ PCWSTR SectionName,
+    _In_ PCWSTR PartitionGuid,
+    _In_ PCWSTR DiskGuid,
+    _In_ PCWSTR Range);
+
+/*
+ * Boot entries that were written WITHOUT the GUID keys (an installation made before they existed). While Setup
+ * can still see the disks as they were (before it formats or changes anything) it works out which partition
+ * such an entry names by what it can verify, and registers the answer here (FreeLdrAddPendingIdentity: one
+ * registration per ARC path, the later ones of the same path are ignored). The registrations are written as
+ * the three keys by FreeLdrApplyPendingIdentities when the boot store is written, once; an entry that is not
+ * registered stays as it is and is never reused for another installation.
+ */
+VOID
+FreeLdrForgetPendingIdentities(VOID);
+
+BOOLEAN
+FreeLdrAddPendingIdentity(
+    _In_ PCWSTR ArcPath,
+    _In_ const GUID* PartitionGuid,
+    _In_ const GUID* DiskGuid,
+    _In_ ULONGLONG FirstSector,
+    _In_ ULONGLONG LastSector);
+
+NTSTATUS
+FreeLdrApplyPendingIdentities(
+    _In_ PVOID Handle);
+
 typedef enum _BOOT_STORE_OPENMODE
 {
     BS_CheckExisting = 0, // See FindBootStore()

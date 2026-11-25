@@ -1765,6 +1765,19 @@ SelectPartitionPage(PINPUT_RECORD Ir)
             DisplayNoHardDiskError(Ir);
             return QUIT_PAGE;
         }
+
+        /*
+         * An unattended setup does not go through the upgrade and repair page, which looks for the existing
+         * installations (and, on a UEFI computer, works out which partition their boot entries name) before
+         * anything on a disk is changed: do that search here, the list of installations is not needed.
+         */
+        if (IsUnattendedSetup && NtOsInstallsList == NULL)
+        {
+            PGENERIC_LIST Installations = CreateNTOSInstallationsList(PartitionList);
+
+            if (Installations)
+                DestroyGenericList(Installations, TRUE);
+        }
     }
 
     if (RepairUpdateFlag)
