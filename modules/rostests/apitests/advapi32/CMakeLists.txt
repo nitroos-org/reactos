@@ -40,6 +40,7 @@ list(APPEND SOURCE
     CreateService.c
     CreateProcessAsUserToken.c
     CreateProcessAsUserRights.c
+    CreateProcessAsUserTokenSd.c
     CreateProcessWithLogon.c
     CreateProcessWithToken.c
     CreateEnvironmentBlockProfile.c

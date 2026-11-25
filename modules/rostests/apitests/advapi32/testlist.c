@@ -36,6 +36,7 @@ extern void func_ConvertStringSidToSid(void);
 extern void func_CreateService(void);
 extern void func_CreateProcessAsUserToken(void);
 extern void func_CreateProcessAsUserRights(void);
+extern void func_CreateProcessAsUserTokenSd(void);
 extern void func_CreateProcessWithLogon(void);
 extern void func_CreateProcessWithToken(void);
 extern void func_CreateEnvironmentBlockProfile(void);
@@ -260,6 +261,7 @@ const struct test winetest_testlist[] =
     { "CreateService", func_CreateService },
     { "CreateProcessAsUserToken", func_CreateProcessAsUserToken },
     { "CreateProcessAsUserRights", func_CreateProcessAsUserRights },
+    { "CreateProcessAsUserTokenSd", func_CreateProcessAsUserTokenSd },
     { "CreateProcessWithLogon", func_CreateProcessWithLogon },
     { "CreateProcessWithToken", func_CreateProcessWithToken },
     { "CreateEnvironmentBlockProfile", func_CreateEnvironmentBlockProfile },
