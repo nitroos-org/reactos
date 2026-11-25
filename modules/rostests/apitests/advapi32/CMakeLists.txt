@@ -148,6 +148,7 @@ list(APPEND SOURCE
     RngKnownAnswer.c
     SaferIdentifyLevel.c
     FileInheritedAce.c
+    TokenDenyOnlyAttributes.c
     TokenFilteredFlags.c
     TokenDefaultDacl.c
     TokenElevation.c
