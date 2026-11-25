@@ -158,6 +158,31 @@ MiTrimMemoryConsumer(ULONG Consumer, ULONG InitialTarget)
     return (InitialTarget > NrFreedPages) ? (InitialTarget - NrFreedPages) : 0;
 }
 
+/*
+ * The balancer takes a process's working set lock only if it is free: a thread that waits for the
+ * balancer to free memory may hold it, or wait for something whose owner holds it, and a balancer
+ * blocked there frees nothing more (no page available, every thread waiting). As
+ * MiLockProcessWorkingSet otherwise; release with MiUnlockProcessWorkingSet.
+ */
+static
+BOOLEAN
+MiTryLockProcessWorkingSetForTrim(
+    _In_ PEPROCESS Process,
+    _In_ PETHREAD Thread)
+{
+    ASSERT(Thread->OwnsProcessWorkingSetShared == FALSE);
+    ASSERT(Thread->OwnsProcessWorkingSetExclusive == FALSE);
+
+    KeEnterGuardedRegion();
+    if (!ExTryToAcquirePushLockExclusive(&Process->Vm.WorkingSetMutex))
+    {
+        KeLeaveGuardedRegion();
+        return FALSE;
+    }
+    Thread->OwnsProcessWorkingSetExclusive = TRUE;
+    return TRUE;
+}
+
 NTSTATUS
 MmTrimUserMemory(ULONG Target, ULONG Priority, PULONG NrFreedPages)
 {
@@ -248,20 +273,26 @@ MmTrimUserMemory(ULONG Target, ULONG Priority, PULONG NrFreedPages)
                 MiReleasePfnLock(OldIrql);
 
                 KeStackAttachProcess(&Process->Pcb, &ApcState);
-                MiLockProcessWorkingSet(Process, PsGetCurrentThread());
-
-                /* Be sure this is still valid. */
-                if (MmIsAddressValid(Address))
+                if (!MiTryLockProcessWorkingSetForTrim(Process, PsGetCurrentThread()))
                 {
-                    PMMPTE Pte = MiAddressToPte(Address);
-                    Accessed = Accessed || Pte->u.Hard.Accessed;
-                    Pte->u.Hard.Accessed = 0;
-
-                    /* There is no need to invalidate, the balancer thread is never on a user process */
-                    //KeInvalidateTlbEntry(Address);
+                    /* Busy: count the page as used, it stays for a later pass */
+                    Accessed = TRUE;
                 }
+                else
+                {
+                    /* Be sure this is still valid. */
+                    if (MmIsAddressValid(Address))
+                    {
+                        PMMPTE Pte = MiAddressToPte(Address);
+                        Accessed = Accessed || Pte->u.Hard.Accessed;
+                        Pte->u.Hard.Accessed = 0;
 
-                MiUnlockProcessWorkingSet(Process, PsGetCurrentThread());
+                        /* There is no need to invalidate, the balancer thread is never on a user process */
+                        //KeInvalidateTlbEntry(Address);
+                    }
+
+                    MiUnlockProcessWorkingSet(Process, PsGetCurrentThread());
+                }
 
                 KeUnstackDetachProcess(&ApcState);
                 ExReleaseRundownProtection(&Process->RundownProtect);

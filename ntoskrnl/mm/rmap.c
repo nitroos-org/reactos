@@ -103,7 +103,18 @@ GetEntry:
     }
     AddressSpace = &Process->Vm;
 
-    MmLockAddressSpace(AddressSpace);
+    /*
+     * The callers (the balancer, the cache's trim) reclaim memory for threads that wait for it,
+     * and such a thread may hold this lock, or wait for one whose owner does, across that wait:
+     * blocking here can stop reclaim for good with no page available. A busy address space is
+     * left for a later pass; the pages of other processes are taken meanwhile.
+     */
+    if (!KeTryToAcquireGuardedMutex(&CONTAINING_RECORD(AddressSpace, EPROCESS, Vm)->AddressCreationLock))
+    {
+        ExReleaseRundownProtection(&Process->RundownProtect);
+        ObDereferenceObject(Process);
+        return STATUS_UNSUCCESSFUL;
+    }
 
     MemoryArea = MmLocateMemoryAreaByAddress(AddressSpace, Address);
     if (MemoryArea == NULL || MemoryArea->DeleteInProgress)
