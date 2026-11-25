@@ -1560,7 +1560,7 @@ SeCopyTokenForNewProcess(
                                &ObjectAttributes,
                                FALSE,
                                TokenPrimary,
-                               Source->ImpersonationLevel,
+                               SecurityAnonymous,   /* a primary token has no impersonation level */
                                KernelMode,
                                &NewToken);
     SeDeassignSecurity(&Descriptor);
