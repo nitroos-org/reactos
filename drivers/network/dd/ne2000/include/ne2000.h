@@ -163,6 +163,10 @@ typedef struct _NIC_ADAPTER
     UINT TXNext;    /* Next buffer to use */
     /* Length of packet. 0 means buffer is unused */
     UINT TXSize[DRIVER_DEFAULT_TX_BUFFER_COUNT];
+    /* Blocks behind the packet that starts here that are left unused, because the next packet does not fit
+       before the end of the ring (a packet is sent from consecutive blocks), and are freed with it */
+    UINT TXTail[DRIVER_DEFAULT_TX_BUFFER_COUNT];
+    INT TXLast;     /* First block of the packet written last. -1 means none */
     INT TXCurrent;  /* Current buffer beeing transmitted. -1 means none */
 
     /* Head of transmit queue */

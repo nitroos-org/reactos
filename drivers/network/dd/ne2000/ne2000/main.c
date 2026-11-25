@@ -394,6 +394,7 @@ static NDIS_STATUS NTAPI MiniportInitialize(
     Adapter->TXCount   = DRIVER_DEFAULT_TX_BUFFER_COUNT;
     Adapter->TXFree    = DRIVER_DEFAULT_TX_BUFFER_COUNT;
     Adapter->TXCurrent = -1;
+    Adapter->TXLast    = -1;
     Adapter->PageStart = Adapter->TXStart + Adapter->TXCount;
     Adapter->PageStop  = Adapter->TXStart + (Adapter->RamSize >> 8);
 

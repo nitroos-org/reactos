@@ -1181,6 +1181,7 @@ static BOOLEAN NICPrepareForTransmit(
 {
     UINT Length;
     UINT BufferCount;
+    UINT Skip;
     PNDIS_PACKET Packet;
 
     NDIS_DbgPrint(MAX_TRACE, ("Called.\n"));
@@ -1194,11 +1195,30 @@ static BOOLEAN NICPrepareForTransmit(
 
     BufferCount = (Length + DRIVER_BLOCK_SIZE - 1) / DRIVER_BLOCK_SIZE;
 
-    if (BufferCount > Adapter->TXFree) {
+    /*
+     * The NIC sends a packet from consecutive blocks starting at the one in TPSR, it does not wrap around the end of
+     * the ring: what lies behind it is the start of the receive ring, which went out as the tail of the packet (and
+     * failed its checksum at the receiver, for every retransmission that starts at the same block, so a bulk
+     * upload stopped). With nothing in the ring the packet starts at the first block; else, a packet that does not
+     * fit before the end of the ring starts at the first block once the packets before it are sent, and the blocks
+     * at the end stay unused until then.
+     */
+    Skip = 0;
+    if (Adapter->TXCurrent == -1)
+        Adapter->TXNext = 0;
+    else if (Adapter->TXNext + BufferCount > Adapter->TXCount)
+        Skip = Adapter->TXCount - Adapter->TXNext;
+
+    if (BufferCount + Skip > Adapter->TXFree) {
         NDIS_DbgPrint(MID_TRACE, ("No transmit resources. Have (%d) buffers, need (%d).\n",
-            Adapter->TXFree, BufferCount));
+            Adapter->TXFree, BufferCount + Skip));
         /* We don't have the resources to transmit this packet right now */
         return FALSE;
+    }
+
+    if (Skip) {
+        Adapter->TXTail[Adapter->TXLast] = Skip;
+        Adapter->TXNext = 0;
     }
 
     /* Write the packet to the card */
@@ -1208,8 +1228,10 @@ static BOOLEAN NICPrepareForTransmit(
     if (Adapter->TXCurrent == -1)
         Adapter->TXCurrent = Adapter->TXNext;
 
+    Adapter->TXLast  = Adapter->TXNext;
+    Adapter->TXTail[Adapter->TXNext] = 0;
     Adapter->TXNext  = (Adapter->TXNext + BufferCount) % Adapter->TXCount;
-    Adapter->TXFree -= BufferCount;
+    Adapter->TXFree -= BufferCount + Skip;
 
     /* Remove the packet from the queue */
     Packet = Adapter->TXQueueHead;
@@ -1381,9 +1403,13 @@ static VOID HandleTransmit(
         Adapter->TransmitError = FALSE;
     }
 
+    /* A transmit interrupt with no packet in the ring (a stale one) has nothing to free */
+    if (Adapter->TXCurrent < 0)
+        return;
+
     /* Free transmit buffers */
     Length      = Adapter->TXSize[Adapter->TXCurrent];
-    BufferCount = (Length + DRIVER_BLOCK_SIZE - 1) / DRIVER_BLOCK_SIZE;
+    BufferCount = (Length + DRIVER_BLOCK_SIZE - 1) / DRIVER_BLOCK_SIZE + Adapter->TXTail[Adapter->TXCurrent];
 
     NDIS_DbgPrint(MID_TRACE, ("Freeing (%d) buffers at (%d).\n",
         BufferCount,
@@ -1391,12 +1417,14 @@ static VOID HandleTransmit(
 
     Adapter->TXFree += BufferCount;
     Adapter->TXSize[Adapter->TXCurrent] = 0;
+    Adapter->TXTail[Adapter->TXCurrent] = 0;
     Adapter->TXCurrent = (Adapter->TXCurrent + BufferCount) % Adapter->TXCount;
 
     if (Adapter->TXSize[Adapter->TXCurrent] == 0) {
         NDIS_DbgPrint(MID_TRACE, ("No more packets in transmit buffer.\n"));
 
         Adapter->TXCurrent = -1;
+        Adapter->TXLast = -1;
     }
 
     if (Adapter->TXQueueTail) {
