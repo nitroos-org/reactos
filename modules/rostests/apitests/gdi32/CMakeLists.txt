@@ -91,6 +91,7 @@ list(APPEND SOURCE
     OffsetRgn.c
     PaintRgn.c
     PatBlt.c
+    PathArcRobustness.c
     PolyPatBlt.c
     Rectangle.c
     RegionAllocFailure.c
