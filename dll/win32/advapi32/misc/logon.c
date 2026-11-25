@@ -959,6 +959,30 @@ CreateProcessAsUserCommon(
                                                 lpProcessInformation->hThread,
                                                 hToken,
                                                 TRUE);
+            if (!NT_SUCCESS(Status))
+            {
+                /*
+                 * The second try of the path below, without impersonating ourselves: a restricted
+                 * caller cannot open its own token for that, and the kernel's answer (the privilege)
+                 * is the one to report
+                 */
+                Status = NtSetInformationThread(NtCurrentThread(),
+                                                ThreadImpersonationToken,
+                                                &OriginalImpersonationToken,
+                                                sizeof(OriginalImpersonationToken));
+                if (NT_SUCCESS(Status))
+                {
+                    Status = InsertTokenToProcessCommon(FALSE,
+                                                        lpProcessInformation->hProcess,
+                                                        lpProcessInformation->hThread,
+                                                        hToken,
+                                                        TRUE);
+                    NtSetInformationThread(NtCurrentThread(),
+                                           ThreadImpersonationToken,
+                                           &NullToken,
+                                           sizeof(NullToken));
+                }
+            }
             if (NT_SUCCESS(Status))
                 Status = STATUS_ACCESS_DENIED;
             Success = FALSE;
