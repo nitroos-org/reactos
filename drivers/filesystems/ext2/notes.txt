@@ -1,0 +1,19 @@
+Ext2Fsd (third party, see "media/doc/3rd Party Files.txt": version 0.69). Changes made in this tree to the
+upstream sources, newest first. Keep this list up to date when the driver is changed or re-synchronised.
+
+- src/flush.c, Ext2Flush: FlushFileBuffers of a file (or directory) handle also writes the whole volume stream
+  (inode table, directory blocks, bitmaps, group descriptors, superblock: CcFlushCache of the volume, with the volume
+  resource held) and then passes the flush request down to the device. The driver has no journal, so this is the only
+  thing that makes a created or renamed file reachable after a power cut. Before, only the file's own cache pages were
+  written (CcFlushCache of the file). Ext2FlushVcb is not used for this: it leaves out every block that a buffer head
+  still holds, which includes the directory block of a file that another thread creates at the same moment.
+  The volume resource is taken after the file's resource is released.
+- src/buffer head (c2594b9df59): an unlinked buffer head is not unlinked again when a racing getblk finds the block cached.
+- src/write.c (6e52cd74f60, 2b4867d0b48): the paging resource is held exclusive across a non-cached write that raises
+  the valid data length; comment on the forced synchronous extending write.
+- sdk/lib/fslib/ext2lib (e7a0a45910d): a requested check fails in the stub checkers.
+
+How the flush change was checked: a guest program creates and renames files through a mapped view and acknowledges
+each one on the serial port after FlushFileBuffers; the disk is an NBD export with a volatile write cache (what was not
+flushed is dropped or kept at random when QEMU is killed); from the host, e2fsck -fn on the image and a read of every
+acknowledged file from a repaired copy.
