@@ -48,6 +48,37 @@ static void shape_items(const char *name, const WCHAR *text, int length, int lev
         ok(clusters[i] == expect_clusters[i], "%s: cluster %d is %d, expected %d\n", name, i, clusters[i], expect_clusters[i]);
     ok(HeapValidate(GetProcessHeap(), 0, NULL), "%s: the heap is corrupted\n", name);
 
+    /* ScriptGetLogicalWidths writes one width per character, no more (it wrote one or two more for a
+       right-to-left cluster), and the widths of a cluster add up to the advance of its glyph; Windows Server 2022:
+       a glyph of advance 3 over two characters gives 1 and 2, left to right and right to left */
+    if (glyphs == expect_glyphs)
+    {
+        int advances[64], widths[70], k, first;
+        GOFFSET offsets[64];
+        ABC abc;
+
+        hr = ScriptPlace(dc, &cache, out, glyphs, attrs, &analysis, advances, offsets, &abc);
+        ok(hr == S_OK, "%s: ScriptPlace returned %#lx\n", name, hr);
+        for (k = 0; k < 70; k++)
+            widths[k] = 0x7eadbeef;
+        hr = ScriptGetLogicalWidths(&analysis, len, glyphs, advances, clusters, attrs, widths);
+        ok(hr == S_OK, "%s: ScriptGetLogicalWidths returned %#lx\n", name, hr);
+        for (k = len; k < 70; k++)
+            ok(widths[k] == 0x7eadbeef, "%s: width %d written (the run has %d characters)\n", name, k, len);
+        for (first = 0; first < len; first = k)
+        {
+            int sum = 0;
+
+            for (k = first; k < len && clusters[k] == clusters[first]; k++)
+                sum += widths[k];
+            ok(sum == advances[clusters[first]], "%s: the cluster at %d has the widths %d, its glyph the advance %d\n",
+               name, first, sum, advances[clusters[first]]);
+            if (k - first == 2)
+                ok(widths[first] == advances[clusters[first]] / 2, "%s: first width %d of an advance %d\n",
+                   name, widths[first], advances[clusters[first]]);
+        }
+    }
+
 done:
     ScriptFreeCache(&cache);
     SelectObject(dc, old);

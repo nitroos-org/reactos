@@ -3900,6 +3900,22 @@ HRESULT WINAPI ScriptStringGetLogicalWidths(SCRIPT_STRING_ANALYSIS ssa, int *piD
         if (analysis->pItem[i].a.fRTL && ! analysis->pItem[i].a.fLogicalOrder)
             direction = -1;
 
+#ifdef __REACTOS__
+        /* the same as ScriptGetLogicalWidths: one width per character, clusters counted in character order */
+        for (j = 0; j < cChar; )
+        {
+            int k;
+            int glyph = analysis->glyphs[i].pwLogClust[j];
+            int clust_size = get_cluster_size(analysis->glyphs[i].pwLogClust,
+                                              cChar, j, 1, NULL, NULL);
+            int advance = get_glyph_cluster_advance(analysis->glyphs[i].piAdvance, analysis->glyphs[i].psva, analysis->glyphs[i].pwLogClust, analysis->glyphs[i].numGlyphs, cChar, glyph, direction);
+            int part = advance / clust_size;
+
+            for (k = 0; k < clust_size; k++)
+                piDx[next++] = (k == clust_size - 1) ? advance - part * (clust_size - 1) : part;
+            j += clust_size;
+        }
+#else
         for (j = 0; j < cChar; j++)
         {
             int k;
@@ -3915,6 +3931,7 @@ HRESULT WINAPI ScriptStringGetLogicalWidths(SCRIPT_STRING_ANALYSIS ssa, int *piD
                 if (k) j++;
             }
         }
+#endif
     }
     return S_OK;
 }
@@ -4090,6 +4107,23 @@ HRESULT WINAPI ScriptGetLogicalWidths(const SCRIPT_ANALYSIS *sa, int nbchars, in
     else
         direction = 1;
 
+#ifdef __REACTOS__
+    /* One width per character, in logical order: the characters of a cluster are the following ones that have its
+       number, also in a right-to-left run (scanning backwards from the first character of a cluster found only
+       itself, then counted the cluster again from its second character and wrote more widths than there are
+       characters). Windows Server 2022 gives the first characters of a cluster the glyph advance divided by their
+       number and the last one the rest: advance 3, two characters: 1 and 2, left to right and right to left. */
+    for (i = 0; i < nbchars; )
+    {
+        int clust_size = get_cluster_size(log_clust, nbchars, i, 1, NULL, NULL);
+        int advance = get_glyph_cluster_advance(advances, sva, log_clust, nbglyphs, nbchars, log_clust[i], direction);
+        int j, part = advance / clust_size;
+
+        for (j = 0; j < clust_size; j++)
+            widths[next++] = (j == clust_size - 1) ? advance - part * (clust_size - 1) : part;
+        i += clust_size;
+    }
+#else
     for (i = 0; i < nbchars; i++)
     {
         int clust_size = get_cluster_size(log_clust, nbchars, i, direction, NULL, NULL);
@@ -4103,6 +4137,7 @@ HRESULT WINAPI ScriptGetLogicalWidths(const SCRIPT_ANALYSIS *sa, int nbchars, in
             if (j) i++;
         }
     }
+#endif
 
     return S_OK;
 }
