@@ -363,7 +363,7 @@ CmpDelayDerefKeyControlBlock(IN PCM_KEY_CONTROL_BLOCK Kcb)
     {
         /* Yes, we have no work item, setup the interval */
         CmpDelayDerefKCBWorkItemActive = TRUE;
-        Timeout.QuadPart = CmpDelayDerefKCBIntervalInSeconds * -10000000;
+        Timeout.QuadPart = -(LONGLONG)CmpDelayDerefKCBIntervalInSeconds * 10 * 1000 * 1000;
         KeSetTimer(&CmpDelayDerefKCBTimer, Timeout, &CmpDelayDerefKCBDpc);
     }
 
@@ -408,8 +408,11 @@ CmpArmDelayedCloseTimer(VOID)
     /* Set the worker active */
     CmpDelayCloseWorkItemActive = TRUE;
 
-    /* Setup the interval */
-    Timeout.QuadPart = CmpDelayCloseIntervalInSeconds * -10000000;
+    /* Setup the interval: a relative time, in negative 100 ns units. The product of the unsigned number of seconds
+       and a negative constant is an unsigned 32-bit number, a positive absolute time long in the past, and the timer
+       expired at once: the worker, which arms the timer again while the table is over its limit, then ran back to
+       back, a DPC and a work item many thousand times a second */
+    Timeout.QuadPart = -(LONGLONG)CmpDelayCloseIntervalInSeconds * 10 * 1000 * 1000;
     KeSetTimer(&CmpDelayCloseTimer, Timeout, &CmpDelayCloseDpc);
 }
 
