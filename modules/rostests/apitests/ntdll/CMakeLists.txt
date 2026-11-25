@@ -137,6 +137,7 @@ list(APPEND SOURCE
     NtOpenProcessProtected.c
     NtOpenProcessToken.c
     NtOpenSection.c
+    NtOpenThread.c
     NtOpenThreadToken.c
     NtProtectVirtualMemory.c
     NtQueryDirectoryFile.c

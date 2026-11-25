@@ -483,6 +483,18 @@ SepMandatoryAllowedAccess(
     if (!(Policy & SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP))
         Allowed |= GenericMapping->GenericExecute | SYNCHRONIZE;
 
+    /*
+     * NO_READ_UP takes READ_CONTROL away also where the execute mapping contains it (the event, mutex, section,
+     * process and thread types do). Measured on Windows Server 2022 (named events with a Medium label and every
+     * combination of the three policies, opened at Low; processes and threads, which carry NO_READ_UP): with
+     * NO_READ_UP READ_CONTROL and GENERIC_EXECUTE are denied, SYNCHRONIZE is granted, MAXIMUM_ALLOWED gives
+     * SYNCHRONIZE alone; with NO_EXECUTE_UP only, READ_CONTROL and GenericRead are granted and SYNCHRONIZE is not.
+     * Only READ_CONTROL is taken: the other bits the two mappings share (SYNCHRONIZE in the read mapping of a
+     * file) are not measured.
+     */
+    if (Policy & SYSTEM_MANDATORY_LABEL_NO_READ_UP)
+        Allowed &= ~READ_CONTROL;
+
     return Allowed;
 }
 

@@ -91,10 +91,16 @@ PspProcessOpen(
     _Inout_ PACCESS_MASK GrantedAccess,
     _In_ ULONG HandleCount)
 {
-    /* As on Windows 7, the set right does not imply PROCESS_SET_LIMITED_INFORMATION */
     if (*GrantedAccess & PROCESS_QUERY_INFORMATION)
     {
         *GrantedAccess |= PROCESS_QUERY_LIMITED_INFORMATION;
+    }
+
+    /* As on Windows 8 and later (measured on Windows Server 2022: PROCESS_SET_INFORMATION is granted as 0x2200):
+     * the set right carries PROCESS_SET_LIMITED_INFORMATION */
+    if (*GrantedAccess & PROCESS_SET_INFORMATION)
+    {
+        *GrantedAccess |= PROCESS_SET_LIMITED_INFORMATION;
     }
 
     return STATUS_SUCCESS;
