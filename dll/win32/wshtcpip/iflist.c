@@ -317,7 +317,7 @@ WSHIoctl_GetInterfaceList(
         inTcpReq1.ID.toi_entity = pIntfIDItem->id;
 
         BufLen = sizeof(IPAddrEntry) * pIntfIDItem->numaddr;
-        pIntfIDItem->pIPAddrEntry0 = HeapAlloc(hHeap, 0, BufLen);
+        pIntfIDItem->pIPAddrEntry0 = HeapAlloc(hHeap, HEAP_ZERO_MEMORY, BufLen);
 
         if (!DeviceIoControl(
                 TcpFile,
@@ -332,6 +332,13 @@ WSHIoctl_GetInterfaceList(
             DPRINT("DeviceIoControl failed, Error %ld!\n", GetLastError());
             res = WSAEFAULT;
             goto cleanup;
+        }
+
+        /* An address was removed since the count was taken: only the entries that came back are rows */
+        if (BufLenNeeded / sizeof(IPAddrEntry) < pIntfIDItem->numaddr)
+        {
+            outNumberOfBytes -= (pIntfIDItem->numaddr - BufLenNeeded / sizeof(IPAddrEntry)) * sizeof(INTERFACE_INFO);
+            pIntfIDItem->numaddr = BufLenNeeded / sizeof(IPAddrEntry);
         }
     }
 
