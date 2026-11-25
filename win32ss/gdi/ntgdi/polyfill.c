@@ -109,6 +109,13 @@ POLYGONFILL_MakeEdge(POINT From, POINT To)
     if (0 == rc)
         return NULL;
 
+    /* Coordinates beyond +-2^27 wrap around to 28 bits, as on Windows (see IntWrapShapeCoord): the differences
+     * below, and the error terms of the stepping, then fit in 32 bits */
+    From.x = IntWrapShapeCoord(From.x);
+    From.y = IntWrapShapeCoord(From.y);
+    To.x = IntWrapShapeCoord(To.x);
+    To.y = IntWrapShapeCoord(To.y);
+
     //DPRINT1("Making Edge: (%d, %d) to (%d, %d)\n", From.x, From.y, To.x, To.y);
     // Now fill the struct.
     if ( To.y < From.y )
@@ -350,6 +357,40 @@ POLYGONFILL_UpdateScanline(FILL_EDGE* pEdge, int Scanline)
 
     //DPRINT("Line (%d, %d) to (%d, %d) intersects scanline %d at (%d,%d)\n",
     //        pEdge->FromX, pEdge->FromY, pEdge->ToX, pEdge->ToY, Scanline, pEdge->XIntercept[0], pEdge->XIntercept[1] );
+}
+
+/*
+ * Bring an edge that is stepped one scanline at a time (POLYGONFILL_UpdateScanline) to the state it has before the
+ * call for scanline Scanline, without the steps in between: the same position and error term, in 64 bit arithmetic.
+ * Only for an edge with FromY < Scanline < ToY.
+ */
+static
+void
+FASTCALL
+POLYGONFILL_SkipToScanline(FILL_EDGE* pEdge, int Scanline)
+{
+    LONGLONG n = (LONGLONG)Scanline - pEdge->y;
+    LONGLONG error;
+
+    if (n <= 0)
+        return;
+
+    if (pEdge->xmajor)
+    {
+        /* every scanline takes the x steps up to the one that makes the error reach ErrorMax, then the error drops by
+         * ErrorMax: after n scanlines the smallest K with Error + K * absdy >= n * ErrorMax steps were taken */
+        LONGLONG k = (n * pEdge->ErrorMax - pEdge->Error + pEdge->absdy - 1) / pEdge->absdy;
+
+        pEdge->x += (int)(k * pEdge->XDirection);
+        pEdge->Error = (int)(pEdge->Error + k * pEdge->absdy - n * pEdge->ErrorMax);
+    }
+    else
+    {
+        error = pEdge->Error + n * pEdge->absdx;
+        pEdge->x += (int)((error / pEdge->ErrorMax) * pEdge->XDirection);
+        pEdge->Error = (int)(error % pEdge->ErrorMax);
+    }
+    pEdge->y = Scanline;
 }
 
 /*
@@ -599,7 +640,7 @@ IntFillPolygon(
     FILL_EDGE_LIST *list = 0;
     FILL_EDGE *ActiveHead = 0;
     FILL_EDGE *pLeft, *pRight;
-    int ScanLine;
+    int ScanLine, i, Top, Bottom, ClipTop, ClipBottom;
 
     //DPRINT("IntFillPolygon\n");
 
@@ -609,8 +650,49 @@ IntFillPolygon(
     if (NULL == list)
         return FALSE;
 
-    /* For each Scanline from DestRect.top to DestRect.bottom, determine line segments to draw */
-    for (ScanLine = DestRect.top; ScanLine < DestRect.bottom; ++ScanLine)
+    /* The scanlines of the polygon, from its edges (the points were wrapped to 28 bits: DestRect is the one of the
+     * points before) */
+    if (list->Count == 0)
+    {
+        /* only horizontal edges: no row to fill */
+        POLYGONFILL_DestroyEdgeList(list);
+        return TRUE;
+    }
+    Top = list->Edges[0]->FromY;
+    Bottom = list->Edges[0]->ToY;
+    for (i = 1; i < list->Count; i++)
+    {
+        Top = min(Top, list->Edges[i]->FromY);
+        Bottom = max(Bottom, list->Edges[i]->ToY);
+    }
+
+    /* Rows outside the clip bounds (the surface when there is no clip) get no pixels: a polygon that reaches far past
+     * them is stepped to the first row inside, not through all the rows before it */
+    if (dc->co.iDComplexity == DC_TRIVIAL)
+    {
+        ClipTop = 0;
+        ClipBottom = psurf->SurfObj.sizlBitmap.cy;
+    }
+    else
+    {
+        ClipTop = dc->co.rclBounds.top;
+        ClipBottom = dc->co.rclBounds.bottom;
+    }
+    if (Top < ClipTop)
+    {
+        for (i = 0; i < list->Count; i++)
+        {
+            FILL_EDGE *pEdge = list->Edges[i];
+
+            if (pEdge->FromY < ClipTop && pEdge->ToY > ClipTop)
+                POLYGONFILL_SkipToScanline(pEdge, ClipTop);
+        }
+        Top = ClipTop;
+    }
+    Bottom = min(Bottom, ClipBottom);
+
+    /* For each Scanline from Top to Bottom, determine line segments to draw */
+    for (ScanLine = Top; ScanLine < Bottom; ++ScanLine)
     {
         POLYGONFILL_BuildActiveList(ScanLine, list, &ActiveHead);
         //DEBUG_PRINT_ACTIVE_EDGELIST(ActiveHead);

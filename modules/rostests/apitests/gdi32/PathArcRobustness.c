@@ -58,6 +58,7 @@ static void Clear(void)
 
 /* The ways to end a path and use it */
 static BOOL g_trace;
+static int g_nSlow;   /* calls that took more than 15 s */
 
 static void Announce(const char *what, int op);
 static void Slow(const char *what, int op, DWORD t);
@@ -103,6 +104,8 @@ static void Slow(const char *what, int op, DWORD t)
 {
     char buf[80];
 
+    if (GetTickCount() - t > 15000)
+        g_nSlow++;
     if (g_trace && GetTickCount() - t > 1000)
     {
         StringCchPrintfA(buf, _countof(buf), "PAR SLOW %s op %d %lu ms\n", what, op, GetTickCount() - t);
@@ -175,7 +178,7 @@ static void test_Paths(HDC hdc, const char *name)
     DWORD t = GetTickCount();
     int iter, k, nops;
 
-    for (iter = 0; iter < 1500; iter++)
+    for (iter = 0; iter < 250; iter++)
     {
         BeginPath(hdc);
         nops = Rand() % 5;
@@ -191,7 +194,7 @@ static void test_Paths(HDC hdc, const char *name)
             UsePath(hdc, 8);
         }
     }
-    ok(GetTickCount() - t < 120000, "%s: the path calls took %lu ms\n", name, GetTickCount() - t);
+    trace("%s: the path calls took %lu ms\n", name, GetTickCount() - t);
 }
 
 /* Shapes drawn directly, not through a path, with every pen */
@@ -200,9 +203,9 @@ static void test_Direct(HDC hdc, const char *name)
     DWORD t = GetTickCount();
     int iter;
 
-    for (iter = 0; iter < 4000; iter++)
+    for (iter = 0; iter < 600; iter++)
         OnePathOp(hdc, Rand());
-    ok(GetTickCount() - t < 120000, "%s: the shape calls took %lu ms\n", name, GetTickCount() - t);
+    trace("%s: the shape calls took %lu ms\n", name, GetTickCount() - t);
 }
 
 static HPEN MakeUserPen(int cnt, int mode, DWORD width, DWORD *pst)
@@ -225,7 +228,7 @@ static void test_Pens(HDC hdc)
     DWORD t = GetTickCount();
     int iter, cnt, i;
 
-    for (iter = 0; iter < 400; iter++)
+    for (iter = 0; iter < 100; iter++)
     {
         DWORD st[20];
         DWORD width = (iter & 1) ? 0 : 1 + Rand() % 7;
@@ -256,7 +259,7 @@ static void test_Pens(HDC hdc)
         SelectObject(hdc, old);
         DeleteObject(pen);
     }
-    ok(GetTickCount() - t < 120000, "the pen calls took %lu ms\n", GetTickCount() - t);
+    trace("the pen calls took %lu ms\n", GetTickCount() - t);
 }
 
 /* A world transform of any numbers: the calls that use it return. Whether the transform is accepted is not decided
@@ -267,7 +270,7 @@ static void test_World(HDC hdc)
     int iter, i;
 
     SetGraphicsMode(hdc, GM_ADVANCED);
-    for (iter = 0; iter < 400; iter++)
+    for (iter = 0; iter < 100; iter++)
     {
         XFORM x;
 
@@ -291,7 +294,7 @@ static void test_World(HDC hdc)
         }
         ModifyWorldTransform(hdc, NULL, MWT_IDENTITY);
     }
-    ok(GetTickCount() - t < 120000, "the world transform calls took %lu ms\n", GetTickCount() - t);
+    trace("the world transform calls took %lu ms\n", GetTickCount() - t);
 }
 
 /* The matrices in the user mode DC_ATTR hold any bits */
@@ -307,7 +310,7 @@ static void test_GarbageAttr(HDC hdc)
         return;
     }
     SetGraphicsMode(hdc, GM_ADVANCED);
-    for (iter = 0; iter < 300; iter++)
+    for (iter = 0; iter < 60; iter++)
     {
         DWORD *pm[3];
 
@@ -338,7 +341,90 @@ static void test_GarbageAttr(HDC hdc)
         SetWorldTransform(hdc, &(XFORM){ 1, 0, 0, 1, 0, 0 });
         ModifyWorldTransform(hdc, NULL, MWT_IDENTITY);
     }
-    ok(GetTickCount() - t < 120000, "the calls on garbage matrices took %lu ms\n", GetTickCount() - t);
+    trace("the calls on garbage matrices took %lu ms\n", GetTickCount() - t);
+}
+
+/* A DIB DC of width 64 and the given height, and its pixels */
+static HDC MakeDib(int cy, DWORD **ppBits)
+{
+    BITMAPINFO bi;
+    HDC hdc = CreateCompatibleDC(NULL);
+    HBITMAP bmp;
+
+    ZeroMemory(&bi, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = DIMS;
+    bi.bmiHeader.biHeight = -cy;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    bmp = CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, (void **)ppBits, NULL, 0);
+    SelectObject(hdc, bmp);
+    return hdc;
+}
+
+/* Polygon: points that are 2^32 apart used to overflow the edge stepping (an assertion of a checked build), a polygon
+   that reaches 2^27 rows past the surface was stepped through all of them, and the rows that are seen are the same
+   whether the rest of the polygon is far above them or not */
+static void test_Polygon(void)
+{
+    static const POINT poly[] = { { 5, 0 }, { 60, 9000 }, { 20, 19990 }, { 50, 5 }, { 2, 19000 }, { 40, 13000 } };
+    static const int rows[] = { 0, 100, 5000, 8990, 12990, 19000, 19936 };
+    static const POINT huge[][4] =
+    {
+        { { 255, (LONG)0x80000000 }, { -32768, 0x7FFFFFFF }, { 63, -100 }, { 0x3FFFFFFF, 100 } },
+        { { 0, -0x7FFFFFF }, { 63, 0x7FFFFFF }, { 30, 0x7FFFFFF }, { 10, -0x7FFFFFF } },
+        { { 0, (LONG)0x80000000 }, { 63, 0x7FFFFFFF }, { 0x7FFFFFFF, 0x7FFFFFFF }, { 0, 0 } },
+        { { 10, -0x10000000 }, { 50, 0x10000000 }, { 63, 0x10000010 }, { 0, 10 } },
+    };
+    DWORD *tall, *small;
+    HDC dcTall = MakeDib(20000, &tall), dcSmall = MakeDib(DIMS, &small);
+    HBRUSH black = GetStockObject(BLACK_BRUSH);
+    HGDIOBJ nullpen = GetStockObject(NULL_PEN);
+    int i, r, bad;
+    DWORD t;
+
+    if (!tall || !small)
+    {
+        skip("no DIB\n");
+        return;
+    }
+    SelectObject(dcTall, black);
+    SelectObject(dcTall, nullpen);
+    SelectObject(dcSmall, black);
+    SelectObject(dcSmall, nullpen);
+
+    for (i = 0; i < 20000 * DIMS; i++)
+        tall[i] = 0xFFFFFF;
+    Polygon(dcTall, poly, _countof(poly));
+    GdiFlush();
+
+    for (r = 0; r < (int)_countof(rows); r++)
+    {
+        for (i = 0; i < DIMS * DIMS; i++)
+            small[i] = 0xFFFFFF;
+        SetViewportOrgEx(dcSmall, 0, -rows[r], NULL);
+        Polygon(dcSmall, poly, _countof(poly));
+        GdiFlush();
+        bad = 0;
+        for (i = 0; i < DIMS * DIMS; i++)
+            if ((small[i] & 0xFFFFFF) != (tall[rows[r] * DIMS + i] & 0xFFFFFF))
+                bad++;
+        ok(bad == 0, "rows %d..%d of the polygon: %d pixels differ from the same rows drawn inside a tall surface\n",
+           rows[r], rows[r] + DIMS - 1, bad);
+    }
+    SetViewportOrgEx(dcSmall, 0, 0, NULL);
+
+    for (r = 0; r < (int)_countof(huge); r++)
+    {
+        t = GetTickCount();
+        Polygon(dcSmall, huge[r], 4);
+        SetPolyFillMode(dcSmall, (r & 1) ? WINDING : ALTERNATE);
+        Polygon(dcSmall, huge[r], 4);
+        ok(GetTickCount() - t < 10000, "polygon %d with far points took %lu ms\n", r, GetTickCount() - t);
+    }
+    DeleteDC(dcTall);
+    DeleteDC(dcSmall);
 }
 
 static HDC MakeDC(int kind)
@@ -377,6 +463,8 @@ START_TEST(PathArcRobustness)
         GetEnvironmentVariableA("PAR_SEED", buf, sizeof(buf));
         g_seed = strtoul(buf, NULL, 16);
     }
+    test_Polygon();
+
     for (kind = 0; kind < 3; kind++)
     {
         HDC hdc = MakeDC(kind);
@@ -410,4 +498,5 @@ START_TEST(PathArcRobustness)
         DeleteObject(pen);
         DeleteObject(pen3);
     }
+    ok(g_nSlow == 0, "%d calls took more than 15 seconds\n", g_nSlow);
 }

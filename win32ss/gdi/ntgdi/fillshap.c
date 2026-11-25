@@ -56,8 +56,9 @@ IntGdiPolygon(PDC    dc,
     IntLPtoDP(dc, Points, Count);
     for (CurrentPoint = 0; CurrentPoint < Count; CurrentPoint++)
     {
-        Points[CurrentPoint].x += dc->ptlDCOrig.x;
-        Points[CurrentPoint].y += dc->ptlDCOrig.y;
+        /* Device coordinates beyond +-2^27 wrap around to 28 bits, as on Windows (see IntWrapShapeCoord) */
+        Points[CurrentPoint].x = IntWrapShapeCoord(Points[CurrentPoint].x) + dc->ptlDCOrig.x;
+        Points[CurrentPoint].y = IntWrapShapeCoord(Points[CurrentPoint].y) + dc->ptlDCOrig.y;
     }
     // No need to have path here.
     {
