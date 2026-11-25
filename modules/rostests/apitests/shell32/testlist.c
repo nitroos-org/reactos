@@ -88,6 +88,7 @@ extern void func_SHGetUserDisplayName(void);
 extern void func_SHIsBadInterfacePtr(void);
 extern void func_SHLimitInputEdit(void);
 extern void func_SHParseDisplayName(void);
+extern void func_SHQueryValueExExpand(void);
 extern void func_SHShouldShowWizards(void);
 extern void func_SHSimpleIDListFromPath(void);
 extern void func_SHRestricted(void);
@@ -183,6 +184,7 @@ const struct test winetest_testlist[] =
     { "SHIsBadInterfacePtr", func_SHIsBadInterfacePtr },
     { "SHLimitInputEdit", func_SHLimitInputEdit },
     { "SHParseDisplayName", func_SHParseDisplayName },
+    { "SHQueryValueExExpand", func_SHQueryValueExExpand },
     { "SHShouldShowWizards", func_SHShouldShowWizards },
     { "SHSimpleIDListFromPath", func_SHSimpleIDListFromPath },
     { "SHRestricted", func_SHRestricted },
