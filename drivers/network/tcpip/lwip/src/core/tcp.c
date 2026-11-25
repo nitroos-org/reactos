@@ -1570,14 +1570,19 @@ tcp_fasttmr_start:
          (1 to 1.5 s with the 500 ms timer, and the window back to one segment) found it. On a path whose
          round trip is below one slow tick, the first unacknowledged segment, retransmitted in this recovery
          and still not acknowledged two fast ticks (250-500 ms) later while nothing else was acknowledged, is
-         retransmitted again; recovery and the window stay as they are */
+         retransmitted again; recovery and the window stay as they are. A peer that keeps sending duplicate
+         SACKs and never acknowledges the hole would be sent the segment every 500 ms: the wait doubles with
+         every resend of the same segment (2, 4, 8, 16 fast ticks) and starts again when snd_una moves; the
+         retransmission timeout, which ends recovery, runs as before */
       if ((pcb->flags & TF_INFR) && pcb->unacked != NULL && (pcb->unacked->flags & TF_SEG_RECOVERY_REXMIT) &&
           (pcb->sa >> 3) == 0) {
         if (pcb->lastack != pcb->recovery_ack) {
           pcb->recovery_ack = pcb->lastack;
           pcb->recovery_ticks = 0;
-        } else if (++pcb->recovery_ticks >= 2) {
+          pcb->recovery_wait = 2;
+        } else if (++pcb->recovery_ticks >= (pcb->recovery_wait < 2 ? 2 : pcb->recovery_wait)) {
           pcb->recovery_ticks = 0;
+          pcb->recovery_wait = (u8_t)(pcb->recovery_wait < 16 ? (pcb->recovery_wait < 2 ? 4 : pcb->recovery_wait * 2) : 16);
           pcb->unacked->flags &= (u8_t)~TF_SEG_RECOVERY_REXMIT;
           if (tcp_rexmit_hole(pcb, &pcb->unacked) == ERR_OK) {
             tcp_output(pcb);
@@ -1585,6 +1590,7 @@ tcp_fasttmr_start:
         }
       } else {
         pcb->recovery_ticks = 0;
+        pcb->recovery_wait = 2;
         pcb->recovery_ack = pcb->lastack;
       }
 #endif /* LWIP_TCP_SACK_IN */
