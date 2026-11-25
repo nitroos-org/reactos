@@ -1323,8 +1323,13 @@ RxCancelRoutine(
     }
     else
     {
-        /* Otherwise, reference it and mark it cancelled */
-        SetFlag(RxContext->Flags, RX_CONTEXT_FLAG_CANCELLED);
+        /* Otherwise, reference it and mark it cancelled. Atomically: the
+         * thread that handles the request changes other flags of the context
+         * at the same time without this lock (RxFspDispatch, RxLowIoSubmit),
+         * and a plain read-modify-write here could write theirs away. Theirs
+         * can still write this one away: RxSetMinirdrCancelRoutine therefore
+         * looks at Irp->Cancel too */
+        InterlockedOr((volatile LONG *)&RxContext->Flags, RX_CONTEXT_FLAG_CANCELLED);
         InterlockedIncrement((volatile long *)&RxContext->ReferenceCount);
     }
 
@@ -3251,6 +3256,32 @@ RxpLockRequestDone(
 }
 
 /*
+ * Called by RxSetMinirdrCancelRoutine (rxce) under RxStrucSupSpinLock: a
+ * lock request whose handle's cleanup has started is not to wait at the
+ * server any more. Cleanup cancels the waiting lock requests of its FOBX
+ * that have a mini-redirector cancel routine (RxpCancelLockRequestsForFobx);
+ * one that was still on its way (posted to the FSP, or between RDBSS and the
+ * mini-redirector) had none to call, and would have been sent after the
+ * cleanup, to wait at the server for as long as the range stays held, with
+ * its handle closed. Cleanup sets the mark (atomically) before it takes the
+ * spin lock to look for requests: a request that sets its routine before
+ * that is found and cancelled there, one that sets it after sees the mark
+ * here and is refused (STATUS_CANCELLED).
+ */
+BOOLEAN
+NTAPI
+RxpLockRequestOfCleanedUpHandle(
+    IN PRX_CONTEXT RxContext)
+{
+    PFOBX Fobx = (PFOBX)RxContext->pFobx;
+
+    return (RxContext->MajorFunction == IRP_MJ_LOCK_CONTROL && Fobx != NULL &&
+            (RxContext->LowIoContext.Operation == LOWIO_OP_SHAREDLOCK ||
+             RxContext->LowIoContext.Operation == LOWIO_OP_EXCLUSIVELOCK) &&
+            BooleanFlagOn(*(volatile ULONG *)&Fobx->Flags, RXP_FOBX_FLAG_CLEANUP_STARTED));
+}
+
+/*
  * Cleanup of a FOBX: lock requests of this FOBX that wait in the
  * mini-redirector (sent asynchronously by RxCommonLockControl) are cancelled
  * through the cancel routine the mini-redirector set for them
@@ -3289,8 +3320,9 @@ RxpCancelLockRequestsForFobx(
                 continue;
             }
 
-            /* Cancelled once: neither this loop nor RxCancelRoutine picks it again */
-            SetFlag(Candidate->Flags, RX_CONTEXT_FLAG_CANCELLED);
+            /* Cancelled once: neither this loop nor RxCancelRoutine picks it again (atomically: the
+             * thread that handles the request may change other flags at the same time) */
+            InterlockedOr((volatile LONG *)&Candidate->Flags, RX_CONTEXT_FLAG_CANCELLED);
             InterlockedIncrement((volatile long *)&Candidate->ReferenceCount);
             Context = Candidate;
             CancelRoutine = Candidate->MRxCancelRoutine;
