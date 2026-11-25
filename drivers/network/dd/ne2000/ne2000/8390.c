@@ -426,6 +426,112 @@ NDIS_STATUS NICSetup(
 }
 
 
+/* The bit of an address in the multicast address registers: the 6 high bits of the Ethernet CRC-32 of the
+   address (polynomial 0x04C11DB7, each byte least significant bit first, as the bits are sent) */
+static UINT NICMulticastHashIndex(
+    const UCHAR *Address)
+{
+    ULONG Crc = 0xFFFFFFFF;
+    UINT i, Bit;
+
+    for (i = 0; i < DRIVER_LENGTH_OF_ADDRESS; i++) {
+        UCHAR b = Address[i];
+
+        for (Bit = 0; Bit < 8; Bit++, b >>= 1) {
+            ULONG Top = (Crc >> 31) ^ (b & 1);
+
+            Crc <<= 1;
+            if (Top)
+                Crc ^= 0x04C11DB7;
+        }
+    }
+
+    return Crc >> 26;
+}
+
+
+VOID NICWriteReceiveFilter(
+    PNIC_ADAPTER Adapter)
+/*
+ * FUNCTION: Programs the receive configuration and the multicast address registers from the packet filter
+ * ARGUMENTS:
+ *     Adapter = Pointer to adapter information
+ * NOTES:
+ *     The NIC accepts frames for its own address whatever the filter says (there is no switch for that
+ *     in the chip). Multicast frames pass the AM bit only if their bit in the multicast address registers
+ *     is set: all of them for all multicast and promiscuous, the groups of the multicast list for multicast,
+ *     none otherwise. Called with the interrupt excluded (NICStart, or through NICApplyPacketFilter)
+ */
+{
+    UCHAR Mask[8];
+    UCHAR Rcr = 0;
+    UINT i;
+
+    RtlZeroMemory(Mask, sizeof(Mask));
+    if (Adapter->PacketFilter & (NDIS_PACKET_TYPE_ALL_MULTICAST | NDIS_PACKET_TYPE_PROMISCUOUS)) {
+        RtlFillMemory(Mask, sizeof(Mask), 0xFF);
+    } else if (Adapter->PacketFilter & NDIS_PACKET_TYPE_MULTICAST) {
+        for (i = 0; i < Adapter->MulticastListSize; i++) {
+            UINT Index;
+
+            if (!(Adapter->Addresses[i][0] & 0x01))
+                continue;
+            Index = NICMulticastHashIndex(Adapter->Addresses[i]);
+            Mask[Index >> 3] |= (UCHAR)(1 << (Index & 7));
+        }
+    }
+
+    if (Adapter->PacketFilter & NDIS_PACKET_TYPE_BROADCAST)
+        Rcr |= RCR_AB;
+    if (Adapter->PacketFilter & (NDIS_PACKET_TYPE_MULTICAST | NDIS_PACKET_TYPE_ALL_MULTICAST |
+                                 NDIS_PACKET_TYPE_PROMISCUOUS))
+        Rcr |= RCR_AM;
+    if (Adapter->PacketFilter & NDIS_PACKET_TYPE_PROMISCUOUS)
+        Rcr |= RCR_PRO;
+
+    /* The multicast address registers are on page 1 */
+    NdisRawWritePortUchar(Adapter->IOBase + PG0_CR, CR_STA | CR_RD2 | CR_PAGE1);
+    for (i = 0; i < sizeof(Mask); i++) {
+        Adapter->MulticastAddressMask[i] = Mask[i];
+        NdisRawWritePortUchar(Adapter->IOBase + PG1_MAR + i, Mask[i]);
+    }
+    NdisRawWritePortUchar(Adapter->IOBase + PG0_CR, CR_STA | CR_RD2 | CR_PAGE0);
+
+    NdisRawWritePortUchar(Adapter->IOBase + PG0_RCR, Rcr);
+
+#if DBG
+    DbgPrint("NE2000: packet filter 0x%X: RCR 0x%02X, MAR %02X%02X%02X%02X%02X%02X%02X%02X.\n",
+        Adapter->PacketFilter, Rcr, Mask[0], Mask[1], Mask[2], Mask[3], Mask[4], Mask[5], Mask[6], Mask[7]);
+#endif
+}
+
+
+static BOOLEAN NTAPI NICApplyPacketFilterSync(
+    PVOID Context)
+{
+    NICWriteReceiveFilter((PNIC_ADAPTER)Context);
+    return TRUE;
+}
+
+
+VOID NICApplyPacketFilter(
+    PNIC_ADAPTER Adapter)
+/*
+ * FUNCTION: Applies the current packet filter and multicast list to a running NIC
+ * ARGUMENTS:
+ *     Adapter = Pointer to adapter information
+ * NOTES:
+ *     The registers are written with the interrupt excluded: the interrupt routine reads the status register
+ *     of page 0, which the page switch would hide
+ */
+{
+    if (Adapter->InterruptRegistered)
+        NdisMSynchronizeWithInterrupt(&Adapter->Interrupt, NICApplyPacketFilterSync, Adapter);
+    else
+        NICWriteReceiveFilter(Adapter);
+}
+
+
 NDIS_STATUS NICStart(
     PNIC_ADAPTER Adapter)
 /*
@@ -441,8 +547,8 @@ NDIS_STATUS NICStart(
     /* Take NIC out of loopback mode */
     NdisRawWritePortUchar(Adapter->IOBase + PG0_TCR, 0x00);
 
-    /* Initialize RCR - Receive Configuration Register (accept all) */
-    NdisRawWritePortUchar(Adapter->IOBase + PG0_RCR, RCR_AB | RCR_AM | RCR_PRO);
+    /* Initialize RCR - Receive Configuration Register from the packet filter */
+    NICWriteReceiveFilter(Adapter);
 
     return NDIS_STATUS_SUCCESS;
 }

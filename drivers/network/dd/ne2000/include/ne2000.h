@@ -110,6 +110,9 @@ typedef struct _NIC_ADAPTER
     /* List of multicast addresses in use */
     DRIVER_HARDWARE_ADDRESS Addresses[DRIVER_MAX_MULTICAST_LIST_SIZE];
 
+    /* Number of addresses in the list */
+    ULONG MulticastListSize;
+
     /* Current multicast address mask */
     UCHAR MulticastAddressMask[8];
 
@@ -204,6 +207,12 @@ NDIS_STATUS NICInitialize(
     PNIC_ADAPTER Adapter);
 
 NDIS_STATUS NICSetup(
+    PNIC_ADAPTER Adapter);
+
+VOID NICWriteReceiveFilter(
+    PNIC_ADAPTER Adapter);
+
+VOID NICApplyPacketFilter(
     PNIC_ADAPTER Adapter);
 
 NDIS_STATUS NICStart(
