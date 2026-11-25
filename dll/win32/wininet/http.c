@@ -1775,11 +1775,23 @@ static BOOL HTTP_DomainMatches(LPCWSTR server, substr_t domain)
     return len == domain.len-2 && !wcsnicmp(dot + 1, domain.str + 2, len);
 }
 
+/* The names of the machine itself go direct whatever the bypass list says, or whether there is one (measured on Windows
+ * Server 2022: "localhost" in any case, "127.0.0.1" and "::1" do; "localhost.", "127.0.0.2" and "::ffff:127.0.0.1" go
+ * through the proxy unless the list names them) */
+static BOOL HTTP_IsLoopbackHost(LPCWSTR server)
+{
+    BOOL loopback;
+
+    return !wcsicmp(server, L"localhost") || !wcscmp(server, L"127.0.0.1") ||
+           (is_ipv6_literal_host(server, &loopback) && loopback);
+}
+
 static BOOL HTTP_ShouldBypassProxy(appinfo_t *lpwai, LPCWSTR server)
 {
     LPCWSTR ptr;
     BOOL ret = FALSE;
 
+    if (HTTP_IsLoopbackHost(server)) return TRUE;
     if (!lpwai->proxyBypass) return FALSE;
     ptr = lpwai->proxyBypass;
     while(1) {
@@ -5228,7 +5240,8 @@ static DWORD HTTP_HttpSendRequestW(http_request_t *request, LPCWSTR lpszHeaders,
             if (HTTP_GetCustomHeaderIndex(request, L"Content-Length", 0, TRUE) >= 0)
                 set_content_length_header(request, 0, HTTP_ADDREQ_FLAG_REPLACE);
 
-            request_header = build_request_header(request, L"CONNECT", target, L"HTTP/1.1", TRUE);
+            /* The tunnel request is HTTP/1.0, as Windows sends it (the proxy's answer may be either) */
+            request_header = build_request_header(request, L"CONNECT", target, L"HTTP/1.0", TRUE);
         }
         else if (request->proxy && !(request->hdr.dwFlags & INTERNET_FLAG_SECURE))
         {
