@@ -882,9 +882,13 @@ static PFW_IMAGE FwMakeSystemImage(VOID)
 }
 
 /* Whether the process runs with a service logon token: NT AUTHORITY\SERVICE (S-1-5-6) is among the groups of its
-   token and enabled. Measured on Windows Server 2022: the processes of services of every account carry it (SYSTEM,
-   LocalService, NetworkService, a service of an administrator), and so does a SYSTEM scheduled task; the token of a
-   batch logon does not. Process is a handle with PROCESS_QUERY_INFORMATION; PASSIVE_LEVEL. FALSE when unknown. */
+   token and enabled, or the user of the token is SYSTEM. Measured on Windows Server 2022 (an allow rule with
+   service=any, a listener in each of: own-process services of LocalSystem without and with a service SID, of
+   LocalService and of NetworkService, an ordinary process started by a SYSTEM, a LocalService and a NetworkService
+   scheduled task, an ordinary process of an administrator): everything is let through except the process of the
+   administrator. A LocalSystem service without a service SID runs with the token of the service controller, which has
+   no S-1-5-6 group, so the user of the token decides there. The token of a batch logon is not a service token.
+   Process is a handle with PROCESS_QUERY_INFORMATION; PASSIVE_LEVEL. FALSE when unknown. */
 static BOOLEAN FwProcessIsService(HANDLE Process)
 {
     static const SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
@@ -915,6 +919,24 @@ static BOOLEAN FwProcessIsService(HANDLE Process)
                 }
             }
             ExFreePoolWithTag(Groups, NITROFW_IMG_TAG);
+        }
+    }
+    if (!Found)
+    {
+        PTOKEN_USER User;
+
+        Len = 0;
+        if (ZwQueryInformationToken(Token, TokenUser, NULL, 0, &Len) == STATUS_BUFFER_TOO_SMALL &&
+            Len >= sizeof(TOKEN_USER) && Len <= 0x1000)
+        {
+            User = ExAllocatePoolWithTag(PagedPool, Len, NITROFW_IMG_TAG);
+            if (User)
+            {
+                if (NT_SUCCESS(ZwQueryInformationToken(Token, TokenUser, User, Len, &Len)) &&
+                    User->User.Sid && RtlEqualSid(User->User.Sid, SeExports->SeLocalSystemSid))
+                    Found = TRUE;
+                ExFreePoolWithTag(User, NITROFW_IMG_TAG);
+            }
         }
     }
     ZwClose(Token);

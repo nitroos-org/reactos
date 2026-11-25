@@ -638,6 +638,15 @@ ObAssignSecurity(IN PACCESS_STATE AccessState,
                                      SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
                                      &NewDescriptor,
                                      &Type->TypeInfo.GenericMapping);
+        if (NT_SUCCESS(Status) &&
+            !(SecurityDescriptor != NULL &&
+              (((PISECURITY_DESCRIPTOR)SecurityDescriptor)->Control & SE_DACL_PRESENT)) &&
+            !(AccessState->SecurityDescriptor != NULL &&
+              (((PISECURITY_DESCRIPTOR)AccessState->SecurityDescriptor)->Control & SE_DACL_PRESENT)))
+        {
+            /* The DACL was derived from the default DACL: Windows adds (A;;TOKEN_QUERY;;;BA) */
+            Status = SeAssignTokenAdminQuery(&NewDescriptor, &Type->TypeInfo.GenericMapping);
+        }
         if (!NT_SUCCESS(Status))
         {
             SeDeassignSecurity(&NewDescriptor);
