@@ -172,6 +172,10 @@ DceSetDrawable( PWND Window OPTIONAL,
 
   /* Set DC Origin and Window Rectangle */
   GreSetDCOrg( hDC, rect.left, rect.top, &rect);
+
+  /* And where that surface is on the screen (GetRandomRgn SYSRGN) */
+  if (Root)
+      GreRedirSetScreenOrg(hDC, Root->rcWindow.left, Root->rcWindow.top);
 }
 
 
@@ -1210,6 +1214,9 @@ DceResetActiveDCEs(PWND Window)
                NtGdiOffsetRgn(pDCE->hrgnClip, DeltaX, DeltaY);
             }
          }
+         /* Where the surface of a redirected DC is on the screen now (GetRandomRgn SYSRGN) */
+         dc->ptlRedirScreen.x = RootX;
+         dc->ptlRedirScreen.y = RootY;
          DC_UnlockDc(dc);
 
          DceUpdateVisRgn(pDCE, CurrentWindow, pDCE->DCXFlags);

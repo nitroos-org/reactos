@@ -1271,6 +1271,23 @@ GreRedirSetDCOrg(
     return TRUE;
 }
 
+/* A redirected window DC: where its surface's pixel 0, 0 is on the screen (the system region is in screen coordinates) */
+VOID
+NTAPI
+GreRedirSetScreenOrg(
+    _In_ HDC hdc,
+    _In_ LONG x,
+    _In_ LONG y)
+{
+    PDC pdc = DC_LockDcAnyOwner(hdc);
+
+    if (!pdc)
+        return;
+    pdc->ptlRedirScreen.x = x;
+    pdc->ptlRedirScreen.y = y;
+    DC_UnlockDc(pdc);
+}
+
 /*
  * Binds a window DC to a redirection surface (ntuser/redir.c), or with psurf NULL back to the screen.
  * pvRedir is USER's record for the window; *ppvOld gets the record the DC had (USER keeps the

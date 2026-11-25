@@ -140,6 +140,7 @@ typedef struct _DC
   RECTL       rclGlass;   /* that window's rectangle on the screen */
   PVOID       pvRedir;    /* while fs & DC_REDIRECTION: the redirection record of the window (ntuser/redir.c) */
   RECTL       rclRedirDraw; /* device rectangle of the primitive being drawn into that surface */
+  POINTL      ptlRedirScreen; /* while fs & DC_REDIRECTION: where the surface's pixel 0, 0 is on the screen */
 } DC;
 
 /*
@@ -154,6 +155,7 @@ typedef struct _DC
 #define REDIRBIND_BUSY  1   /* the DC is locked by another process for now: binding unchanged */
 #define REDIRBIND_GONE  2   /* the DC handle is no longer valid (or not a window DC) */
 BOOL NTAPI GreRedirSetDCOrg(_In_ HDC hdc, _In_ LONG x, _In_ LONG y, _In_opt_ PRECTL prcl);
+VOID NTAPI GreRedirSetScreenOrg(_In_ HDC hdc, _In_ LONG x, _In_ LONG y);
 ULONG NTAPI GreRedirBindDC(_In_ HDC hdc, _In_opt_ PVOID pvRedir, _In_opt_ struct _SURFACE *psurf, _Out_ PVOID *ppvOld);
 struct _SURFACE *NTAPI GreRedirCreateSurface(_In_ LONG cx, _In_ LONG cy, _In_opt_ struct _SURFACE *psurfOld);
 VOID NTAPI GreRedirDeleteSurface(_In_ struct _SURFACE *psurf);
