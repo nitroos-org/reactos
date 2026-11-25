@@ -133,7 +133,7 @@ static BOOL get_all(IPV6_ALL *All)
   BOOL On;
 
   memset(All, 0, sizeof(*All));
-  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_ATTRIBUTES)))
     return FALSE;
 
   On = Ipv6GetStateFromFile(TcpFile, &All->State);
@@ -828,7 +828,7 @@ BOOL Ipv6GetIpStatistics(PMIB_IPSTATS Stats)
   ULONG Routed = 0, i;
   BOOL Result;
 
-  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_ATTRIBUTES)))
     return FALSE;
   Result = get_stats_from_file(TcpFile, &Counters);
   closeTcpFile(TcpFile);
@@ -862,7 +862,7 @@ BOOL Ipv6GetTcpStatistics(PMIB_TCPSTATS Stats)
   ULONG i;
   BOOL Result;
 
-  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_ATTRIBUTES)))
     return FALSE;
   Result = get_stats_from_file(TcpFile, &Counters);
   if (Result)
@@ -909,7 +909,7 @@ BOOL Ipv6GetIcmpStatistics(PMIB_ICMP_EX Stats)
   BOOL Result;
   ULONG i;
 
-  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_ATTRIBUTES)))
     return FALSE;
   Result = get_stats_from_file(TcpFile, &Counters);
   closeTcpFile(TcpFile);

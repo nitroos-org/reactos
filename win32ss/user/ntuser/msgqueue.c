@@ -1732,7 +1732,7 @@ MsqPostMessage(PTHREADINFO pti,
     * (or reads it slower than the others post, as a shell does with shell hook messages) takes
     * paged pool without bound. The events of the system (activation, win events) are not counted.
     */
-   if (!HardwareMessage && dwQEvent == 0 && pti->cPostedMessages >= USER_POST_MESSAGE_LIMIT)
+   if (!HardwareMessage && dwQEvent == 0 && pti->cPostedMessages >= gUserPostMessageLimit)
    {
       EngSetLastError(ERROR_NOT_ENOUGH_QUOTA);
       return FALSE;

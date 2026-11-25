@@ -493,8 +493,9 @@ static void TestCommon(HANDLE Lsa, ULONG Package, PCWSTR Tag, SECURITY_IMPERSONA
     Release(&Result);
 
     /* Only a network logon is possible; the other types are refused */
-    ExpectFailure(Lsa, Package, L"interactive", Interactive, User, ComputerName, 0, NT_STATUS_BAD_VALIDATION_CLASS, 0);
-    ExpectFailure(Lsa, Package, L"service", Service, User, ComputerName, 0, NT_STATUS_BAD_VALIDATION_CLASS, 0);
+    /* measured on Windows Server 2022: Interactive and Service are an invalid parameter */
+    ExpectFailure(Lsa, Package, L"interactive", Interactive, User, ComputerName, 0, NT_STATUS_INVALID_PARAMETER, 0);
+    ExpectFailure(Lsa, Package, L"service", Service, User, ComputerName, 0, NT_STATUS_INVALID_PARAMETER, 0);
     ExpectFailure(Lsa, Package, L"network cleartext", NetworkCleartext, User, ComputerName, 0, NT_STATUS_BAD_VALIDATION_CLASS, 0);
     ExpectFailure(Lsa, Package, L"unlock", Unlock, User, ComputerName, 0, NT_STATUS_BAD_VALIDATION_CLASS, 0);
     ExpectFailure(Lsa, Package, L"new credentials", NewCredentials, User, ComputerName, 0, NT_STATUS_INVALID_LOGON_TYPE, 0);

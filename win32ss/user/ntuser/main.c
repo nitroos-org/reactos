@@ -1177,7 +1177,7 @@ DriverEntry(
     /* Create the global USER heap */
     GlobalUserHeap = UserCreateHeap(&GlobalUserHeapSection,
                                     &GlobalUserHeapBase,
-                                    1 * 1024 * 1024, /* FIXME: 1 MB for now... */
+                                    4 * 1024 * 1024, /* the user handle table alone takes up to 0.4 / 0.8 MB (i386 / amd64) */
                                     PAGE_SIZE);
     if (GlobalUserHeap == NULL)
     {

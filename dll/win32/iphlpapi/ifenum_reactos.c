@@ -230,7 +230,7 @@ static DWORD getNumInterfacesInt(BOOL onlyNonLoopback)
     NTSTATUS status;
     int i;
 
-    status = openTcpFile( &tcpFile, FILE_READ_DATA );
+    status = openTcpFile( &tcpFile, FILE_READ_ATTRIBUTES );
 
     if( !NT_SUCCESS(status) ) {
         WARN("getNumInterfaces: failed %08x\n", status );
@@ -382,7 +382,7 @@ const char *getInterfaceNameByIndex(DWORD index)
     IFInfo ifInfo;
     HANDLE tcpFile;
     char *interfaceName = NULL;
-    NTSTATUS status = openTcpFile( &tcpFile, FILE_READ_DATA );
+    NTSTATUS status = openTcpFile( &tcpFile, FILE_READ_ATTRIBUTES );
 
     if( NT_SUCCESS(status) ) {
         status = getInterfaceInfoByIndex( tcpFile, index, &ifInfo );
@@ -410,7 +410,7 @@ DWORD getInterfaceIndexByName(const char *name, PDWORD index)
 {
     IFInfo ifInfo;
     HANDLE tcpFile;
-    NTSTATUS status = openTcpFile( &tcpFile, FILE_READ_DATA );
+    NTSTATUS status = openTcpFile( &tcpFile, FILE_READ_ATTRIBUTES );
 
     if( NT_SUCCESS(status) ) {
         status = getInterfaceInfoByName( tcpFile, (char *)name, &ifInfo );
@@ -431,7 +431,7 @@ InterfaceIndexTable *getInterfaceIndexTableInt( BOOL nonLoopbackOnly ) {
   IFInfo *ifInfo;
   InterfaceIndexTable *ret = 0;
   HANDLE tcpFile;
-  NTSTATUS status = openTcpFile( &tcpFile, FILE_READ_DATA );
+  NTSTATUS status = openTcpFile( &tcpFile, FILE_READ_ATTRIBUTES );
 
   if( NT_SUCCESS(status) ) {
       status = getInterfaceInfoSet( tcpFile, &ifInfo, &numInterfaces );
@@ -514,7 +514,7 @@ DWORD getInterfaceAdditionalAddresses(DWORD index, IPAddrEntry **Entries, PDWORD
     *Entries = NULL;
     *Count = 0;
 
-    status = openTcpFile( &tcpFile, FILE_READ_DATA );
+    status = openTcpFile( &tcpFile, FILE_READ_ATTRIBUTES );
     if( !NT_SUCCESS(status) )
         return status;
 
@@ -545,7 +545,7 @@ DWORD getAddrByIndexOrName( char *name, DWORD index, IPHLPAddrType addrType ) {
     NTSTATUS status = STATUS_SUCCESS;
     DWORD addrOut = INADDR_ANY;
 
-    status = openTcpFile( &tcpFile, FILE_READ_DATA );
+    status = openTcpFile( &tcpFile, FILE_READ_ATTRIBUTES );
 
     if( NT_SUCCESS(status) ) {
         status = getIPAddrEntryForIf( tcpFile, name, index, &ifInfo );
@@ -596,7 +596,7 @@ DWORD getInterfacePhysicalByName(const char *name, PDWORD len, PBYTE addr,
 {
     HANDLE tcpFile;
     IFInfo info;
-    NTSTATUS status = openTcpFile( &tcpFile, FILE_READ_DATA );
+    NTSTATUS status = openTcpFile( &tcpFile, FILE_READ_ATTRIBUTES );
 
     if( NT_SUCCESS(status) ) {
         status = getInterfaceInfoByName( tcpFile, (char *)name, &info );
@@ -613,7 +613,7 @@ DWORD getInterfacePhysicalByIndex(DWORD index, PDWORD len, PBYTE addr,
 {
     HANDLE tcpFile;
     IFInfo info;
-    NTSTATUS status = openTcpFile( &tcpFile, FILE_READ_DATA );
+    NTSTATUS status = openTcpFile( &tcpFile, FILE_READ_ATTRIBUTES );
 
     if( NT_SUCCESS(status) ) {
         status = getInterfaceInfoByIndex( tcpFile, index, &info );
@@ -650,7 +650,7 @@ DWORD getInterfaceEntryByName(const char *name, PMIB_IFROW entry)
 {
     HANDLE tcpFile;
     IFInfo info;
-    NTSTATUS status = openTcpFile( &tcpFile, FILE_READ_DATA );
+    NTSTATUS status = openTcpFile( &tcpFile, FILE_READ_ATTRIBUTES );
 
     TRACE("Called.\n");
 
@@ -675,7 +675,7 @@ DWORD getInterfaceEntryByIndex(DWORD index, PMIB_IFROW entry)
 {
     HANDLE tcpFile;
     IFInfo info;
-    NTSTATUS status = openTcpFile( &tcpFile, FILE_READ_DATA );
+    NTSTATUS status = openTcpFile( &tcpFile, FILE_READ_ATTRIBUTES );
 
     TRACE("Called.\n");
 

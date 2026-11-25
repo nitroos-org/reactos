@@ -35,6 +35,7 @@ typedef struct _FACTS
     CHAR Owner[128];
     CHAR DefaultDacl[512];
     CHAR TokenSd[512];
+    CHAR Origin[32];
 } FACTS, *PFACTS;
 
 static CHAR g_Dir[MAX_PATH];
@@ -101,6 +102,12 @@ WriteFacts(PCSTR Name)
     {
         fprintf(f, "S %s\n", Str);
         LocalFree(Str);
+    }
+    {
+        TOKEN_ORIGIN Origin;
+
+        if (GetTokenInformation(hToken, TokenOrigin, &Origin, sizeof(Origin), &Length))
+            fprintf(f, "R %lx:%lx\n", (ULONG)Origin.OriginatingLogonSession.HighPart, Origin.OriginatingLogonSession.LowPart);
     }
     fprintf(f, "END\n");
     fclose(f);
@@ -211,6 +218,8 @@ ReadFacts(PCSTR File, PFACTS Facts)
             StringCbCopyA(Facts->DefaultDacl, sizeof(Facts->DefaultDacl), Line + 2);
         else if (!strncmp(Line, "S ", 2))
             StringCbCopyA(Facts->TokenSd, sizeof(Facts->TokenSd), Line + 2);
+        else if (!strncmp(Line, "R ", 2))
+            StringCbCopyA(Facts->Origin, sizeof(Facts->Origin), Line + 2);
         else if (!strcmp(Line, "END"))
             Facts->Valid = TRUE;
     }
@@ -332,6 +341,13 @@ RunRow(SC_HANDLE hScm, PCSTR Dir, const ROW *Row, ULONG Number)
         else
             ok(g < 0, "%s: NT AUTHORITY\\SERVICE is in the token\n", Row->Tag);
         ok(!strcmp(Facts.Owner, Row->Owner), "%s: owner %s, expected %s\n", Row->Tag, Facts.Owner, Row->Owner);
+        /* the origin (Windows Server 2022, measured): the system token that a LocalSystem service without a service SID
+         * runs with has none (0:0); every token the controller makes or has the LSA make has its logon session, 0:3e7 */
+        {
+            PCSTR Origin = (Row->Account == NULL && Row->SidType == SERVICE_SID_TYPE_NONE) ? "0:0" : "0:3e7";
+
+            ok(!strcmp(Facts.Origin, Origin), "%s: origin %s, expected %s\n", Row->Tag, Facts.Origin, Origin);
+        }
         {
             /* one logon SID of its own (a new LUID, not the logon session's: the SYSTEM session is S-1-5-5-0-999) */
             ULONG Logon = 0, Found = 0, i;
@@ -346,10 +362,8 @@ RunRow(SC_HANDLE hScm, PCSTR Dir, const ROW *Row, ULONG Number)
                 }
             }
             ok(Found == (Row->LogonSid ? 1 : 0), "%s: %lu logon SIDs\n", Row->Tag, Found);
-            /* LocalService/NetworkService with a service SID: Windows sets SE_GROUP_OWNER on the logon SID, the logon here
-             * does not (ticket SCM-service-logon-sessions-and-logon-sid-attributes-differ) */
-            todo_ros_if(Row->Account != NULL && Row->SidType != SERVICE_SID_TYPE_NONE)
-                ok(Logon == Row->LogonSid, "%s: logon SID attributes 0x%lx, expected 0x%lx\n", Row->Tag, Logon, Row->LogonSid);
+            /* LocalService/NetworkService with a service SID: SE_GROUP_OWNER on the logon SID, as on Windows Server 2022 */
+            ok(Logon == Row->LogonSid, "%s: logon SID attributes 0x%lx, expected 0x%lx\n", Row->Tag, Logon, Row->LogonSid);
         }
         if (Row->DefaultDacl)
         {

@@ -61,7 +61,7 @@ WsQueryIpv6Table(PHANDLE File, PVOID Buffer, ULONG BufferLength, PULONG Informat
     if (*File == NULL)
     {
         InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
-        Status = NtOpenFile(File, FILE_READ_DATA | SYNCHRONIZE, &Attributes, &Iosb,
+        Status = NtOpenFile(File, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &Attributes, &Iosb,
                             FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT);
         if (!NT_SUCCESS(Status))
         {

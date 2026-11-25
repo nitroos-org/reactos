@@ -37,7 +37,7 @@ static PVOID AllocThreadObject(
     IntReferenceThreadInfo(pti);
     *HandleOwner = pti;
     /* It's a thread object, but it still count as one for the process */
-    pti->ppi->UserHandleCount++;
+    IntIncrementUserHandleCount(pti->ppi);
 
     return ObjHead;
 }
@@ -83,7 +83,7 @@ static PVOID AllocDeskThreadObject(
     IntReferenceThreadInfo(pti);
     *HandleOwner = pti;
     /* It's a thread object, but it still count as one for the process */
-    pti->ppi->UserHandleCount++;
+    IntIncrementUserHandleCount(pti->ppi);
 
     return ObjHead;
 }
@@ -138,7 +138,7 @@ static PVOID AllocDeskProcObject(
     /* As AllocDeskThreadObject: a menu or a call procedure keeps the desktop whose heap it lives in */
     IntReferenceDesktopForObject(pDesk);
     ObjHead->hTaskWow = (DWORD_PTR)ppi;
-    ppi->UserHandleCount++;
+    IntIncrementUserHandleCount(ppi);
     IntReferenceProcessInfo(ppi);
     *HandleOwner = ppi;
 
@@ -182,7 +182,7 @@ static PVOID AllocProcMarkObject(
     ObjHead->ppi = ppi;
     IntReferenceProcessInfo(ppi);
     *HandleOwner = ppi;
-    ppi->UserHandleCount++;
+    IntIncrementUserHandleCount(ppi);
 
     return ObjHead;
 }
@@ -387,27 +387,21 @@ __inline static PUSER_HANDLE_ENTRY alloc_user_entry(PUSER_HANDLE_TABLE ht)
       return entry;
    }
 
-   if (ht->nb_handles >= ht->allocated_handles)  /* Need to grow the array */
+   if (ht->nb_handles >= ht->allocated_handles)  /* Need to grow the table */
    {
-       ERR("Out of user handles! Used -> %lu, NM_Handle -> %d\n", gpsi->cHandleEntries, ht->nb_handles);
+      /* The array of entries is allocated once, at the size the handle values can address (the table is mapped
+         into every process, which keep its address); the part in use grows in steps. Called with the USER lock. */
+      if (ht->allocated_handles >= USER_HANDLE_TABLE_MAX_ENTRIES)
+      {
+          ERR("Out of user handles! Used -> %lu, NM_Handle -> %d\n", gpsi->cHandleEntries, ht->nb_handles);
 
 #if DBG
-       DbgUserDumpHandleTable();
+          DbgUserDumpHandleTable();
 #endif
 
-      return NULL;
-#if 0
-      PUSER_HANDLE_ENTRY new_handles;
-      /* Grow array by 50% (but at minimum 32 entries) */
-      int growth = max( 32, ht->allocated_handles / 2 );
-      int new_size = min( ht->allocated_handles + growth, (LAST_USER_HANDLE-FIRST_USER_HANDLE+1) >> 1 );
-      if (new_size <= ht->allocated_handles)
-         return NULL;
-      if (!(new_handles = UserHeapReAlloc( ht->handles, new_size * sizeof(*ht->handles) )))
-         return NULL;
-      ht->handles = new_handles;
-      ht->allocated_handles = new_size;
-#endif
+          return NULL;
+      }
+      ht->allocated_handles = min(ht->allocated_handles + USER_HANDLE_TABLE_STEP, USER_HANDLE_TABLE_MAX_ENTRIES);
    }
 
    entry = &ht->handles[ht->nb_handles++];
@@ -425,7 +419,8 @@ VOID UserInitHandleTable(PUSER_HANDLE_TABLE ht, PVOID mem, ULONG bytes)
    ht->handles = mem;
 
    ht->nb_handles = 0;
-   ht->allocated_handles = bytes / sizeof(USER_HANDLE_ENTRY);
+   /* The entries in use: the first step of the array (bytes is the whole array) */
+   ht->allocated_handles = min(bytes / sizeof(USER_HANDLE_ENTRY), USER_HANDLE_TABLE_STEP);
 }
 
 
@@ -604,9 +599,10 @@ void *get_user_object_handle(PUSER_HANDLE_TABLE ht,  HANDLE* handle, HANDLE_TYPE
 BOOL FASTCALL UserCreateHandleTable(VOID)
 {
    PVOID mem;
-   INT HandleCount = 1024 * 4;
+   INT HandleCount = USER_HANDLE_TABLE_MAX_ENTRIES;
 
-   // FIXME: Don't alloc all at once! Must be mapped into umode also...
+   /* The array is in the global USER heap, which every process maps at one place: it cannot move, so it is
+      allocated at its full size (the heap is sized for it) and alloc_user_entry opens it in steps */
    mem = UserHeapAlloc(sizeof(USER_HANDLE_ENTRY) * HandleCount);
    if (!mem)
    {
@@ -622,7 +618,6 @@ BOOL FASTCALL UserCreateHandleTable(VOID)
        return FALSE;
    }
 
-   // FIXME: Make auto growable
    UserInitHandleTable(gHandleTable, mem, sizeof(USER_HANDLE_ENTRY) * HandleCount);
 
    return TRUE;

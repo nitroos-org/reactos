@@ -33,6 +33,13 @@ extern HRGN hrgnDefault;
 
 PREGION FASTCALL REGION_AllocRgnWithHandle(INT n);
 PREGION FASTCALL REGION_AllocUserRgnWithHandle(INT n);
+
+/* A region that could not be made: out of memory, except at the handle quota of the process (Windows leaves the last error alone there) */
+FORCEINLINE VOID REGION_vSetAllocError(VOID)
+{
+    if (!GDIOBJ_bProcessAtHandleQuota())
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+}
 BOOL FASTCALL REGION_UnionRectWithRgn(PREGION rgn, const RECTL *rect);
 INT FASTCALL REGION_SubtractRectFromRgn(PREGION prgnDest, PREGION prgnSrc, const RECTL *prcl);
 INT FASTCALL REGION_GetRgnBox(PREGION Rgn, RECTL *pRect);

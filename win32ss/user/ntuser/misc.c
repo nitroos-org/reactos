@@ -591,6 +591,16 @@ NtUserGetGuiResources(
             Ret = (DWORD)W32Process->UserHandleCount;
             break;
          }
+      case 2: /* GR_GDIOBJECTS_PEAK */
+         {
+            Ret = (DWORD)W32Process->GDIHandleCountPeak;
+            break;
+         }
+      case 4: /* GR_USEROBJECTS_PEAK */
+         {
+            Ret = (DWORD)W32Process->UserHandleCountPeak;
+            break;
+         }
       default:
          {
             EngSetLastError(ERROR_INVALID_PARAMETER);

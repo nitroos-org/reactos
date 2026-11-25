@@ -190,6 +190,12 @@ GDIOBJ_hInsertObject(
     POBJ pobj,
     ULONG ulOwner);
 
+/* TRUE when the current process holds as many GDI objects as its quota lets it (a creating call that fails then
+   leaves the last error alone, as on Windows) */
+BOOL
+NTAPI
+GDIOBJ_bProcessAtHandleQuota(VOID);
+
 VOID
 NTAPI
 GDIOBJ_vFreeObject(

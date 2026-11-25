@@ -51,6 +51,7 @@ extern void func_tcpnodelay(void);
 extern void func_tcpchurn(void);
 extern void func_tcpnodelaysend(void);
 extern void func_sockinherit(void);
+extern void func_lowqueries(void);
 extern void func_inheritedsocket(void);
 extern void func_inheritedsocketchild(void);
 extern void func_iocpskip(void);
@@ -168,6 +169,7 @@ const struct test winetest_testlist[] =
     { "tcpchurn", func_tcpchurn },
     { "tcpnodelaysend", func_tcpnodelaysend },
     { "sockinherit", func_sockinherit },
+    { "lowqueries", func_lowqueries },
     { "inheritedsocket", func_inheritedsocket },
     { "inheritedsocketchild", func_inheritedsocketchild },
     { "iocpskip", func_iocpskip },

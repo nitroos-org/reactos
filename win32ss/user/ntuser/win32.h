@@ -180,6 +180,13 @@ typedef struct _THREADINFO
 } THREADINFO;
 
 
+/* A user object is counted for a process (under the USER lock); the peak is the highest count so far */
+#define IntIncrementUserHandleCount(ppi) \
+do { \
+    if (++(ppi)->UserHandleCount > (ppi)->UserHandleCountPeak) \
+        (ppi)->UserHandleCountPeak = (ppi)->UserHandleCount; \
+} while (0)
+
 #define IntReferenceThreadInfo(pti) \
     InterlockedIncrement(&(pti)->RefCount)
 
@@ -251,6 +258,8 @@ typedef struct _W32PROCESS
     DWORD         W32Pid;
     LONG          GDIHandleCount;
     LONG          UserHandleCount;
+    LONG          GDIHandleCountPeak;   /* The highest counts the process has held (GetGuiResources GR_*_PEAK) */
+    LONG          UserHandleCountPeak;
     PEX_PUSH_LOCK GDIPushLock;  /* Locking Process during access to structure. */
     RTL_AVL_TABLE GDIEngUserMemAllocTable;  /* Process AVL Table. */
     LIST_ENTRY    GDIDcAttrFreeList;

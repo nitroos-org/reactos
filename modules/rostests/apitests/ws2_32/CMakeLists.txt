@@ -47,6 +47,7 @@ list(APPEND SOURCE
     tcpchurn.c
     tcpnodelaysend.c
     sockinherit.c
+    lowqueries.c
     inheritedsocket.c
     helpers.c
     iocpskip.c

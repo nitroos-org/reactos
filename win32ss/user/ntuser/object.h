@@ -14,6 +14,16 @@ PVOID FASTCALL UserCreateObject(PUSER_HANDLE_TABLE ht, struct _DESKTOP* pDesktop
 BOOL FASTCALL UserDeleteObject(HANDLE h, HANDLE_TYPE type );
 PVOID UserGetObject(PUSER_HANDLE_TABLE ht, HANDLE handle, HANDLE_TYPE type );
 PVOID UserGetObjectNoErr(PUSER_HANDLE_TABLE, HANDLE, HANDLE_TYPE);
+/* Entries of the user handle table of a session: what the low word of a handle can address (index << 1 from
+   FIRST_USER_HANDLE; 32744), as many as one block of the global USER heap holds (the heap takes a block of 0x7F000
+   bytes at most: 21162 entries of 24 bytes on amd64, all 32744 of 12 bytes on i386), opened in steps of
+   USER_HANDLE_TABLE_STEP. The most one process may hold (USERProcessHandleQuota) is 18000. */
+#define USER_HANDLE_TABLE_ADDRESSABLE ((LAST_USER_HANDLE - FIRST_USER_HANDLE + 1) >> 1)
+#define USER_HANDLE_TABLE_MAX_BYTES 0x7C000
+#define USER_HANDLE_TABLE_MAX_ENTRIES \
+    (USER_HANDLE_TABLE_ADDRESSABLE < (USER_HANDLE_TABLE_MAX_BYTES / sizeof(USER_HANDLE_ENTRY)) ? \
+     USER_HANDLE_TABLE_ADDRESSABLE : (USER_HANDLE_TABLE_MAX_BYTES / sizeof(USER_HANDLE_ENTRY)))
+#define USER_HANDLE_TABLE_STEP 4096
 BOOL FASTCALL UserCreateHandleTable(VOID);
 BOOL FASTCALL UserObjectInDestroy(HANDLE);
 BOOL FASTCALL UserMarkHandleGranted(HANDLE);

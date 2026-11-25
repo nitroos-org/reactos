@@ -2093,7 +2093,7 @@ GreCreateFrameRgn(
     prgnFrame = REGION_AllocUserRgnWithHandle(1);
     if (prgnFrame == NULL)
     {
-        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        REGION_vSetAllocError();
         return NULL;
     }
 
@@ -3566,7 +3566,7 @@ GreCreatePolyPolygonRgn(
     prgn = REGION_AllocUserRgnWithHandle(0);
     if (prgn == NULL)
     {
-        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        REGION_vSetAllocError();
         return NULL;
     }
 
@@ -3699,7 +3699,7 @@ NtGdiCreateRectRgn(
     pRgn = REGION_AllocUserRgnWithHandle(1);
     if (pRgn == NULL)
     {
-        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        REGION_vSetAllocError();
         return NULL;
     }
 
@@ -3971,7 +3971,7 @@ NtGdiExtCreateRegion(
 
     if (Region == NULL)
     {
-        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        REGION_vSetAllocError();
         return FALSE;
     }
     hRgn = Region->BaseObject.hHmgr;

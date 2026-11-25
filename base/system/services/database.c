@@ -1125,6 +1125,12 @@ ScmCreateSystemServiceToken(
     }
     else
     {
+        /* The origin of the token is the logon session of the controller (the system token itself has none: 0:0) */
+        TOKEN_ORIGIN Origin;
+
+        Origin.OriginatingLogonSession = pStatistics->AuthenticationId;
+        NtSetInformationToken(*phToken, TokenOrigin, &Origin, sizeof(Origin));
+
         /* The default DACL of a service token (the controller's has the Administrators in it) */
         dwError = ScmSetServiceDefaultDacl(*phToken, pConfig);
         if (dwError != ERROR_SUCCESS)
@@ -1680,6 +1686,9 @@ ScmLogonService(
     PSID *ppSids;
     ULONG cSids = 0, i;
     ULONG WriteRestrictedSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    ULONG LogonSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    LUID LogonSidValue;
 
     DPRINT("ScmLogonService(%p %p)\n", pService, pImage);
     DPRINT("Service %S\n", pService->lpServiceName);
@@ -1733,7 +1742,7 @@ ScmLogonService(
     /* Do the service logon; a service with a service SID gets it as a group of the logon (all of the image: shared) */
     if (cSids != 0)
     {
-        pServiceGroups = HeapAlloc(GetProcessHeap(), 0, FIELD_OFFSET(TOKEN_GROUPS, Groups[cSids + 1]));
+        pServiceGroups = HeapAlloc(GetProcessHeap(), 0, FIELD_OFFSET(TOKEN_GROUPS, Groups[cSids + 2]));
         if (pServiceGroups == NULL)
         {
             dwError = ERROR_NOT_ENOUGH_MEMORY;
@@ -1745,12 +1754,28 @@ ScmLogonService(
             pServiceGroups->Groups[i].Sid = ppSids[i];
             pServiceGroups->Groups[i].Attributes = ScmServiceSidAttributes(&TokenConfig, ppSids[i]);
         }
+        /*
+         * The logon SID of a LocalService or NetworkService service whose image has service SIDs only has
+         * SE_GROUP_OWNER (Windows Server 2022: 0xc000000f; 0xc0000007 without service SIDs, which the logon makes
+         * itself). The controller makes it, as for a LocalSystem service: a new value for each process.
+         */
+        if (pszDomainName != NULL && !_wcsicmp(pszDomainName, L"NT AUTHORITY") && TokenConfig.bAllSids &&
+            AllocateLocallyUniqueId(&LogonSidValue))
+        {
+            RtlInitializeSid((PSID)LogonSidBuffer, &NtAuthority, SECURITY_LOGON_IDS_RID_COUNT);
+            *RtlSubAuthoritySid((PSID)LogonSidBuffer, 0) = SECURITY_LOGON_IDS_RID;
+            *RtlSubAuthoritySid((PSID)LogonSidBuffer, 1) = (ULONG)LogonSidValue.HighPart;
+            *RtlSubAuthoritySid((PSID)LogonSidBuffer, 2) = LogonSidValue.LowPart;
+            pServiceGroups->Groups[pServiceGroups->GroupCount].Sid = (PSID)LogonSidBuffer;
+            pServiceGroups->Groups[pServiceGroups->GroupCount].Attributes = SCM_GROUP_ENABLED_ALL | SE_GROUP_LOGON_ID | SE_GROUP_OWNER;
+            pServiceGroups->GroupCount++;
+        }
         if (TokenConfig.dwSidType == SERVICE_SID_TYPE_RESTRICTED)
         {
             /* the group WRITE RESTRICTED, as in the token of such a service on Windows */
             ScmInitWriteRestrictedSid((PSID)WriteRestrictedSidBuffer);
-            pServiceGroups->Groups[cSids].Sid = (PSID)WriteRestrictedSidBuffer;
-            pServiceGroups->Groups[cSids].Attributes = SCM_GROUP_ENABLED_ALL;
+            pServiceGroups->Groups[pServiceGroups->GroupCount].Sid = (PSID)WriteRestrictedSidBuffer;
+            pServiceGroups->Groups[pServiceGroups->GroupCount].Attributes = SCM_GROUP_ENABLED_ALL;
             pServiceGroups->GroupCount++;
         }
     }
