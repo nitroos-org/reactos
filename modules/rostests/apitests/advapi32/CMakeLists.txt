@@ -186,6 +186,7 @@ list(APPEND SOURCE
     ServiceInheritOnlyGeneric.c
     ServiceSharedToken.c
     ServiceTokenSd.c
+    SystemVolumeRootControl.c
     TokenAdminQuery.c
     ServiceSidToken.c
     PerfCounterValues.c

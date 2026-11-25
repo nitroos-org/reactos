@@ -215,6 +215,7 @@ extern void func_ServiceProcess(void);
 extern void func_ServiceInheritOnlyGeneric(void);
 extern void func_ServiceSharedToken(void);
 extern void func_ServiceTokenSd(void);
+extern void func_SystemVolumeRootControl(void);
 extern void func_TokenAdminQuery(void);
 extern void func_ServiceSidToken(void);
 extern void func_ServiceStructLayout(void);
@@ -439,6 +440,7 @@ const struct test winetest_testlist[] =
     { "ServiceInheritOnlyGeneric", func_ServiceInheritOnlyGeneric },
     { "ServiceSharedToken", func_ServiceSharedToken },
     { "ServiceTokenSd", func_ServiceTokenSd },
+    { "SystemVolumeRootControl", func_SystemVolumeRootControl },
     { "TokenAdminQuery", func_TokenAdminQuery },
     { "ServiceSidToken", func_ServiceSidToken },
     { "ServiceStructLayout", func_ServiceStructLayout },
