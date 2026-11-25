@@ -15,6 +15,9 @@
 
 #include <aclapi.h>
 
+/* The control word of the descriptor that the last LabelOf read */
+static SECURITY_DESCRIPTOR_CONTROL LastControl;
+
 /* Level of the first label ACE (MAXDWORD: none), its policy and ACE flags */
 static DWORD
 LabelOf(HANDLE Handle, PDWORD Policy, PBYTE Flags)
@@ -22,12 +25,14 @@ LabelOf(HANDLE Handle, PDWORD Policy, PBYTE Flags)
     PSECURITY_DESCRIPTOR Sd = NULL;
     PACL Sacl = NULL;
     SYSTEM_MANDATORY_LABEL_ACE *Ace;
-    DWORD Level = MAXDWORD, Error, i;
+    DWORD Level = MAXDWORD, Error, i, Revision;
 
+    LastControl = 0;
     Error = GetSecurityInfo(Handle, SE_WINDOW_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL, &Sacl, &Sd);
     ok(Error == ERROR_SUCCESS, "GetSecurityInfo(LABEL): %lu\n", Error);
     if (Error != ERROR_SUCCESS)
         return MAXDWORD - 1;
+    GetSecurityDescriptorControl(Sd, &LastControl, &Revision);
     for (i = 0; Sacl && i < Sacl->AceCount; i++)
     {
         if (!GetAce(Sacl, i, (PVOID *)&Ace) || Ace->Header.AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
@@ -59,6 +64,8 @@ START_TEST(DesktopLabels)
     ok(Level == SECURITY_MANDATORY_LOW_RID, "WinSta0 level 0x%lx\n", Level);
     ok(Policy == SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, "WinSta0 policy 0x%lx\n", Policy);
     ok(Flags == 0, "WinSta0 ACE flags 0x%x\n", Flags);
+    /* Windows prints S:(ML;;NW;;;LW): the descriptor is not SE_SACL_AUTO_INHERITED */
+    ok(!(LastControl & SE_SACL_AUTO_INHERITED), "WinSta0 control 0x%x\n", LastControl);
 
     Desktop = OpenDesktopW(L"Default", 0, FALSE, READ_CONTROL);
     ok(Desktop != NULL, "OpenDesktop(Default) failed with %lu\n", GetLastError());
@@ -70,6 +77,7 @@ START_TEST(DesktopLabels)
         ok(Level == SECURITY_MANDATORY_LOW_RID, "Default level 0x%lx\n", Level);
         ok(Policy == SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, "Default policy 0x%lx\n", Policy);
         ok(Flags == 0, "Default ACE flags 0x%x\n", Flags);
+        ok(!(LastControl & SE_SACL_AUTO_INHERITED), "Default control 0x%x\n", LastControl);
         CloseDesktop(Desktop);
     }
 
