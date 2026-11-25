@@ -586,7 +586,7 @@ DetectKeyboardPeripheral(PCONFIGURATION_COMPONENT_DATA ControllerKey)
     PCONFIGURATION_COMPONENT_DATA PeripheralKey;
     PCSTR Identifier;
     ULONG Size;
-    REGS Regs;
+    REGS Regs = {0};
     UCHAR KeyboardType = ((*(PUCHAR)MEM_KEYB_TYPE & 0x40) >> 5) |
                          ((*(PUCHAR)MEM_KEYB_TYPE & 0x08) >> 3);
 

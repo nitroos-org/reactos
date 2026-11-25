@@ -21,8 +21,8 @@ BOOLEAN
 PcFindPciBios(
     _Out_ PPCI_REGISTRY_INFO BusData)
 {
-    REGS RegsIn;
-    REGS RegsOut;
+    REGS RegsIn = {0};
+    REGS RegsOut = {0};
 
     RegsIn.b.ah = 0xB1; /* Subfunction B1h */
     RegsIn.b.al = 0x01; /* PCI BIOS present */

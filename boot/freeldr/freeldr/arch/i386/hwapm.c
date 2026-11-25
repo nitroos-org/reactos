@@ -13,7 +13,7 @@ DBG_DEFAULT_CHANNEL(HWDETECT);
 static BOOLEAN
 FindApmBios(VOID)
 {
-    REGS RegsIn, RegsOut;
+    REGS RegsIn = {0}, RegsOut = {0};
 
     /* APM BIOS - Installation check */
 #if defined(SARCH_PC98)

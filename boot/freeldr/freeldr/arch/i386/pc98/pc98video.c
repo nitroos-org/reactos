@@ -65,7 +65,7 @@ static const PALETTE_ENTRY CgaPalette[] =
 VOID
 Pc98VideoInit(VOID)
 {
-    REGS Regs;
+    REGS Regs = {0};
     USHORT i;
 
     if (HiResoMachine)
@@ -111,6 +111,7 @@ Pc98VideoInit(VOID)
      *    10 - Lower-half (0-16 kB), 640x200
      *    11 - All (0-32 kB), 640x400
      */
+    RtlZeroMemory(&Regs, sizeof(Regs));
     Regs.b.ah = 0x42;
     Regs.b.ch = 0xC0;
     Int386(0x18, &Regs, &Regs); /* 640x400 */
@@ -143,6 +144,7 @@ Pc98VideoInit(VOID)
      * High-resolution machine:
      * AL4 - text rows, AL3 - KCG access mode
      */
+    RtlZeroMemory(&Regs, sizeof(Regs));
     Regs.b.ah = 0x0A;
     Regs.b.al = HiResoMachine ? 0x10 : 0x00;
     Int386(0x18, &Regs, &Regs); /* 80x25(31) */
@@ -150,12 +152,14 @@ Pc98VideoInit(VOID)
     /* Int 18h AH=0Ch
      * CRT BIOS - Start displaying text
      */
+    RtlZeroMemory(&Regs, sizeof(Regs));
     Regs.b.ah = 0x0C;
     Int386(0x18, &Regs, &Regs);
 
     /* Int 18h AH=40h
      * CRT BIOS - Start displaying graphics
      */
+    RtlZeroMemory(&Regs, sizeof(Regs));
     Regs.b.ah = 0x40;
     Int386(0x18, &Regs, &Regs);
 }
@@ -442,7 +446,7 @@ Pc98VideoSync(VOID)
 VOID
 Pc98VideoPrepareForReactOS(VOID)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /* Int 18h AH=41h
      * CRT BIOS - Stop displaying graphics
