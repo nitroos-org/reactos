@@ -41,6 +41,7 @@ extern void func_g8hwquery(void);
 extern void func_g8tableinfo(void);
 extern void func_tdiaddr6(void);
 extern void func_ipv6addr(void);
+extern void func_nitrofw(void);
 
 const struct test winetest_testlist[] =
 {
@@ -78,5 +79,6 @@ const struct test winetest_testlist[] =
     { "g8tableinfo", func_g8tableinfo },
     { "tdiaddr6", func_tdiaddr6 },
     { "ipv6addr", func_ipv6addr },
+    { "nitrofw", func_nitrofw },
     { 0, 0 }
 };
