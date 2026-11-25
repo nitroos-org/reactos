@@ -64,6 +64,7 @@ extern void func_ClipboardFormatListener(void);
 extern void func_ClipboardInteractiveRows(void);
 extern void func_ClipboardSetData(void);
 extern void func_ClipboardMedBatch(void);
+extern void func_ClipboardMetafileLifetime(void);
 extern void func_ClipboardSynthBitmap(void);
 extern void func_ConsoleClipText(void);
 extern void func_DisplayModeCycle(void);
@@ -287,6 +288,7 @@ const struct test winetest_testlist[] =
     { "ClipboardInteractiveRows", func_ClipboardInteractiveRows },
     { "ClipboardSetData", func_ClipboardSetData },
     { "ClipboardMedBatch", func_ClipboardMedBatch },
+    { "ClipboardMetafileLifetime", func_ClipboardMetafileLifetime },
     { "ClipboardSynthBitmap", func_ClipboardSynthBitmap },
     { "ConsoleClipText", func_ConsoleClipText },
     { "DisplayModeCycle", func_DisplayModeCycle },

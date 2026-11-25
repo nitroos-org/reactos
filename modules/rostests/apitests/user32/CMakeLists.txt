@@ -36,6 +36,7 @@ list(APPEND SOURCE
     ClipboardInteractiveRows.c
     ClipboardSetData.c
     ClipboardMedBatch.c
+    ClipboardMetafileLifetime.c
     ClipboardSynthBitmap.c
     ConsoleClipText.c
     DisplayModeCycle.c
