@@ -84,7 +84,7 @@ START_TEST(FirstPipeInstance)
     BOOL Present = FALSE, Defaulted = FALSE;
     SECURITY_DESCRIPTOR Garbage;
 
-    /* A pipe that nobody made: the endpoint makes it, a second registration in this process is the same endpoint */
+    /* A pipe that nobody made: the endpoint makes it */
     Status = UseEndpoint(L"\\pipe\\rpcfpi1", NULL);
     ok(Status == RPC_S_OK, "first registration: %ld\n", Status);
     Probe = CreateFileW(L"\\\\.\\pipe\\rpcfpi1", READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
@@ -92,14 +92,15 @@ START_TEST(FirstPipeInstance)
     if (Probe != INVALID_HANDLE_VALUE)
         CloseHandle(Probe);
     Status = UseEndpoint(L"\\pipe\\rpcfpi1", NULL);
+    /* the same endpoint a second time in the same process: Windows Server 2022 answers RPC_S_DUPLICATE_ENDPOINT, rpcrt4
+     * (from Wine) RPC_S_OK; not changed here */
     ok(Status == RPC_S_OK, "second registration of the same endpoint: %ld\n", Status);
 
-    /* A pipe of this (trusted: SYSTEM or administrator) process is shared by a server, as the plug and play server
-     * shares \pipe\ntsvcs with the service controller */
+    /* A pipe of this process (an administrator, or SYSTEM) is not joined either (Windows Server 2022: 1740) */
     Squatter = CreatePipeAs(NULL, L"\\\\.\\pipe\\rpcfpi2");
     ok(Squatter != INVALID_HANDLE_VALUE, "CreateNamedPipe failed %lu\n", GetLastError());
     Status = UseEndpoint(L"\\pipe\\rpcfpi2", NULL);
-    ok(Status == RPC_S_OK, "a pipe of an administrator exists: %ld\n", Status);
+    ok(Status == RPC_S_DUPLICATE_ENDPOINT, "a pipe of an administrator exists: %ld, expected %d\n", Status, RPC_S_DUPLICATE_ENDPOINT);
     if (Squatter != INVALID_HANDLE_VALUE)
         CloseHandle(Squatter);
 

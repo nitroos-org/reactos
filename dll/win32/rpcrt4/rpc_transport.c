@@ -385,55 +385,6 @@ Quit:
 #endif
 
 #ifdef __REACTOS__
-/* Whether a pipe that exists already belongs to a process this server may share the endpoint with: its owner is
- * SYSTEM, the Administrators, or the user (or the default owner) of this process. A pipe of another user is
- * somebody who created the name before the server did. The pipe is opened with READ_CONTROL only and at the
- * anonymous impersonation level: nothing is sent and the owner of the pipe learns nothing about this process. */
-static BOOL rpcrt4_pipe_owner_trusted(const char *pipe_name)
-{
-    static SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
-    HANDLE pipe, token = NULL;
-    PSID owner = NULL, system_sid = NULL, admins_sid = NULL;
-    PSECURITY_DESCRIPTOR sd = NULL;
-    BYTE buffer[512];
-    DWORD length;
-    BOOL trusted = FALSE;
-
-    pipe = CreateFileA(pipe_name, READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
-                       SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS, NULL);
-    if (pipe == INVALID_HANDLE_VALUE)
-        return FALSE;
-    if (GetSecurityInfo(pipe, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, &owner, NULL, NULL, NULL, &sd) != ERROR_SUCCESS ||
-        !owner)
-    {
-        CloseHandle(pipe);
-        return FALSE;
-    }
-
-    if (AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &system_sid) &&
-        EqualSid(owner, system_sid))
-        trusted = TRUE;
-    else if (AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
-                                      0, 0, 0, 0, 0, 0, &admins_sid) && EqualSid(owner, admins_sid))
-        trusted = TRUE;
-    else if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
-    {
-        if (GetTokenInformation(token, TokenUser, buffer, sizeof(buffer), &length) &&
-            EqualSid(owner, ((PTOKEN_USER)buffer)->User.Sid))
-            trusted = TRUE;
-        else if (GetTokenInformation(token, TokenOwner, buffer, sizeof(buffer), &length) &&
-                 EqualSid(owner, ((PTOKEN_OWNER)buffer)->Owner))
-            trusted = TRUE;
-    }
-
-    if (token) CloseHandle(token);
-    if (system_sid) FreeSid(system_sid);
-    if (admins_sid) FreeSid(admins_sid);
-    LocalFree(sd);
-    CloseHandle(pipe);
-    return trusted;
-}
-
 /* A copy (self-relative) of the descriptor the program gave RpcServerUseProtseqEp*; NULL is no descriptor */
 static RPC_STATUS rpcrt4_copy_pipe_descriptor(const void *descriptor, PSECURITY_DESCRIPTOR *copy)
 {
@@ -475,8 +426,7 @@ static RPC_STATUS rpcrt4_copy_pipe_descriptor(const void *descriptor, PSECURITY_
 
 /* first: the first instance of the endpoint's pipe. It must be the first: when the name exists already, somebody
  * else made it before this server, and joining it would hand this server's clients to that process (and let it
- * impersonate them). A pipe whose owner is SYSTEM, the Administrators or this process's own user is joined: a
- * second server of the same endpoint (the plug and play server shares \pipe\ntsvcs with the service controller). */
+ * impersonate them), whoever it is. */
 static RPC_STATUS rpcrt4_conn_create_pipe(RpcConnection *conn, BOOL first)
 {
     RpcConnection_np *connection = (RpcConnection_np *) conn;
@@ -516,21 +466,15 @@ static RPC_STATUS rpcrt4_conn_create_pipe(RpcConnection *conn, BOOL first)
                                         RPC_MAX_PACKET_SIZE, RPC_MAX_PACKET_SIZE, 5000, &SecurityAttributes);
     if (connection->pipe == INVALID_HANDLE_VALUE && first && GetLastError() == ERROR_ACCESS_DENIED)
     {
-        /* The name exists (the error of a first instance that is not the first). Share it only with a server. */
-        if (rpcrt4_pipe_owner_trusted(connection->listen_pipe))
-        {
-            connection->pipe = CreateNamedPipeA(connection->listen_pipe, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                                                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE,
-                                                PIPE_UNLIMITED_INSTANCES,
-                                                RPC_MAX_PACKET_SIZE, RPC_MAX_PACKET_SIZE, 5000, &SecurityAttributes);
-        }
-        else
-        {
-            WARN("%s exists and its owner is not SYSTEM, an administrator or this user\n", connection->listen_pipe);
-            if (OwnDescriptor)
-                HeapFree(GetProcessHeap(), 0, PipeSecDesc);
-            return RPC_S_DUPLICATE_ENDPOINT;
-        }
+        /*
+         * The name exists (the error of a first instance that is not the first): whoever made it, this server does
+         * not join it (Windows Server 2022: RPC_S_DUPLICATE_ENDPOINT for a pipe of an administrator, for a second
+         * server in another process and for a second registration in the same process).
+         */
+        WARN("%s exists\n", connection->listen_pipe);
+        if (OwnDescriptor)
+            HeapFree(GetProcessHeap(), 0, PipeSecDesc);
+        return RPC_S_DUPLICATE_ENDPOINT;
     }
     if (OwnDescriptor)
         HeapFree(GetProcessHeap(), 0, PipeSecDesc);
