@@ -39,9 +39,18 @@ typedef struct _FRAMEBUFFER_INFO
 
     ULONG BytesPerPixel;
     ULONG Delta;             // aka. "Pitch": actual size in bytes of a scanline.
+    ULONG FontScale;         // Whole factor the 8x16 font is drawn at (0 when there is no framebuffer: counts as 1).
 } FRAMEBUFFER_INFO, *PFRAMEBUFFER_INFO;
 
 static FRAMEBUFFER_INFO framebufInfo = {0};
+
+/*
+ * On a screen much larger than the 8x16 font was made for, the font is drawn at a whole multiple of its size so that
+ * the text keeps its physical size: one step for every 1280x720 of the mode (1920x1080: 1, 2560x1440: 2, 3840x2160: 3).
+ */
+#define FB_FONT_SCALE   (framebufInfo.FontScale ? framebufInfo.FontScale : 1)
+#define FB_CELL_WIDTH   (CHAR_WIDTH * FB_FONT_SCALE)
+#define FB_CELL_HEIGHT  (CHAR_HEIGHT * FB_FONT_SCALE)
 static CM_FRAMEBUF_DEVICE_DATA FrameBufferData = {0};
 
 
@@ -148,6 +157,11 @@ VidFbInitializeVideo(
 
     framebufInfo.BytesPerPixel = (BitsPerPixel + 7) / 8; // Round up to nearest byte.
     framebufInfo.Delta = (PixelsPerScanLine * framebufInfo.BytesPerPixel + 3) & ~3;
+
+    /* The scale of the console font from the size of the mode */
+    framebufInfo.FontScale = ((ScreenWidth / 1280) < (ScreenHeight / 720)) ? (ScreenWidth / 1280) : (ScreenHeight / 720);
+    if (framebufInfo.FontScale < 1)
+        framebufInfo.FontScale = 1;
 
     /* Verify that the framebuffer fits inside the video RAM */
     if (!(ScreenHeight * framebufInfo.Delta <= BufferSize))
@@ -285,29 +299,36 @@ VidFbOutputChar(
     const UCHAR* FontPtr;
     PUINT32 Pixel;
     UCHAR Mask;
-    ULONG Line, Col;
+    ULONG Line, Col, Scale, ScaleX, ScaleY;
 
     /* Don't display outside of the screen, nor partial characters, nor without a framebuffer */
     if (!framebufInfo.BaseAddress ||
-        (X + CHAR_WIDTH - 1 >= framebufInfo.ScreenWidth) ||
-        (Y + CHAR_HEIGHT - 1 >= (framebufInfo.ScreenHeight - 2 * TOP_BOTTOM_LINES)))
+        (X + FB_CELL_WIDTH - 1 >= framebufInfo.ScreenWidth) ||
+        (Y + FB_CELL_HEIGHT - 1 >= (framebufInfo.ScreenHeight - 2 * TOP_BOTTOM_LINES)))
     {
         return;
     }
 
+    Scale = FB_FONT_SCALE;
     FontPtr = BitmapFont8x16 + Char * CHAR_HEIGHT;
     Pixel = (PUINT32)((PUCHAR)framebufInfo.BaseAddress +
             (Y + TOP_BOTTOM_LINES) * framebufInfo.Delta + X * sizeof(UINT32));
 
     for (Line = 0; Line < CHAR_HEIGHT; Line++)
     {
-        Mask = 0x80;
-        for (Col = 0; Col < CHAR_WIDTH; Col++)
+        /* Every row of the font is drawn Scale times */
+        for (ScaleY = 0; ScaleY < Scale; ScaleY++)
         {
-            Pixel[Col] = (0 != (FontPtr[Line] & Mask) ? FgColor : BgColor);
-            Mask = Mask >> 1;
+            Mask = 0x80;
+            for (Col = 0; Col < CHAR_WIDTH; Col++)
+            {
+                /* ... and every dot of it Scale times */
+                for (ScaleX = 0; ScaleX < Scale; ScaleX++)
+                    Pixel[Col * Scale + ScaleX] = (0 != (FontPtr[Line] & Mask) ? FgColor : BgColor);
+                Mask = Mask >> 1;
+            }
+            Pixel = (PUINT32)((PUCHAR)Pixel + framebufInfo.Delta);
         }
-        Pixel = (PUINT32)((PUCHAR)Pixel + framebufInfo.Delta);
     }
 }
 
@@ -406,8 +427,8 @@ VidFbGetPaletteColor(
 
 #define VGA_CHAR_SIZE 2
 
-#define FBCONS_WIDTH    (framebufInfo.ScreenWidth / CHAR_WIDTH)
-#define FBCONS_HEIGHT   ((framebufInfo.ScreenHeight - 2 * TOP_BOTTOM_LINES) / CHAR_HEIGHT)
+#define FBCONS_WIDTH    (framebufInfo.ScreenWidth / FB_CELL_WIDTH)
+#define FBCONS_HEIGHT   ((framebufInfo.ScreenHeight - 2 * TOP_BOTTOM_LINES) / FB_CELL_HEIGHT)
 
 static inline
 UINT32
@@ -463,7 +484,7 @@ FbConsOutputChar(
     /* Don't display outside of the screen */
     if ((Column >= FBCONS_WIDTH) || (Row >= FBCONS_HEIGHT))
         return;
-    VidFbOutputChar(Char, Column * CHAR_WIDTH, Row * CHAR_HEIGHT, FgColor, BgColor);
+    VidFbOutputChar(Char, Column * FB_CELL_WIDTH, Row * FB_CELL_HEIGHT, FgColor, BgColor);
 }
 
 /**
@@ -544,5 +565,5 @@ FbConsScrollUp(
 {
     UINT32 BgColor, Dummy;
     FbConsAttrToColors(Attr, &Dummy, &BgColor);
-    VidFbScrollUp(BgColor, CHAR_HEIGHT);
+    VidFbScrollUp(BgColor, FB_CELL_HEIGHT);
 }
