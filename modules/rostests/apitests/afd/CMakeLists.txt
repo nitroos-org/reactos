@@ -27,7 +27,8 @@ list(APPEND SOURCE
     g7setinfoex.c
     g8net.c
     tdiaddr6.c
-    ipv6addr.c)
+    ipv6addr.c
+    nitrofw.c)
 
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)

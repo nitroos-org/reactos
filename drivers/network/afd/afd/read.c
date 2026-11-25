@@ -179,6 +179,35 @@ static VOID HandleReceiveComplete( PAFD_FCB FCB, NTSTATUS Status, ULONG_PTR Info
     }
 }
 
+/* A stream socket starts with the small buffer (AfdReceiveWindowSize: thousands of sockets stay cheap) and gets one of
+ * up to Want bytes once a reader proves to need it. Only when nothing is left in it and no receive is in flight
+ * (the transport holds the buffer by raw pointer): the socket state lock is held. A failed allocation keeps the
+ * buffer it has */
+static VOID GrowReceiveWindow( PAFD_FCB FCB, UINT Want )
+{
+    PVOID Window;
+    BOOLEAN NonPaged;
+    PEPROCESS QuotaProcess;
+
+    if (Want <= FCB->Recv.Size || !FCB->Recv.Window ||
+        (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) ||
+        FCB->ReceiveIrp.InFlightRequest || FCB->RecvDeferred || FCB->TdiReceiveClosed ||
+        FCB->Recv.Content != FCB->Recv.BytesUsed)
+        return;
+
+    Window = AfdAllocRecvWindow(FCB, Want, &NonPaged, &QuotaProcess);
+    if (!Window)
+        return;
+
+    AfdFreeRecvWindow(FCB->Recv.Window, FCB->Recv.Size, FCB->Recv.NonPaged, FCB->Recv.QuotaProcess);
+    FCB->Recv.Window = Window;
+    FCB->Recv.Size = Want;
+    FCB->Recv.NonPaged = NonPaged;
+    FCB->Recv.QuotaProcess = QuotaProcess;
+    FCB->Recv.Content = 0;
+    FCB->Recv.BytesUsed = 0;
+}
+
 static BOOLEAN CantReadMore( PAFD_FCB FCB ) {
     UINT BytesAvailable = FCB->Recv.Content - FCB->Recv.BytesUsed;
 
@@ -234,6 +263,17 @@ static NTSTATUS TryToSatisfyRecvRequestFromBuffer( PAFD_FCB FCB,
             if (!(RecvReq->TdiFlags & TDI_RECEIVE_PEEK))
                 FCB->Recv.BytesUsed += BytesToCopy;
         }
+    }
+
+    /* A reader that takes the whole buffer and asked for more is reading faster than the buffer holds: let a recv
+       return what it asks for, as on Windows (measured: a 64K recv returns 64K when that much is queued) */
+    if (!(RecvReq->TdiFlags & TDI_RECEIVE_PEEK) && *TotalBytesCopied == FCB->Recv.Size)
+    {
+        UINT Capacity = 0;
+
+        for (i = 0; RecvReq->BufferArray && i < RecvReq->BufferCount; i++)
+            Capacity += RecvReq->BufferArray[i].len;
+        GrowReceiveWindow(FCB, min(Capacity, AFD_NONPAGED_WINDOW_MAX));
     }
 
     /* Issue another receive IRP to keep the buffer well stocked */
