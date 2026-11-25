@@ -473,6 +473,15 @@ LsapCreateTokenSd(
     _Outptr_ PSECURITY_DESCRIPTOR *TokenSd,
     _Out_ PULONG TokenSdSize);
 
+NTSTATUS
+LsapCheckClientLogonSessionAccess(
+    _In_ PCLIENT_ID ClientId,
+    _In_ PLUID LogonId);
+
+NTSTATUS
+LsapCheckClientPolicyNotificationAccess(
+    _In_ PCLIENT_ID ClientId);
+
 /* session.c */
 VOID
 LsapInitLogonSessions(VOID);

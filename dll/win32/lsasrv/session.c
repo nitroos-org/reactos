@@ -533,6 +533,13 @@ LsapGetLogonSessionData(IN OUT PLSA_API_MSG RequestMsg)
     TRACE("LsapGetLogonSessionData(%p)\n", RequestMsg);
 
     TRACE("LogonId: %lx\n", RequestMsg->GetLogonSessionData.Request.LogonId.LowPart);
+
+    /* The owner of the session, an administrator or SYSTEM only (a session that does not exist is checked the same: no hint) */
+    Status = LsapCheckClientLogonSessionAccess(&RequestMsg->h.ClientId,
+                                               &RequestMsg->GetLogonSessionData.Request.LogonId);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
     RtlEnterCriticalSection(&SessionListLock);
 
     Session = LsapGetLogonSession(&RequestMsg->GetLogonSessionData.Request.LogonId);
