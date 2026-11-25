@@ -279,6 +279,10 @@ private:
     bool                      m_isFullStatusBar;
     bool                      m_ScheduledStatusbarUpdate;
     bool                      m_HasCutItems;
+    // SHCNE_UPDATEITEM of one item is shown at once the first time and then at most every UPDATEITEM_INTERVAL
+    // ms: what comes within an interval is kept (the latest PIDL of every item) and shown together at its end
+    HDPA                      m_PendingUpdates;
+    bool                      m_UpdateTimerOn;
 
     CLSID m_Category;
     BOOL  m_Destroyed;
@@ -332,6 +336,8 @@ public:
     PCUITEMID_CHILD _PidlByItem(int i);
     PCUITEMID_CHILD _PidlByItem(LVITEM& lvItem);
     int LV_FindItemByPidl(PCUITEMID_CHILD pidl);
+    BOOL QueueItemUpdate(PCIDLIST_ABSOLUTE pidlAbs);
+    void FreePendingUpdates();
     int LV_AddItem(PCUITEMID_CHILD pidl);
     BOOLEAN LV_DeleteItem(PCUITEMID_CHILD pidl);
     BOOLEAN LV_RenameItem(PCUITEMID_CHILD pidlOld, PCUITEMID_CHILD pidlNew);
@@ -492,6 +498,7 @@ public:
     LRESULT OnShowWindow(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
     LRESULT OnGetDlgCode(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
     LRESULT OnDestroy(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
+    LRESULT OnTimer(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
     LRESULT OnEraseBackground(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
     LRESULT OnPrintClient(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
     LRESULT OnSysColorChange(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
@@ -563,6 +570,7 @@ public:
     MESSAGE_HANDLER(WM_SHOWWINDOW, OnShowWindow)
     MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
     MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
+    MESSAGE_HANDLER(WM_TIMER, OnTimer)
     MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBackground)
     MESSAGE_HANDLER(WM_PRINTCLIENT, OnPrintClient)
     MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnSysColorChange)
@@ -591,6 +599,9 @@ public:
 };
 
 #define ID_LISTVIEW     1
+
+#define TIMER_UPDATEITEMS   0x7501
+#define UPDATEITEM_INTERVAL 250
 
 // windowsx.h
 #define GET_WM_COMMAND_ID(wp, lp)       LOWORD(wp)
@@ -623,6 +634,8 @@ CDefView::CDefView() :
     m_isFullStatusBar(true),
     m_ScheduledStatusbarUpdate(false),
     m_HasCutItems(false),
+    m_PendingUpdates(NULL),
+    m_UpdateTimerOn(false),
     m_Destroyed(FALSE)
 {
     ZeroMemory(&m_FolderSettings, sizeof(m_FolderSettings));
@@ -655,6 +668,7 @@ CDefView::~CDefView()
     }
 
     SHFree(m_apidl);
+    FreePendingUpdates();
     DPA_Destroy(m_LoadColumnsList);
     DPA_Destroy(m_ListToFolderColMap);
 }
@@ -1701,6 +1715,12 @@ LRESULT CDefView::OnDestroy(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHand
     if (!m_Destroyed)
     {
         m_Destroyed = TRUE;
+        if (m_UpdateTimerOn)
+        {
+            KillTimer(TIMER_UPDATEITEMS);
+            m_UpdateTimerOn = false;
+        }
+        FreePendingUpdates();
         RevokeDragDrop(m_hWnd);
         SHChangeNotifyDeregister(m_hNotify);
         m_hNotify = NULL;
@@ -1719,6 +1739,98 @@ LRESULT CDefView::OnDestroy(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHand
         m_pidlParent = NULL;
     }
     bHandled = FALSE;
+    return 0;
+}
+
+static BOOL ILIsParentOrSpecialParent(PCIDLIST_ABSOLUTE pidl1, PCIDLIST_ABSOLUTE pidl2);
+
+void CDefView::FreePendingUpdates()
+{
+    if (!m_PendingUpdates)
+        return;
+
+    for (INT i = DPA_GetPtrCount(m_PendingUpdates) - 1; i >= 0; --i)
+        ILFree(reinterpret_cast<PITEMID_CHILD>(DPA_GetPtr(m_PendingUpdates, i)));
+    DPA_Destroy(m_PendingUpdates);
+    m_PendingUpdates = NULL;
+}
+
+// A file that is written to changes its size many times a second and every change comes as SHCNE_UPDATEITEM.
+// The first one is shown at once and starts an interval of UPDATEITEM_INTERVAL ms; the ones that arrive within
+// the interval are only noted (the absolute PIDL of the item, once) and shown together when the interval ends, so
+// that the view neither repaints the item for each of them nor looks the item up for each of them.
+// Returns TRUE when the change was noted (the caller has nothing more to do with it).
+BOOL CDefView::QueueItemUpdate(PCIDLIST_ABSOLUTE pidlAbs)
+{
+    if (m_Destroyed || !m_hWnd || !m_UpdateTimerOn || !pidlAbs)
+        return FALSE;
+
+    // only what this view shows (the same test as the one that translates the PIDLs)
+    if (!_ILIsSpecialFolder(pidlAbs) && !ILIsParentOrSpecialParent(m_pidlParent, pidlAbs))
+        return FALSE;
+
+    PIDLIST_ABSOLUTE pidlCopy = ILClone(pidlAbs);
+    if (!pidlCopy)
+        return FALSE;
+
+    if (!m_PendingUpdates)
+        m_PendingUpdates = DPA_Create(8);
+
+    if (m_PendingUpdates)
+    {
+        for (INT i = 0; i < DPA_GetPtrCount(m_PendingUpdates); ++i)
+        {
+            PIDLIST_ABSOLUTE pidlOld = reinterpret_cast<PIDLIST_ABSOLUTE>(DPA_GetPtr(m_PendingUpdates, i));
+            if (ILIsEqual(pidlOld, pidlCopy))
+            {
+                ILFree(pidlCopy);   // this item is noted already
+                return TRUE;
+            }
+        }
+        if (DPA_AppendPtr(m_PendingUpdates, pidlCopy) >= 0)
+            return TRUE;
+    }
+
+    ILFree(pidlCopy);
+    return FALSE;
+}
+
+LRESULT CDefView::OnTimer(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled)
+{
+    if (wParam != TIMER_UPDATEITEMS)
+    {
+        bHandled = FALSE;
+        return 0;
+    }
+
+    INT cPending = m_PendingUpdates ? DPA_GetPtrCount(m_PendingUpdates) : 0;
+    if (m_Destroyed || cPending == 0)
+    {
+        // nothing came in this interval: the next change is shown at once again
+        KillTimer(TIMER_UPDATEITEMS);
+        m_UpdateTimerOn = false;
+        return 0;
+    }
+
+    // Take the list first: showing an item can bring in a change again
+    HDPA hdpa = m_PendingUpdates;
+    m_PendingUpdates = NULL;
+    for (INT i = 0; i < cPending; ++i)
+    {
+        PIDLIST_ABSOLUTE pidlAbs = reinterpret_cast<PIDLIST_ABSOLUTE>(DPA_GetPtr(hdpa, i));
+
+        // as OnChangeNotify does for one SHCNE_UPDATEITEM: the real PIDL (the file's size and times as they are now)
+        PCUITEMID_CHILD child = ILFindLastID(pidlAbs);
+        CComHeapPtr<ITEMIDLIST_RELATIVE> pidlReal;
+        if (child)
+        {
+            if (SUCCEEDED(SHGetRealIDL(m_pSFParent, child, &pidlReal)))
+                child = pidlReal;
+            LV_UpdateItem(child);
+        }
+        ILFree(pidlAbs);
+    }
+    DPA_Destroy(hdpa);
     return 0;
 }
 
@@ -2978,6 +3090,13 @@ LRESULT CDefView::OnChangeNotify(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &
         return FALSE;
     }
 
+    // Within the interval that a change of an item started, further changes of items are only noted
+    if (lEvent == SHCNE_UPDATEITEM && QueueItemUpdate(Pidls[0]))
+    {
+        SHChangeNotification_Unlock(hLock);
+        return TRUE;
+    }
+
     // Translate child IDLs.
     // SHSimpleIDListFromPathW creates fake PIDLs (lacking some attributes)
     HRESULT hr;
@@ -3048,7 +3167,12 @@ LRESULT CDefView::OnChangeNotify(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &
             break;
         case SHCNE_UPDATEITEM:
             if (child0)
+            {
+                // shown at once; the changes of the next UPDATEITEM_INTERVAL ms are collected (QueueItemUpdate)
+                if (!m_UpdateTimerOn && SetTimer(TIMER_UPDATEITEMS, UPDATEITEM_INTERVAL, NULL))
+                    m_UpdateTimerOn = true;
                 LV_UpdateItem(child0);
+            }
             break;
         case SHCNE_UPDATEIMAGE:
         case SHCNE_MEDIAINSERTED:
