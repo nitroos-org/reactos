@@ -65,7 +65,6 @@ DbgPhysical(
                                  &Request, sizeof(Request), NULL, 0, &Length, KernelMode);
 }
 
-#ifdef _M_AMD64
 static
 NTSTATUS
 DbgVirtual(
@@ -82,7 +81,6 @@ DbgVirtual(
     return pKdSystemDebugControl(Write ? SysDbgWriteVirtual : SysDbgReadVirtual,
                                  &Request, sizeof(Request), NULL, 0, &Length, KernelMode);
 }
-#endif
 
 static
 ULONG64
@@ -90,6 +88,64 @@ Pattern(
     _In_ ULONG64 Physical)
 {
     return (Physical * 0x9E3779B97F4A7C15ULL) ^ 0x5A5A5A5A5A5A5A5AULL;
+}
+
+/* The debugger's virtual copy of an address that no page table entry is indexed by, and of device memory,
+ * is refused; a copy of ordinary memory is not */
+static
+VOID
+TestDebuggerRefusals(VOID)
+{
+    static const ULONG64 Known = 0x1122334455667788ULL;
+    PHYSICAL_ADDRESS Apic;
+    ULONG64 Value;
+    NTSTATUS Status;
+    PVOID Va;
+
+    Value = 0;
+    Status = DbgVirtual(FALSE, (PVOID)&Known, &Value);
+    ok(NT_SUCCESS(Status) && Value == Known, "Virtual read of %p: %lx, %I64x\n", &Known, Status, Value);
+
+    /* A user address of the calling process is read as before */
+    {
+        PVOID UserVa = NULL;
+        SIZE_T UserSize = PAGE_SIZE;
+
+        Status = ZwAllocateVirtualMemory(ZwCurrentProcess(), &UserVa, 0, &UserSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!skip(NT_SUCCESS(Status), "No user memory: %lx\n", Status))
+        {
+            KmtStartSeh()
+                *(volatile ULONG64 *)UserVa = Known;
+            KmtEndSeh(STATUS_SUCCESS)
+            Value = 0;
+            Status = DbgVirtual(FALSE, UserVa, &Value);
+            ok(NT_SUCCESS(Status) && Value == Known, "Virtual read of the user address %p: %lx, %I64x\n", UserVa, Status, Value);
+            UserSize = 0;
+            ZwFreeVirtualMemory(ZwCurrentProcess(), &UserVa, &UserSize, MEM_RELEASE);
+        }
+    }
+
+#ifdef _M_AMD64
+    /* Canonical addresses with the high bits of a non-canonical one: the same page tables entries, another address */
+    Value = 0xD1D2D3D4D5D6D7D8ULL;
+    Status = DbgVirtual(FALSE, (PVOID)((ULONG_PTR)&Known ^ 0x0000800000000000ULL), &Value);
+    ok(!NT_SUCCESS(Status), "Virtual read of the non-canonical %p succeeded\n", (PVOID)((ULONG_PTR)&Known ^ 0x0000800000000000ULL));
+    ok(Value == 0xD1D2D3D4D5D6D7D8ULL, "A refused read changed the buffer: %I64x\n", Value);
+    Status = DbgVirtual(FALSE, (PVOID)0x0000F80003000000ULL, &Value);
+    ok(!NT_SUCCESS(Status), "Virtual read of the non-canonical 0000F80003000000 succeeded\n");
+#endif
+
+    /* The local APIC page: mapped, never read through the debugger */
+    Apic.QuadPart = 0xFEE00000;
+    Va = MmMapIoSpace(Apic, PAGE_SIZE, MmNonCached);
+    if (!skip(Va != NULL, "The local APIC page cannot be mapped\n"))
+    {
+        Value = 0xD1D2D3D4D5D6D7D8ULL;
+        Status = DbgVirtual(FALSE, Va, &Value);
+        ok(!NT_SUCCESS(Status), "Virtual read of the mapped local APIC page %p succeeded: %I64x\n", Va, Value);
+        ok(Value == 0xD1D2D3D4D5D6D7D8ULL, "A refused read changed the buffer: %I64x\n", Value);
+        MmUnmapIoSpace(Va, PAGE_SIZE);
+    }
 }
 
 static
@@ -111,6 +167,8 @@ TestDebuggerCopies(VOID)
     Status = pKdSystemDebugControl(SysDbgQueryVersion, NULL, 0, Version, sizeof(Version), &Length, KernelMode);
     if (skip(NT_SUCCESS(Status), "No active kernel debugger (SysDbgQueryVersion: %lx)\n", Status))
         return;
+
+    TestDebuggerRefusals();
 
     /* Pages of RAM above 4 GiB */
     Low.QuadPart = FOUR_GB;

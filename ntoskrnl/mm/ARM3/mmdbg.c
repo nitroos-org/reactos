@@ -119,6 +119,27 @@ MiDbgUnTranslatePhysicalAddress(VOID)
 //
 C_ASSERT(MMDBG_COPY_MAX_SIZE == 8);
 
+/*
+ * The debugger protocol carries 64-bit addresses. A page table walk ignores the bits of an address that
+ * no entry is indexed by, so a non-canonical address would look valid and fault when it is used.
+ */
+static
+BOOLEAN
+MiDbgIsCanonicalAddress(IN ULONG64 Address)
+{
+#ifdef _WIN64
+    /* Bits 63..47 must all be equal */
+    ULONG64 Top = Address >> 47;
+
+    return (Top == 0) || (Top == 0x1FFFF);
+#else
+    /* A 32-bit address, either zero extended or sign extended (the debugger protocol sign extends it) */
+    ULONG High = (ULONG)(Address >> 32);
+
+    return (High == 0) || ((High == 0xFFFFFFFF) && ((Address & 0x80000000) != 0));
+#endif
+}
+
 NTSTATUS
 NTAPI
 MmDbgCopyMemory(IN ULONG64 Address,
@@ -185,6 +206,15 @@ MmDbgCopyMemory(IN ULONG64 Address,
     }
     else
     {
+        /* A non-canonical address is refused before anything walks the page tables with it */
+        if (!MiDbgIsCanonicalAddress(Address))
+        {
+            KdpDprintf("MmDbgCopyMemory: Failing %s for non-canonical Address 0x%I64x\n",
+                       Flags & MMDBG_COPY_WRITE ? "write" : "read",
+                       Address);
+            return STATUS_UNSUCCESSFUL;
+        }
+
         /* Virtual; truncate it to avoid casts later down */
         TargetAddress = (PVOID)(ULONG_PTR)Address;
 
@@ -204,8 +234,18 @@ MmDbgCopyMemory(IN ULONG64 Address,
             /* FIXME */
         }
 
-        /* If we are going to write to the address, then check if its writable */
+        /* A page without a PFN entry is device memory (the local APIC page, a mapped register
+         * window): reading it can have side effects and writing it is not a debugger's business */
         PointerPte = MiAddressToPte(TargetAddress);
+        if (!MiGetPfnEntry(PFN_FROM_PTE(PointerPte)))
+        {
+            KdpDprintf("MmDbgCopyMemory: Failing %s for I/O space Address 0x%p\n",
+                       Flags & MMDBG_COPY_WRITE ? "write" : "read",
+                       TargetAddress);
+            return STATUS_UNSUCCESSFUL;
+        }
+
+        /* If we are going to write to the address, then check if its writable */
         if ((Flags & MMDBG_COPY_WRITE) &&
             (!MI_IS_PAGE_WRITEABLE(PointerPte)))
         {
