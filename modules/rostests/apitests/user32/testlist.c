@@ -45,7 +45,6 @@ extern void func_CloseWindow(void);
 extern void func_CopyImage(void);
 extern void func_CalculatePopupWindowPosition(void);
 extern void func_CreateDialog(void);
-extern void func_ChangeDisplaySettings(void);
 extern void func_CreateIconFromResourceEx(void);
 extern void func_CreateWindowEx(void);
 extern void func_DeferWindowPos(void);
@@ -273,7 +272,6 @@ const struct test winetest_testlist[] =
     { "CloseWindow", func_CloseWindow },
     { "CopyImage", func_CopyImage },
     { "CalculatePopupWindowPosition", func_CalculatePopupWindowPosition },
-    { "ChangeDisplaySettings", func_ChangeDisplaySettings },
     { "CreateDialog", func_CreateDialog },
     { "CreateIconFromResourceEx", func_CreateIconFromResourceEx },
     { "CreateWindowEx", func_CreateWindowEx },

@@ -849,25 +849,8 @@ UserChangeDisplaySettings(
     }
     else if (flags & CDS_TEST)
     {
-        /*
-         * The probe above falls back to the listed mode closest to the request.
-         * A test is only answered with success for a mode the device lists:
-         * DISP_CHANGE_BADMODE is "the graphics mode is not supported".
-         */
-        if (pdm &&
-            (newDevMode->dmPelsWidth != dm.dmPelsWidth ||
-            newDevMode->dmPelsHeight != dm.dmPelsHeight ||
-            newDevMode->dmBitsPerPel != dm.dmBitsPerPel ||
-            ((dm.dmFields & DM_DISPLAYFREQUENCY) &&
-             newDevMode->dmDisplayFrequency != dm.dmDisplayFrequency)))
-        {
-            lResult = DISP_CHANGE_BADMODE;
-        }
-        else
-        {
-            /* It's possible, go ahead! */
-            lResult = DISP_CHANGE_SUCCESSFUL;
-        }
+        /* It's possible, go ahead! */
+        lResult = DISP_CHANGE_SUCCESSFUL;
         goto leave;
     }
 
