@@ -248,6 +248,188 @@ IntOwnFreeAll(VOID)
         IntFreeOwnBlock(ah[i]);
 }
 
+/* The metafile formats (CF_ENHMETAFILE, CF_METAFILEPICT and their DSP variants). Like the memory blocks above
+   they belong to the system once they are on the clipboard: in this process GetClipboardData hands back the
+   handle that was given to SetClipboardData, and the handle is freed when the clipboard is emptied or another
+   one is put into the format (measured on Windows Server 2022: the same handle on every call, the process holds
+   no GDI object of it after EmptyClipboard). The kernel holds a converted copy (a server metafile); what
+   GetClipboardData makes from that copy for a format this process did not put there (data of another process,
+   a synthesized format) is kept the same way, so that a call does not make a new object every time. The
+   kernel's handle of the copy tells whether the clipboard still holds what this entry was made from. */
+#define MAX_OWN_META 8
+static struct { UINT fmt; HANDLE hKernel; HANDLE hLocal; } g_OwnMeta[MAX_OWN_META];
+
+static BOOL
+IntIsEnhMetaFormat(UINT fmt)
+{
+    return fmt == CF_ENHMETAFILE || fmt == CF_DSPENHMETAFILE;
+}
+
+/* the application may have freed the handle against the rules: never trust it blindly */
+static BOOL
+IntOwnMetaIsValid(UINT fmt, HANDLE hLocal)
+{
+    BOOL fValid = FALSE;
+
+    _SEH2_TRY
+    {
+        if (IntIsEnhMetaFormat(fmt))
+        {
+            ENHMETAHEADER emh;
+
+            fValid = GetEnhMetaFileHeader(hLocal, sizeof(emh), &emh) != 0;
+        }
+        else if (GlobalFlags(hLocal) != GMEM_INVALID_HANDLE)
+        {
+            METAFILEPICT *pInfo = GlobalLock(hLocal);
+
+            if (pInfo)
+            {
+                fValid = GetMetaFileBitsEx(pInfo->hMF, 0, NULL) != 0;
+                GlobalUnlock(hLocal);
+            }
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        fValid = FALSE;
+    }
+    _SEH2_END;
+    return fValid;
+}
+
+static VOID
+IntFreeOwnMeta(UINT fmt, HANDLE hLocal)
+{
+    _SEH2_TRY
+    {
+        if (IntIsEnhMetaFormat(fmt))
+        {
+            DeleteEnhMetaFile(hLocal);
+        }
+        else if (GlobalFlags(hLocal) != GMEM_INVALID_HANDLE)
+        {
+            METAFILEPICT *pInfo = GlobalLock(hLocal);
+            HMETAFILE hMF = NULL;
+
+            if (pInfo)
+            {
+                hMF = pInfo->hMF;
+                GlobalUnlock(hLocal);
+            }
+            if (hMF)
+                DeleteMetaFile(hMF);
+            GlobalFree(hLocal);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+    _SEH2_END;
+}
+
+static VOID
+IntOwnMetaRecord(UINT fmt, HANDLE hKernel, HANDLE hLocal)
+{
+    int i, iFree = -1;
+    HANDLE hOld = NULL;
+
+    IntOwnLock();
+    for (i = 0; i < MAX_OWN_META; i++)
+    {
+        if (g_OwnMeta[i].hLocal && g_OwnMeta[i].fmt == fmt)
+        {
+            if (g_OwnMeta[i].hLocal != hLocal)
+                hOld = g_OwnMeta[i].hLocal;
+            g_OwnMeta[i].hKernel = hKernel;
+            g_OwnMeta[i].hLocal = hLocal;
+            goto done;
+        }
+        if (!g_OwnMeta[i].hLocal && iFree < 0)
+            iFree = i;
+    }
+    if (iFree >= 0)
+    {
+        g_OwnMeta[iFree].fmt = fmt;
+        g_OwnMeta[iFree].hKernel = hKernel;
+        g_OwnMeta[iFree].hLocal = hLocal;
+    }
+    else
+    {
+        /* no room (not reachable: four formats): give the object up rather than leak it */
+        hOld = hLocal;
+    }
+done:
+    IntOwnUnlock();
+    if (hOld)
+        IntFreeOwnMeta(fmt, hOld);
+}
+
+static HANDLE
+IntOwnMetaFind(UINT fmt, HANDLE hKernel)
+{
+    int i;
+    HANDLE h = NULL;
+
+    IntOwnLock();
+    for (i = 0; i < MAX_OWN_META; i++)
+    {
+        if (g_OwnMeta[i].hLocal && g_OwnMeta[i].fmt == fmt && g_OwnMeta[i].hKernel == hKernel)
+        {
+            h = g_OwnMeta[i].hLocal;
+            break;
+        }
+    }
+    IntOwnUnlock();
+    return h;
+}
+
+static VOID
+IntOwnMetaFreeAll(VOID)
+{
+    int i, n = 0;
+    UINT afmt[MAX_OWN_META];
+    HANDLE ah[MAX_OWN_META];
+
+    IntOwnLock();
+    for (i = 0; i < MAX_OWN_META; i++)
+    {
+        if (g_OwnMeta[i].hLocal)
+        {
+            afmt[n] = g_OwnMeta[i].fmt;
+            ah[n++] = g_OwnMeta[i].hLocal;
+        }
+        g_OwnMeta[i].hLocal = NULL;
+        g_OwnMeta[i].hKernel = NULL;
+    }
+    IntOwnUnlock();
+    for (i = 0; i < n; i++)
+        IntFreeOwnMeta(afmt[i], ah[i]);
+}
+
+/* GetClipboardData of a metafile format: the handle this process put there, or the (kept) copy made from the
+   kernel's converted metafile */
+static HANDLE
+IntGetMetaFormat(UINT uFormat, HANDLE hKernel)
+{
+    HANDLE hLocal = IntOwnMetaFind(uFormat, hKernel);
+
+    if (hLocal)
+    {
+        if (IntOwnMetaIsValid(uFormat, hLocal))
+            return hLocal;
+        /* given up by the application: a new copy from the kernel's below replaces the entry */
+    }
+
+    if (uFormat == CF_DSPMETAFILEPICT || uFormat == CF_METAFILEPICT)
+        hLocal = GdiCreateLocalMetaFilePict(hKernel);
+    else
+        hLocal = GdiCreateLocalEnhMetaFile(hKernel);
+    if (hLocal)
+        IntOwnMetaRecord(uFormat, hKernel, hLocal);
+    return hLocal;
+}
+
 /*
  * @implemented
  */
@@ -258,7 +440,10 @@ EmptyClipboard(VOID)
     BOOL ret = NtUserEmptyClipboard();
 
     if (ret)
+    {
         IntOwnFreeAll();
+        IntOwnMetaFreeAll();
+    }
     return ret;
 }
 
@@ -404,10 +589,9 @@ GetClipboardData(UINT uFormat)
     {
         case CF_DSPMETAFILEPICT:
         case CF_METAFILEPICT:
-            return GdiCreateLocalMetaFilePict(hData);
         case CF_DSPENHMETAFILE:
         case CF_ENHMETAFILE:
-            return GdiCreateLocalEnhMetaFile(hData);
+            return IntGetMetaFormat(uFormat, hData);
     }
 
     if (gcd.fGlobalHandle)
@@ -545,7 +729,11 @@ SetClipboardData(UINT uFormat, HANDLE hMem)
             return NULL;
         }
         hRet = NtUserSetClipboardData(uFormat, hTemp, &scd); // Note : LOL, it returns a BOOL not a HANDLE!!!!
-        if (hRet == hTemp) hRet = hMem;                      // If successful "TRUE", return the original handle.
+        if (hRet == hTemp)                                   // If successful "TRUE", return the original handle.
+        {
+            IntOwnMetaRecord(uFormat, hTemp, hMem);
+            hRet = hMem;
+        }
     }
     else if (uFormat == CF_DSPENHMETAFILE || uFormat == CF_ENHMETAFILE)
     {
@@ -558,7 +746,11 @@ SetClipboardData(UINT uFormat, HANDLE hMem)
             return NULL;
         }
         hRet = NtUserSetClipboardData(uFormat, hTemp, &scd);
-        if (hRet == hTemp) hRet = hMem;
+        if (hRet == hTemp)
+        {
+            IntOwnMetaRecord(uFormat, hTemp, hMem);
+            hRet = hMem;
+        }
     }
     else
     {
