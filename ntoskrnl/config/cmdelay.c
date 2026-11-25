@@ -23,6 +23,7 @@ BOOLEAN CmpDelayCloseWorkItemActive;
 WORK_QUEUE_ITEM CmpDelayCloseWorkItem;
 LIST_ENTRY CmpDelayedLRUListHead;
 ULONG CmpDelayCloseIntervalInSeconds = 5;
+#define CMP_DELAY_CLOSE_BOUND_FACTOR 4
 KDPC CmpDelayCloseDpc;
 KTIMER CmpDelayCloseTimer;
 
@@ -60,41 +61,24 @@ CmpDelayCloseDpcRoutine(IN PKDPC Dpc,
     ExQueueWorkItem(&CmpDelayCloseWorkItem, DelayedWorkQueue);
 }
 
-_Function_class_(WORKER_THREAD_ROUTINE)
+/*
+ * Release the oldest entries of the delayed close table until it holds Target entries or less, at most Limit entries
+ * examined. The caller holds the registry lock (shared) and the table lock, which is held again on return; no key
+ * control block lock may be held by the caller (the lock of each victim is taken here, one at a time).
+ */
+static
 VOID
-NTAPI
-CmpDelayCloseWorker(IN PVOID Context)
+CmpDelayCloseReleaseEntries(IN ULONG Target,
+                            IN ULONG Limit)
 {
     PCM_DELAYED_CLOSE_ENTRY ListEntry;
-    ULONG i, ConvKey, Limit;
-    PAGED_CODE();
-
-    /* Sanity check */
-    ASSERT(CmpDelayCloseWorkItemActive);
-
-    /* Lock the registry */
-    CmpLockRegistry();
-
-    /* Acquire the delayed close table lock */
-    KeAcquireGuardedMutex(&CmpDelayedCloseTableLock);
-
-    /*
-     * Release at least a quarter of the table size per run, and everything that is over the limit when the run starts:
-     * the timer now waits its five seconds, so a run that frees a fixed 512 entries leaves a table that a scan of many
-     * keys filled (tens of thousands of key control blocks) over its limit for minutes.
-     */
-    Limit = CmpDelayedCloseSize >> 2;
-    if (CmpDelayedCloseElements > CmpDelayedCloseSize &&
-        CmpDelayedCloseElements - CmpDelayedCloseSize > Limit)
-    {
-        Limit = CmpDelayedCloseElements - CmpDelayedCloseSize;
-    }
+    ULONG i, ConvKey;
 
     /* Iterate */
     for (i = 0; i < Limit; i++)
     {
         /* Break out of the loop if there is nothing to process */
-        if (CmpDelayedCloseElements <= CmpDelayedCloseSize) break;
+        if (CmpDelayedCloseElements <= Target) break;
 
         /* Sanity check */
         ASSERT(!IsListEmpty(&CmpDelayedLRUListHead));
@@ -122,7 +106,7 @@ CmpDelayCloseWorker(IN PVOID Context)
                                       DelayedLRUList);
 
         /* Is the entry we have still the first one? */
-        if (CmpDelayedCloseElements <= CmpDelayedCloseSize)
+        if (CmpDelayedCloseElements <= Target)
         {
             /* No, someone already inserted an entry there */
             CmpReleaseKcbLockByKey(ConvKey);
@@ -188,6 +172,37 @@ CmpDelayCloseWorker(IN PVOID Context)
         /* Reacquire the delayed close table lock */
         KeAcquireGuardedMutex(&CmpDelayedCloseTableLock);
     }
+}
+
+_Function_class_(WORKER_THREAD_ROUTINE)
+VOID
+NTAPI
+CmpDelayCloseWorker(IN PVOID Context)
+{
+    ULONG Limit;
+    PAGED_CODE();
+
+    /* Sanity check */
+    ASSERT(CmpDelayCloseWorkItemActive);
+
+    /* Lock the registry */
+    CmpLockRegistry();
+
+    /* Acquire the delayed close table lock */
+    KeAcquireGuardedMutex(&CmpDelayedCloseTableLock);
+
+    /*
+     * Release at least a quarter of the table size per run, and everything that is over the limit when the run starts:
+     * the timer now waits its five seconds, so a run that frees a fixed 512 entries leaves a table that a scan of many
+     * keys filled (tens of thousands of key control blocks) over its limit for minutes.
+     */
+    Limit = CmpDelayedCloseSize >> 2;
+    if (CmpDelayedCloseElements > CmpDelayedCloseSize &&
+        CmpDelayedCloseElements - CmpDelayedCloseSize > Limit)
+    {
+        Limit = CmpDelayedCloseElements - CmpDelayedCloseSize;
+    }
+    CmpDelayCloseReleaseEntries(CmpDelayedCloseSize, Limit);
 
     if (CmpDelayedCloseElements <= CmpDelayedCloseSize)
     {
@@ -204,6 +219,30 @@ CmpDelayCloseWorker(IN PVOID Context)
     KeReleaseGuardedMutex(&CmpDelayedCloseTableLock);
 
     /* Unlock the registry */
+    CmpUnlockRegistry();
+}
+
+/*
+ * The table may hold more than its limit until the timer runs (five seconds), but not without bound: a process that
+ * touches many distinct keys in those seconds would pin one key control block per key in paged pool. Above
+ * CMP_DELAY_CLOSE_BOUND_FACTOR times the limit, the caller (which holds no key control block lock: the handle close
+ * path and the release worker) releases the oldest entries itself, down to the bound, as the worker does.
+ */
+VOID
+NTAPI
+CmpDelayCloseEnforceBound(VOID)
+{
+    ULONG Bound = CmpDelayedCloseSize * CMP_DELAY_CLOSE_BOUND_FACTOR;
+    PAGED_CODE();
+
+    /* The count is read without the lock: a bound, not an exact limit */
+    if (*(volatile ULONG *)&CmpDelayedCloseElements <= Bound) return;
+
+    CmpLockRegistry();
+    KeAcquireGuardedMutex(&CmpDelayedCloseTableLock);
+    if (CmpDelayedCloseElements > Bound)
+        CmpDelayCloseReleaseEntries(Bound, CmpDelayedCloseElements - Bound + 16);
+    KeReleaseGuardedMutex(&CmpDelayedCloseTableLock);
     CmpUnlockRegistry();
 }
 
@@ -274,6 +313,9 @@ CmpDelayDerefKCBWorker(IN PVOID Context)
         /* Dereference and free */
         CmpDereferenceKeyControlBlock(Entry->Kcb);
         CmpFreeDelayItem(Entry);
+
+        /* The dereference may have filled the delayed close table: keep it within its bound */
+        CmpDelayCloseEnforceBound();
 
         /* Lock the list again */
         KeAcquireGuardedMutex(&CmpDelayDerefKCBLock);
@@ -405,6 +447,9 @@ CmpDerefKeyControlBlockOnClose(IN PCM_KEY_CONTROL_BLOCK Kcb,
         if (!InterlockedExchange(&Reported, 1))
             DPRINT1("CM: %lu delayed KCB dereferences queued: closing handles dereference inline\n", CmpDelayDerefKCBCount);
         CmpDereferenceKeyControlBlock(Kcb);
+
+        /* The dereference may have filled the delayed close table; this path holds no key control block lock */
+        CmpDelayCloseEnforceBound();
         return;
     }
     CmpDelayDerefKeyControlBlock(Kcb);

@@ -1200,6 +1200,10 @@ CmpFlushDelayDerefKCBs(VOID);
 
 VOID
 NTAPI
+CmpDelayCloseEnforceBound(VOID);
+
+VOID
+NTAPI
 CmpAddToDelayedClose(
     IN PCM_KEY_CONTROL_BLOCK Kcb,
     IN BOOLEAN LockHeldExclusively
