@@ -673,6 +673,17 @@ C_ASSERT(sizeof(WOW64_QUOTA_LIMITS_EX) == 52);
 
 static ULONG Narrow(SIZE_T Value);
 
+/* SECTION_IMAGE_INFORMATION as a 32-bit program lays it out (ProcessImageInformation) */
+typedef struct
+{
+    ULONG TransferAddress, ZeroBits, MaximumStackSize, CommittedStackSize, SubSystemType, SubSystemVersion, GpValue;
+    USHORT ImageCharacteristics, DllCharacteristics, Machine;
+    BOOLEAN ImageContainsCode;
+    UCHAR ImageFlags;
+    ULONG LoaderFlags, ImageFileSize, CheckSum;
+} WOW64_SECTION_IMAGE_INFORMATION;
+C_ASSERT(sizeof(WOW64_SECTION_IMAGE_INFORMATION) == 48);
+
 static BOOLEAN QuotaLength32(ULONG Length, BOOLEAN *Padded)
 {
     switch (Length)
@@ -3706,6 +3717,35 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             }
             return Status;
         }
+        if (a[1] == ProcessImageInformation)
+        {
+            /* SECTION_IMAGE_INFORMATION of the 32-bit image: the address and the two stack sizes are
+             * 4 bytes (48 bytes in all, 64 natively) */
+            SECTION_IMAGE_INFORMATION Native;
+            WOW64_SECTION_IMAGE_INFORMATION Guest;
+            if (a[3] != sizeof(Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+            if (a[4]) PROBE(4);
+            Status = NtQueryInformationProcess(H(0), a[1], &Native, sizeof(Native), NULL);
+            if (!NT_SUCCESS(Status)) return Status;
+            Guest.TransferAddress = (ULONG)(ULONG_PTR)Native.TransferAddress;
+            Guest.ZeroBits = Native.ZeroBits;
+            Guest.MaximumStackSize = Narrow(Native.MaximumStackSize);
+            Guest.CommittedStackSize = Narrow(Native.CommittedStackSize);
+            Guest.SubSystemType = Native.SubSystemType;
+            Guest.SubSystemVersion = Native.SubSystemVersion;
+            Guest.GpValue = Native.GpValue;
+            Guest.ImageCharacteristics = Native.ImageCharacteristics;
+            Guest.DllCharacteristics = Native.DllCharacteristics;
+            Guest.Machine = Native.Machine;
+            Guest.ImageContainsCode = Native.ImageContainsCode;
+            Guest.ImageFlags = Native.ImageFlags;
+            Guest.LoaderFlags = Native.LoaderFlags;
+            Guest.ImageFileSize = Native.ImageFileSize;
+            Guest.CheckSum = Native.CheckSum;
+            RtlCopyMemory(P(2), &Guest, sizeof(Guest));
+            if (a[4]) U(4) = sizeof(Guest);
+            return STATUS_SUCCESS;
+        }
         if (a[1] == ProcessDebugObjectHandle)
         {
             /* A handle, a ULONG for the guest (STATUS_PORT_NOT_SET when the process is not debugged) */
@@ -3737,6 +3777,10 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         case ProcessDebugFlags:
             /* A ULONG, and the handle values as a ULONG array */
             return NtQueryInformationProcess(H(0), a[1], P(2), a[3], P(4));
+        case ProcessWx86Information: case ProcessPriorityBoost: case ProcessLUIDDeviceMapsEnabled:
+        case ProcessCycleTime: case 61 /* ProcessProtectionInformation */:
+            /* The same layout in both widths: a ULONG, a ULONG, a ULONG, two ULONGLONGs, a byte */
+            return NtQueryInformationProcess(H(0), a[1], P(2), a[3], P(4));
         case 52 /* ProcessMitigationPolicy: { ULONG Policy; ULONG Flags }, the same in both widths. The sandbox of a
                  * 32-bit Firefox asks it for the Win32k lockdown of its own process (GetProcessMitigationPolicy,
                  * ProcessSystemCallDisablePolicy); refused, the process thinks it is not locked down and creates the
@@ -3745,7 +3789,12 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         case ProcessIoCounters: case ProcessTimes: case ProcessVmCounters: case ProcessDeviceMap:
         case ProcessImageFileName: case ProcessQuotaLimits:
             return QueryProcess32(H(0), a[1], a[2], a[3], a[4], Cleanup);
-        default: UNSUPPORTED(CLASS, a[1]);
+        default:
+            /* A class that the native service itself does not have (no data comes back) is answered as Windows
+             * answers it for a 32-bit program: STATUS_INVALID_INFO_CLASS, not STATUS_NOT_SUPPORTED */
+            Status = NtQueryInformationProcess(H(0), a[1], NULL, 0, NULL);
+            if (Status == STATUS_INVALID_INFO_CLASS || Status == STATUS_NOT_IMPLEMENTED) return Status;
+            UNSUPPORTED(CLASS, a[1]);
         }
     case W64_NtSetInformationProcess:
         if (a[1] == ProcessTlsInformation) return SetProcessTls32(H(0), a[2], a[3], Cleanup);

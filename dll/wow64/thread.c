@@ -185,6 +185,24 @@ NTSTATUS Wow64QueryThread(HANDLE Thread, ULONG Class, PVOID Buffer, ULONG Length
         if (ReturnLength) *ReturnLength = sizeof(ULONG);
         return Status;
     }
+    if (Class == ThreadGroupInformation)
+    {
+        /* GROUP_AFFINITY: the mask is 4 bytes in a 32-bit program (12 bytes, 16 natively) */
+        GROUP_AFFINITY Native;
+        struct { ULONG Mask; USHORT Group; USHORT Reserved[3]; } *Guest = Buffer;
+        if (Length != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+        Status = NtQueryInformationThread(Thread, Class, &Native, sizeof(Native), NULL);
+        if (NT_SUCCESS(Status))
+        {
+            Guest->Mask = (ULONG)Native.Mask;
+            Guest->Group = Native.Group;
+            Guest->Reserved[0] = Native.Reserved[0];
+            Guest->Reserved[1] = Native.Reserved[1];
+            Guest->Reserved[2] = Native.Reserved[2];
+            if (ReturnLength) *ReturnLength = sizeof(*Guest);
+        }
+        return Status;
+    }
     if (Class == ThreadNameInformation)
     {
         /* A UNICODE_STRING followed by its characters: the guest header is
@@ -223,10 +241,18 @@ NTSTATUS Wow64QueryThread(HANDLE Thread, ULONG Class, PVOID Buffer, ULONG Length
     }
     switch (Class)
     {
+    case ThreadIoPriority: case ThreadCycleTime: case ThreadPagePriority: case ThreadActualBasePriority:
+    case ThreadIdealProcessorEx: case ThreadSuspendCount: case ThreadContainerId: case ThreadDynamicCodePolicyInfo:
+        /* The same layout in both widths */
+        return NtQueryInformationThread(Thread, Class, Buffer, Length, ReturnLength);
     case ThreadTimes: case ThreadPriorityBoost: case ThreadAmILastThread:
     case ThreadIsIoPending: case ThreadHideFromDebugger: case ThreadBreakOnTermination:
     case ThreadIsTerminated: case ThreadPerformanceCount:
         return NtQueryInformationThread(Thread, Class, Buffer, Length, ReturnLength);
-    default: return STATUS_NOT_SUPPORTED;
+    default:
+        /* A class that the native service does not have is answered as Windows answers it for a 32-bit program */
+        Status = NtQueryInformationThread(Thread, Class, NULL, 0, NULL);
+        if (Status == STATUS_INVALID_INFO_CLASS || Status == STATUS_NOT_IMPLEMENTED) return Status;
+        return STATUS_NOT_SUPPORTED;
     }
 }
