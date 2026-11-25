@@ -83,6 +83,7 @@ list(APPEND SOURCE
     LsassServerLeak.c
     LsaLogonUserFailure.c
     LsaLogonUserLocalGroups.c
+    LsaClientAccess.c
     LsaPortClients.c
     LsaPrivateDataCaller.c
     LsaSubmitLength.c

@@ -83,6 +83,7 @@ extern void func_LsassLeak(void);
 extern void func_LsassServerLeak(void);
 extern void func_LsaLogonUserFailure(void);
 extern void func_LsaLogonUserLocalGroups(void);
+extern void func_LsaClientAccess(void);
 extern void func_LsaPortClients(void);
 extern void func_LsaPrivateDataCaller(void);
 extern void func_LsaSubmitLength(void);
@@ -307,6 +308,7 @@ const struct test winetest_testlist[] =
     { "LsassServerLeak", func_LsassServerLeak },
     { "LsaLogonUserFailure", func_LsaLogonUserFailure },
     { "LsaLogonUserLocalGroups", func_LsaLogonUserLocalGroups },
+    { "LsaClientAccess", func_LsaClientAccess },
     { "LsaPortClients", func_LsaPortClients },
     { "LsaPrivateDataCaller", func_LsaPrivateDataCaller },
     { "LsaSubmitLength", func_LsaSubmitLength },
