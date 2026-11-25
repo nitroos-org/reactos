@@ -310,6 +310,7 @@ static const FWD Forwarders[] =
     {"SetFileSecurityW", L"advapi32.dll", "SetFileSecurityW"},
     {"SetKernelObjectSecurity", L"advapi32.dll", "SetKernelObjectSecurity"},
     {"SetPrivateObjectSecurity", L"advapi32.dll", "SetPrivateObjectSecurity"},
+    {"SetPrivateObjectSecurityEx", L"advapi32.dll", "SetPrivateObjectSecurityEx"},
     {"SetSecurityAccessMask", L"advapi32.dll", "SetSecurityAccessMask"},
     {"SetSecurityDescriptorControl", L"advapi32.dll", "SetSecurityDescriptorControl"},
     {"SetSecurityDescriptorDacl", L"advapi32.dll", "SetSecurityDescriptorDacl"},

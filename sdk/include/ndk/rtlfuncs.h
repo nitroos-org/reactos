@@ -1804,6 +1804,18 @@ RtlSetSecurityObject(
     _In_ HANDLE Token
 );
 
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlSetSecurityObjectEx(
+    _In_ SECURITY_INFORMATION SecurityInformation,
+    _In_ PSECURITY_DESCRIPTOR ModificationDescriptor,
+    _Inout_ PSECURITY_DESCRIPTOR *ObjectsSecurityDescriptor,
+    _In_ ULONG AutoInheritFlags,
+    _In_ PGENERIC_MAPPING GenericMapping,
+    _In_opt_ HANDLE Token
+);
+
 //
 // Single-Character Functions
 //
