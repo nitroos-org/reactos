@@ -197,6 +197,10 @@ Return Value:
     BOOLEAN AcquiredVcb = FALSE;
     BOOLEAN AcquiredFcb = FALSE;
 
+#ifdef __REACTOS__
+    BOOLEAN DeletedFile = FALSE;
+#endif
+
 #if (NTDDI_VERSION >= NTDDI_WIN8)
     BOOLEAN ProcessingDeleteOnClose = FALSE;
 #endif
@@ -945,6 +949,10 @@ Return Value:
 
                             FatDeleteDirent( IrpContext, Fcb, &DeleteContext, TRUE );
 
+#ifdef __REACTOS__
+                            DeletedFile = TRUE;
+#endif
+
                             //
                             //  Report that we have removed an entry.
                             //
@@ -1056,6 +1064,33 @@ Return Value:
             //
 
             CcUninitializeCacheMap( FileObject, TruncateSize, NULL );
+
+#ifdef __REACTOS__
+            //
+            //  A deleted file's data is of no use any more. Mm keeps the
+            //  pages of a data section after the cache map and its views
+            //  are gone, each resident page keeps the section, and the
+            //  section keeps a file object of this Fcb referenced: the
+            //  close that frees the Fcb waits until memory gets short.
+            //  The truncation above purges only through a cache map, and
+            //  the handle that wrote the file usually closed (and its
+            //  close deleted the map) before the delete: nothing was
+            //  purged. Under a churn of small files that are created and
+            //  deleted, nonpaged pool runs out first (the sections, their
+            //  page tables, the file objects, the Fcbs). Purge the data
+            //  section now: no view maps it any more, and the section,
+            //  the file objects and the Fcb go with its pages.
+            //
+
+            if (DeletedFile &&
+                (Fcb->NonPaged->SectionObjectPointers.DataSectionObject != NULL)) {
+
+                (VOID)CcPurgeCacheSection( &Fcb->NonPaged->SectionObjectPointers,
+                                           NULL,
+                                           0,
+                                           FALSE );
+            }
+#endif
 
             break;
 
