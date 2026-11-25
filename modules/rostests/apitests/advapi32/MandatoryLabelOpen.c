@@ -161,6 +161,10 @@ static ACCESS_MASK LabelAllows(DWORD Token, DWORD Level, DWORD Policy, const GEN
         Allowed |= Mapping->GenericRead | READ_CONTROL;
     if (!(Policy & SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP))
         Allowed |= Mapping->GenericExecute | SYNCHRONIZE;
+    /* NO_READ_UP takes READ_CONTROL away from the execute rights too (it is in the execute mapping of the event,
+     * mutex, section and process types): measured on Windows Server 2022 with a named event at Low */
+    if (Policy & SYSTEM_MANDATORY_LABEL_NO_READ_UP)
+        Allowed &= ~READ_CONTROL;
     return Allowed;
 }
 
@@ -1572,10 +1576,10 @@ static VOID ParentRowsV3Types(void)
             {
                 const GENERIC_MAPPING *M = &Info->GenericMapping;
                 /*
-                 * Known differences, not label rules (tickets): Thread GenericExecute without THREAD_RESUME,
-                 * Job GenericAll/valid without 0x20, SymbolicLink valid mask
+                 * Known differences, not label rules (tickets): Job GenericAll/valid without 0x20,
+                 * SymbolicLink valid mask
                  */
-                BOOL KnownMapping = !wcscmp(Types[t].Name, L"Thread") || !wcscmp(Types[t].Name, L"Job");
+                BOOL KnownMapping = !wcscmp(Types[t].Name, L"Job");
                 BOOL KnownValid = !wcscmp(Types[t].Name, L"Job") || !wcscmp(Types[t].Name, L"SymbolicLink");
 
                 Found[t] = TRUE;

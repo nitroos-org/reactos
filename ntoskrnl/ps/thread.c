@@ -41,6 +41,12 @@ PspThreadOpen(
         *GrantedAccess |= THREAD_QUERY_LIMITED_INFORMATION;
     }
 
+    /* Measured on Windows Server 2022: the suspend/resume right carries THREAD_RESUME */
+    if (*GrantedAccess & THREAD_SUSPEND_RESUME)
+    {
+        *GrantedAccess |= THREAD_RESUME;
+    }
+
     return STATUS_SUCCESS;
 }
 

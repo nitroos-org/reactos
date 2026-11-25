@@ -123,9 +123,14 @@ NtLdrEnumerateBootEntries(
 
 // Question 1: What if config file is optional?
 // Question 2: What if many config files are possible?
+//
+// On an EFI system partition the loader is not freeldr.sys but the file Setup
+// copies to \EFI\NITROOS (see bootsup.c), and the boot entries are in the
+// freeldr.ini next to the EFI directory: without it no boot store of a UEFI
+// computer is ever found and its installations are never offered for upgrade.
 NTOS_BOOT_LOADER_FILES NtosBootLoaders[] =
 {
-    {FreeLdr, L"freeldr.sys\0" L"rosload.exe\0", L"freeldr.ini",
+    {FreeLdr, L"freeldr.sys\0" L"rosload.exe\0" L"EFI\\NITROOS\\BOOTX64.EFI\0" L"EFI\\NITROOS\\BOOTIA32.EFI\0", L"freeldr.ini",
         OpenIniBootLoaderStore, CloseIniBootLoaderStore, (PENUM_BOOT_STORE_ENTRIES)FreeLdrEnumerateBootEntries},
     {NtLdr  , L"ntldr\0" L"osloader.exe\0", L"boot.ini",
         OpenIniBootLoaderStore, CloseIniBootLoaderStore, (PENUM_BOOT_STORE_ENTRIES)NtLdrEnumerateBootEntries  },
@@ -1541,9 +1546,20 @@ FreeLdrMarkEntriesInCache(
         PINI_SECTION OsIniSection = IniGetSection(IniCache, SectionName);
         PCWSTR OldPath;
 
+        PCWSTR OldGuid;
+
         if (!OsIniSection || !IniGetKey(OsIniSection, L"SystemPath", &OldPath) || !OldPath ||
             !SystemPathsEqual(OldPath, ArcPath))
             continue;
+
+        /* An entry that names another partition by its GUID belongs to another installation whose position
+         * in the table is out of date: its keys stay as they are */
+        if (IniGetKey(OsIniSection, L"SystemPathPartitionGuid", &OldGuid) && OldGuid && *OldGuid &&
+            _wcsicmp(OldGuid, PartitionGuid) != 0)
+        {
+            DPRINT1("Boot entry '%S' names another partition (GUID %S), not touched\n", SectionName, OldGuid);
+            continue;
+        }
 
         DPRINT1("Boot entry '%S' names its system partition by GUID %S\n", SectionName, PartitionGuid);
         SetUniqueKey(OsIniSection, L"SystemPathPartitionGuid", PartitionGuid);
@@ -1553,6 +1569,34 @@ FreeLdrMarkEntriesInCache(
     IniFindClose(Iterator);
 
     return STATUS_SUCCESS;
+}
+
+PCWSTR
+FreeLdrGetEntryPartitionGuidInCache(
+    _In_ PINICACHE IniCache,
+    _In_ PCWSTR SectionName)
+{
+    PINI_SECTION OsIniSection;
+    PCWSTR Guid;
+
+    if (!IniCache || !SectionName)
+        return NULL;
+    OsIniSection = IniGetSection(IniCache, SectionName);
+    if (!OsIniSection || !IniGetKey(OsIniSection, L"SystemPathPartitionGuid", &Guid) || !Guid || !*Guid)
+        return NULL;
+    return Guid;
+}
+
+PCWSTR
+FreeLdrGetEntryPartitionGuid(
+    _In_ PVOID Handle,
+    _In_ PCWSTR SectionName)
+{
+    PBOOT_STORE_INI_CONTEXT BootStore = (PBOOT_STORE_INI_CONTEXT)Handle;
+
+    if (!BootStore || BootStore->Header.Type != FreeLdr)
+        return NULL;
+    return FreeLdrGetEntryPartitionGuidInCache(BootStore->IniCache, SectionName);
 }
 
 NTSTATUS

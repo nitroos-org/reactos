@@ -2826,6 +2826,22 @@ SelectPartition(
 }
 
 PPARTENTRY
+FindPartitionByGptId(
+    _In_ PPARTLIST List,
+    _In_ const GUID* PartitionGuid)
+{
+    PPARTENTRY PartEntry;
+
+    for (PartEntry = GetNextPartition(List, NULL); PartEntry; PartEntry = GetNextPartition(List, PartEntry))
+    {
+        if (PartEntry->IsPartitioned && PartEntry->DiskEntry->DiskStyle == PARTITION_STYLE_GPT &&
+            IsEqualGUID(&PartEntry->GptId, PartitionGuid))
+            return PartEntry;
+    }
+    return NULL;
+}
+
+PPARTENTRY
 NTAPI
 GetNextPartition(
     IN PPARTLIST List,

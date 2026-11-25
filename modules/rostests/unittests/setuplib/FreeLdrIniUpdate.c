@@ -12,6 +12,9 @@ extern HANDLE ProcessHeap;
 
 #define ARC_A "multi(0)disk(0)rdisk(0)partition(1)\\ReactOS"
 #define ARC_B "multi(0)disk(0)rdisk(0)partition(2)\\Other"
+#define GUID_1 "{11111111-2222-4333-8444-555555555555}"
+#define GUID_1W L"{11111111-2222-4333-8444-555555555555}"
+#define GUID_2W L"{AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE}"
 
 static const char Head[] =
     "[FREELOADER]\r\n"
@@ -60,6 +63,23 @@ static BOOL WriteIni(const char *ListExtra, const char *SectionExtra)
     if (File == INVALID_HANDLE_VALUE)
         return FALSE;
     _snprintf(Buffer, sizeof(Buffer), "%s%s%s%s", Head, ListExtra, Sections, SectionExtra);
+    WriteFile(File, Buffer, (DWORD)strlen(Buffer), &Written, NULL);
+    CloseHandle(File);
+    return TRUE;
+}
+
+/* The file with the head as above and the sections as given */
+static BOOL WriteWithSections(const char *OwnSections)
+{
+    HANDLE File;
+    DWORD Written;
+    char Buffer[4096];
+
+    SetFileAttributesW(IniFile, FILE_ATTRIBUTE_NORMAL);
+    File = CreateFileW(IniFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (File == INVALID_HANDLE_VALUE)
+        return FALSE;
+    _snprintf(Buffer, sizeof(Buffer), "%s%s", Head, OwnSections);
     WriteFile(File, Buffer, (DWORD)strlen(Buffer), &Written, NULL);
     CloseHandle(File);
     return TRUE;
@@ -197,6 +217,48 @@ START_TEST(FreeLdrIniUpdate)
     if (Kit)
         ok(!strcmp(Value("ReactOS_KdKit", "SystemPath", Buffer, sizeof(Buffer)), ARC_B), "second: kit SystemPath '%s'\n", Buffer);
     ok(!strcmp(Value("FREELOADER", "DefaultOS", Buffer, sizeof(Buffer)), "ReactOS"), "second: DefaultOS is '%s'\n", Buffer);
+
+    /* A second installation (GPT) whose partition has the position the first one's entries still hold in their path:
+     * those entries name the first partition by its GUID, they are not reused, an entry of its own is added and the
+     * first installation's entries keep their GUID */
+    ok(WriteWithSections(
+                "\r\n[ReactOS]\r\nBootType=Windows2003\r\nSystemPath=" ARC_A "\r\nOptions=/FASTDETECT\r\n"
+                "SystemPathPartitionGuid=" GUID_1 "\r\n"
+                "\r\n[ReactOS_Debug]\r\nBootType=Windows2003\r\nSystemPath=" ARC_A "\r\nOptions=/DEBUG\r\n"
+                "SystemPathPartitionGuid=" GUID_1 "\r\n"), "cannot write %ls\n", IniFile);
+    Status = UpdateFreeLoaderIniForPartition(NtDir, ARC_AW, GUID_2W);
+    ok(Status == STATUS_SUCCESS, "UpdateFreeLoaderIniForPartition (other GUID) 0x%08lx\n", Status);
+    ReadIni();
+    ok(Lines("[ReactOS_1]") == 1, "other GUID: %d entries ReactOS_1\n", Lines("[ReactOS_1]"));
+    ok(!strcmp(Value("ReactOS_1", "SystemPath", Buffer, sizeof(Buffer)), ARC_A), "other GUID: SystemPath '%s'\n", Buffer);
+    ok(!strcmp(Value("ReactOS", "SystemPathPartitionGuid", Buffer, sizeof(Buffer)), GUID_1),
+       "other GUID: the first entry's GUID is '%s'\n", Buffer);
+    ok(!strcmp(Value("ReactOS_Debug", "SystemPathPartitionGuid", Buffer, sizeof(Buffer)), GUID_1),
+       "other GUID: the debug entry's GUID is '%s'\n", Buffer);
+    ok(!strcmp(Value("FREELOADER", "DefaultOS", Buffer, sizeof(Buffer)), "ReactOS"), "other GUID: DefaultOS is '%s'\n", Buffer);
+
+    /* Setup over it again for the second installation: its entry is found, no third one */
+    Status = UpdateFreeLoaderIniForPartition(NtDir, ARC_AW, GUID_2W);
+    ok(Status == STATUS_SUCCESS, "UpdateFreeLoaderIniForPartition (again) 0x%08lx\n", Status);
+    ReadIni();
+    ok(Lines("[ReactOS_1]") == 1 && Lines("[ReactOS_2]") == 0, "other GUID, again: %d ReactOS_1, %d ReactOS_2\n",
+       Lines("[ReactOS_1]"), Lines("[ReactOS_2]"));
+
+    /* The partition of the first installation itself: its entry is reused (a repair or an upgrade) */
+    ok(WriteWithSections(
+                "\r\n[ReactOS]\r\nBootType=Windows2003\r\nSystemPath=" ARC_A "\r\nOptions=/FASTDETECT\r\n"
+                "SystemPathPartitionGuid=" GUID_1 "\r\n"), "cannot write %ls\n", IniFile);
+    Status = UpdateFreeLoaderIniForPartition(NtDir, ARC_AW, GUID_1W);
+    ok(Status == STATUS_SUCCESS, "UpdateFreeLoaderIniForPartition (same GUID) 0x%08lx\n", Status);
+    ReadIni();
+    ok(Lines("[ReactOS]") == 1 && Lines("[ReactOS_1]") == 0, "same GUID: %d ReactOS, %d ReactOS_1\n",
+       Lines("[ReactOS]"), Lines("[ReactOS_1]"));
+
+    /* No GUID known (a BIOS install): the entries are matched by their path, as before */
+    Status = UpdateFreeLoaderIniForPartition(NtDir, ARC_AW, NULL);
+    ok(Status == STATUS_SUCCESS, "UpdateFreeLoaderIniForPartition (no GUID) 0x%08lx\n", Status);
+    ReadIni();
+    ok(Lines("[ReactOS_1]") == 0, "no GUID: %d entries ReactOS_1\n", Lines("[ReactOS_1]"));
 
     SetFileAttributesW(IniFile, FILE_ATTRIBUTE_NORMAL);
     DeleteFileW(IniFile);

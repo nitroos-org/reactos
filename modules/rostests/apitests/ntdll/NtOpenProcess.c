@@ -121,7 +121,7 @@ Test_GrantedAccess(
           STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x3FFF },
     };
     HANDLE Process;
-    ACCESS_MASK Granted;
+    ACCESS_MASK Granted, Expected;
     ULONG i;
 
     for (i = 0; i < RTL_NUMBER_OF(Tests); i++)
@@ -131,9 +131,9 @@ Test_GrantedAccess(
            i, Tests[i].Desired, GetLastError());
         if (!Process) continue;
         Granted = GetGrantedAccess(Process);
-        ok(Granted == Tests[i].Granted ||
-           (Win8OrLater && Tests[i].Win8Granted && Granted == Tests[i].Win8Granted),
-           "[%lu] granted 0x%lx, expected 0x%lx\n", i, Granted, Tests[i].Granted);
+        /* Windows 8 and later grant the Win8Granted mask where the row has one, earlier ones the plain mask */
+        Expected = (Win8OrLater && Tests[i].Win8Granted) ? Tests[i].Win8Granted : Tests[i].Granted;
+        ok(Granted == Expected, "[%lu] granted 0x%lx, expected 0x%lx\n", i, Granted, Expected);
         CloseHandle(Process);
     }
 
