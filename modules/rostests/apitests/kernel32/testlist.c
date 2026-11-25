@@ -183,6 +183,7 @@ extern void func_LocalDumps(void);
 extern void func_CrashDialog(void);
 extern void func_LocaleDerivedFields(void);
 extern void func_LocaleEveryName(void);
+extern void func_LCIDToLocaleNameRows(void);
 extern void func_LocaleNameToLCID(void);
 extern void func_LocaleTable(void);
 extern void func_LocalTimeZone(void);
@@ -483,6 +484,7 @@ const struct test winetest_testlist[] =
     { "CrashDialog",                 func_CrashDialog },
     { "LocaleDerivedFields",         func_LocaleDerivedFields },
     { "LocaleEveryName",             func_LocaleEveryName },
+    { "LCIDToLocaleNameRows",        func_LCIDToLocaleNameRows },
     { "LocaleNameToLCID",            func_LocaleNameToLCID },
     { "LocaleTable",                 func_LocaleTable },
     { "LocalTimeZone",               func_LocalTimeZone },
