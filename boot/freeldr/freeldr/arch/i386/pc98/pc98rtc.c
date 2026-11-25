@@ -19,7 +19,7 @@ TIMEINFO*
 Pc98GetTime(VOID)
 {
     static TIMEINFO TimeInfo;
-    REGS Regs;
+    REGS Regs = {0};
     UCHAR SysTime[6];
 
     /* Int 1Ch AH=00h

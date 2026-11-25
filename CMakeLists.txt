@@ -442,20 +442,38 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
             set(_rel "${CMAKE_MATCH_2}")
             list(APPEND _pdb_targets ${_m})
             if(_rel STREQUAL "")
-                set(_pdb_dir "${REACTOS_BINARY_DIR}/pdb")
+                set(_pdb_dir "${NITRO_PDB_DIR}")
             else()
-                set(_pdb_dir "${REACTOS_BINARY_DIR}/pdb/${_rel}")
+                set(_pdb_dir "${NITRO_PDB_DIR}/${_rel}")
             endif()
             string(APPEND _pdb_lines "$<TARGET_FILE:${_m}>|${_pdb_dir}/$<TARGET_FILE_BASE_NAME:${_m}>.pdb\n")
         endforeach()
         file(GENERATE OUTPUT ${CMAKE_BINARY_DIR}/pdb_modules.txt CONTENT "${_pdb_lines}")
+        # The list of the images of the medium: this build's and, with SYSWOW64, the 32-bit files of SysWOW64 (the nested build
+        # lists every module it could build; only the files it staged count)
+        set(_pdb_all_list ${CMAKE_BINARY_DIR}/pdb_modules_all.txt)
+        set(_pdb_merge_args -DHOST_LIST=${CMAKE_BINARY_DIR}/pdb_modules.txt -DOUT=${_pdb_all_list})
+        set(_pdb_guest_target "")
+        if(SYSWOW64 AND NOT SYSWOW64_GUEST)
+            list(APPEND _pdb_merge_args
+                -DGUEST_LIST=${REACTOS_BINARY_DIR}/syswow64-i386/pdb_modules.txt
+                -DGUEST_FILES=${REACTOS_BINARY_DIR}/syswow64-i386/syswow64-guest.${CMAKE_BUILD_TYPE}.lst)
+            set(_pdb_guest_target syswow64-i386)
+        endif()
         add_custom_target(nitro_pdb_manifest ALL
+            COMMAND ${CMAKE_COMMAND} ${_pdb_merge_args} -P ${REACTOS_SOURCE_DIR}/sdk/cmake/pdb_merge.cmake
             COMMAND ${CMAKE_COMMAND}
-                -DLIST=${CMAKE_BINARY_DIR}/pdb_modules.txt
+                -DLIST=${_pdb_all_list}
                 -DPDB_ROOT=${REACTOS_BINARY_DIR}/pdb
                 -DOUT=${REACTOS_BINARY_DIR}/pdb/MANIFEST.txt
                 -P ${REACTOS_SOURCE_DIR}/sdk/cmake/pdb_manifest.cmake
-            DEPENDS ${_pdb_targets}
+            DEPENDS ${_pdb_targets} ${_pdb_guest_target}
+            VERBATIM)
+        add_custom_target(pdb_merge_test
+            COMMAND ${CMAKE_COMMAND}
+                -DMERGE=${REACTOS_SOURCE_DIR}/sdk/cmake/pdb_merge.cmake
+                -DWORK=${REACTOS_BINARY_DIR}/pdb-merge-test
+                -P ${REACTOS_SOURCE_DIR}/sdk/cmake/tests/pdb_merge.cmake
             VERBATIM)
 
         # The symbols package (ninja nitro_symbols): a symbol store of the PDB files and images, with the manifest, and its archives
@@ -473,7 +491,7 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
         add_custom_target(nitro_symbols
             COMMAND ${CMAKE_COMMAND}
                 -DMANIFEST=${REACTOS_BINARY_DIR}/pdb/MANIFEST.txt
-                -DLIST=${CMAKE_BINARY_DIR}/pdb_modules.txt
+                -DLIST=${_pdb_all_list}
                 -DPDB_ROOT=${REACTOS_BINARY_DIR}/pdb
                 -DOUT=${REACTOS_BINARY_DIR}/symbols
                 -DNAME=${_symbols_name}

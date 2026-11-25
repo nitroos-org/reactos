@@ -173,7 +173,7 @@ DiskGetErrorCodeString(
 
 BOOLEAN DiskResetController(UCHAR DriveNumber)
 {
-    REGS RegsIn, RegsOut;
+    REGS RegsIn = {0}, RegsOut = {0};
 
     WARN("DiskResetController(0x%x) DISK OPERATION FAILED -- RESETTING CONTROLLER\n", DriveNumber);
 
@@ -213,7 +213,7 @@ DiskIsDriveRemovable(UCHAR DriveNumber)
 static BOOLEAN
 DiskInt13ExtensionsSupported(IN UCHAR DriveNumber)
 {
-    REGS RegsIn, RegsOut;
+    REGS RegsIn = {0}, RegsOut = {0};
 
     /*
      * Some BIOSes report that extended disk access functions are not supported
@@ -296,7 +296,7 @@ DiskGetExtendedDriveParameters(
     _In_ USHORT BufferSize)
 {
     PEXTENDED_GEOMETRY Ptr = (PEXTENDED_GEOMETRY)BIOSCALLBUFFER;
-    REGS RegsIn, RegsOut;
+    REGS RegsIn = {0}, RegsOut = {0};
 
     TRACE("DiskGetExtendedDriveParameters(0x%x)\n", DriveNumber);
 
@@ -395,7 +395,7 @@ InitDriveGeometry(
     IN PPC_DISK_DRIVE DiskDrive)
 {
     BOOLEAN Success;
-    REGS RegsIn, RegsOut;
+    REGS RegsIn = {0}, RegsOut = {0};
     ULONG Cylinders;
 
     /* Get the extended geometry first */
@@ -587,7 +587,7 @@ PcDiskReadLogicalSectorsLBA(
     OUT PVOID Buffer)
 {
     PI386_DISK_ADDRESS_PACKET Packet = (PI386_DISK_ADDRESS_PACKET)BIOSCALLBUFFER;
-    REGS RegsIn, RegsOut;
+    REGS RegsIn = {0}, RegsOut = {0};
     ULONG RetryCount;
 
     /* Setup disk address packet */
@@ -656,7 +656,7 @@ PcDiskReadLogicalSectorsCHS(
     ULONG PhysicalTrack;
     GEOMETRY DriveGeometry;
     ULONG NumberOfSectorsToRead;
-    REGS RegsIn, RegsOut;
+    REGS RegsIn = {0}, RegsOut = {0};
     ULONG RetryCount;
 
     DriveGeometry = DiskDrive->Geometry;
@@ -848,7 +848,7 @@ PcDiskGetDevicePathInfo(
 {
     PPC_DISK_DRIVE DiskDrive;
     PUCHAR Ptr = (PUCHAR)BIOSCALLBUFFER;
-    REGS RegsIn, RegsOut;
+    REGS RegsIn = {0}, RegsOut = {0};
     ULONG Length;
 
     DiskDrive = PcDiskDriveNumberToDrive(DriveNumber);

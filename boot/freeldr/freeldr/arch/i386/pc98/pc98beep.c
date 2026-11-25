@@ -9,7 +9,7 @@
 
 VOID Pc98Beep(VOID)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /* Int 18h AH=17h
      * CRT BIOS - Beep on
@@ -22,6 +22,7 @@ VOID Pc98Beep(VOID)
     /* Int 18h AH=18h
      * CRT BIOS - Beep off
      */
+    RtlZeroMemory(&Regs, sizeof(Regs));
     Regs.b.ah = 0x18;
     Int386(0x18, &Regs, &Regs);
 }

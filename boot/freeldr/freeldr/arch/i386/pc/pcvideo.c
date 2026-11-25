@@ -140,7 +140,7 @@ enum
 static ULONG
 PcVideoDetectVideoCard(VOID)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /* Int 10h AH=12h BL=10h
      * VIDEO - ALTERNATE FUNCTION SELECT (PS,EGA,VGA,MCGA) - GET EGA INFO
@@ -195,6 +195,7 @@ PcVideoDetectVideoCard(VOID)
      * 0Ch    MCGA w/ color analog display
      * FFh    unknown display type
      */
+    RtlZeroMemory(&Regs, sizeof(Regs));
     Regs.w.ax = 0x1A00;
     Int386(0x10, &Regs, &Regs);
 
@@ -209,7 +210,7 @@ PcVideoVesaGetSVGAModeInformation(
     _In_ USHORT Mode,
     _Out_ PSVGA_MODE_INFORMATION ModeInformation)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     RtlZeroMemory((PVOID)BIOSCALLBUFFER, sizeof(*ModeInformation));
 
@@ -299,7 +300,7 @@ static BOOLEAN
 PcVideoVesaGetCurrentSVGAMode(
     _Out_ PUSHORT Mode)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /*
      * VESA SuperVGA BIOS - GET CURRENT VIDEO MODE
@@ -336,7 +337,7 @@ PcVideoGetBiosMode(
     _Out_ PUSHORT Mode,
     _Out_ PUSHORT WidthInChars)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /* Int 10h AH=0Fh
      * VIDEO - GET CURRENT VIDEO MODE
@@ -453,7 +454,7 @@ PcVideoGetDisplayMode(VOID)
 static BOOLEAN
 PcVideoSetBiosVesaMode(USHORT Mode)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /* Int 10h AX=4F02h
      * VESA SuperVGA BIOS - SET SuperVGA VIDEO MODE
@@ -519,7 +520,7 @@ PcVideoSetBiosVesaMode(USHORT Mode)
 static VOID
 PcVideoSetBiosMode(UCHAR VideoMode)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /* Int 10h AH=00h
      * VIDEO - SET VIDEO MODE
@@ -541,7 +542,7 @@ PcVideoSetBiosMode(UCHAR VideoMode)
 static VOID
 PcVideoSetFont8x8(VOID)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /* Int 10h AX=1112h
      * VIDEO - TEXT-MODE CHARGEN - LOAD ROM 8x8 DBL-DOT PATTERNS (PS,EGA,VGA)
@@ -559,7 +560,7 @@ PcVideoSetFont8x8(VOID)
 static VOID
 PcVideoSetFont8x14(VOID)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /* Int 10h AX=1111h
      * VIDEO - TEXT-MODE CHARGEN - LOAD ROM MONOCHROME PATTERNS (PS,EGA,VGA)
@@ -577,7 +578,7 @@ PcVideoSetFont8x14(VOID)
 static VOID
 PcVideoSelectAlternatePrintScreen(VOID)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /* Int 10h AH=12h BL=20h
      * VIDEO - ALTERNATE FUNCTION SELECT (PS,EGA,VGA,MCGA) - ALTERNATE PRTSC
@@ -601,7 +602,7 @@ PcVideoSelectAlternatePrintScreen(VOID)
 static VOID
 PcVideoDisableCursorEmulation(VOID)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /* Int 10h AH=12h BL=34h
      * VIDEO - ALTERNATE FUNCTION SELECT (VGA) - CURSOR EMULATION
@@ -626,7 +627,7 @@ PcVideoDisableCursorEmulation(VOID)
 static VOID
 PcVideoDefineCursor(UCHAR StartScanLine, UCHAR EndScanLine)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /* Int 10h AH=01h
      * VIDEO - SET TEXT-MODE CURSOR SHAPE
@@ -662,7 +663,7 @@ PcVideoDefineCursor(UCHAR StartScanLine, UCHAR EndScanLine)
 static VOID
 PcVideoSetVerticalResolution(UCHAR VerticalResolutionMode)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /* Int 10h AH=12h BL=30h
      * VIDEO - ALTERNATE FUNCTION SELECT (VGA) - SELECT VERTICAL RESOLUTION
@@ -948,7 +949,7 @@ PcVideoSetMode(USHORT NewMode)
 static VOID
 PcVideoSetBlinkBit(BOOLEAN Enable)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /* Int 10h AX=1003h
      * VIDEO - TOGGLE INTENSITY/BLINKING BIT (Jr, PS, TANDY 1000, EGA, VGA)
@@ -973,7 +974,7 @@ PcVideoSetBlinkBit(BOOLEAN Enable)
 static VOID
 PcVideoSetMemoryBank(USHORT BankNumber)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     if (CurrentMemoryBank == BankNumber)
         return;
@@ -1116,32 +1117,44 @@ PcVideoGetBufferSize(VOID)
 VOID
 PcVideoGetFontsFromFirmware(PULONG RomFontPointers)
 {
-    REGS BiosRegs;
+    REGS BiosRegs = {0};
 
     /* Get the address of the BIOS ROM fonts.
      * Int 10h, AX=1130h, BH = pointer specifier
-     * Returns: es:bp = address */
+     * Returns: es:bp = address.
+     * Every call starts from a cleared register set: the previous
+     * call's results are not input of the next. */
     BiosRegs.d.eax = 0x1130;
     BiosRegs.b.bh = ROM_8x14CharacterFont;
     Int386(0x10, &BiosRegs, &BiosRegs);
     RomFontPointers[0] = BiosRegs.w.es << 4 | BiosRegs.w.bp;
 
+    RtlZeroMemory(&BiosRegs, sizeof(BiosRegs));
+    BiosRegs.d.eax = 0x1130;
     BiosRegs.b.bh = ROM_8x8DoubleDotFontLo;
     Int386(0x10, &BiosRegs, &BiosRegs);
     RomFontPointers[1] = BiosRegs.w.es << 16 | BiosRegs.w.bp;
 
+    RtlZeroMemory(&BiosRegs, sizeof(BiosRegs));
+    BiosRegs.d.eax = 0x1130;
     BiosRegs.b.bh = ROM_8x8DoubleDotFontHi;
     Int386(0x10, &BiosRegs, &BiosRegs);
     RomFontPointers[2] = BiosRegs.w.es << 16 | BiosRegs.w.bp;
 
+    RtlZeroMemory(&BiosRegs, sizeof(BiosRegs));
+    BiosRegs.d.eax = 0x1130;
     BiosRegs.b.bh = ROM_AlphaAlternate;
     Int386(0x10, &BiosRegs, &BiosRegs);
     RomFontPointers[3] = BiosRegs.w.es << 16 | BiosRegs.w.bp;
 
+    RtlZeroMemory(&BiosRegs, sizeof(BiosRegs));
+    BiosRegs.d.eax = 0x1130;
     BiosRegs.b.bh = ROM_8x16Font;
     Int386(0x10, &BiosRegs, &BiosRegs);
     RomFontPointers[4] = BiosRegs.w.es << 16 | BiosRegs.w.bp;
 
+    RtlZeroMemory(&BiosRegs, sizeof(BiosRegs));
+    BiosRegs.d.eax = 0x1130;
     BiosRegs.b.bh = ROM_Alternate9x16Font;
     Int386(0x10, &BiosRegs, &BiosRegs);
     RomFontPointers[5] = BiosRegs.w.es << 16 | BiosRegs.w.bp;
@@ -1150,7 +1163,7 @@ PcVideoGetFontsFromFirmware(PULONG RomFontPointers)
 VOID
 PcVideoSetTextCursorPosition(UCHAR X, UCHAR Y)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /* Int 10h AH=02h
      * VIDEO - SET CURSOR POSITION

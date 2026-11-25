@@ -37,7 +37,9 @@ PcGetTime(VOID)
         /* Some BIOSes, such as the 1998/07/25 system ROM
          * in the Compaq Deskpro EP/SB, leave CF unchanged
          * if successful, so CF should be cleared before
-         * calling this function. */
+         * calling this function. Every call starts from
+         * a cleared register set. */
+        RtlZeroMemory(&Regs, sizeof(Regs));
         Regs.x.eflags = 0;
 //        __writeeflags(__readeflags() & ~EFLAGS_CF);
 
@@ -65,6 +67,7 @@ PcGetTime(VOID)
 
         /* Some BIOSes leave CF unchanged if successful,
          * so CF should be cleared before calling this function. */
+        RtlZeroMemory(&Regs, sizeof(Regs));
         Regs.x.eflags = 0;
 //        __writeeflags(__readeflags() & ~EFLAGS_CF);
 

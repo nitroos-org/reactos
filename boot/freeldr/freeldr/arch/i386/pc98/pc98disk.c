@@ -66,7 +66,7 @@ BOOLEAN
 DiskResetController(
     _In_ PPC98_DISK_DRIVE DiskDrive)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     if (DiskDrive->Type == DRIVE_TYPE_FDD)
     {
@@ -175,7 +175,7 @@ Pc98DiskReadLogicalSectorsLBA(
     _In_ ULONG SectorCount,
     _Out_writes_bytes_all_(SectorCount * DiskDrive->Geometry.BytesPerSector) PVOID Buffer)
 {
-    REGS RegsIn, RegsOut;
+    REGS RegsIn = {0}, RegsOut = {0};
     ULONG RetryCount;
 
     /* Int 1Bh AH=06h
@@ -237,7 +237,7 @@ Pc98DiskReadLogicalSectorsCHS(
     ULONG PhysicalTrack;
     GEOMETRY DriveGeometry;
     ULONG NumberOfSectorsToRead;
-    REGS RegsIn, RegsOut;
+    REGS RegsIn = {0}, RegsOut = {0};
     ULONG RetryCount;
 
     DriveGeometry = DiskDrive->Geometry;
@@ -365,7 +365,7 @@ InitScsiDrive(
     _Out_ PPC98_DISK_DRIVE DiskDrive,
     _In_ UCHAR DaUa)
 {
-    REGS RegsIn, RegsOut;
+    REGS RegsIn = {0}, RegsOut = {0};
     UCHAR UnitAddress = DaUa & 0x0F;
     USHORT DiskEquipment = *(PUCHAR)MEM_DISK_EQUIPS;
     ULONG ScsiParameters = *(PULONG)(MEM_SCSI_TABLE + UnitAddress * sizeof(ULONG));
@@ -465,7 +465,7 @@ InitFloppyDrive(
     _Out_ PPC98_DISK_DRIVE DiskDrive,
     _In_ UCHAR DaUa)
 {
-    REGS RegsIn, RegsOut;
+    REGS RegsIn = {0}, RegsOut = {0};
     ULONG BytesPerSector;
     UCHAR DeviceAddress;
 

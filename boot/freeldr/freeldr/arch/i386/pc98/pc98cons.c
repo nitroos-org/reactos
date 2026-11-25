@@ -63,7 +63,7 @@ Pc98ConsPutChar(int Ch)
 BOOLEAN
 Pc98ConsKbHit(VOID)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     /* Int 18h AH=01h
      * KEYBOARD - CHECK FOR KEYSTROKE
@@ -86,7 +86,7 @@ Pc98ConsGetCh(VOID)
 {
     static BOOLEAN ExtendedKey = FALSE;
     static UCHAR ExtendedScanCode = 0;
-    REGS Regs;
+    REGS Regs = {0};
 
     /*
      * If the last time we were called an

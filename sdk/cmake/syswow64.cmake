@@ -166,6 +166,18 @@ function(setup_syswow64)
     # the 32-bit guest tree is configured later in a separate cmake run: hand it the same build time
     list(APPEND _args -DNITRO_STABLE_BUILD_ID=${NITRO_STABLE_BUILD_ID} -DSOURCE_DATE_EPOCH=$ENV{SOURCE_DATE_EPOCH})
 
+    # symbols: the 32-bit files get PDB files with the same settings, written into pdb/syswow64 of this build. The image time
+    # stamp is not passed (the nested configuration derives the same one from SOURCE_DATE_EPOCH or the commit date), unless it
+    # was given explicitly.
+    if(NITRO_PDB_PUBLICS)
+        list(APPEND _args -DNITRO_PDB_PUBLICS:BOOL=ON -DNITRO_PDB_DIR:PATH=${REACTOS_BINARY_DIR}/pdb/syswow64)
+        foreach(_var NITRO_PDB_TIMESTAMP NITRO_PDB_USER_MODULES)
+            if(DEFINED ${_var})
+                list(APPEND _args "-D${_var}=${${_var}}")
+            endif()
+        endforeach()
+    endif()
+
     set(_guest_dir ${REACTOS_BINARY_DIR}/syswow64-i386)
     set(_manifest ${_guest_dir}/syswow64-guest.${CMAKE_BUILD_TYPE}.lst)
 

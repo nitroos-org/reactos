@@ -70,7 +70,7 @@ VOID __cdecl ChainLoadBiosBootSectorCode(
     IN UCHAR BootDrive OPTIONAL,
     IN ULONG BootPartition OPTIONAL)
 {
-    REGS Regs;
+    REGS Regs = {0};
     PPC98_DISK_DRIVE DiskDrive;
     USHORT LoadAddress;
     UCHAR DriveNumber = BootDrive ? BootDrive : FrldrBootDrive;
@@ -102,7 +102,7 @@ VOID __cdecl ChainLoadBiosBootSectorCode(
 static BOOLEAN
 Pc98ArchTest(VOID)
 {
-    REGS RegsIn, RegsOut;
+    REGS RegsIn = {0}, RegsOut = {0};
 
     /* Int 1Ah AX=1000h
      * NEC PC-9800 series - Installation check

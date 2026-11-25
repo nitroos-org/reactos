@@ -57,8 +57,8 @@ static
 BOOLEAN
 GetExtendedMemoryConfiguration(ULONG* pMemoryAtOneMB /* in KB */, ULONG* pMemoryAtSixteenMB /* in 64KB */)
 {
-    REGS     RegsIn;
-    REGS     RegsOut;
+    REGS     RegsIn = {0};
+    REGS     RegsOut = {0};
 
     TRACE("GetExtendedMemoryConfiguration()\n");
 
@@ -118,6 +118,7 @@ GetExtendedMemoryConfiguration(ULONG* pMemoryAtOneMB /* in KB */, ULONG* pMemory
     // AH = status
     // 80h invalid command (PC,PCjr)
     // 86h unsupported function (XT,PS30)
+    RtlZeroMemory(&RegsIn, sizeof(RegsIn));
     RegsIn.b.ah = 0x88;
     Int386(0x15, &RegsIn, &RegsOut);
 
@@ -153,7 +154,7 @@ static
 ULONG
 PcMemGetConventionalMemorySize(VOID)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     TRACE("PcMemGetConventionalMemorySize()\n");
 
@@ -181,7 +182,7 @@ GetEbdaLocation(
     PULONG BaseAddress,
     PULONG Size)
 {
-    REGS Regs;
+    REGS Regs = {0};
 
     TRACE("GetEbdaLocation()\n");
 
@@ -239,7 +240,8 @@ static
 ULONG
 PcMemGetBiosMemoryMap(PFREELDR_MEMORY_DESCRIPTOR MemoryMap, ULONG MaxMemoryMapSize)
 {
-    REGS Regs;
+    REGS Regs = {0};
+    ULONG Continuation;
     ULONGLONG RealBaseAddress, EndAddress, RealSize;
     TYPE_OF_MEMORY MemoryType;
 
@@ -265,7 +267,7 @@ PcMemGetBiosMemoryMap(PFREELDR_MEMORY_DESCRIPTOR MemoryMap, ULONG MaxMemoryMapSi
      * CF set on error
      * AH = error code (86h)
      */
-    Regs.x.ebx = 0x00000000;
+    Continuation = 0x00000000;
 
     while (PcBiosMapCount < MAX_BIOS_DESCRIPTORS)
     {
@@ -273,14 +275,17 @@ PcMemGetBiosMemoryMap(PFREELDR_MEMORY_DESCRIPTOR MemoryMap, ULONG MaxMemoryMapSi
         ((PBIOS_MEMORY_MAP)BIOSCALLBUFFER)->ExtendedAttributesAsULONG = 0;
         ((PBIOS_MEMORY_MAP)BIOSCALLBUFFER)->ExtendedAttributes.Enabled_Reserved = 1;
 
-        /* Setup the registers for the BIOS call */
+        /* Setup the registers for the BIOS call: only the continuation value
+         * of the previous call is carried over, all else starts cleared */
+        RtlZeroMemory(&Regs, sizeof(Regs));
         Regs.x.eax = 0x0000E820;
         Regs.x.edx = 0x534D4150; /* ('SMAP') */
-        /* Regs.x.ebx = 0x00000001;  Continuation value already set */
+        Regs.x.ebx = Continuation;
         Regs.x.ecx = sizeof(BIOS_MEMORY_MAP);
         Regs.w.es = BIOSCALLBUFSEGMENT;
         Regs.w.di = BIOSCALLBUFOFFSET;
         Int386(0x15, &Regs, &Regs);
+        Continuation = Regs.x.ebx;
 
         TRACE("Memory Map Entry %lu\n", PcBiosMapCount);
         TRACE("Int15h AX=E820h\n");
