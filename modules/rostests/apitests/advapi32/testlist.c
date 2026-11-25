@@ -181,6 +181,7 @@ extern void func_ServiceDependency(void);
 extern void func_ServiceEnv(void);
 extern void func_ServiceFailureActions(void);
 extern void func_ServiceRecovery(void);
+extern void func_ServiceSetOwner(void);
 extern void func_ServiceSid(void);
 extern void func_ServiceVirtualAccount(void);
 extern void func_ServiceNetwork(void);
@@ -413,6 +414,7 @@ const struct test winetest_testlist[] =
     { "ServiceEnv", func_ServiceEnv },
     { "ServiceFailureActions", func_ServiceFailureActions },
     { "ServiceRecovery", func_ServiceRecovery },
+    { "ServiceSetOwner", func_ServiceSetOwner },
     { "ServiceSid", func_ServiceSid },
     { "ServiceVirtualAccount", func_ServiceVirtualAccount },
     { "ServiceNetwork", func_ServiceNetwork },

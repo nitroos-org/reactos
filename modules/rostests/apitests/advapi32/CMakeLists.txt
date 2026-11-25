@@ -164,6 +164,7 @@ list(APPEND SOURCE
     ServiceEnv.c
     ServiceFailureActions.c
     ServiceRecovery.c
+    ServiceSetOwner.c
     ServiceSid.c
     ServiceVirtualAccount.c
     ServiceNetwork.c

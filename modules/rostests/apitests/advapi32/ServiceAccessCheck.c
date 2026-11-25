@@ -856,6 +856,15 @@ START_TEST(ServiceAccessCheck)
         return;
     }
 
+    /* The owner of a scratch service is set to other accounts below: that takes SeRestorePrivilege in the token the service
+       controller sees, which is its enabled privileges (measured on Windows Server 2022: ERROR_INVALID_OWNER in a console
+       session of an administrator, where the privilege is disabled, success in the remote shell, where it is enabled) */
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &Proc))
+    {
+        SetPrivilege(Proc, L"SeRestorePrivilege", TRUE);
+        CloseHandle(Proc);
+    }
+
     Admin = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!Admin)
     {
