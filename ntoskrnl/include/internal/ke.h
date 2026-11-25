@@ -160,21 +160,6 @@ extern KEVENT KiSwapEvent;
 extern KAFFINITY KiIdleSummary;
 extern ULONG KiIdlePollMicroseconds;
 #define KI_IDLE_POLL_DEFAULT 50
-extern BOOLEAN KiSmpIpiCoalesce;    /* T79 redundant-IPI coalescing kill-switch */
-extern BOOLEAN KiDispatcherLockMcsEnabled;  /* T72 MCS dispatcher-lock kill-switch (boot-latched) */
-#ifdef CONFIG_SMP
-extern PKSPIN_LOCK_QUEUE volatile KiDispatcherMcsTail;
-VOID
-FASTCALL
-KiAcquireQueuedSpinLockMcs(
-    IN PKSPIN_LOCK_QUEUE volatile *Tail,
-    IN PKSPIN_LOCK_QUEUE Node);
-VOID
-FASTCALL
-KiReleaseQueuedSpinLockMcs(
-    IN PKSPIN_LOCK_QUEUE volatile *Tail,
-    IN PKSPIN_LOCK_QUEUE Node);
-#endif
 extern PVOID KeUserApcDispatcher;
 extern PVOID KeUserCallbackDispatcher;
 extern PVOID KeUserExceptionDispatcher;

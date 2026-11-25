@@ -165,11 +165,17 @@ static int RunStress(const char *name, int threads, int cpus, int live, int secs
     int i, before = atomic_load(&Failures);
     struct timespec ts = { secs, 0 };
 
-    ExpHandleCpuCacheEnabled = cache;
     KeNumberProcessors = cpus;
     TlsCpu = 0;
     T = ExCreateHandleTable(NULL);
     if (!T) { FAIL("[%s] table create failed", name); return 1; }
+    if (!cache)
+    {
+        /* A table without cache storage (as when its allocation failed): everything goes through the shared free list. */
+        ExFreePoolWithTag(T->PerCpuFreeCache, TAG_HANDLE_CPU_CACHE);
+        T->PerCpuFreeCache = NULL;
+        T->PerCpuFreeCacheCount = 0;
+    }
     T->StrictFIFO = strict;
     memset(Owner, 0, sizeof(Owner));
     for (i = 0; i < threads; i++)
@@ -195,7 +201,7 @@ static void TestGrowth(void)
     enum { N = 400000 };
     HANDLE *hs = malloc(N * sizeof(HANDLE));
     int i, before = atomic_load(&Failures);
-    ExpHandleCpuCacheEnabled = TRUE; KeNumberProcessors = 1; TlsCpu = 0;
+    KeNumberProcessors = 1; TlsCpu = 0;
     T = ExCreateHandleTable(NULL);
     memset(Owner, 0, sizeof(Owner));
     for (i = 0; i < N; i++)
@@ -226,7 +232,7 @@ static void TestPoolFailure(void)
 {
     int before = atomic_load(&Failures), k;
     long base = atomic_load(&PoolLive);
-    ExpHandleCpuCacheEnabled = TRUE; KeNumberProcessors = 2; TlsCpu = 0;
+    KeNumberProcessors = 2; TlsCpu = 0;
     for (k = 0; k < 6; k++)
     {
         PHANDLE_TABLE T;
@@ -248,7 +254,7 @@ int main(int argc, char **argv)
     ExpInitializeHandleTables();
     TestGrowth();
     TestPoolFailure();
-    /* shared-list ABA hammer: cache off, tiny live-set so list heads recycle constantly */
+    /* shared-list ABA hammer: no cache storage, tiny live-set so list heads recycle constantly */
     bad += RunStress("shared-list ABA hammer", 8, 8, 3, secs, 0, 0);
     bad += RunStress("shared-list, bigger live set", 8, 8, 200, secs, 0, 0);
     bad += RunStress("shared-list strict-FIFO", 8, 8, 50, secs, 1, 0);
