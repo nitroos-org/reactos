@@ -35,6 +35,16 @@ set_module_type(smbengacl win32cui UNICODE)
 add_importlibs(smbengacl advapi32 msvcrt kernel32 ntdll)
 add_rostests_file(TARGET smbengacl)
 
+list(APPEND SMBRDR_APITEST_SOURCE
+    SmbLockCancel.c
+    testlist.c)
+
+add_executable(smbrdr_apitest ${SMBRDR_APITEST_SOURCE})
+target_link_libraries(smbrdr_apitest wine)
+set_module_type(smbrdr_apitest win32cui)
+add_importlibs(smbrdr_apitest mpr msvcrt kernel32 ntdll)
+add_rostests_file(TARGET smbrdr_apitest)
+
 add_executable(smbmap smbmap.c)
 set_module_type(smbmap win32cui UNICODE)
 add_importlibs(smbmap advapi32 msvcrt kernel32 ntdll)
