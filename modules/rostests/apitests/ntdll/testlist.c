@@ -104,6 +104,7 @@ extern void func_NtOpenKey(void);
 extern void func_NtOpenKeyConcurrent(void);
 extern void func_NtOpenKeyEx(void);
 extern void func_NtOpenProcess(void);
+extern void func_NtOpenProcessImplied(void);
 extern void func_NtOpenProcessProtected(void);
 extern void func_NtOpenProcessToken(void);
 extern void func_NtOpenSection(void);
@@ -407,6 +408,7 @@ const struct test winetest_testlist[] =
     { "NtOpenKeyConcurrent",            func_NtOpenKeyConcurrent },
     { "NtOpenKeyEx",                    func_NtOpenKeyEx },
     { "NtOpenProcess",                  func_NtOpenProcess },
+    { "NtOpenProcessImplied",           func_NtOpenProcessImplied },
     { "NtOpenProcessProtected",         func_NtOpenProcessProtected },
     { "NtOpenProcessToken",             func_NtOpenProcessToken },
     { "NtOpenSection",                  func_NtOpenSection },

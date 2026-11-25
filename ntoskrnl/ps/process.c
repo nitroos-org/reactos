@@ -95,6 +95,16 @@ PspProcessOpen(
     {
         *GrantedAccess |= PROCESS_QUERY_LIMITED_INFORMATION;
     }
+    else if ((*GrantedAccess & (PROCESS_VM_OPERATION | PROCESS_VM_WRITE)) == (PROCESS_VM_OPERATION | PROCESS_VM_WRITE))
+    {
+        /*
+         * Measured on Windows Server 2022 (OpenProcess for every combination of the 14 rights that are
+         * specific to a process): the pair of PROCESS_VM_OPERATION and PROCESS_VM_WRITE also carries
+         * PROCESS_QUERY_LIMITED_INFORMATION, neither right alone does. GENERIC_WRITE (0x20bea) is
+         * granted as 0x23bea for that reason (and for PROCESS_SET_LIMITED_INFORMATION, 0x2000).
+         */
+        *GrantedAccess |= PROCESS_QUERY_LIMITED_INFORMATION;
+    }
 
     /* As on Windows 8 and later (measured on Windows Server 2022: PROCESS_SET_INFORMATION is granted as 0x2200):
      * the set right carries PROCESS_SET_LIMITED_INFORMATION */

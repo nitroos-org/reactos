@@ -561,6 +561,23 @@ cleanup:
     return cbSize;
 }
 
+/* Free the per-driver mode arrays; no list is left that counts them */
+static
+VOID
+LDEVOBJ_vFreeDevmodeInfo(
+    _Inout_ PGRAPHICS_DEVICE pGraphicsDevice)
+{
+    PDEVMODEINFO pdminfo, pdmiNext;
+
+    for (pdminfo = pGraphicsDevice->pdevmodeInfo; pdminfo; pdminfo = pdmiNext)
+    {
+        pdmiNext = pdminfo->pdmiNext;
+        ExFreePoolWithTag(pdminfo, GDITAG_DEVMODE);
+    }
+    pGraphicsDevice->pdevmodeInfo = NULL;
+    pGraphicsDevice->cDevModes = 0;
+}
+
 BOOL
 LDEVOBJ_bBuildDevmodeList(
     _Inout_ PGRAPHICS_DEVICE pGraphicsDevice)
@@ -574,6 +591,7 @@ LDEVOBJ_bBuildDevmodeList(
     if (pGraphicsDevice->pdevmodeInfo)
         return TRUE;
     ASSERT(pGraphicsDevice->pDevModeList == NULL);
+    pGraphicsDevice->cDevModes = 0;
 
     pwsz = pGraphicsDevice->pDiplayDrivers;
 
@@ -628,19 +646,22 @@ LDEVOBJ_bBuildDevmodeList(
     if (!pGraphicsDevice->pdevmodeInfo || cModes == 0)
     {
         ERR("No devmodes\n");
+        LDEVOBJ_vFreeDevmodeInfo(pGraphicsDevice);
         return FALSE;
     }
 
     /* Allocate an index buffer */
-    pGraphicsDevice->cDevModes = cModes;
     pGraphicsDevice->pDevModeList = ExAllocatePoolWithTag(PagedPool,
                                                           cModes * sizeof(DEVMODEENTRY),
                                                           GDITAG_GDEVICE);
     if (!pGraphicsDevice->pDevModeList)
     {
         ERR("No devmode list\n");
+        /* Without the index the arrays cannot be used, and a later call must build them again */
+        LDEVOBJ_vFreeDevmodeInfo(pGraphicsDevice);
         return FALSE;
     }
+    pGraphicsDevice->cDevModes = cModes;
 
     /* Loop through all DEVMODEINFOs */
     for (pdminfo = pGraphicsDevice->pdevmodeInfo, i = 0;

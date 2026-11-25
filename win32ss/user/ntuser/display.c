@@ -496,14 +496,22 @@ UserEnumCurrentDisplaySettings(
     PUNICODE_STRING pustrDevice,
     PDEVMODEW *ppdm)
 {
+    PGRAPHICS_DEVICE pGraphicsDevice;
     PPDEVOBJ ppdev;
 
-    /* Get the PDEV for the device */
-    ppdev = EngpGetPDEV(pustrDevice);
+    /* Get the PDEV for the device; with several displays and no name this is the first display's own PDEV */
+    pGraphicsDevice = EngpFindGraphicsDevice(pustrDevice, 0);
+    ppdev = pGraphicsDevice ? EngpGetPDEVOfGraphicsDevice(pustrDevice, pGraphicsDevice) : NULL;
     if (!ppdev)
     {
         /* No device found */
         ERR("No PDEV found!\n");
+        return STATUS_INVALID_PARAMETER_1;
+    }
+
+    if (!ppdev->pdmwDev)
+    {
+        PDEVOBJ_vRelease(ppdev);
         return STATUS_INVALID_PARAMETER_1;
     }
 
@@ -534,7 +542,7 @@ UserEnumDisplaySettings(
 
     /* Ask GDI for the GRAPHICS_DEVICE */
     pGraphicsDevice = EngpFindGraphicsDevice(pustrDevice, 0);
-    ppdev = EngpGetPDEV(pustrDevice);
+    ppdev = pGraphicsDevice ? EngpGetPDEVOfGraphicsDevice(pustrDevice, pGraphicsDevice) : NULL;
 
     if (!pGraphicsDevice || !ppdev)
     {

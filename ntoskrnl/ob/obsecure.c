@@ -567,6 +567,7 @@ ObAssignSecurity(IN PACCESS_STATE AccessState,
     NTSTATUS Status;
     KIRQL CalloutIrql;
     ULONG AutoInheritFlags = 0;
+    BOOLEAN WindowObject;
     PAGED_CODE();
 
     /*
@@ -578,10 +579,16 @@ ObAssignSecurity(IN PACCESS_STATE AccessState,
      * object made where nothing has a SACL, with the creator's own level
      * label, has neither.
      */
-    if ((SecurityDescriptor != NULL &&
-         (((PISECURITY_DESCRIPTOR)SecurityDescriptor)->Control & SE_SACL_PRESENT)) ||
-        (AccessState->SecurityDescriptor != NULL &&
-         (((PISECURITY_DESCRIPTOR)AccessState->SecurityDescriptor)->Control & SE_SACL_PRESENT)))
+    /*
+     * Window stations and desktops are the exception (Windows Server 2022, measured: the descriptor of
+     * WinSta0 and of the Default desktop prints with `S:(ML;;NW;;;LW)`, no SE_SACL_AUTO_INHERITED).
+     */
+    WindowObject = (Type == ExWindowStationObjectType || Type == ExDesktopObjectType);
+    if (!WindowObject &&
+        ((SecurityDescriptor != NULL &&
+          (((PISECURITY_DESCRIPTOR)SecurityDescriptor)->Control & SE_SACL_PRESENT)) ||
+         (AccessState->SecurityDescriptor != NULL &&
+          (((PISECURITY_DESCRIPTOR)AccessState->SecurityDescriptor)->Control & SE_SACL_PRESENT))))
     {
         AutoInheritFlags = SEF_SACL_AUTO_INHERIT;
     }
@@ -668,7 +675,8 @@ ObAssignSecurity(IN PACCESS_STATE AccessState,
      * (process and thread descriptors are marked when they are labelled).
      * An object created without a SACL keeps the descriptor as it is.
      */
-    if ((((PISECURITY_DESCRIPTOR)NewDescriptor)->Control & SE_SACL_PRESENT) &&
+    if (!WindowObject &&
+        (((PISECURITY_DESCRIPTOR)NewDescriptor)->Control & SE_SACL_PRESENT) &&
         ((Type == SeTokenObjectType) ||
          (AccessState->SecurityDescriptor != NULL &&
           (((PISECURITY_DESCRIPTOR)AccessState->SecurityDescriptor)->Control & SE_SACL_PRESENT))))
