@@ -2202,6 +2202,79 @@ SeAssignObjectLabel(
     return SepAssignObjectLabelLevel(Level, Policy, SecurityDescriptor, GenericMapping);
 }
 
+/*
+ * The descriptor of a token whose DACL the kernel derived from the default DACL of the creating
+ * token gets one more entry at the end, (A;;TOKEN_QUERY;;;BA), unless an entry (of any type) for
+ * the Administrators is there already. Measured on Windows Server 2022 with default DACLs of a
+ * token changed in turn (a descendant of an administrator's, a standard user's and a service's
+ * process): SY and the owner or account entries are mapped as they are, BA TOKEN_QUERY follows
+ * when the default DACL has no BA entry (a deny, RC only, read and TOKEN_QUERY entries all keep
+ * it away); a descriptor given by the caller is not touched.
+ */
+NTSTATUS
+NTAPI
+SeAssignTokenAdminQuery(
+    _Inout_ PSECURITY_DESCRIPTOR *SecurityDescriptor,
+    _In_ PGENERIC_MAPPING GenericMapping)
+{
+    SECURITY_INFORMATION Information = DACL_SECURITY_INFORMATION;
+    PSECURITY_DESCRIPTOR NewDescriptor = *SecurityDescriptor;
+    SECURITY_DESCRIPTOR Modification;
+    BOOLEAN Present, Defaulted;
+    SEP_ACE_CURSOR Cursor;
+    PACE_HEADER Header;
+    PACL Dacl, NewDacl;
+    ULONG i, AceBytes = 0, Size;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    Status = RtlGetDaclSecurityDescriptor(NewDescriptor, &Present, &Dacl, &Defaulted);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    /* No DACL, or a NULL one: everybody has every right already */
+    if (!Present || Dacl == NULL)
+        return STATUS_SUCCESS;
+
+    SepInitAceCursor(&Cursor, Dacl);
+    for (i = 0; i < Dacl->AceCount; i++)
+    {
+        if (!SepNextAce(&Cursor, (PVOID *)&Header))
+            return STATUS_SUCCESS;
+        AceBytes += Header->AceSize;
+        if ((Header->AceType == ACCESS_ALLOWED_ACE_TYPE || Header->AceType == ACCESS_DENIED_ACE_TYPE) &&
+            RtlEqualSid((PSID)&((PACCESS_ALLOWED_ACE)Header)->SidStart, SeAliasAdminsSid))
+        {
+            return STATUS_SUCCESS;
+        }
+    }
+
+    Size = sizeof(ACL) + AceBytes + FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + RtlLengthSid(SeAliasAdminsSid);
+    Size = ALIGN_UP(Size, ULONG);
+    NewDacl = ExAllocatePoolWithTag(PagedPool, Size, TAG_ACL);
+    if (!NewDacl)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = RtlCreateAcl(NewDacl, Size, ACL_REVISION);
+    if (NT_SUCCESS(Status) && AceBytes != 0)
+        Status = RtlAddAce(NewDacl, ACL_REVISION, MAXULONG, Dacl + 1, AceBytes);
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(NewDacl, ACL_REVISION, TOKEN_QUERY, SeAliasAdminsSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlCreateSecurityDescriptor(&Modification, SECURITY_DESCRIPTOR_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetDaclSecurityDescriptor(&Modification, TRUE, NewDacl, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = SeSetSecurityDescriptorInfoEx(NULL, &Information, &Modification, &NewDescriptor, 0, PagedPool, GenericMapping);
+    ExFreePoolWithTag(NewDacl, TAG_ACL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    SeDeassignSecurity(SecurityDescriptor);
+    *SecurityDescriptor = NewDescriptor;
+    return STATUS_SUCCESS;
+}
+
 static
 NTSTATUS
 SepAssignObjectLabelLevel(

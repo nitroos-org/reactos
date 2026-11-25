@@ -574,6 +574,12 @@ SeAssignObjectLabel(
 
 NTSTATUS
 NTAPI
+SeAssignTokenAdminQuery(
+    _Inout_ PSECURITY_DESCRIPTOR *SecurityDescriptor,
+    _In_ PGENERIC_MAPPING GenericMapping);
+
+NTSTATUS
+NTAPI
 SeAssignProcessObjectLabel(
     _In_ PTOKEN OwnerToken,
     _In_ PTOKEN CreatorToken,
