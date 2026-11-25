@@ -82,6 +82,7 @@ list(APPEND SOURCE
     SetParentCrossProcess.c
     SetParentKillOrder.c
     SetParentLoop.c
+    SetCursorParentDestroys.c
     SetWindowPosLastError.c
     WmCancelModeLastError.c
     LastInputInfo.c
