@@ -423,6 +423,11 @@ if(NITRO_PDB_PUBLICS)
     set(NITRO_PDB_USER_MODULES "all" CACHE STRING "user-mode modules that get a PDB with NITRO_PDB_PUBLICS: all, core (the system libraries and servers), none or a list of module names")
     # Where the PDB files are written (the nested 32-bit build of SYSWOW64 writes into the pdb directory of the 64-bit build)
     set(NITRO_PDB_DIR "${REACTOS_BINARY_DIR}/pdb" CACHE PATH "directory of the PDB files written with NITRO_PDB_PUBLICS")
+    # The PDB records its own path. The nested build writes into the pdb directory of the 64-bit build, which lies outside
+    # its own build directory, so that path needs a prefix of its own or the name of the build directory ends up in the file.
+    if(SYSWOW64_GUEST)
+        list(APPEND NITRO_PDBFIX_ARGS --map "${NITRO_PDB_DIR}=C:\\nitroos\\build\\pdb\\syswow64")
+    endif()
     set(NITRO_PDB_USER_ALL FALSE)
     if(NITRO_PDB_USER_MODULES STREQUAL "core")
         set(NITRO_PDB_USER_LIST ntdll kernel32 kernelbase advapi32 user32 gdi32 win32u msvcrt rpcrt4 ws2_32 conhost
