@@ -17,15 +17,13 @@ static CHEW_SERIAL_QUEUE LoopQueue;
 
 #define LOOP_QUEUE_LIMIT 1024
 
-/* TCP fast path (Tcpip\Parameters NitroLoopbackFastPath, REG_DWORD, read when the adapter registers;
-   absent = LOOP_FAST_PATH_DEFAULT, 0 = off): a TCP datagram lwIP sends to the loopback netif is copied
+/* TCP fast path (on from the registration of the adapter to its removal): a TCP datagram lwIP sends to the loopback netif is copied
    once into a pbuf and goes on LoopQueue as it is. The worker gives it to lwIP, without the two NDIS
    packets, the neighbour queue, the IP layer's receive path and the two further copies of the other
    path. Everything the IP layer would do on the way is nothing for loopback: the firewall passes it by
    interface, loopback has no counters, and lwIP checks the header it built itself. Same queue, same
-   worker, so the order of looped segments and datagrams does not change */
-#define LOOP_FAST_PATH_DEFAULT 1
-#define LOOP_FAST_PATH_VALUE L"NitroLoopbackFastPath"
+   worker, so the order of looped segments and datagrams does not change. Other protocols (UDP, ICMP)
+   take the NDIS path of LoopTransmit */
 
 BOOLEAN LoopFastPath = FALSE;
 
@@ -174,30 +172,6 @@ BOOLEAN LoopDataFollows(
   return Follows;
 }
 
-static BOOLEAN LoopReadFastPathSwitch(VOID)
-{
-  UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip\\Parameters");
-  UNICODE_STRING ValueName = RTL_CONSTANT_STRING(LOOP_FAST_PATH_VALUE);
-  OBJECT_ATTRIBUTES Attributes;
-  UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
-  PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
-  HANDLE Key;
-  ULONG Length;
-  NTSTATUS Status;
-  BOOLEAN Enabled = LOOP_FAST_PATH_DEFAULT;
-
-  InitializeObjectAttributes(&Attributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-  if (!NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))
-    return Enabled;
-
-  Status = ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
-  if (NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
-    Enabled = (*(PULONG)Info->Data != 0);
-
-  ZwClose(Key);
-  return Enabled;
-}
-
 VOID LoopTransmit(
   PVOID Context,
   PNDIS_PACKET NdisPacket,
@@ -343,8 +317,8 @@ NDIS_STATUS LoopRegisterAdapter(
   TCPAddLoopbackAddress6(Loopback);
 
   /* Last: the fast path needs the interface's netif */
-  LoopFastPath = LoopReadFastPathSwitch();
-  DbgPrint("TCPIP: loopback fast path %s\n", LoopFastPath ? "on" : "off");
+  LoopFastPath = TRUE;
+  DbgPrint("TCPIP: loopback fast path on\n");
 
   TI_DbgPrint(MAX_TRACE, ("Leaving.\n"));
 
