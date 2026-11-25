@@ -3001,6 +3001,18 @@ static BOOL IsNumericSidText(LPCWSTR p)
     return (p[0] == 'S' || p[0] == 's') && p[1] == '-';
 }
 
+/* The owner or group field of a descriptor that is empty: it names nothing (ERROR_NONE_MAPPED) when it ends the
+ * string and is a bad SID when another section follows (measured on Windows Server 2022) */
+static BOOL IsEmptySidField(LPCWSTR p, BOOL MoreSections)
+{
+    while (*p == ' ')
+        p++;
+    if (*p)
+        return FALSE;
+    SetLastError(MoreSections ? ERROR_INVALID_SID : ERROR_NONE_MAPPED);
+    return TRUE;
+}
+
 /*
  * A SID written as a two-letter alias ends with the alias: only blanks may follow it before the ')' of the ACE (or the
  * end of the field). Text glued to the alias ("LAx") is not an alias plus something to ignore, it is not a SID, and the
@@ -3010,7 +3022,7 @@ static BOOL AliasFieldEndsCleanly(LPCWSTR p)
 {
     while (*p == ' ')
         p++;
-    if (!p[0] || !p[1] || IsNumericSidText(p))
+    if (!p[0] || !p[1] || IsNumericSidText(p) || *p == ')' || *p == ';')
         return TRUE; /* nothing to check here: the parser refuses what it cannot read */
     p += 2;
     while (*p == ' ')
@@ -3024,7 +3036,7 @@ static BOOL AliasFieldEndsCleanly(LPCWSTR p)
  * dacl_flags(string_ace1)(string_ace2)... (string_acen)
  */
 static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, BOOL sacl, LPDWORD lpdwFlags,
-    PACL pAcl, LPDWORD cBytes, BOOL *pIsNull)
+    PACL pAcl, LPDWORD cBytes, BOOL *pIsNull, BOOL MoreText)
 {
     BOOL nullAcl, badFlags;
     DWORD val;
@@ -3035,6 +3047,7 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, BOOL sacl, LPDWORD lpdwFlags,
     PACCESS_ALLOWED_ACE pAce = NULL; /* pointer to current ACE */
     BYTE aceType = 0;
     BOOL hasObjectAce = FALSE;
+    BYTE ScratchSid[SECURITY_MAX_SID_SIZE];
     DWORD error = ERROR_INVALID_ACL;
 
     TRACE("%s\n", debugstr_w(StringAcl));
@@ -3081,7 +3094,11 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, BOOL sacl, LPDWORD lpdwFlags,
 	if (pAce)
             pAce->Header.AceFlags = (BYTE) val;
         if (*StringAcl != ';')
+        {
+            if (*StringAcl == ')')
+                error = ERROR_INVALID_PARAMETER;
             goto lerr;
+        }
         StringAcl++;
 
         /* Parse ACE rights */
@@ -3089,7 +3106,16 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, BOOL sacl, LPDWORD lpdwFlags,
 	if (pAce)
             pAce->Mask = val;
         if (*StringAcl != ';')
+        {
+            /* the ACE ended in its rights (fewer fields): a bad parameter; other text here is a bad ACL */
+            LPCWSTR end = StringAcl;
+
+            while (*end && *end != ';' && *end != ')')
+                end++;
+            if (*end == ')')
+                error = ERROR_INVALID_PARAMETER;
             goto lerr;
+        }
         StringAcl++;
 
         /* Parse the object GUID and the inherited object GUID: only object ACEs have them */
@@ -3099,11 +3125,31 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, BOOL sacl, LPDWORD lpdwFlags,
             BOOL isObject = IsObjectAceType(pAce ? pAce->Header.AceType : aceType);
             DWORD sidoff = 8, objflags = 0, k;
 
-            if (!ParseAceStringGuid(&StringAcl, &guids[0], &present[0]) || *StringAcl != ';')
+            if (!ParseAceStringGuid(&StringAcl, &guids[0], &present[0]))
+            {
+                if (*StringAcl == ')')
+                    error = ERROR_INVALID_PARAMETER;
                 goto lerr;
+            }
+            if (*StringAcl != ';')
+            {
+                if (*StringAcl == ')')
+                    error = ERROR_INVALID_PARAMETER;
+                goto lerr;
+            }
             StringAcl++;
-            if (!ParseAceStringGuid(&StringAcl, &guids[1], &present[1]) || *StringAcl != ';')
+            if (!ParseAceStringGuid(&StringAcl, &guids[1], &present[1]))
+            {
+                if (*StringAcl == ')')
+                    error = ERROR_INVALID_PARAMETER;
                 goto lerr;
+            }
+            if (*StringAcl != ';')
+            {
+                if (*StringAcl == ')')
+                    error = ERROR_INVALID_PARAMETER;
+                goto lerr;
+            }
             StringAcl++;
 
             if (!isObject && (present[0] || present[1]))
@@ -3144,21 +3190,54 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, BOOL sacl, LPDWORD lpdwFlags,
                     goto lerr;
                 }
             }
-            if (!ParseStringSidToSid(StringAcl, pAce ? (PSID)((LPBYTE)pAce + sidoff) : NULL, &sidlen))
+            /* the SID is read in the size pass too, into a scratch buffer: the first bad field of the string is the one
+             * reported, whatever the later ones are */
+            if (!ParseStringSidToSid(StringAcl, pAce ? (PSID)((LPBYTE)pAce + sidoff) : (PSID)ScratchSid, &sidlen))
             {
                 LPCWSTR sidtext = StringAcl;
+                LPCWSTR scan;
 
                 /* an alias that names nothing here (a domain account on a machine that is no domain member, an unknown
                  * one) is a bad SID, not a bad ACL */
                 while (*sidtext == ' ')
                     sidtext++;
-                if (*sidtext && *sidtext != ')' && *sidtext != ';' && !IsNumericSidText(sidtext) &&
-                    GetLastError() == ERROR_INVALID_SID)
+                for (scan = sidtext; *scan && *scan != ')' && *scan != ';'; scan++)
+                    ;
+                if (*scan == ';')
+                {
+                    /* a ';' in the field: one field too many */
+                    error = ERROR_INVALID_PARAMETER;
+                }
+                else if (!*sidtext || *sidtext == ')')
+                {
+                    /* An empty SID field names nothing (ERROR_NONE_MAPPED) when only blanks follow the ACE and the
+                     * string goes no further, it is a bad SID when text follows, and a bad parameter when a ';'
+                     * follows (measured on Windows Server 2022) */
+                    LPCWSTR after = *sidtext ? sidtext + 1 : sidtext;
+
+                    while (*after == ' ')
+                        after++;
+                    if (*after == ';')
+                        error = ERROR_INVALID_PARAMETER;
+                    else if (*after || MoreText)
+                        error = ERROR_INVALID_SID;
+                    else
+                        error = ERROR_NONE_MAPPED;
+                }
+                else if (GetLastError() == ERROR_INVALID_SID)
                     error = ERROR_INVALID_SID;
                 goto lerr;
             }
+            /* a ';' before the ')' is one field too many */
             while (*StringAcl && *StringAcl != ')')
+            {
+                if (*StringAcl == ';')
+                {
+                    error = ERROR_INVALID_PARAMETER;
+                    goto lerr;
+                }
                 StringAcl++;
+            }
 
             if (*StringAcl != ')')
                 goto lerr;
@@ -3227,6 +3306,8 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
     LPCWSTR lptoken;
     LPBYTE lpNext = NULL;
     DWORD len;
+    BOOL MoreSections;
+    BYTE ScratchSid[SECURITY_MAX_SID_SIZE];
 
     *cBytes = sizeof(SECURITY_DESCRIPTOR_RELATIVE);
 
@@ -3256,6 +3337,8 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
 	while (*lptoken && *lptoken != ':')
             lptoken++;
 
+	/* another section follows this token */
+        MoreSections = *lptoken != 0;
 	if (*lptoken)
             lptoken--;
 
@@ -3274,7 +3357,9 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
                     SetLastError(ERROR_INVALID_PARAMETER);
                     goto lend;
                 }
-                if (!ParseStringSidToSid(tok, lpNext, &bytes))
+                if (IsEmptySidField(tok, MoreSections))
+                    goto lend;
+                if (!ParseStringSidToSid(tok, lpNext ? lpNext : ScratchSid, &bytes))
                     goto lend;
 
                 if (SecurityDescriptor)
@@ -3297,7 +3382,9 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
                     SetLastError(ERROR_INVALID_PARAMETER);
                     goto lend;
                 }
-                if (!ParseStringSidToSid(tok, lpNext, &bytes))
+                if (IsEmptySidField(tok, MoreSections))
+                    goto lend;
+                if (!ParseStringSidToSid(tok, lpNext ? lpNext : ScratchSid, &bytes))
                     goto lend;
 
                 if (SecurityDescriptor)
@@ -3317,7 +3404,7 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
                 DWORD bytes;
                 BOOL isNull;
 
-                if (!ParseStringAclToAcl(tok, FALSE, &flags, (PACL)lpNext, &bytes, &isNull))
+                if (!ParseStringAclToAcl(tok, FALSE, &flags, (PACL)lpNext, &bytes, &isNull, MoreSections))
                     goto lend;
 
                 if (SecurityDescriptor)
@@ -3343,7 +3430,7 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
                 DWORD bytes;
                 BOOL isNull;
 
-                if (!ParseStringAclToAcl(tok, TRUE, &flags, (PACL)lpNext, &bytes, &isNull))
+                if (!ParseStringAclToAcl(tok, TRUE, &flags, (PACL)lpNext, &bytes, &isNull, MoreSections))
                     goto lend;
 
                 if (SecurityDescriptor)
