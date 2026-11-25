@@ -7,8 +7,6 @@
 
 #include "precomp.h"
 
-#ifdef _M_AMD64
-
 static volatile LONG g_Started;
 static volatile ULONG_PTR g_Parameter;
 
@@ -62,17 +60,10 @@ START_TEST(RtlCreateUserThreadReturn)
 {
     TestReturn(FALSE, 0x1233);
     TestReturn(TRUE, 0x41);
+#ifdef _M_AMD64
     /* A parameter wider than 32 bits is passed whole */
     TestReturn(FALSE, 0x123400007FFFull);
+#endif
     /* The exit status is the whole ULONG: an NTSTATUS error code comes through unchanged */
     TestReturn(FALSE, 0xC0000121 - 1);
 }
-
-#else
-
-START_TEST(RtlCreateUserThreadReturn)
-{
-    skip("amd64 only: the i386 thread start has no return address\n");
-}
-
-#endif

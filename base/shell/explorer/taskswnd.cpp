@@ -10,6 +10,10 @@
 #include "mediabtns.h"
 #include <commoncontrols.h>
 #include <regstr.h>
+
+#ifndef TBCDRF_USECDCOLORS
+#define TBCDRF_USECDCOLORS 0x00800000 /* custom draw: use the colours of the notification (SDK value) */
+#endif
 #include <shlwapi_undoc.h>
 #include <psapi.h>
 
@@ -415,6 +419,8 @@ class CTaskSwitchWnd :
     PTASK_ITEM m_ActiveTaskItem;
 
     HTHEME m_Theme;
+    BOOL m_HasNormalTextColor; /* the text colour of a button that is neither active, hot nor pressed (from the style) */
+    COLORREF m_NormalTextColor;
     UINT m_ButtonsPerLine;
     WORD m_ButtonCount;
 
@@ -445,6 +451,8 @@ public:
         m_TaskItems(NULL),
         m_ActiveTaskItem(NULL),
         m_Theme(NULL),
+        m_HasNormalTextColor(FALSE),
+        m_NormalTextColor(0),
         m_ButtonsPerLine(0),
         m_ButtonCount(0),
         m_ImageList(NULL),
@@ -1607,6 +1615,31 @@ public:
         return EnumWindows(s_EnumWindowsProc, (LPARAM)this);
     }
 
+    /* The buttons of the task bar are drawn with the toolbar part of the style, whose text colour is that of
+       the light buttons of other toolbars. A button that is not active, hot or pressed has no background of
+       its own, so its text must have the colour the style gives the task bar's toolbar (light on a dark or
+       blue bar). The colour is taken from the "TaskBand" toolbar class of the style. */
+    VOID UpdateNormalTextColor()
+    {
+        HTHEME hToolbar;
+
+        m_HasNormalTextColor = FALSE;
+        if (!m_Theme || !m_TaskBar.m_hWnd)
+            return;
+
+        hToolbar = OpenThemeData(m_TaskBar.m_hWnd, L"Toolbar");
+        if (hToolbar)
+        {
+            COLORREF Color;
+            if (SUCCEEDED(GetThemeColor(hToolbar, TP_BUTTON, TS_NORMAL, TMT_TEXTCOLOR, &Color)))
+            {
+                m_NormalTextColor = Color;
+                m_HasNormalTextColor = TRUE;
+            }
+            CloseThemeData(hToolbar);
+        }
+    }
+
     LRESULT OnThemeChanged(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
     {
         TRACE("OmThemeChanged\n");
@@ -1619,6 +1652,8 @@ public:
         else
             m_Theme = NULL;
 
+        UpdateNormalTextColor();
+
         return TRUE;
     }
 
@@ -1628,6 +1663,7 @@ public:
             return FALSE;
 
         SetWindowTheme(m_TaskBar.m_hWnd, L"TaskBand", NULL);
+        UpdateNormalTextColor();
 
         m_ImageList = ImageList_Create(GetSystemMetrics(g_TaskbarSettings.bSmallIcons ? SM_CXSMICON : SM_CXICON),
                                        GetSystemMetrics(g_TaskbarSettings.bSmallIcons ? SM_CYSMICON : SM_CYICON),
@@ -1976,6 +2012,14 @@ public:
                     }
                     nmtbcd->clrText = GetSysColor(COLOR_HIGHLIGHTTEXT);
                     return Ret;
+                }
+
+                /* A button without a background of its own (not active, hot, pressed or disabled) */
+                if (m_HasNormalTextColor &&
+                    !(nmtbcd->nmcd.uItemState & (CDIS_CHECKED | CDIS_HOT | CDIS_SELECTED | CDIS_DISABLED)))
+                {
+                    nmtbcd->clrText = m_NormalTextColor;
+                    Ret = TBCDRF_USECDCOLORS;
                 }
             }
         }

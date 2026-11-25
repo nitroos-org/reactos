@@ -104,6 +104,20 @@ START_TEST(VisualStyles)
         hr = GetCurrentThemeName(szFile, _countof(szFile), szColor, _countof(szColor), szSize, _countof(szSize));
         ok(hr == S_OK, "GetCurrentThemeName returned 0x%lx\n", hr);
         ok(!lstrcmpiW(szFile, szLautus), "Current theme is %S, expected %S\n", szFile, szLautus);
+
+        /* The text of an inactive title bar is light enough for the dark bar of this style (it was
+           180,180,180, a contrast of 4.5 : 1); the title bars take this system colour of the style */
+        if (hwnd)
+        {
+            HTHEME hTheme = OpenThemeData(hwnd, L"Window");
+            ok(hTheme != NULL, "OpenThemeData(Window) failed\n");
+            if (hTheme)
+            {
+                COLORREF color = GetThemeSysColor(hTheme, COLOR_INACTIVECAPTIONTEXT);
+                ok(color == RGB(220, 220, 220), "The inactive caption text is 0x%06lx\n", color);
+                CloseThemeData(hTheme);
+            }
+        }
     }
 
     /* Back to the classic theme */

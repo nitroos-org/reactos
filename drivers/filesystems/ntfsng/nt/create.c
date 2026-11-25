@@ -1810,6 +1810,13 @@ walked:
         Status = STATUS_SHARING_VIOLATION;
         goto out;
     }
+    if (!IsDir && (Options & FILE_DELETE_ON_CLOSE) && Fcb->SectionObjectPointers.ImageSectionObject &&
+        !MmFlushImageSection(&Fcb->SectionObjectPointers, MmFlushForDelete))
+    {
+        /* Nor can it be opened to delete it when closed (Windows Server 2022: error 5 at the open, the file is kept). */
+        Status = STATUS_CANNOT_DELETE;
+        goto out;
+    }
 
     KeAcquireGuardedMutex(&Vcb->FcbListLock);
     if (Vcb->LockedBy)
