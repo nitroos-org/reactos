@@ -1377,9 +1377,24 @@ RedirPresentRect(PREDIR r, const REDIR_DIRTY *pd)
         gRedirPresents++;
         return;
     }
+    /* All of it (the window moved or came to the top): what it still has to paint is not shown from the surface */
+    if (!pd && Root->hrgnUpdate == HRGN_WINDOW)
+        return;
     Rgn = VIS_ComputeVisibleRegion(Root, FALSE, FALSE, TRUE);
     if (!Rgn)
         return;
+    if (!pd && Root->hrgnUpdate)
+    {
+        /* As where it is uncovered (UserRedirExpose), and as the screen copy of a move leaves out the update region
+           without redirection: that part shows what the window paints, not what the surface held before */
+        PREGION RgnUpdate = REGION_LockRgn(Root->hrgnUpdate);
+
+        if (RgnUpdate)
+        {
+            IntGdiCombineRgn(Rgn, Rgn, RgnUpdate, RGN_DIFF);
+            REGION_UnlockRgn(RgnUpdate);
+        }
+    }
     if (pd)
     {
         /* Only what was drawn: the rectangles (their bounding box if the region cannot be made) */
