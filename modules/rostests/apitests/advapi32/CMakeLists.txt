@@ -29,6 +29,7 @@ list(APPEND SOURCE
     TimeZoneKeys.c
     BuildSecurityDescriptor.c
     NamedPipeSD.c
+    OpenProcessTokenSystemSecurity.c
     ConvertStringSidToSid.c
     RegWow64.c
     RegWow64Review.c

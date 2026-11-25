@@ -32,6 +32,7 @@ extern void func_TimeZoneKeys(void);
 extern void func_PerfCounterValues(void);
 extern void func_BuildSecurityDescriptor(void);
 extern void func_NamedPipeSD(void);
+extern void func_OpenProcessTokenSystemSecurity(void);
 extern void func_ConvertStringSidToSid(void);
 extern void func_CreateService(void);
 extern void func_CreateProcessAsUserToken(void);
@@ -251,6 +252,7 @@ const struct test winetest_testlist[] =
     { "PerfCounterValues", func_PerfCounterValues },
     { "BuildSecurityDescriptor", func_BuildSecurityDescriptor },
     { "NamedPipeSD", func_NamedPipeSD },
+    { "OpenProcessTokenSystemSecurity", func_OpenProcessTokenSystemSecurity },
     { "ConvertStringSidToSid", func_ConvertStringSidToSid },
     { "RegWow64", func_RegWow64 },
     { "RegWow64Unicode", func_RegWow64Unicode },
