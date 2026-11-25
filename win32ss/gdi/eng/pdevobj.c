@@ -41,10 +41,20 @@ InitPDEVImpl(VOID)
     ghsemPDEV = EngCreateSemaphore();
     if (!ghsemPDEV) return STATUS_INSUFFICIENT_RESOURCES;
 
-    /* Without it, such a driver copies only when drawing goes on (see PDEVOBJ_vArmDisplaySync) */
+    /*
+     * Without it, a display driver that batches its copies to the screen (GCAPS2_SYNCTIMER) leaves the last
+     * rectangles of a frame off the screen until the next draw (see PDEVOBJ_vArmDisplaySync), so there is no going on
+     * without it. It is allocated from the pool: win32k's image data is session space, which the system threads that
+     * expire the timer cannot reach.
+     */
     gDisplaySyncTimer = ExAllocatePoolWithTag(NonPagedPool, sizeof(KTIMER), GDITAG_PDEV);
-    if (gDisplaySyncTimer)
-        KeInitializeTimerEx(gDisplaySyncTimer, SynchronizationTimer);
+    if (!gDisplaySyncTimer)
+    {
+        EngDeleteSemaphore(ghsemPDEV);
+        ghsemPDEV = NULL;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    KeInitializeTimerEx(gDisplaySyncTimer, SynchronizationTimer);
 
     return STATUS_SUCCESS;
 }
