@@ -1456,8 +1456,23 @@ co_IntSetParent(PWND Wnd, PWND WndNewParent)
       return NULL;
    }
 
-   /* The messages of the hide can have moved the new parent or grown the subtree: check the nesting again */
-   if (!IntWindowSubtreeFits(Wnd, WndNewParent) || IntIsChildWindow(Wnd, WndNewParent))
+   /*
+    * The messages of the hide (they reach the window's procedure, also of this thread) can have moved the new
+    * parent below the window itself: linking it then would make the window its own ancestor, a loop in the tree
+    * that every recursive walk of a subtree follows until the kernel stack overflows. Walk the parent chain
+    * itself, as before the hide (IntIsChildWindow stops at a window without WS_CHILD, and a top-level window
+    * moved by SetParent keeps its style). Then the nesting, which the hide can have changed as well.
+    */
+   for (pWndExam = WndNewParent; pWndExam; pWndExam = pWndExam->spwndParent)
+   {
+      if (pWndExam == Wnd)
+      {
+         ERR("IntSetParent: the new parent was moved below the window while it was hidden\n");
+         EngSetLastError(ERROR_INVALID_PARAMETER);
+         return NULL;
+      }
+   }
+   if (!IntWindowSubtreeFits(Wnd, WndNewParent))
    {
       TRACE("IntSetParent: the tree changed while the window was hidden\n");
       EngSetLastError(ERROR_INVALID_PARAMETER);
