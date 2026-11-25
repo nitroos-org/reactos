@@ -15,6 +15,55 @@ DBG_DEFAULT_CHANNEL(UserWnd);
 
 INT gNestedWindowLimit = 50;
 
+/*
+ * Windows Server 2022, measured (32 and 64 bit): a window is at most 50 levels below the desktop (a top-level
+ * window is level 1). CreateWindowEx of a child one level deeper and SetParent that would put a window of the
+ * moved subtree one level deeper fail with ERROR_INVALID_PARAMETER. Painting, invalidation, destruction and the
+ * searches of the window tree recurse once per level on the kernel stack.
+ */
+#define USER_MAX_WINDOW_LEVEL 50
+
+/* The level of a window: 0 for the desktop and the message window, 1 for their children */
+static ULONG
+IntWindowLevel(PWND Wnd)
+{
+   ULONG Level = 0;
+
+   while (Wnd && Wnd->spwndParent)
+   {
+      Level++;
+      Wnd = Wnd->spwndParent;
+   }
+   return Level;
+}
+
+/* Whether the subtree of Wnd fits below NewParent; the subtree is walked without recursion */
+static BOOL
+IntWindowSubtreeFits(PWND Wnd, PWND NewParent)
+{
+   ULONG Room = USER_MAX_WINDOW_LEVEL - min(IntWindowLevel(NewParent), USER_MAX_WINDOW_LEVEL);
+   ULONG Depth = 1;
+   PWND Cur = Wnd;
+
+   if (Room < 1) return FALSE;
+   for (;;)
+   {
+      if (Cur->spwndChild)
+      {
+         Cur = Cur->spwndChild;
+         if (++Depth > Room) return FALSE;
+         continue;
+      }
+      while (Cur != Wnd && !Cur->spwndNext)
+      {
+         Cur = Cur->spwndParent;
+         Depth--;
+      }
+      if (Cur == Wnd) return TRUE;
+      Cur = Cur->spwndNext;
+   }
+}
+
 PWINDOWLIST gpwlList = NULL;
 PWINDOWLIST gpwlCache = NULL;
 
@@ -1382,6 +1431,14 @@ co_IntSetParent(PWND Wnd, PWND WndNewParent)
       pWndExam = pWndExam->spwndParent;
    }
 
+   /* No window deeper than the nesting limit, also of the moved subtree */
+   if (!IntWindowSubtreeFits(Wnd, WndNewParent))
+   {
+      TRACE("IntSetParent: the subtree would be nested too deep\n");
+      EngSetLastError(ERROR_INVALID_PARAMETER);
+      return NULL;
+   }
+
    /*
     * Windows hides the window first, then shows it again
     * including the WM_SHOWWINDOW messages and all
@@ -1396,6 +1453,14 @@ co_IntSetParent(PWND Wnd, PWND WndNewParent)
    {
       ERR("IntSetParent: the window or its new parent was destroyed while it was hidden\n");
       EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+      return NULL;
+   }
+
+   /* The messages of the hide can have moved the new parent or grown the subtree: check the nesting again */
+   if (!IntWindowSubtreeFits(Wnd, WndNewParent) || IntIsChildWindow(Wnd, WndNewParent))
+   {
+      TRACE("IntSetParent: the tree changed while the window was hidden\n");
+      EngSetLastError(ERROR_INVALID_PARAMETER);
       return NULL;
    }
 
@@ -2632,6 +2697,15 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
     if (ParentWindow && IntIsWindowOrphaned(ParentWindow))
     {
         ERR("Parent window of %wZ is below a destroyed window\n", ClassName);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        ParentWindow = NULL;
+        goto cleanup;
+    }
+
+    /* No child deeper than the nesting limit (Windows: ERROR_INVALID_PARAMETER) */
+    if (ParentWindow && IntWindowLevel(ParentWindow) >= USER_MAX_WINDOW_LEVEL)
+    {
+        TRACE("Parent window of %wZ is nested too deep\n", ClassName);
         EngSetLastError(ERROR_INVALID_PARAMETER);
         ParentWindow = NULL;
         goto cleanup;
