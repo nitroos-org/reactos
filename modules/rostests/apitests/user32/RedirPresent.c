@@ -597,6 +597,49 @@ static void Test_RestStays(HWND hwnd)
     ok(ScreenPixel(301, 11) == BLACK, "drawing over the mark: 0x%06lx\n", ScreenPixel(301, 11));
 }
 
+/*
+ * GetRandomRgn(SYSRGN) of a window DC is in screen coordinates (MSDN, GetRandomRgn), also when the window draws into
+ * a surface of its own: for the window, a child window, and after the window moved while the DC was held.
+ */
+static void CheckSysRgn(HDC hdc, HWND hwnd, const char *what)
+{
+    HRGN hrgn = CreateRectRgn(0, 0, 0, 0);
+    RECT rcWin, rcRgn;
+    int ret = GetRandomRgn(hdc, hrgn, 4 /* SYSRGN */);
+
+    GetWindowRect(hwnd, &rcWin);
+    GetRgnBox(hrgn, &rcRgn);
+    ok(ret == 1, "%s: GetRandomRgn returned %d\n", what, ret);
+    ok(!IsRectEmpty(&rcRgn) && rcRgn.left >= rcWin.left && rcRgn.top >= rcWin.top && rcRgn.right <= rcWin.right &&
+       rcRgn.bottom <= rcWin.bottom, "%s: region (%ld,%ld)-(%ld,%ld) not inside the window (%ld,%ld)-(%ld,%ld)\n", what,
+       rcRgn.left, rcRgn.top, rcRgn.right, rcRgn.bottom, rcWin.left, rcWin.top, rcWin.right, rcWin.bottom);
+    DeleteObject(hrgn);
+}
+
+static void Test_SysRgn(HWND hwnd)
+{
+    HWND hChild = CreateWindowExW(0, L"RedirPresentTest", L"", WS_CHILD | WS_VISIBLE, 30, 40, 100, 60, hwnd, NULL,
+                                  GetModuleHandleW(NULL), NULL);
+    HDC hdc;
+
+    Pump();
+    hdc = GetDC(hwnd);
+    CheckSysRgn(hdc, hwnd, "window DC");
+    SetWindowPos(hwnd, NULL, WX + 37, WY + 21, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    Pump();
+    CheckSysRgn(hdc, hwnd, "window DC held across a move");
+    ReleaseDC(hwnd, hdc);
+    if (hChild)
+    {
+        hdc = GetDC(hChild);
+        CheckSysRgn(hdc, hChild, "child window DC");
+        ReleaseDC(hChild, hdc);
+        DestroyWindow(hChild);
+    }
+    SetWindowPos(hwnd, NULL, WX, WY, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    Pump();
+}
+
 START_TEST(RedirPresent)
 {
     WNDCLASSW wc = { 0 };
@@ -631,6 +674,7 @@ START_TEST(RedirPresent)
 
     Test_Primitives(hwnd);
     Test_RestStays(hwnd);
+    Test_SysRgn(hwnd);
 
     DestroyWindow(hwnd);
     Pump();
