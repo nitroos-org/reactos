@@ -573,6 +573,55 @@ static void TestSetDaclAutoInherited(VOID)
 }
 
 /*
+ * What a directory passes on to its children is deduplicated: a directory that has an entry of its own (Users modify) and
+ * the inherited entry that it covers (Users read, from its parent) passes on the one entry, and the repeat of an
+ * inherited entry (SYSTEM, Administrators) is not stored again (Windows Server 2022, SetNamedSecurityInfo)
+ */
+static void TestDeduplicated(VOID)
+{
+    WCHAR Temp[MAX_PATH], Root[MAX_PATH], Path[MAX_PATH];
+    PWSTR After;
+    DWORD Error;
+    LONG Count;
+    PWSTR Found;
+
+    GetTempPathW(_countof(Temp), Temp);
+    StringCbPrintfW(Root, sizeof(Root), L"%sPropDedup%lu", Temp, GetCurrentProcessId());
+    RemoveTree(Root);
+    ok(CreateDirectoryW(Root, NULL), "%S: %lu\n", Root, GetLastError());
+    ok(SetFromSddl(Root, L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)", PROTECTED_DACL_SECURITY_INFORMATION) == ERROR_SUCCESS,
+       "root\n");
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a", Root);          CreateDirectoryW(Path, NULL);
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a\\f1", Root);      MakeFile(Path);
+
+    /* Users read on the root, Users modify on a: the file below a has the modify only */
+    Error = SetFromSddl(Root, L"D:P(A;OICI;0x1200a9;;;BU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)", PROTECTED_DACL_SECURITY_INFORMATION);
+    ok(Error == ERROR_SUCCESS, "root: %lu\n", Error);
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a", Root);
+    Error = SetFromSddl(Path, L"D:(A;OICI;0x1301bf;;;BU)", UNPROTECTED_DACL_SECURITY_INFORMATION);
+    ok(Error == ERROR_SUCCESS, "a: %lu\n", Error);
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a\\f1", Root);
+    After = FileDaclString(Path);
+    ok(After && wcsstr(After, L"0x1301bf;;;BU") != NULL && wcsstr(After, L"0x1200a9;;;BU") == NULL,
+       "a\\f1 has the entry that the modify covers: %S\n", After ? After : L"(none)");
+    LocalFree(After);
+
+    /* the entries of a, set again to what it has inherited: the file has each of SYSTEM and Administrators once */
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a", Root);
+    Error = SetFromSddl(Path, L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", UNPROTECTED_DACL_SECURITY_INFORMATION);
+    ok(Error == ERROR_SUCCESS, "a again: %lu\n", Error);
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a\\f1", Root);
+    After = FileDaclString(Path);
+    Count = 0;
+    for (Found = After; Found && (Found = wcsstr(Found, L";;;SY)")) != NULL; Found++)
+        Count++;
+    ok(Count == 1, "a\\f1 has SYSTEM %ld times: %S\n", Count, After ? After : L"(none)");
+    LocalFree(After);
+
+    RemoveTree(Root);
+}
+
+/*
  * An entry that denies SYNCHRONIZE (to Everyone, say) in the DACL of the directories below the one that is set: the
  * children cannot be opened with SYNCHRONIZE, but READ_CONTROL | WRITE_DAC and FILE_LIST_DIRECTORY open without it
  * (Windows Server 2022: an open with SYNCHRONIZE is refused, the others work), and the propagation changes them all.
@@ -676,6 +725,7 @@ START_TEST(SetNamedSecurityInfoPropagate)
     {
         TestFiles();
         TestSetDaclAutoInherited();
+        TestDeduplicated();
         TestDeniedSynchronize();
     }
     TestKeys();

@@ -1703,8 +1703,9 @@ Cleanup:
  * not happen, among them a handle opened with MAXIMUM_ALLOWED (not detected here: the access a handle was asked
  * for is not recorded in it).
  *
- * The rules are those of the subkeys (AccpPropagateToSubkeys, measured on Windows Server 2022 for keys), with the
- * file generic mapping and no deduplication of inherited ACEs:
+ * The rules are those of the subkeys (AccpPropagateToSubkeys, measured on Windows Server 2022 for keys and for
+ * files), with the file generic mapping, and the inherited ACEs are deduplicated as those of a key are (a repeat
+ * of an entry the child has inherited already, or one a larger entry covers, is not stored):
  *  - a child whose DACL is protected, and one without a DACL, is left alone with everything below it;
  *  - an auto-inherited child, or one with an ACE flagged INHERITED_ACE, keeps its ACEs that are not flagged
  *    inherited (in their order, first) and gets what the new DACL of the directory passes on (flagged inherited,
@@ -1956,12 +1957,12 @@ AccpPropagateToFiles(IN HANDLE Directory,
             Inherits = TRUE;
         else
             Inherits = (Matched = AccpMatchOldInheritedSetEx(Frame->OldParentSd, Frame->ParentSd, Owner, Group, OldDacl,
-                                                             FALSE, &AccpFileMapping, IsDirectory)) != NULL;
+                                                             TRUE, &AccpFileMapping, IsDirectory)) != NULL;
         if (!Inherits)
             goto Next;
 
         if (!NT_SUCCESS(AccpMergeInheritedDaclEx(Frame->ParentSd, Owner, Group, Matched != NULL ? Matched : OldDacl,
-                                                 FALSE, FALSE, &AccpFileMapping, IsDirectory, &NewSd)) ||
+                                                 FALSE, TRUE, &AccpFileMapping, IsDirectory, &NewSd)) ||
             !GetSecurityDescriptorDacl(NewSd, &Present, &NewDacl, &Defaulted) || !Present || NewDacl == NULL)
         {
             Walk->Skipped++;
