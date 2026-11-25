@@ -2600,6 +2600,7 @@ AccpRewriteForSet(IN HANDLE Handle,
     PSID Owner = NULL, Group = NULL;
     SECURITY_DESCRIPTOR_CONTROL Control;
     ULONG Revision;
+    BOOLEAN MarkAuto = FALSE;
 
     *Dacl = NULL;
     *Sacl = NULL;
@@ -2619,6 +2620,14 @@ AccpRewriteForSet(IN HANDLE Handle,
         RtlGetDaclSecurityDescriptor(Sd, &Present, &OldDacl, &Defaulted);
         if (!Present || AccpRewriteAclForSet(OldDacl, TRUE, IsContainer, Dacl) != ERROR_SUCCESS)
             *Dacl = NULL;
+
+        /*
+         * The DACL of a file or directory that is set carries SE_DACL_AUTO_INHERITED afterwards, protected or not
+         * (measured on Windows Server 2022, SetNamedSecurityInfo with PROTECTED_DACL_SECURITY_INFORMATION, with
+         * UNPROTECTED_DACL_SECURITY_INFORMATION and with neither: the SDDL reads D:PAI, D:AI and D:AI)
+         */
+        if (ObjectType == SE_FILE_OBJECT && Present && OldDacl != NULL)
+            MarkAuto = TRUE;
     }
     /* a key keeps its SACL as given */
     if ((SecurityInfo & SACL_SECURITY_INFORMATION) && ObjectType == SE_FILE_OBJECT)
@@ -2627,7 +2636,7 @@ AccpRewriteForSet(IN HANDLE Handle,
         if (!Present || AccpRewriteAclForSet(OldSacl, FALSE, IsContainer, Sacl) != ERROR_SUCCESS)
             *Sacl = NULL;
     }
-    if (*Dacl == NULL && *Sacl == NULL)
+    if (*Dacl == NULL && *Sacl == NULL && !MarkAuto)
         return Sd;
 
     /* the same descriptor with the rewritten ACLs: owner, group and control as given */
@@ -2648,8 +2657,9 @@ AccpRewriteForSet(IN HANDLE Handle,
     SetSecurityDescriptorControl(Rewritten,
                                  SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED |
                                  SE_SACL_PROTECTED | SE_SACL_AUTO_INHERIT_REQ | SE_SACL_AUTO_INHERITED,
-                                 Control & (SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED |
-                                            SE_SACL_PROTECTED | SE_SACL_AUTO_INHERIT_REQ | SE_SACL_AUTO_INHERITED));
+                                 (Control & (SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED |
+                                             SE_SACL_PROTECTED | SE_SACL_AUTO_INHERIT_REQ | SE_SACL_AUTO_INHERITED)) |
+                                 (MarkAuto ? (SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED) : 0));
     return Rewritten;
 }
 

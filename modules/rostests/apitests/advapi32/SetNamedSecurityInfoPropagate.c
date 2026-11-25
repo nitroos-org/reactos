@@ -499,6 +499,79 @@ static DWORD SetFromSddl(PCWSTR Path, PCWSTR Format, DWORD Protection)
     return Error;
 }
 
+/* The control flags of the descriptor of a file or directory (0xFFFF when it cannot be read) */
+static SECURITY_DESCRIPTOR_CONTROL FileControl(PCWSTR Path)
+{
+    SECURITY_DESCRIPTOR_CONTROL Control = 0xFFFF;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    DWORD Revision;
+
+    if (GetNamedSecurityInfoW((PWSTR)Path, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, &Sd) == ERROR_SUCCESS)
+    {
+        GetSecurityDescriptorControl(Sd, &Control, &Revision);
+        LocalFree(Sd);
+    }
+    return Control;
+}
+
+/*
+ * The DACL of a file or directory that SetNamedSecurityInfo or SetSecurityInfo sets is auto-inherited afterwards,
+ * protected or not (Windows Server 2022: D:PAI with PROTECTED_DACL_SECURITY_INFORMATION, D:AI with
+ * UNPROTECTED_DACL_SECURITY_INFORMATION and with neither, through the name and through a handle)
+ */
+static void TestSetDaclAutoInherited(VOID)
+{
+    WCHAR Temp[MAX_PATH], Root[MAX_PATH], Path[MAX_PATH];
+    SECURITY_DESCRIPTOR_CONTROL Control;
+    PSECURITY_DESCRIPTOR Sd;
+    BOOL Present, Defaulted;
+    PACL Dacl = NULL;
+    HANDLE h;
+    DWORD Error;
+
+    GetTempPathW(_countof(Temp), Temp);
+    StringCbPrintfW(Root, sizeof(Root), L"%sPropAI%lu", Temp, GetCurrentProcessId());
+    RemoveTree(Root);
+    ok(CreateDirectoryW(Root, NULL), "%S: %lu\n", Root, GetLastError());
+    ok(SetFromSddl(Root, L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)", PROTECTED_DACL_SECURITY_INFORMATION) == ERROR_SUCCESS,
+       "root\n");
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\d", Root);
+    CreateDirectoryW(Path, NULL);
+
+    Error = SetFromSddl(Path, L"D:(A;OICI;0x1200a9;;;BU)", UNPROTECTED_DACL_SECURITY_INFORMATION);
+    Control = FileControl(Path);
+    ok(Error == ERROR_SUCCESS && (Control & (SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED)) == SE_DACL_AUTO_INHERITED,
+       "unprotected: error %lu, control %#x\n", Error, Control);
+
+    Error = SetFromSddl(Path, L"D:(A;OICI;0x1301bf;;;BU)", 0);
+    Control = FileControl(Path);
+    ok(Error == ERROR_SUCCESS && (Control & (SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED)) == SE_DACL_AUTO_INHERITED,
+       "no protection flag: error %lu, control %#x\n", Error, Control);
+
+    Error = SetFromSddl(Path, L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", PROTECTED_DACL_SECURITY_INFORMATION);
+    Control = FileControl(Path);
+    ok(Error == ERROR_SUCCESS && (Control & (SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED)) == (SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED),
+       "protected: error %lu, control %#x\n", Error, Control);
+
+    /* through a handle */
+    Sd = SdFromSddl(L"D:(A;OICI;0x1200a9;;;BU)");
+    GetSecurityDescriptorDacl(Sd, &Present, &Dacl, &Defaulted);
+    h = CreateFileW(Path, READ_CONTROL | WRITE_DAC, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    ok(h != INVALID_HANDLE_VALUE, "open %S: %lu\n", Path, GetLastError());
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        Error = SetSecurityInfo(h, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL, Dacl, NULL);
+        CloseHandle(h);
+        Control = FileControl(Path);
+        ok(Error == ERROR_SUCCESS && (Control & (SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED)) == SE_DACL_AUTO_INHERITED,
+           "by handle: error %lu, control %#x\n", Error, Control);
+    }
+    LocalFree(Sd);
+
+    RemoveTree(Root);
+}
+
 /*
  * An entry that denies SYNCHRONIZE (to Everyone, say) in the DACL of the directories below the one that is set: the
  * children cannot be opened with SYNCHRONIZE, but READ_CONTROL | WRITE_DAC and FILE_LIST_DIRECTORY open without it
@@ -602,6 +675,7 @@ START_TEST(SetNamedSecurityInfoPropagate)
     else
     {
         TestFiles();
+        TestSetDaclAutoInherited();
         TestDeniedSynchronize();
     }
     TestKeys();
