@@ -514,7 +514,7 @@ LdrGetDllHandleEx(
     UNICODE_STRING RedirectName, DynamicString, RawDllName;
     PUNICODE_STRING pRedirectName, CompareName;
     PWCHAR p1, p2, p3;
-    BOOLEAN Locked, RedirectedDll;
+    BOOLEAN Locked, RedirectedDll, ListLookup = FALSE, ListLocked = FALSE;
     ULONG_PTR Cookie;
     ULONG LoadFlag, Length;
 
@@ -541,8 +541,22 @@ LdrGetDllHandleEx(
         goto Quickie;
     }
 
-    /* If not initializing */
-    if (!LdrpInLdrInit)
+    /*
+     * A lookup that leaves the load count alone does not wait for the loader lock, as on Windows: it holds the
+     * module list lock shared (see ldrutils.c), which every change of the lists takes for the change only. A module
+     * found in the middle of its load by another thread (its references not processed yet) is looked up again under
+     * the loader lock, which waits for that load as before.
+     */
+    ListLookup = !LdrpInLdrInit &&
+                 (Flags & LDR_GET_DLL_HANDLE_EX_UNCHANGED_REFCOUNT) &&
+                 !(Flags & LDR_GET_DLL_HANDLE_EX_PIN);
+LookUp:
+    if (ListLookup)
+    {
+        RtlAcquireSRWLockShared(&LdrpModuleListLock);
+        ListLocked = TRUE;
+    }
+    else if (!LdrpInLdrInit)
     {
         /* Acquire the lock */
         Status = LdrLockLoaderLock(0, NULL, &Cookie);
@@ -570,8 +584,8 @@ LdrGetDllHandleEx(
     /* Set default failure code */
     Status = STATUS_DLL_NOT_FOUND;
 
-    /* Use the cache if we can */
-    if (LdrpGetModuleHandleCache)
+    /* Use the cache if we can (it belongs to the loader lock) */
+    if (!ListLocked && LdrpGetModuleHandleCache)
     {
         /* Check if we were redirected */
         if (RedirectedDll)
@@ -702,7 +716,8 @@ DontCompare:
                               &LdrEntry))
     {
         /* Update cached entry */
-        LdrpGetModuleHandleCache = LdrEntry;
+        if (!ListLocked)
+            LdrpGetModuleHandleCache = LdrEntry;
 
         /* Return success */
         Status = STATUS_SUCCESS;
@@ -715,6 +730,23 @@ DontCompare:
 Quickie:
     /* The success path must have a valid loader entry */
     ASSERT((LdrEntry != NULL) == NT_SUCCESS(Status));
+
+    /* A module that another thread is loading right now: look it up again under the loader lock */
+    if (ListLocked && LdrEntry && NT_SUCCESS(Status) &&
+        ((LdrEntry->Flags & LDRP_LOAD_IN_PROGRESS) || !(LdrEntry->Flags & LDRP_ENTRY_PROCESSED)))
+    {
+        RtlReleaseSRWLockShared(&LdrpModuleListLock);
+        ListLocked = ListLookup = FALSE;
+        if (DynamicString.Buffer) RtlFreeUnicodeString(&DynamicString);
+        RtlInitEmptyUnicodeString(&DynamicString, NULL, 0);
+        if (RawDllName.Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, RawDllName.Buffer);
+        RtlInitEmptyUnicodeString(&RawDllName, NULL, 0);
+        RedirectName = *DllName;
+        pRedirectName = &RedirectName;
+        RedirectedDll = FALSE;
+        LdrEntry = NULL;
+        goto LookUp;
+    }
 
     /* Check if we got an entry and success */
     DPRINT("Got LdrEntry->BaseDllName %wZ\n", LdrEntry ? &LdrEntry->BaseDllName : NULL);
@@ -746,6 +778,10 @@ Quickie:
         /* Check if the caller is requesting the handle */
         if (DllHandle) *DllHandle = LdrEntry->DllBase;
     }
+
+    /* The entry is not touched after this */
+    if (ListLocked)
+        RtlReleaseSRWLockShared(&LdrpModuleListLock);
 
     /* Free string if needed */
     if (DynamicString.Buffer) RtlFreeUnicodeString(&DynamicString);
@@ -1455,6 +1491,10 @@ BuildUnloadList:
             /* Unlink it */
             CurrentEntry = LdrEntry;
             RemoveEntryList(&CurrentEntry->InInitializationOrderLinks);
+
+            /* Off the memory order and hash lists and on the unload list through its hash links: all at once for a
+               lookup without the loader lock (it stays on the load order list until its entry point ran) */
+            RtlAcquireSRWLockExclusive(&LdrpModuleListLock);
             RemoveEntryList(&CurrentEntry->InMemoryOrderLinks);
             RemoveEntryList(&CurrentEntry->HashLinks);
 
@@ -1468,6 +1508,7 @@ BuildUnloadList:
 
             /* Add the entry on the unload list */
             InsertTailList(&LdrpUnloadHead, &CurrentEntry->HashLinks);
+            RtlReleaseSRWLockExclusive(&LdrpModuleListLock);
 
             /* It does not keep the targets of its forwarders any more */
             if (LdrpReleaseForwarderReferences(CurrentEntry->DllBase))
@@ -1544,8 +1585,10 @@ BuildUnloadList:
             LdrpRemoveDynamicTls(LdrEntry);
 
         /* Remove it from the list */
+        RtlAcquireSRWLockExclusive(&LdrpModuleListLock);
         RemoveEntryList(&CurrentEntry->InLoadOrderLinks);
         LdrpRemoveImageRange(CurrentEntry);
+        RtlReleaseSRWLockExclusive(&LdrpModuleListLock);
         CurrentEntry = NULL;
         NextEntry = LdrpUnloadHead.Flink;
     }

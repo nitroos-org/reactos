@@ -1089,16 +1089,14 @@ GetModuleHandleExW(IN DWORD dwFlags,
     if (dwValid == BASEP_GET_MODULE_HANDLE_EX_PARAMETER_VALIDATION_SUCCESS) return TRUE;
 
     /*
-     * A lookup by address that leaves the reference count alone needs no loader lock: the address ranges of the
-     * loaded modules answer lock-free (RtlPcToFileHeader). Windows returns at once while another thread holds
-     * the loader lock; waiting for it here deadlocks a program that calls this while it holds one of its own
-     * locks, against a thread that loads or unloads a DLL and needs that lock from a DLL entry point (Firefox
-     * at shutdown, NSPR with its thread detach).
+     * A lookup that leaves the reference count alone needs no loader lock: the address ranges of the loaded
+     * modules answer lock-free (RtlPcToFileHeader), and a lookup by name holds only the loader's module list
+     * lock (LdrGetDllHandle). Windows returns at once while another thread holds the loader lock; waiting for
+     * it here deadlocks a program that calls this while it holds one of its own locks, against a thread that
+     * loads or unloads a DLL and needs that lock from a DLL entry point (Firefox at shutdown, NSPR with its
+     * thread detach).
      */
-    Ret = BasepGetModuleHandleExW(((dwFlags & (GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT)) ==
-                                    (GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT)),
+    Ret = BasepGetModuleHandleExW(!!(dwFlags & GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT),
                                   dwFlags,
                                   lpwModuleName,
                                   phModule);
@@ -1145,8 +1143,8 @@ GetModuleHandleExA(IN DWORD dwFlags,
         /* Return FALSE if conversion failed */
         if (!lpModuleNameW) return FALSE;
 
-        /* Call the extended version of the API */
-        Ret = BasepGetModuleHandleExW(FALSE,
+        /* Call the extended version of the API (no loader lock when the count stays: see GetModuleHandleExW) */
+        Ret = BasepGetModuleHandleExW(!!(dwFlags & GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT),
                                       dwFlags,
                                       lpModuleNameW->Buffer,
                                       phModule);
