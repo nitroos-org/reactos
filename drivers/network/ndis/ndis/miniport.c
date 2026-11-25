@@ -3919,8 +3919,9 @@ NdisGenericIrpHandler(
         {
             return NdisIPower(DeviceObject, Irp);
         }
+        /* Any process that can open the adapter's device object can send it
+           any request: it is refused below, as for the other devices */
         NDIS_DbgPrint(MIN_TRACE, ("Unexpected IRP MajorFunction 0x%x\n", IrpSp->MajorFunction));
-        ASSERT(FALSE);
     }
     else if (DeviceObject->DeviceType == FILE_DEVICE_NETWORK)
     {
