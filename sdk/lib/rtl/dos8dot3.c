@@ -210,8 +210,33 @@ RtlGenerate8dot3Name(IN PUNICODE_STRING Name,
     /* If name present */
     if (Context->NameLength)
     {
+        /*
+         * The base name and the "~<index>" part together are at most eight
+         * OEM characters: when the index grows (~10, ~100, ...) the base name
+         * gives up characters from its end, as Windows does. The context keeps
+         * the full prefix.
+         */
+        ULONG Room = 8 - IndexLength;
+        ULONG Used = 0;
+        ULONG Count = 0;
+
+        while (Count < Context->NameLength)
+        {
+            ULONG Bytes = 1;
+
+            Char = Context->NameBuffer[Count];
+            if (NlsMbOemCodePageTag && HIBYTE(NlsUnicodeToMbOemTable[Char]))
+                Bytes = 2;
+
+            if (Used + Bytes > Room)
+                break;
+
+            Used += Bytes;
+            Count++;
+        }
+
         /* Copy name buffer */
-        Length = Context->NameLength * sizeof(WCHAR);
+        Length = Count * sizeof(WCHAR);
         RtlCopyMemory(Name8dot3->Buffer, Context->NameBuffer, Length);
         Name8dot3->Length = Length;
     }
