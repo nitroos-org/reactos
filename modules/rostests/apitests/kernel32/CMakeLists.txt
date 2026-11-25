@@ -253,6 +253,7 @@ list(APPEND SOURCE
     SystemFirmware.c
     PhysicallyInstalledMemory.c
     Toolhelp32.c
+    UnalignedDiskRead.c
     TerminateProcess.c
     ThreadContextNpx.c
     ThreadContextObjects.c
