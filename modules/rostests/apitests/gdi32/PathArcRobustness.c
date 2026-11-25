@@ -58,6 +58,7 @@ static void Clear(void)
 
 /* The ways to end a path and use it */
 static BOOL g_trace;
+static BOOL g_noPoly;   /* PAR_NOPOLY: no Polygon calls (to see what the other calls do where Polygon asserts) */
 static int g_nSlow;   /* calls that took more than 15 s */
 
 static void Announce(const char *what, int op);
@@ -154,7 +155,11 @@ static void DoPathOp(HDC hdc, int op)
         case 12: Rectangle(hdc, pt[0].x, pt[0].y, pt[1].x, pt[1].y); break;
         case 13: RoundRect(hdc, pt[0].x, pt[0].y, pt[1].x, pt[1].y, pt[2].x, pt[2].y); break;
         case 14: Polyline(hdc, pt, 1 + Rand() % 8); break;
-        case 15: Polygon(hdc, pt, 1 + Rand() % 8); break;
+        case 15:
+            n = 1 + Rand() % 8;
+            if (!g_noPoly)
+                Polygon(hdc, pt, n);
+            break;
         case 16: PolylineTo(hdc, pt, 1 + Rand() % 8); break;
         case 17: TextOutW(hdc, pt[0].x, pt[0].y, L"Path", 4); break;
         case 18: SetArcDirection(hdc, (Rand() & 1) ? AD_CLOCKWISE : AD_COUNTERCLOCKWISE); break;
@@ -267,9 +272,26 @@ static void test_Pens(HDC hdc)
 static void test_World(HDC hdc)
 {
     DWORD t = GetTickCount();
-    int iter, i;
+    int iter, i, j;
+    static const DWORD special[] = { 0x7FC00000, 0x7F800000, 0xFF800000 };
 
     SetGraphicsMode(hdc, GM_ADVANCED);
+
+    /* What a NaN or an infinity in one member does (reported, not decided here: verify on the Windows reference) */
+    for (i = 0; i < 3; i++)
+    {
+        for (j = 0; j < 6; j++)
+        {
+            FLOAT m[6] = { 1, 0, 0, 1, 0, 0 };
+            BOOL ret;
+
+            m[j] = *(const FLOAT *)&special[i];
+            ret = SetWorldTransform(hdc, (XFORM *)m);
+            trace("SetWorldTransform with %08lx in member %d: %d\n", special[i], j, ret);
+            ModifyWorldTransform(hdc, NULL, MWT_IDENTITY);
+        }
+    }
+
     for (iter = 0; iter < 100; iter++)
     {
         XFORM x;
@@ -342,6 +364,36 @@ static void test_GarbageAttr(HDC hdc)
         ModifyWorldTransform(hdc, NULL, MWT_IDENTITY);
     }
     trace("the calls on garbage matrices took %lu ms\n", GetTickCount() - t);
+}
+
+/* A path of many single point strokes (one PT_MOVETO after the other) has more strokes than half its entries: the
+   region of the path counted them in a buffer of half the size. (Whether PolyPolyline gets single points into a path
+   is up to the calls before it; the random sequences below do reach the overflow on a system without the fix.) */
+static void test_SinglePointStrokes(void)
+{
+    static const DWORD counts[] = { 1, 1, 1, 1, 1, 1, 1, 1, 3 };
+    HDC hdc = CreateCompatibleDC(NULL);
+    POINT pt[12];
+    HRGN rgn;
+    int i;
+
+    for (i = 0; i < 12; i++)
+    {
+        pt[i].x = 3 + i;
+        pt[i].y = 2 + (i & 1);
+    }
+    /* PolyPolyline puts the first point of each polyline in as a PT_MOVETO: eight single points and a line */
+    BeginPath(hdc);
+    PolyPolyline(hdc, pt, counts, _countof(counts));
+    EndPath(hdc);
+    rgn = PathToRegion(hdc);
+    if (rgn)
+        DeleteObject(rgn);
+    BeginPath(hdc);
+    PolyPolyline(hdc, pt, counts, _countof(counts));
+    EndPath(hdc);
+    SelectClipPath(hdc, RGN_COPY);
+    DeleteDC(hdc);
 }
 
 /* A DIB DC of width 64 and the given height, and its pixels */
@@ -463,7 +515,11 @@ START_TEST(PathArcRobustness)
         GetEnvironmentVariableA("PAR_SEED", buf, sizeof(buf));
         g_seed = strtoul(buf, NULL, 16);
     }
-    test_Polygon();
+    test_SinglePointStrokes();
+    /* PAR_NOPOLY=1: leave the polygon rows out (to see what the other calls do on a system where they fail) */
+    g_noPoly = GetEnvironmentVariableA("PAR_NOPOLY", NULL, 0) != 0;
+    if (!g_noPoly)
+        test_Polygon();
 
     for (kind = 0; kind < 3; kind++)
     {
