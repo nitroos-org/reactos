@@ -1524,13 +1524,14 @@ FreeLdrRebaseEntriesInCache(
 }
 
 NTSTATUS
-FreeLdrMarkEntriesInCache(
+FreeLdrMarkEntriesInCacheEx(
     _In_ PINICACHE IniCache,
     _In_ PINI_SECTION OsIniSection_,
     _In_ PCWSTR ArcPath,
     _In_ PCWSTR PartitionGuid,
     _In_ PCWSTR DiskGuid,
-    _In_ PCWSTR Range)
+    _In_ PCWSTR Range,
+    _In_ BOOLEAN MarkKeyless)
 {
     PINICACHEITERATOR Iterator;
     PCWSTR SectionName, KeyData;
@@ -1554,10 +1555,18 @@ FreeLdrMarkEntriesInCache(
 
         /* An entry that names another partition by its GUID belongs to another installation whose position
          * in the table is out of date: its keys stay as they are */
-        if (IniGetKey(OsIniSection, L"SystemPathPartitionGuid", &OldGuid) && OldGuid && *OldGuid &&
-            _wcsicmp(OldGuid, PartitionGuid) != 0)
+        if (IniGetKey(OsIniSection, L"SystemPathPartitionGuid", &OldGuid) && OldGuid && *OldGuid)
         {
-            DPRINT1("Boot entry '%S' names another partition (GUID %S), not touched\n", SectionName, OldGuid);
+            if (_wcsicmp(OldGuid, PartitionGuid) != 0)
+            {
+                DPRINT1("Boot entry '%S' names another partition (GUID %S), not touched\n", SectionName, OldGuid);
+                continue;
+            }
+        }
+        else if (!MarkKeyless)
+        {
+            /* No key and not told to give one: the entry is of an installation Setup could not identify */
+            DPRINT1("Boot entry '%S' names no partition by GUID, not touched\n", SectionName);
             continue;
         }
 
@@ -1568,6 +1577,127 @@ FreeLdrMarkEntriesInCache(
     } while (IniFindNextValue(Iterator, &SectionName, &KeyData));
     IniFindClose(Iterator);
 
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+FreeLdrMarkEntriesInCache(
+    _In_ PINICACHE IniCache,
+    _In_ PINI_SECTION OsIniSection_,
+    _In_ PCWSTR ArcPath,
+    _In_ PCWSTR PartitionGuid,
+    _In_ PCWSTR DiskGuid,
+    _In_ PCWSTR Range)
+{
+    return FreeLdrMarkEntriesInCacheEx(IniCache, OsIniSection_, ArcPath, PartitionGuid, DiskGuid, Range, TRUE);
+}
+
+NTSTATUS
+FreeLdrMarkEntryByNameInCache(
+    _In_ PINICACHE IniCache,
+    _In_ PCWSTR SectionName,
+    _In_ PCWSTR PartitionGuid,
+    _In_ PCWSTR DiskGuid,
+    _In_ PCWSTR Range)
+{
+    PINI_SECTION OsIniSection;
+
+    if (!IniCache || !SectionName || !PartitionGuid || !DiskGuid || !Range)
+        return STATUS_INVALID_PARAMETER;
+    OsIniSection = IniGetSection(IniCache, SectionName);
+    if (!OsIniSection)
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    SetUniqueKey(OsIniSection, L"SystemPathPartitionGuid", PartitionGuid);
+    SetUniqueKey(OsIniSection, L"SystemPathDiskGuid", DiskGuid);
+    SetUniqueKey(OsIniSection, L"SystemPathPartitionRange", Range);
+    return STATUS_SUCCESS;
+}
+
+/*
+ * The identities that Setup found for boot entries that were written without GUID keys (see
+ * FreeLdrAddPendingIdentity in bldrsup.h): kept until the boot store is written.
+ */
+#define MAX_PENDING_IDENTITIES 16
+
+static struct
+{
+    WCHAR ArcPath[MAX_PATH];
+    GUID PartitionGuid;
+    GUID DiskGuid;
+    ULONGLONG FirstSector;
+    ULONGLONG LastSector;
+} PendingIdentities[MAX_PENDING_IDENTITIES];
+static ULONG PendingIdentityCount = 0;
+
+VOID
+FreeLdrForgetPendingIdentities(VOID)
+{
+    PendingIdentityCount = 0;
+}
+
+BOOLEAN
+FreeLdrAddPendingIdentity(
+    _In_ PCWSTR ArcPath,
+    _In_ const GUID* PartitionGuid,
+    _In_ const GUID* DiskGuid,
+    _In_ ULONGLONG FirstSector,
+    _In_ ULONGLONG LastSector)
+{
+    ULONG i;
+
+    for (i = 0; i < PendingIdentityCount; ++i)
+    {
+        if (SystemPathsEqual(PendingIdentities[i].ArcPath, ArcPath))
+            return TRUE;
+    }
+    if (PendingIdentityCount >= MAX_PENDING_IDENTITIES ||
+        FAILED(RtlStringCchCopyW(PendingIdentities[i].ArcPath, MAX_PATH, ArcPath)))
+        return FALSE;
+    PendingIdentities[i].PartitionGuid = *PartitionGuid;
+    PendingIdentities[i].DiskGuid = *DiskGuid;
+    PendingIdentities[i].FirstSector = FirstSector;
+    PendingIdentities[i].LastSector = LastSector;
+    PendingIdentityCount++;
+    return TRUE;
+}
+
+NTSTATUS
+FreeLdrApplyPendingIdentities(
+    _In_ PVOID Handle)
+{
+    PBOOT_STORE_INI_CONTEXT BootStore = (PBOOT_STORE_INI_CONTEXT)Handle;
+    ULONG i;
+
+    if (!BootStore || BootStore->Header.Type != FreeLdr)
+        return STATUS_INVALID_PARAMETER;
+
+    for (i = 0; i < PendingIdentityCount; ++i)
+    {
+        UNICODE_STRING PartGuid = {0}, DiskGuid = {0};
+        WCHAR Range[48];
+        NTSTATUS Status;
+
+        Status = RtlStringFromGUID((REFGUID)&PendingIdentities[i].PartitionGuid, &PartGuid);
+        if (NT_SUCCESS(Status))
+            Status = RtlStringFromGUID((REFGUID)&PendingIdentities[i].DiskGuid, &DiskGuid);
+        if (NT_SUCCESS(Status))
+            Status = RtlStringCchPrintfW(Range, ARRAYSIZE(Range), L"%I64u-%I64u",
+                                         PendingIdentities[i].FirstSector, PendingIdentities[i].LastSector);
+        if (NT_SUCCESS(Status))
+        {
+            DPRINT1("Boot entries of '%S' without keys: partition %wZ\n", PendingIdentities[i].ArcPath, &PartGuid);
+            /* Entries that already name a partition are not touched */
+            Status = FreeLdrMarkEntriesInCacheEx(BootStore->IniCache, BootStore->OsIniSection,
+                                                 PendingIdentities[i].ArcPath,
+                                                 PartGuid.Buffer, DiskGuid.Buffer, Range, TRUE);
+        }
+        RtlFreeUnicodeString(&PartGuid);
+        RtlFreeUnicodeString(&DiskGuid);
+        if (!NT_SUCCESS(Status))
+            DPRINT1("Giving the entries of '%S' their keys failed (Status 0x%08lx)\n",
+                    PendingIdentities[i].ArcPath, Status);
+    }
     return STATUS_SUCCESS;
 }
 
@@ -1626,6 +1756,38 @@ FreeLdrMarkEntriesWithIdentity(
         return STATUS_INVALID_PARAMETER;
     return FreeLdrMarkEntriesInCache(BootStore->IniCache, BootStore->OsIniSection, ArcPath,
                                      PartitionGuid, DiskGuid, Range);
+}
+
+NTSTATUS
+FreeLdrMarkEntriesWithIdentityEx(
+    _In_ PVOID Handle,
+    _In_ PCWSTR ArcPath,
+    _In_ PCWSTR PartitionGuid,
+    _In_ PCWSTR DiskGuid,
+    _In_ PCWSTR Range,
+    _In_ BOOLEAN MarkKeyless)
+{
+    PBOOT_STORE_INI_CONTEXT BootStore = (PBOOT_STORE_INI_CONTEXT)Handle;
+
+    if (!BootStore || BootStore->Header.Type != FreeLdr)
+        return STATUS_INVALID_PARAMETER;
+    return FreeLdrMarkEntriesInCacheEx(BootStore->IniCache, BootStore->OsIniSection, ArcPath,
+                                       PartitionGuid, DiskGuid, Range, MarkKeyless);
+}
+
+NTSTATUS
+FreeLdrMarkEntryByName(
+    _In_ PVOID Handle,
+    _In_ PCWSTR SectionName,
+    _In_ PCWSTR PartitionGuid,
+    _In_ PCWSTR DiskGuid,
+    _In_ PCWSTR Range)
+{
+    PBOOT_STORE_INI_CONTEXT BootStore = (PBOOT_STORE_INI_CONTEXT)Handle;
+
+    if (!BootStore || BootStore->Header.Type != FreeLdr)
+        return STATUS_INVALID_PARAMETER;
+    return FreeLdrMarkEntryByNameInCache(BootStore->IniCache, SectionName, PartitionGuid, DiskGuid, Range);
 }
 
 static NTSTATUS

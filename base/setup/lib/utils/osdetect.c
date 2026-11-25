@@ -729,6 +729,283 @@ AddNTOSInstallation(
     return NtOsInstall;
 }
 
+/*
+ * Boot entries of a UEFI computer that were written without the GUID keys (an installation made before they
+ * existed) name their partition only by the position in the ARC path, and the position is out of date once the
+ * partition table has changed. Here Setup works out which partition such an entry names by what it can still
+ * verify, before it changes anything on a disk:
+ *  1. the partition at the stored position holds an installation at the path of the entry: that one;
+ *  2. otherwise the one partition that holds an installation at that path (after the "partition(N)") and is not
+ *     named by another entry; two candidates, or none, leave the entry unidentified (its partition is gone).
+ * The answers are registered (FreeLdrAddPendingIdentity) and written as the GUID keys when the boot store is
+ * written. An entry that stays unidentified is never reused for another installation.
+ */
+VOID
+NTAPI
+ResolveKeylessPaths(
+    _In_ ULONG PathCount,
+    _Inout_updates_(PathCount) PKEYLESS_PATH Paths,
+    _In_ ULONG PartCount,
+    _Inout_updates_(PartCount) PKEYLESS_PART Parts,
+    _In_ PKEYLESS_HOLDS_ROUTINE Holds)
+{
+    LONG Candidate[MAX_KEYLESS_PATHS];
+    ULONG CandidateCount[MAX_KEYLESS_PATHS];
+    ULONG i, j, k;
+
+    if (PathCount > MAX_KEYLESS_PATHS)
+        PathCount = MAX_KEYLESS_PATHS;
+
+    /* 1. The partition at the stored position holds an installation at the path of the entry */
+    for (i = 0; i < PathCount; ++i)
+    {
+        LONG Stored = Paths[i].Stored;
+
+        Paths[i].Found = -1;
+        if (Stored < 0 || (ULONG)Stored >= PartCount)
+            continue;
+        if (!Parts[Stored].Usable || Parts[Stored].Claimed ||
+            !Holds(Parts[Stored].Context, Paths[i].Tail))
+            continue;
+        Paths[i].Found = Stored;
+        Parts[Stored].Claimed = TRUE;
+    }
+
+    /* 2. Not there: the one unclaimed partition that holds an installation at that path */
+    for (i = 0; i < PathCount; ++i)
+    {
+        Candidate[i] = -1;
+        CandidateCount[i] = 0;
+        if (Paths[i].Found >= 0)
+            continue;
+        for (k = 0; k < PartCount; ++k)
+        {
+            if (!Parts[k].Usable || Parts[k].Claimed || !Holds(Parts[k].Context, Paths[i].Tail))
+                continue;
+            Candidate[i] = k;
+            CandidateCount[i]++;
+        }
+    }
+    for (i = 0; i < PathCount; ++i)
+    {
+        BOOLEAN Shared = FALSE;
+
+        if (Candidate[i] < 0 || CandidateCount[i] != 1)
+            continue;
+        /* Two entries that would take the same partition: neither is identified */
+        for (j = 0; j < PathCount; ++j)
+        {
+            if (j != i && Candidate[j] == Candidate[i] && CandidateCount[j] == 1)
+                Shared = TRUE;
+        }
+        if (!Shared)
+            Paths[i].Found = Candidate[i];
+    }
+}
+
+typedef struct _KEYLESS_ENTRIES_DATA
+{
+    PPARTLIST PartList;
+    PVOID BootStoreHandle;
+    ULONG PartCount;
+    PKEYLESS_PART Parts;
+    PPARTENTRY *PartEntries;
+    ULONG PathCount;
+    WCHAR ArcPath[MAX_KEYLESS_PATHS][MAX_PATH];
+} KEYLESS_ENTRIES_DATA, *PKEYLESS_ENTRIES_DATA;
+
+static LONG
+PartitionIndex(
+    _In_ PKEYLESS_ENTRIES_DATA Data,
+    _In_ PPARTENTRY PartEntry)
+{
+    ULONG i;
+
+    for (i = 0; i < Data->PartCount; ++i)
+    {
+        if (Data->PartEntries[i] == PartEntry)
+            return i;
+    }
+    return -1;
+}
+
+static BOOLEAN
+SamePath(
+    _In_ PCWSTR Path1,
+    _In_ PCWSTR Path2)
+{
+    SIZE_T Length1 = wcslen(Path1), Length2 = wcslen(Path2);
+
+    if (Length1 >= 2 && Path1[0] == L'"' && Path1[Length1 - 1] == L'"')
+        Path1++, Length1 -= 2;
+    if (Length2 >= 2 && Path2[0] == L'"' && Path2[Length2 - 1] == L'"')
+        Path2++, Length2 -= 2;
+    return (Length1 == Length2) && (_wcsnicmp(Path1, Path2, Length1) == 0);
+}
+
+/* A partition that can hold an installation Setup identifies: GPT, partitioned, a volume that was there before */
+static BOOLEAN
+IsCandidatePartition(
+    _In_ PPARTENTRY PartEntry)
+{
+    return PartEntry->IsPartitioned &&
+           PartEntry->DiskEntry->DiskStyle == PARTITION_STYLE_GPT &&
+           PartEntry->Volume && !PartEntry->Volume->New &&
+           PartEntry->Volume->FormatState == Formatted;
+}
+
+// PKEYLESS_HOLDS_ROUTINE
+static BOOLEAN
+NTAPI
+HoldsInstallation(
+    _In_ PVOID Context,
+    _In_ PCWSTR PathTail)
+{
+    PPARTENTRY PartEntry = (PPARTENTRY)Context;
+    WCHAR Path[MAX_PATH];
+    UNICODE_STRING SystemRootPath;
+    USHORT Machine;
+    UNICODE_STRING VendorName;
+    WCHAR VendorNameBuffer[MAX_PATH];
+
+    if (FAILED(RtlStringCchPrintfW(Path, ARRAYSIZE(Path), L"%s%s", PartEntry->DeviceName, PathTail)))
+        return FALSE;
+    RtlInitUnicodeString(&SystemRootPath, Path);
+    RtlInitEmptyUnicodeString(&VendorName, VendorNameBuffer, sizeof(VendorNameBuffer));
+    return IsValidNTOSInstallation(&SystemRootPath, &Machine, &VendorName);
+}
+
+// PENUM_BOOT_ENTRIES_ROUTINE
+static NTSTATUS
+NTAPI
+CollectKeylessEntries(
+    IN BOOT_STORE_TYPE Type,
+    IN PBOOT_STORE_ENTRY BootEntry,
+    IN PVOID Parameter OPTIONAL)
+{
+    PKEYLESS_ENTRIES_DATA Data = (PKEYLESS_ENTRIES_DATA)Parameter;
+    PNTOS_OPTIONS Options = (PNTOS_OPTIONS)&BootEntry->OsOptions;
+    PCWSTR EntryGuid;
+    ULONG i;
+
+    if (Type != FreeLdr || !BootEntry->BootEntryKey ||
+        BootEntry->OsOptionsLength < sizeof(NTOS_OPTIONS) ||
+        RtlCompareMemory(&BootEntry->OsOptions, NTOS_OPTIONS_SIGNATURE,
+                         RTL_FIELD_SIZE(NTOS_OPTIONS, Signature)) != RTL_FIELD_SIZE(NTOS_OPTIONS, Signature) ||
+        !Options->OsLoadPath || !*Options->OsLoadPath)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    EntryGuid = FreeLdrGetEntryPartitionGuid(Data->BootStoreHandle, (PCWSTR)BootEntry->BootEntryKey);
+    if (EntryGuid)
+    {
+        /* Named already: the partition is taken */
+        UNICODE_STRING GuidString;
+        GUID PartitionGuid;
+        LONG Index = -1;
+
+        RtlInitUnicodeString(&GuidString, EntryGuid);
+        if (NT_SUCCESS(RtlGUIDFromString(&GuidString, &PartitionGuid)))
+            Index = PartitionIndex(Data, FindPartitionByGptId(Data->PartList, &PartitionGuid));
+        if (Index >= 0)
+            Data->Parts[Index].Claimed = TRUE;
+        return STATUS_SUCCESS;
+    }
+
+    /* Only paths that name a partition can be identified */
+    if (!FindSubStrI(Options->OsLoadPath, L"partition("))
+        return STATUS_SUCCESS;
+    for (i = 0; i < Data->PathCount; ++i)
+    {
+        if (SamePath(Data->ArcPath[i], Options->OsLoadPath))
+            return STATUS_SUCCESS;
+    }
+    if (Data->PathCount < MAX_KEYLESS_PATHS &&
+        SUCCEEDED(RtlStringCchCopyW(Data->ArcPath[Data->PathCount], MAX_PATH, Options->OsLoadPath)))
+    {
+        Data->PathCount++;
+    }
+    return STATUS_SUCCESS;
+}
+
+static VOID
+IdentifyKeylessEntries(
+    _In_ PPARTLIST PartList,
+    _In_ PVOID BootStoreHandle)
+{
+    PKEYLESS_ENTRIES_DATA Data;
+    PPARTENTRY PartEntry;
+    KEYLESS_PATH Paths[MAX_KEYLESS_PATHS];
+    ULONG i;
+
+    Data = RtlAllocateHeap(ProcessHeap, HEAP_ZERO_MEMORY, sizeof(*Data));
+    if (!Data)
+        return;
+    Data->PartList = PartList;
+    Data->BootStoreHandle = BootStoreHandle;
+
+    for (PartEntry = GetNextPartition(PartList, NULL); PartEntry; PartEntry = GetNextPartition(PartList, PartEntry))
+        Data->PartCount++;
+    Data->Parts = RtlAllocateHeap(ProcessHeap, HEAP_ZERO_MEMORY,
+                                  Data->PartCount * (sizeof(KEYLESS_PART) + sizeof(PPARTENTRY)));
+    if (!Data->Parts)
+        goto Quit;
+    Data->PartEntries = (PPARTENTRY*)(Data->Parts + Data->PartCount);
+    for (i = 0, PartEntry = GetNextPartition(PartList, NULL); PartEntry;
+         PartEntry = GetNextPartition(PartList, PartEntry), ++i)
+    {
+        Data->PartEntries[i] = PartEntry;
+        Data->Parts[i].Usable = IsCandidatePartition(PartEntry);
+        Data->Parts[i].Context = PartEntry;
+    }
+
+    EnumerateBootStoreEntries(BootStoreHandle, CollectKeylessEntries, Data);
+
+    for (i = 0; i < Data->PathCount; ++i)
+    {
+        WCHAR NtBuffer[MAX_PATH];
+        UNICODE_STRING NtPath;
+        ULONG DiskNumber, PartitionNumber;
+        PCWSTR PathComponent;
+
+        Paths[i].Tail = wcschr(Data->ArcPath[i], OBJ_NAME_PATH_SEPARATOR);
+        Paths[i].Stored = -1;
+        Paths[i].Found = -1;
+        RtlInitEmptyUnicodeString(&NtPath, NtBuffer, sizeof(NtBuffer));
+        if (ArcPathToNtPath(&NtPath, Data->ArcPath[i], PartList) &&
+            NtPathToDiskPartComponents(NtPath.Buffer, &DiskNumber, &PartitionNumber, &PathComponent))
+        {
+            PartEntry = SelectPartition(PartList, DiskNumber, PartitionNumber);
+            if (PartEntry)
+                Paths[i].Stored = PartitionIndex(Data, PartEntry);
+        }
+        if (!Paths[i].Tail)
+            Paths[i].Tail = L"";    /* no installation holds an empty path */
+    }
+    ResolveKeylessPaths(Data->PathCount, Paths, Data->PartCount, Data->Parts, HoldsInstallation);
+
+    for (i = 0; i < Data->PathCount; ++i)
+    {
+        if (Paths[i].Found < 0)
+        {
+            DPRINT1("The boot entries of '%S' name no partition by GUID and none could be identified\n",
+                    Data->ArcPath[i]);
+            continue;
+        }
+        PartEntry = Data->PartEntries[Paths[i].Found];
+        DPRINT1("The boot entries of '%S' belong to %S\n", Data->ArcPath[i], PartEntry->DeviceName);
+        FreeLdrAddPendingIdentity(Data->ArcPath[i], &PartEntry->GptId, &PartEntry->DiskEntry->GptDiskId,
+                                  PartEntry->StartSector.QuadPart,
+                                  PartEntry->StartSector.QuadPart + PartEntry->SectorCount.QuadPart - 1);
+    }
+
+Quit:
+    if (Data->Parts)
+        RtlFreeHeap(ProcessHeap, 0, Data->Parts);
+    RtlFreeHeap(ProcessHeap, 0, Data);
+}
+
 static VOID
 FindNTOSInstallations(
     _Inout_ PGENERIC_LIST List,
@@ -802,6 +1079,13 @@ FindNTOSInstallations(
         Data.BootStoreHandle = BootStoreHandle;
         EnumerateBootStoreEntries(BootStoreHandle, EnumerateInstallations, &Data);
         Data.BootStoreHandle = NULL;
+
+        /* UEFI: entries of installations made before the GUID keys existed (see IdentifyKeylessEntries) */
+        if (Type == FreeLdr && Volume->PartEntry &&
+            Volume->PartEntry->DiskEntry->DiskStyle == PARTITION_STYLE_GPT)
+        {
+            IdentifyKeylessEntries(PartList, BootStoreHandle);
+        }
         CloseBootStore(BootStoreHandle);
     }
 
@@ -828,6 +1112,9 @@ CreateNTOSInstallationsList(
     List = CreateGenericList();
     if (!List)
         return NULL;
+
+    /* What an earlier search found about boot entries without GUID keys is out of date now */
+    FreeLdrForgetPendingIdentities();
 
     /* Loop each available volume */
     for (Entry = PartList->VolumesList.Flink;

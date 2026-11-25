@@ -37,6 +37,15 @@ UpdateFreeLoaderIniForPartition(
     IN PCWSTR ArcPath,
     IN PCWSTR PartitionGuid OPTIONAL);
 
+/* The same, and an entry that Update adds also gets the keys of the partition (DiskGuid and Range both given) */
+NTSTATUS
+UpdateFreeLoaderIniForIdentity(
+    IN PCWSTR IniPath,
+    IN PCWSTR ArcPath,
+    IN PCWSTR PartitionGuid OPTIONAL,
+    IN PCWSTR DiskGuid OPTIONAL,
+    IN PCWSTR Range OPTIONAL);
+
 /* UEFI: TRUE if the last install found another system's loader at \EFI\BOOT and left it there */
 BOOLEAN
 WasEfiFallbackLoaderKept(VOID);

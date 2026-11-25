@@ -445,6 +445,19 @@ EnumerateReactOSEntries(
                     (PCWSTR)BootEntry->BootEntryKey, EntryGuid);
             goto SkipThisEntry;
         }
+
+        /*
+         * An entry without keys, written before Setup named the partition: it got its keys before this
+         * (FreeLdrApplyPendingIdentities) if Setup could tell which partition it names. One that is still
+         * without them could not be identified (its partition is gone, or two candidates), its position
+         * says nothing about our partition: it belongs to something else and stays as it is.
+         */
+        if (!EntryGuid)
+        {
+            DPRINT1("Boot entry '%S' names no partition by GUID and could not be identified: not ours\n",
+                    (PCWSTR)BootEntry->BootEntryKey);
+            goto SkipThisEntry;
+        }
     }
 
     Data->UseExistingEntry = TRUE;
@@ -468,10 +481,12 @@ SkipThisEntry:
 
 /* Not static: the setuplib unit test calls it on a freeldr.ini of its own */
 NTSTATUS
-UpdateFreeLoaderIniForPartition(
+UpdateFreeLoaderIniForIdentity(
     IN PCWSTR IniPath,
     IN PCWSTR ArcPath,
-    IN PCWSTR PartitionGuid OPTIONAL)
+    IN PCWSTR PartitionGuid OPTIONAL,
+    IN PCWSTR DiskGuid OPTIONAL,
+    IN PCWSTR Range OPTIONAL)
 {
     NTSTATUS Status;
     PVOID BootStoreHandle;
@@ -521,6 +536,10 @@ UpdateFreeLoaderIniForPartition(
         BootEntry->FriendlyName = Data.OsName;
         Options->OsLoadOptions  = NULL; // L"";
         AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(Data.SectionName));
+
+        /* The entry we add names its partition from the start: another one of the same path may be there */
+        if (PartitionGuid && DiskGuid && Range)
+            FreeLdrMarkEntryByName(BootStoreHandle, Data.SectionName, PartitionGuid, DiskGuid, Range);
     }
 
 #ifdef NITRO_KDKIT
@@ -534,13 +553,26 @@ UpdateFreeLoaderIniForPartition(
 
         EnumerateBootStoreEntries(BootStoreHandle, EnumerateKdKitEntry, &KdKitPresent);
         if (!KdKitPresent)
+        {
             AddKdKitBootEntry(BootStoreHandle, ArcPath);
+            if (PartitionGuid && DiskGuid && Range)
+                FreeLdrMarkEntryByName(BootStoreHandle, L"ReactOS_KdKit", PartitionGuid, DiskGuid, Range);
+        }
     }
 #endif
 
     /* Close the INI file */
     CloseBootStore(BootStoreHandle);
     return STATUS_SUCCESS;
+}
+
+NTSTATUS
+UpdateFreeLoaderIniForPartition(
+    IN PCWSTR IniPath,
+    IN PCWSTR ArcPath,
+    IN PCWSTR PartitionGuid OPTIONAL)
+{
+    return UpdateFreeLoaderIniForIdentity(IniPath, ArcPath, PartitionGuid, NULL, NULL);
 }
 
 NTSTATUS
@@ -1771,7 +1803,8 @@ AreFilesIdentical(
  * UEFI, GPT: opens the freeldr.ini of the EFI system partition and either (Rebase) moves the entries that
  * already carry the partition's GUID to the partition position in DestinationArcPath, or gives the entries
  * of DestinationArcPath the keys SystemPathPartitionGuid, SystemPathDiskGuid and SystemPathPartitionRange
- * (see FreeLdrMarkEntriesWithIdentity). The loader (UefiResolveSystemPath) resolves them at every boot.
+ * (see FreeLdrMarkEntriesWithIdentityEx; MarkKeyless: also those that name no partition yet). The loader
+ * (UefiResolveSystemPath) resolves them at every boot.
  */
 static
 NTSTATUS
@@ -1779,7 +1812,8 @@ SetEfiEntryIdentity(
     _In_ PCUNICODE_STRING SystemRootPath,
     _In_ PCUNICODE_STRING DestinationArcPath,
     _In_ const BOOT_TARGET_IDENTITY* Identity,
-    _In_ BOOLEAN Rebase)
+    _In_ BOOLEAN Rebase,
+    _In_ BOOLEAN MarkKeyless)
 {
     NTSTATUS Status;
     PVOID BootStoreHandle;
@@ -1809,8 +1843,8 @@ SetEfiEntryIdentity(
     }
     else
     {
-        Status = FreeLdrMarkEntriesWithIdentity(BootStoreHandle, DestinationArcPath->Buffer,
-                                                PartGuid.Buffer, DiskGuid.Buffer, Range);
+        Status = FreeLdrMarkEntriesWithIdentityEx(BootStoreHandle, DestinationArcPath->Buffer,
+                                                  PartGuid.Buffer, DiskGuid.Buffer, Range, MarkKeyless);
     }
 
     CloseBootStore(BootStoreHandle);
@@ -1855,6 +1889,7 @@ InstallEfiBootFiles(
     WCHAR DstPath[MAX_PATH];
     WCHAR OwnPath[MAX_PATH];
     BOOLEAN KeepFallback;
+    BOOLEAN FreshIni = FALSE;
 
     EfiFallbackLoaderKept = FALSE;
 
@@ -1917,21 +1952,44 @@ InstallEfiBootFiles(
          * add a second set of entries next to the stale ones.
          */
         if (TargetIdentity && TargetIdentity->IsGpt)
-            SetEfiEntryIdentity(SystemRootPath, DestinationArcPath, TargetIdentity, TRUE);
+        {
+            /*
+             * Entries written before the keys existed: those whose partition Setup could verify (while the
+             * disks were still as they were) get their keys now, once, so that the GUID decides below which
+             * of them are this installation's.
+             */
+            PVOID BootStoreHandle;
+
+            if (NT_SUCCESS(OpenBootStore(&BootStoreHandle, SystemRootPath->Buffer, FreeLdr,
+                                         BS_OpenExisting, BS_ReadWriteAccess)))
+            {
+                FreeLdrApplyPendingIdentities(BootStoreHandle);
+                CloseBootStore(BootStoreHandle);
+            }
+
+            SetEfiEntryIdentity(SystemRootPath, DestinationArcPath, TargetIdentity, TRUE, FALSE);
+        }
 
         DPRINT1("Update existing 'freeldr.ini'\n");
         if (TargetIdentity && TargetIdentity->IsGpt)
         {
             /* The entries that name another partition by GUID are other installations': not reused */
-            UNICODE_STRING PartGuid;
+            UNICODE_STRING PartGuid = {0}, DiskGuid = {0};
+            WCHAR Range[48];
 
             Status = RtlStringFromGUID((REFGUID)&TargetIdentity->PartitionGuid, &PartGuid);
             if (NT_SUCCESS(Status))
+                Status = RtlStringFromGUID((REFGUID)&TargetIdentity->DiskGuid, &DiskGuid);
+            if (NT_SUCCESS(Status))
+                Status = RtlStringCchPrintfW(Range, ARRAYSIZE(Range), L"%I64u-%I64u",
+                                             TargetIdentity->FirstSector, TargetIdentity->LastSector);
+            if (NT_SUCCESS(Status))
             {
-                Status = UpdateFreeLoaderIniForPartition(SystemRootPath->Buffer, DestinationArcPath->Buffer,
-                                                         PartGuid.Buffer);
-                RtlFreeUnicodeString(&PartGuid);
+                Status = UpdateFreeLoaderIniForIdentity(SystemRootPath->Buffer, DestinationArcPath->Buffer,
+                                                        PartGuid.Buffer, DiskGuid.Buffer, Range);
             }
+            RtlFreeUnicodeString(&PartGuid);
+            RtlFreeUnicodeString(&DiskGuid);
         }
         else
         {
@@ -1942,14 +2000,19 @@ InstallEfiBootFiles(
     {
         DPRINT1("Create new 'freeldr.ini'\n");
         Status = CreateFreeLoaderIniForReactOS(SystemRootPath->Buffer, DestinationArcPath->Buffer);
+        FreshIni = TRUE;
     }
     if (!NT_SUCCESS(Status))
         DPRINT1("Writing 'freeldr.ini' failed (Status 0x%08lx)\n", Status);
 
-    /* Name the partition by its GUID as well: the loader finds it by that at every boot */
+    /*
+     * Name the partition by its GUID as well: the loader finds it by that at every boot. In an existing
+     * file the entries we added carry the keys already and the ones of this partition are brought up to
+     * date; an entry without keys that is still there is not ours.
+     */
     if (NT_SUCCESS(Status) && TargetIdentity && TargetIdentity->IsGpt)
     {
-        Status = SetEfiEntryIdentity(SystemRootPath, DestinationArcPath, TargetIdentity, FALSE);
+        Status = SetEfiEntryIdentity(SystemRootPath, DestinationArcPath, TargetIdentity, FALSE, FreshIni);
         if (!NT_SUCCESS(Status))
             DPRINT1("Naming the system partition by GUID in 'freeldr.ini' failed (Status 0x%08lx)\n", Status);
     }
