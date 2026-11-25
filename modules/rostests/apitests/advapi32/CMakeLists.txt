@@ -17,6 +17,7 @@ list(APPEND SOURCE
     AddMandatoryAce.c
     RegSaveKeyExFormat.c
     RegSaveKeyBigValue.c
+    RegSaveKeyLink.c
     SddlLabelAce.c
     SddlMandatoryLabel.c
     SddlNullAcl.c
