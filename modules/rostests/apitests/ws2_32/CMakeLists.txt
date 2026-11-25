@@ -7,6 +7,7 @@ list(APPEND SOURCE
     acceptlag.c
     acceptname.c
     loopbackalias.c
+    loopbackecho.c
     addresschange.c
     addrchange6.c
     connectbyname.c

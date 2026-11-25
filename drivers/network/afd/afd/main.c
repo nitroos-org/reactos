@@ -24,7 +24,12 @@ DWORD DebugTraceLevel = MIN_TRACE;
 
 #endif /* DBG */
 
-/* FIXME: should depend on SystemSize */
+/* AFD's receive buffer of a stream socket when it starts. A reader that takes all of it and asks for more makes it
+ * grow to what it asks for, up to AFD_NONPAGED_WINDOW_MAX (read.c, GrowReceiveWindow): a recv returns what is queued up
+ * to its buffer, as on Windows (a 64K recv returns 64K; measured on Windows Server 2022, loopback). With 8 KB for good
+ * a program that sends 64 KB and reads what is ready fell behind, its unread data grew to tens of MB, and the exchange
+ * stalled for seconds or never finished. 64K for every socket does not do: 5000 socket pairs ran out of memory.
+ * FIXME: should depend on SystemSize */
 ULONG AfdReceiveWindowSize = 0x2000;
 /* The send window of a socket (what SO_SNDBUF reads, and how much a sender can queue before it waits for
  * the transport). Windows 10 22H2 reports SO_SNDBUF 65536 on a fresh TCP socket, on loopback and Ethernet,
