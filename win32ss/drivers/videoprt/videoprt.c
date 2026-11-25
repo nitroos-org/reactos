@@ -130,6 +130,51 @@ IntVideoPortAddDeviceMapLink(
     return STATUS_SUCCESS;
 }
 
+/**
+ * @brief
+ * Undo IntVideoPortAddDeviceMapLink(): delete the DEVICEMAP\VIDEO value and
+ * the "\??\DISPLAYx" link of an adapter that failed, and give its device
+ * number back when it is the highest one in use.
+ **/
+static
+VOID
+IntVideoPortRemoveDeviceMapLink(
+    PVIDEO_PORT_DEVICE_EXTENSION DeviceExtension)
+{
+    WCHAR DeviceBuffer[20];
+    WCHAR SymlinkBuffer[20];
+    UNICODE_STRING SymlinkName;
+    ULONG DeviceNumber = DeviceExtension->DeviceNumber;
+    ULONG NewMax;
+
+    _swprintf(DeviceBuffer, L"\\Device\\Video%lu", DeviceNumber);
+    RtlDeleteRegistryValue(RTL_REGISTRY_DEVICEMAP, L"VIDEO", DeviceBuffer);
+
+    _swprintf(SymlinkBuffer, L"\\??\\DISPLAY%lu", DeviceNumber + 1);
+    RtlInitUnicodeString(&SymlinkName, SymlinkBuffer);
+    IoDeleteSymbolicLink(&SymlinkName);
+
+    /* Only the newest adapter can hand its number back */
+    if (VideoPortMaxObjectNumber != DeviceNumber)
+        return;
+
+    NewMax = DeviceNumber - 1;
+    VideoPortMaxObjectNumber = NewMax;
+    if (NewMax == (ULONG)-1)
+    {
+        RtlDeleteRegistryValue(RTL_REGISTRY_DEVICEMAP, L"VIDEO", L"MaxObjectNumber");
+    }
+    else
+    {
+        RtlWriteRegistryValue(RTL_REGISTRY_DEVICEMAP,
+                              L"VIDEO",
+                              L"MaxObjectNumber",
+                              REG_DWORD,
+                              &NewMax,
+                              sizeof(NewMax));
+    }
+}
+
 PVOID
 NTAPI
 IntVideoPortImageDirectoryEntryToData(
@@ -345,6 +390,7 @@ IntVideoPortCreateAdapterDeviceObject(
     if (!NT_SUCCESS(Status))
     {
         ERR_(VIDEOPRT, "IntVideoPortAddDeviceMapLink() failed with status 0x%08x\n", Status);
+        IntVideoPortRemoveDeviceMapLink(DeviceExtension);
         goto Failure;
     }
 
@@ -707,6 +753,8 @@ IntVideoPortFindAdapter(
     return STATUS_SUCCESS;
 
 Failure:
+    /* The adapter did not start: do not leave its device map entry and display link behind */
+    IntVideoPortRemoveDeviceMapLink(DeviceExtension);
     RtlFreeUnicodeString(&DeviceExtension->RegistryPath);
     if (DeviceExtension->NextDeviceObject)
         IoDetachDevice(DeviceExtension->NextDeviceObject);
