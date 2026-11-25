@@ -358,12 +358,23 @@ WSAConnectByNameW(IN SOCKET s,
     if ((LocalAddressLength && LocalAddress && getsockname(s, (SOCKADDR *)&Local, &LocalLength) == SOCKET_ERROR) ||
         (RemoteAddressLength && RemoteAddress && getpeername(s, (SOCKADDR *)&Remote, &RemoteLength) == SOCKET_ERROR))
         return FALSE;
-    if (!CbnCopyOut(LocalAddressLength, LocalAddress, &Local, LocalLength) ||
-        !CbnCopyOut(RemoteAddressLength, RemoteAddress, &Remote, RemoteLength))
+    /* the local address comes back without its port, and a buffer that is too small fails the call with the lengths
+       as the caller gave them (Windows Server 2022, as WSAConnectByList) */
+    if (LocalAddressLength && LocalAddress)
+    {
+        if (Local.ss_family == AF_INET)
+            ((SOCKADDR_IN *)&Local)->sin_port = 0;
+        else if (Local.ss_family == AF_INET6)
+            ((SOCKADDR_IN6 *)&Local)->sin6_port = 0;
+    }
+    if ((LocalAddressLength && LocalAddress && *LocalAddressLength < (DWORD)LocalLength) ||
+        (RemoteAddressLength && RemoteAddress && *RemoteAddressLength < (DWORD)RemoteLength))
     {
         SetLastError(WSAEFAULT);
         return FALSE;
     }
+    CbnCopyOut(LocalAddressLength, LocalAddress, &Local, LocalLength);
+    CbnCopyOut(RemoteAddressLength, RemoteAddress, &Remote, RemoteLength);
     return TRUE;
 }
 
