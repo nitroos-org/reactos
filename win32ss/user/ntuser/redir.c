@@ -91,7 +91,6 @@ static ATOM AtomUlwSeen;     /* level 2: the window has had UpdateLayeredWindow 
 static volatile LONG gRedirTimerArmed;
 static volatile LONG gRedirTailArmed;
 static LONG gRedirTailBusy;             /* tail-timer passes that found the USER lock held (raw input thread only) */
-static BOOL gRedirScrollRelease;        /* the DC being released is the one of a scroll (USER lock) */
 static LONGLONG gRedirFrameQpc;         /* a frame (REDIR_FRAME_100NS) in performance counter units */
 static LONGLONG gRedirQuietQpc;         /* half a frame: no release this long ends a burst of scrolls */
 static LONG gRedirBusyFrames;           /* frame-timer passes that found the USER lock held (raw input thread only) */
@@ -1423,18 +1422,11 @@ RedirPresentDirty(PREDIR r)
 }
 
 /*
- * ScrollWindowEx releases its DC with this set: a scroll moves the whole scrolled rectangle, so each one copied to the
- * screen costs as much as the scroll on the screen itself, on top of the scroll in the surface.
- */
-VOID
-FASTCALL
-UserRedirScrollRelease(BOOL bScroll)
-{
-    gRedirScrollRelease = bScroll;
-}
-
-/*
  * A DC bound to the record is released (ReleaseDC or EndPaint): what it drew goes to the screen.
+ *
+ * bScroll: the DC scrolled (ScrollWindowEx's DC, or a window DC passed to ScrollDC, windc.c DCE_REDIR_SCROLLED). A
+ * scroll moves the whole scrolled rectangle, so each one copied to the screen costs as much as the scroll on the
+ * screen itself, on top of the scroll in the surface.
  *
  * Scrolls that follow each other within a frame (a list or text scrolled in a loop) are the exception: the first
  * scroll after a pause is shown at once, and while the next ones come within a frame of the one before, the window is
@@ -1443,17 +1435,20 @@ UserRedirScrollRelease(BOOL bScroll)
  * shows what is left when the releases stop presenting (two frames without one), not before, so the raw input thread
  * does not copy the window on another processor while the scrolling thread draws into it. What is shown is the same,
  * a few frames later at the end of a burst, and a loop of scrolls copies once per frame instead of once per scroll.
+ *
+ * The burst state is the top-level window's (the record's), not the scrolled child's: scrolls of two children of one
+ * window in turn are one burst, and a child's paint during the burst of another waits for the frame too.
  */
 VOID
 FASTCALL
-UserRedirReleased(PVOID pv)
+UserRedirReleased(PVOID pv, BOOL bScroll)
 {
     PREDIR r = pv;
     LONGLONG Now;
 
     if (!r->pwnd)
         return;
-    if (gRedirScrollRelease)
+    if (bScroll)
     {
         BOOL bBurst;
 

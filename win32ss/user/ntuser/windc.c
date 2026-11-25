@@ -488,10 +488,11 @@ DceReleaseDC(DCE* dce, BOOL EndPaint)
    /* What a redirected window drew goes to the screen now; a cache DC lets go of its surface */
    if (dce->pRedir)
    {
-      UserRedirReleased(dce->pRedir);
+      UserRedirReleased(dce->pRedir, (dce->RedirFlags & DCE_REDIR_SCROLLED) != 0);
       if (dce->DCXFlags & DCX_CACHE)
          DceRedirBind(dce, NULL);
    }
+   dce->RedirFlags &= ~DCE_REDIR_SCROLLED;
 
    /* The clip region (the update region of a paint) goes first: the visible region restored below must not keep
     * it, or what the owner draws through a held CS_OWNDC / CS_CLASSDC DC after a paint reaches only the part

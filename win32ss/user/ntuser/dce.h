@@ -38,6 +38,7 @@ typedef struct tagDCE
 #define DCE_REDIR_RETRY     0x0001
 #define DCE_REDIR_VISSTALE  0x0002
 #define DCE_REDIR_TRIED     0x0004  /* tried by the frame timer in this round (DceRedirRetryAll) */
+#define DCE_REDIR_SCROLLED  0x0008  /* scrolled (ScrollDC, ScrollWindowEx) since it was got: its release is a scroll (redir.c) */
 
 /* internal DCX flags, see psdk/winuser.h for the rest */
 #define DCX_DCEEMPTY        0x00000800
