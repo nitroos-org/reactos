@@ -362,6 +362,8 @@ typedef struct _ENUM_REACTOS_ENTRIES_DATA
     ULONG i;
     BOOLEAN UseExistingEntry;
     PCWSTR ArcPath;
+    PVOID BootStoreHandle;  /* the store being enumerated (to read the GUID key of an entry) */
+    PCWSTR PartitionGuid;   /* GUID of the partition the installation goes to, or NULL (MBR, no GUID) */
     WCHAR SectionName[80];
     WCHAR OsName[80];
 } ENUM_REACTOS_ENTRIES_DATA, *PENUM_REACTOS_ENTRIES_DATA;
@@ -428,6 +430,23 @@ EnumerateReactOSEntries(
 
     DPRINT("EnumerateReactOSEntries: OsLoadPath: '%S'\n", Options->OsLoadPath);
 
+    /*
+     * An entry that names its partition by GUID is the entry of the installation on that partition, whatever
+     * position its SystemPath holds. When the GUID is not the one of the partition we install to, the entry is
+     * another installation's (the position in its path is out of date and now equals ours): it is not ours.
+     */
+    if (Type == FreeLdr && Data->PartitionGuid && Data->BootStoreHandle && BootEntry->BootEntryKey)
+    {
+        PCWSTR EntryGuid = FreeLdrGetEntryPartitionGuid(Data->BootStoreHandle, (PCWSTR)BootEntry->BootEntryKey);
+
+        if (EntryGuid && _wcsicmp(EntryGuid, Data->PartitionGuid) != 0)
+        {
+            DPRINT1("Boot entry '%S' names another partition (GUID %S): not ours\n",
+                    (PCWSTR)BootEntry->BootEntryKey, EntryGuid);
+            goto SkipThisEntry;
+        }
+    }
+
     Data->UseExistingEntry = TRUE;
     RtlStringCchCopyW(Data->OsName, ARRAYSIZE(Data->OsName), BootEntry->FriendlyName);
 
@@ -449,9 +468,10 @@ SkipThisEntry:
 
 /* Not static: the setuplib unit test calls it on a freeldr.ini of its own */
 NTSTATUS
-UpdateFreeLoaderIni(
+UpdateFreeLoaderIniForPartition(
     IN PCWSTR IniPath,
-    IN PCWSTR ArcPath)
+    IN PCWSTR ArcPath,
+    IN PCWSTR PartitionGuid OPTIONAL)
 {
     NTSTATUS Status;
     PVOID BootStoreHandle;
@@ -470,6 +490,8 @@ UpdateFreeLoaderIni(
     Data.UseExistingEntry = TRUE;
     Data.i = 1;
     Data.ArcPath = ArcPath;
+    Data.BootStoreHandle = BootStoreHandle;
+    Data.PartitionGuid = PartitionGuid;
     RtlStringCchCopyW(Data.SectionName, ARRAYSIZE(Data.SectionName), L"ReactOS");
     RtlStringCchCopyW(Data.OsName, ARRAYSIZE(Data.OsName), L"\"" BRAND_PRODUCT_NAME_W L"\"");
 
@@ -521,6 +543,14 @@ UpdateFreeLoaderIni(
     return STATUS_SUCCESS;
 }
 
+NTSTATUS
+UpdateFreeLoaderIni(
+    IN PCWSTR IniPath,
+    IN PCWSTR ArcPath)
+{
+    return UpdateFreeLoaderIniForPartition(IniPath, ArcPath, NULL);
+}
+
 static
 NTSTATUS
 UpdateBootIni(
@@ -547,6 +577,8 @@ UpdateBootIni(
     Data.UseExistingEntry = TRUE;
     // Data.i = 1;
     Data.ArcPath = EntryName;
+    Data.BootStoreHandle = NULL;
+    Data.PartitionGuid = NULL;
     // RtlStringCchCopyW(Data.SectionName, ARRAYSIZE(Data.SectionName), L"ReactOS");
     RtlStringCchCopyW(Data.OsName, ARRAYSIZE(Data.OsName), L"\"" BRAND_PRODUCT_NAME_W L"\"");
 
@@ -1888,7 +1920,23 @@ InstallEfiBootFiles(
             SetEfiEntryIdentity(SystemRootPath, DestinationArcPath, TargetIdentity, TRUE);
 
         DPRINT1("Update existing 'freeldr.ini'\n");
-        Status = UpdateFreeLoaderIni(SystemRootPath->Buffer, DestinationArcPath->Buffer);
+        if (TargetIdentity && TargetIdentity->IsGpt)
+        {
+            /* The entries that name another partition by GUID are other installations': not reused */
+            UNICODE_STRING PartGuid;
+
+            Status = RtlStringFromGUID((REFGUID)&TargetIdentity->PartitionGuid, &PartGuid);
+            if (NT_SUCCESS(Status))
+            {
+                Status = UpdateFreeLoaderIniForPartition(SystemRootPath->Buffer, DestinationArcPath->Buffer,
+                                                         PartGuid.Buffer);
+                RtlFreeUnicodeString(&PartGuid);
+            }
+        }
+        else
+        {
+            Status = UpdateFreeLoaderIni(SystemRootPath->Buffer, DestinationArcPath->Buffer);
+        }
     }
     else
     {

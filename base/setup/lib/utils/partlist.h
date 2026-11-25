@@ -357,6 +357,12 @@ SelectPartition(
     _In_ ULONG DiskNumber,
     _In_ ULONG PartitionNumber);
 
+/* The partition of a GPT disk whose unique GUID is PartitionGuid, wherever it sits in the table now, or NULL */
+PPARTENTRY
+FindPartitionByGptId(
+    _In_ PPARTLIST List,
+    _In_ const GUID* PartitionGuid);
+
 PPARTENTRY
 NTAPI
 GetNextPartition(

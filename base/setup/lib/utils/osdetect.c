@@ -60,6 +60,7 @@ typedef struct _ENUM_INSTALLS_DATA
 {
     _Inout_ PGENERIC_LIST List;
     _In_ PPARTLIST PartList;
+    _In_opt_ PVOID BootStoreHandle;     /* the store being enumerated, to read the keys of an entry */
 } ENUM_INSTALLS_DATA, *PENUM_INSTALLS_DATA;
 
 // PENUM_BOOT_ENTRIES_ROUTINE
@@ -76,6 +77,9 @@ EnumerateInstallations(
 
     ULONG DiskNumber = 0, PartitionNumber = 0;
     PCWSTR PathComponent = NULL;
+    PCWSTR EntryGuid;       /* the entry's SystemPathPartitionGuid, if it has one */
+    PCWSTR ArcPathKey;      /* what tells this installation from another in the list */
+    PCWSTR PathTail;
 
     UNICODE_STRING SystemRootPath;
     WCHAR SystemRoot[MAX_PATH];
@@ -120,33 +124,79 @@ EnumerateInstallations(
     // TODO: Normalize the ARC path.
 
     /*
-     * Check whether we already have an installation with this ARC path.
-     * If this is the case, stop there.
+     * A UEFI boot entry may name its system partition by the unique GUID of its GPT entry
+     * (SystemPathPartitionGuid): that identifies the partition whatever its position in the
+     * partition table is now, where the number in the ARC path is only the position at the
+     * time the entry was written. The partition is found by the GUID; an entry whose GUID
+     * names no partition of this computer belongs to a partition that is gone.
      */
-    NtOsInstall = FindExistingNTOSInstall(Data->List, Options->OsLoadPath, NULL);
-    if (NtOsInstall)
+    EntryGuid = (Type == FreeLdr && BootEntry->BootEntryKey)
+                    ? FreeLdrGetEntryPartitionGuid(Data->BootStoreHandle, (PCWSTR)BootEntry->BootEntryKey)
+                    : NULL;
+    if (EntryGuid)
     {
-        DPRINT("    An NTOS installation with name \"%S\" from vendor \"%S\" already exists in SystemRoot '%wZ'\n",
-               NtOsInstall->InstallationName, NtOsInstall->VendorName, &NtOsInstall->SystemArcPath);
-        /* Continue the enumeration */
-        return STATUS_SUCCESS;
-    }
+        UNICODE_STRING GuidString;
+        GUID PartitionGuid;
+        PPARTENTRY GuidPartEntry = NULL;
 
-    /*
-     * Convert the ARC path into an NT path, from which we will deduce the
-     * real disk & partition on which the candidate installation resides,
-     * as well as verifying whether it is indeed an NTOS installation.
-     */
-    RtlInitEmptyUnicodeString(&SystemRootPath, SystemRoot, sizeof(SystemRoot));
-    if (!ArcPathToNtPath(&SystemRootPath, Options->OsLoadPath, Data->PartList))
+        RtlInitUnicodeString(&GuidString, EntryGuid);
+        if (NT_SUCCESS(RtlGUIDFromString(&GuidString, &PartitionGuid)))
+            GuidPartEntry = FindPartitionByGptId(Data->PartList, &PartitionGuid);
+        if (!GuidPartEntry)
+        {
+            DPRINT1("The partition %S of the boot entry '%S' is not on this computer, skip the installation.\n",
+                    EntryGuid, BootEntry->FriendlyName);
+            /* Continue the enumeration */
+            return STATUS_SUCCESS;
+        }
+
+        /* The rest of the path (after the partition) is kept; the NT path of the partition is the one of now */
+        PathTail = wcschr(Options->OsLoadPath, OBJ_NAME_PATH_SEPARATOR);
+        if (!NT_SUCCESS(RtlStringCchPrintfW(SystemRoot, ARRAYSIZE(SystemRoot), L"%s%s",
+                                            GuidPartEntry->DeviceName, PathTail ? PathTail : L"")))
+        {
+            return STATUS_SUCCESS;
+        }
+        RtlInitUnicodeString(&SystemRootPath, SystemRoot);
+        /* The stored position is not the identity: installations are told apart by their NT path */
+        ArcPathKey = SystemRoot;
+
+        DPRINT("The partition %S of the boot entry '%S' is at '%wZ' now (path says '%S')\n",
+               EntryGuid, BootEntry->FriendlyName, &SystemRootPath, Options->OsLoadPath);
+    }
+    else
     {
-        DPRINT1("ArcPathToNtPath(%S) failed, skip the installation.\n", Options->OsLoadPath);
-        /* Continue the enumeration */
-        return STATUS_SUCCESS;
-    }
+        ArcPathKey = Options->OsLoadPath;
 
-    DPRINT("ArcPathToNtPath() succeeded: '%S' --> '%wZ'\n",
-           Options->OsLoadPath, &SystemRootPath);
+        /*
+         * Check whether we already have an installation with this ARC path.
+         * If this is the case, stop there.
+         */
+        NtOsInstall = FindExistingNTOSInstall(Data->List, Options->OsLoadPath, NULL);
+        if (NtOsInstall)
+        {
+            DPRINT("    An NTOS installation with name \"%S\" from vendor \"%S\" already exists in SystemRoot '%wZ'\n",
+                   NtOsInstall->InstallationName, NtOsInstall->VendorName, &NtOsInstall->SystemArcPath);
+            /* Continue the enumeration */
+            return STATUS_SUCCESS;
+        }
+
+        /*
+         * Convert the ARC path into an NT path, from which we will deduce the
+         * real disk & partition on which the candidate installation resides,
+         * as well as verifying whether it is indeed an NTOS installation.
+         */
+        RtlInitEmptyUnicodeString(&SystemRootPath, SystemRoot, sizeof(SystemRoot));
+        if (!ArcPathToNtPath(&SystemRootPath, Options->OsLoadPath, Data->PartList))
+        {
+            DPRINT1("ArcPathToNtPath(%S) failed, skip the installation.\n", Options->OsLoadPath);
+            /* Continue the enumeration */
+            return STATUS_SUCCESS;
+        }
+
+        DPRINT("ArcPathToNtPath() succeeded: '%S' --> '%wZ'\n",
+               Options->OsLoadPath, &SystemRootPath);
+    }
 
     /*
      * Check whether we already have an installation with this NT path.
@@ -190,7 +240,7 @@ EnumerateInstallations(
                                       BootEntry->FriendlyName,
                                       Machine,
                                       VendorName.Buffer, // FIXME: What if it's not NULL-terminated?
-                                      Options->OsLoadPath,
+                                      ArcPathKey,
                                       &SystemRootPath, PathComponent,
                                       DiskNumber, PartitionNumber);
     if (NtOsInstall)
@@ -749,7 +799,9 @@ FindNTOSInstallations(
                     Type, Status);
             continue;
         }
+        Data.BootStoreHandle = BootStoreHandle;
         EnumerateBootStoreEntries(BootStoreHandle, EnumerateInstallations, &Data);
+        Data.BootStoreHandle = NULL;
         CloseBootStore(BootStoreHandle);
     }
 
