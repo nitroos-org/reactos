@@ -4415,7 +4415,29 @@ static void test_wow64_context(void)
     ok(ret == STATUS_INVALID_PARAMETER || broken(ret == STATUS_PARTIAL_COPY), "got %#lx\n", ret);
 
     sprintf( cmdline, "\"%s\" /c for /l %%n in () do @echo >nul", appname );
+#ifdef __REACTOS__
+    /* The child is suspended at arbitrary points. A console child that is not given standard handles
+     * gets a duplicate of this process' standard output; when that is a file (a redirected test run),
+     * suspending the child inside its flush of the file leaves the file object locked and the next
+     * WriteFile of this test blocks for good. Give it the NUL device instead. */
+    {
+        SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+        HANDLE nul = CreateFileA( "NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                  &sa, OPEN_EXISTING, 0, NULL );
+        if (nul != INVALID_HANDLE_VALUE)
+        {
+            si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESTDHANDLES;
+            si.hStdInput = si.hStdOutput = si.hStdError = nul;
+            r = CreateProcessA( appname, cmdline, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &si, &pi);
+            CloseHandle( nul );
+        }
+        else
+            r = CreateProcessA( appname, cmdline, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi);
+    }
+#else
     r = CreateProcessA( appname, cmdline, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi);
+#endif
     ok( r, "failed to start %s err %lu\n", appname, GetLastError() );
 
     ret = pRtlWow64GetThreadContext( pi.hThread, &ctx );
