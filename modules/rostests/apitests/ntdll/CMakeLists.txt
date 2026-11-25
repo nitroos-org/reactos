@@ -134,6 +134,7 @@ list(APPEND SOURCE
     NtOpenKeyConcurrent.c
     NtOpenKeyEx.c
     NtOpenProcess.c
+    NtOpenProcessImplied.c
     NtOpenProcessProtected.c
     NtOpenProcessToken.c
     NtOpenSection.c
