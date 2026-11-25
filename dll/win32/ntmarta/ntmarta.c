@@ -1761,18 +1761,36 @@ AccpOpenRelative(IN HANDLE Directory,
                  IN ULONG Length,
                  IN ACCESS_MASK Access,
                  IN ULONG Options,
-                 OUT PHANDLE File)
+                 OUT PHANDLE File,
+                 OUT PBOOLEAN Synchronous OPTIONAL)
 {
     OBJECT_ATTRIBUTES Attributes;
     UNICODE_STRING String;
     IO_STATUS_BLOCK Iosb;
+    NTSTATUS Status;
 
     String.Buffer = (PWSTR)Name;
     String.Length = String.MaximumLength = (USHORT)Length;
     InitializeObjectAttributes(&Attributes, &String, OBJ_CASE_INSENSITIVE, Directory, NULL);
-    return NtOpenFile(File, Access | SYNCHRONIZE, &Attributes, &Iosb,
-                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                      Options | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT);
+    Status = NtOpenFile(File, Access | SYNCHRONIZE, &Attributes, &Iosb,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        Options | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT);
+    if (Synchronous != NULL)
+        *Synchronous = TRUE;
+    if (Status == STATUS_ACCESS_DENIED)
+    {
+        /*
+         * A DACL that denies SYNCHRONIZE (to Everyone, say) does not keep Windows from changing and listing the object
+         * (measured on Windows Server 2022: READ_CONTROL | WRITE_DAC and FILE_LIST_DIRECTORY open without it, an open
+         * with it is refused). The handle is then not a synchronous one.
+         */
+        Status = NtOpenFile(File, Access, &Attributes, &Iosb,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            Options | FILE_OPEN_REPARSE_POINT);
+        if (Synchronous != NULL)
+            *Synchronous = FALSE;
+    }
+    return Status;
 }
 
 /* Sets an auto-inherited DACL on a file handle */
@@ -1793,6 +1811,7 @@ AccpSetFileDacl(IN HANDLE File,
 typedef struct _ACCP_FILE_FRAME
 {
     HANDLE Directory;                   /* the directory whose entries this level lists (FILE_LIST_DIRECTORY) */
+    BOOLEAN Synchronous;                /* the handle is a synchronous one (else the listing waits on the walk's event) */
     PSECURITY_DESCRIPTOR ParentSd;      /* its descriptor now (LocalAlloc) */
     PSECURITY_DESCRIPTOR OldParentSd;   /* its descriptor before (LocalAlloc) */
     PUCHAR Buffer;                      /* the entries of the last query (ACCP_FILE_DIR_BUFFER bytes) */
@@ -1807,16 +1826,19 @@ typedef struct _ACCP_FILE_WALK
 } ACCP_FILE_WALK, *PACCP_FILE_WALK;
 
 /*
- * The walk below Directory (a handle with FILE_LIST_DIRECTORY, which the walk takes over and closes), whose
- * descriptor was OldSd and is RootSd now (both LocalAlloc'd; the walk frees them).
+ * The walk below Directory (a handle with FILE_LIST_DIRECTORY, which the walk takes over and closes; Synchronous
+ * says whether it is a synchronous one), whose descriptor was OldSd and is RootSd now (both LocalAlloc'd; the walk
+ * frees them).
  */
 static VOID
 AccpPropagateToFiles(IN HANDLE Directory,
+                     IN BOOLEAN Synchronous,
                      IN PSECURITY_DESCRIPTOR RootSd,
                      IN PSECURITY_DESCRIPTOR RootOldSd OPTIONAL,
                      OUT PACCP_FILE_WALK Walk)
 {
     PACCP_FILE_FRAME Stack;
+    HANDLE ListEvent = NULL;
     LONG Top;
 
     RtlZeroMemory(Walk, sizeof(*Walk));
@@ -1832,6 +1854,7 @@ AccpPropagateToFiles(IN HANDLE Directory,
         return;
     }
     Stack[0].Directory = Directory;
+    Stack[0].Synchronous = Synchronous;
     Stack[0].ParentSd = RootSd;
     Stack[0].OldParentSd = RootOldSd;
     Stack[0].Offset = MAXULONG;
@@ -1857,8 +1880,21 @@ AccpPropagateToFiles(IN HANDLE Directory,
         /* the next entry of this level, querying the directory again when the buffer is used up */
         if (Frame->Offset == MAXULONG)
         {
-            Status = NtQueryDirectoryFile(Frame->Directory, NULL, NULL, NULL, &Iosb, Frame->Buffer,
-                                          ACCP_FILE_DIR_BUFFER, FileDirectoryInformation, FALSE, NULL, Frame->Restart);
+            if (!Frame->Synchronous && ListEvent == NULL)
+                ListEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+            if (!Frame->Synchronous && ListEvent == NULL)
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+            else
+            {
+                Status = NtQueryDirectoryFile(Frame->Directory, Frame->Synchronous ? NULL : ListEvent, NULL, NULL,
+                                              &Iosb, Frame->Buffer, ACCP_FILE_DIR_BUFFER, FileDirectoryInformation,
+                                              FALSE, NULL, Frame->Restart);
+                if (Status == STATUS_PENDING)
+                {
+                    WaitForSingleObject(ListEvent, INFINITE);
+                    Status = Iosb.Status;
+                }
+            }
             Frame->Restart = FALSE;
             if (!NT_SUCCESS(Status))
             {
@@ -1885,7 +1921,7 @@ AccpPropagateToFiles(IN HANDLE Directory,
         Walk->Checked++;
 
         if (!NT_SUCCESS(AccpOpenRelative(Frame->Directory, Entry->FileName, Entry->FileNameLength,
-                                         READ_CONTROL | WRITE_DAC, 0, &Child)))
+                                         READ_CONTROL | WRITE_DAC, 0, &Child, NULL)))
         {
             Walk->Skipped++;
             continue;
@@ -1956,7 +1992,8 @@ AccpPropagateToFiles(IN HANDLE Directory,
             StoredSd = AccpQueryFileSd(Child);
             if (StoredSd == NULL)
                 goto Next;
-            if (!NT_SUCCESS(AccpOpenRelative(Child, NULL, 0, FILE_LIST_DIRECTORY, FILE_DIRECTORY_FILE, &ChildDirectory)) ||
+            if (!NT_SUCCESS(AccpOpenRelative(Child, NULL, 0, FILE_LIST_DIRECTORY, FILE_DIRECTORY_FILE, &ChildDirectory,
+                                             &Stack[Top + 1].Synchronous)) ||
                 (Stack[Top + 1].Buffer = (PUCHAR)LocalAlloc(LMEM_FIXED, ACCP_FILE_DIR_BUFFER)) == NULL)
             {
                 if (ChildDirectory != NULL)
@@ -1985,6 +2022,8 @@ Next:
             NtClose(Child);
     }
 
+    if (ListEvent != NULL)
+        CloseHandle(ListEvent);
     LocalFree(Stack);
 }
 
@@ -2000,6 +2039,7 @@ AccpSetFileSecurity(IN HANDLE File,
     FILE_BASIC_INFORMATION Basic;
     PSECURITY_DESCRIPTOR OldSd = NULL, NewSd;
     HANDLE Directory = NULL;
+    BOOLEAN DirectorySynchronous = TRUE;
     IO_STATUS_BLOCK Iosb;
     ACCP_FILE_WALK Walk;
     NTSTATUS Status;
@@ -2007,7 +2047,7 @@ AccpSetFileSecurity(IN HANDLE File,
     /* the directory, reopened through the handle for the walk; not a link, not a file */
     if ((SecurityInfo & DACL_SECURITY_INFORMATION) &&
         NT_SUCCESS(AccpOpenRelative(File, NULL, 0, READ_CONTROL | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES, 0,
-                                    &Directory)))
+                                    &Directory, &DirectorySynchronous)))
     {
         if (!NT_SUCCESS(NtQueryInformationFile(Directory, &Iosb, &Basic, sizeof(Basic), FileBasicInformation)) ||
             !(Basic.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (Basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
@@ -2033,7 +2073,7 @@ AccpSetFileSecurity(IN HANDLE File,
         NewSd = AccpQueryFileSd(Directory);
         if (NewSd != NULL)
         {
-            AccpPropagateToFiles(Directory, NewSd, OldSd, &Walk);
+            AccpPropagateToFiles(Directory, DirectorySynchronous, NewSd, OldSd, &Walk);
             DPRINT("Propagated: %lu checked, %lu updated, %lu skipped, %lu too deep\n",
                    Walk.Checked, Walk.Updated, Walk.Skipped, Walk.TooDeep);
         }
