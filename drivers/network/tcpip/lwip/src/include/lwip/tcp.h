@@ -338,9 +338,11 @@ struct tcp_pcb {
   /* NitroOS: the end of the highest SACKed segment in the unacked queue (RFC 6675 HighACK/HighData) */
   u32_t sack_high;
   /* NitroOS: lost retransmission in fast recovery (tcp_fasttmr): lastack at the last fast tick, and for how many
-     fast ticks it has not moved */
+     fast ticks it has not moved; recovery_wait is how many fast ticks to wait for the next resend of the same
+     segment (it doubles with every resend until snd_una moves) */
   u32_t recovery_ack;
   u8_t recovery_ticks;
+  u8_t recovery_wait;
 #endif
 
   /* sender variables */

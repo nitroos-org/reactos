@@ -1497,7 +1497,7 @@
 #@ stdcall SetNamedPipeHandleState(long ptr ptr ptr)
 #@ stdcall SetPriorityClass(long long)
 @ stdcall -version=0x601+ SetPrivateObjectSecurity(long ptr ptr ptr long) advapi32.SetPrivateObjectSecurity
-#@ stdcall SetPrivateObjectSecurityEx(long ptr ptr long ptr long)
+@ stdcall -version=0x601+ SetPrivateObjectSecurityEx(long ptr ptr long ptr long) advapi32.SetPrivateObjectSecurityEx
 #@ stdcall SetProcessAffinityUpdateMode(long long)
 #@ stdcall SetProcessDefaultCpuSets(ptr ptr long)
 #@ stdcall SetProcessGroupAffinity(long ptr ptr)

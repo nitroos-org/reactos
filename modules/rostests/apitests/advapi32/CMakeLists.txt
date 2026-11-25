@@ -17,6 +17,7 @@ list(APPEND SOURCE
     AddMandatoryAce.c
     RegSaveKeyExFormat.c
     RegSaveKeyBigValue.c
+    RegSaveKeyLink.c
     SddlLabelAce.c
     SddlMandatoryLabel.c
     SddlNullAcl.c
@@ -159,6 +160,7 @@ list(APPEND SOURCE
     ServiceVirtualAccount.c
     ServiceNetwork.c
     SetEntriesInAclOld.c
+    SetPrivateObjectSecurityEx.c
     SetSecurityGenericMap.c
     SetSecurityTypeMask.c
     SetSecurityInfoKey.c

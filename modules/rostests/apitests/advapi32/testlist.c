@@ -19,6 +19,7 @@ extern void func_AccessCheckObjectTypeList(void);
 extern void func_AddMandatoryAce(void);
 extern void func_RegSaveKeyExFormat(void);
 extern void func_RegSaveKeyBigValue(void);
+extern void func_RegSaveKeyLink(void);
 extern void func_SddlLabelAce(void);
 extern void func_SddlMandatoryLabel(void);
 extern void func_SddlNullAcl(void);
@@ -176,6 +177,7 @@ extern void func_ServiceSid(void);
 extern void func_ServiceVirtualAccount(void);
 extern void func_ServiceNetwork(void);
 extern void func_SetEntriesInAclOld(void);
+extern void func_SetPrivateObjectSecurityEx(void);
 extern void func_SetSecurityGenericMap(void);
 extern void func_SetSecurityTypeMask(void);
 extern void func_SetSecurityInfoKey(void);
@@ -231,6 +233,7 @@ const struct test winetest_testlist[] =
     { "AddMandatoryAce", func_AddMandatoryAce },
     { "RegSaveKeyExFormat", func_RegSaveKeyExFormat },
     { "RegSaveKeyBigValue", func_RegSaveKeyBigValue },
+    { "RegSaveKeyLink", func_RegSaveKeyLink },
     { "SddlLabelAce", func_SddlLabelAce },
     { "SddlMandatoryLabel", func_SddlMandatoryLabel },
     { "SddlNullAcl", func_SddlNullAcl },
@@ -398,6 +401,7 @@ const struct test winetest_testlist[] =
     { "ServiceVirtualAccount", func_ServiceVirtualAccount },
     { "ServiceNetwork", func_ServiceNetwork },
     { "SetEntriesInAclOld", func_SetEntriesInAclOld },
+    { "SetPrivateObjectSecurityEx", func_SetPrivateObjectSecurityEx },
     { "SetSecurityGenericMap", func_SetSecurityGenericMap },
     { "SetSecurityTypeMask", func_SetSecurityTypeMask },
     { "SetSecurityInfoKey", func_SetSecurityInfoKey },

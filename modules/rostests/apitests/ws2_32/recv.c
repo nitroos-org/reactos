@@ -345,6 +345,10 @@ static void Test_Overread(void)
 
     for (i = 1; i < RTL_NUMBER_OF(receivers); i++)
     {
+        /* The close is delivered to the client asynchronously: wait for the completion that is checked */
+        ret = (int)WaitForSingleObject(receivers[i].overlapped.hEvent, 1000);
+        ok(ret == WAIT_OBJECT_0, "[%Iu] receive not completed after close: wait returned %d\n", i, ret);
+
         flags = 0x55555555;
         bytesTransferred = 0x55555555;
         ret = WSAGetOverlappedResult(ClientSocket,
