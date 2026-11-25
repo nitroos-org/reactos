@@ -244,6 +244,90 @@ DPtoLP(
     return NtGdiTransformPoints(hdc, lpPoints, lpPoints, nCount, GdiDpToLp);
 }
 
+/*
+ * LPtoDP through 28.4 fixed point (see LPtoDP). Coordinates of 2^27 and more do not fit 28.4: a call with one of them,
+ * and a coordinate that comes back from the kernel saturated (LONG_MAX / LONG_MIN), keep the plain transform, which is
+ * exact for the large values that an offset or a unity scale produces (INT_MAX stays INT_MAX), as before.
+ */
+#define FIXED_LIMIT 0x08000000L
+
+static
+BOOL
+IntLPtoDPFixed(
+    _In_ HDC hdc,
+    _Inout_updates_(nCount) LPPOINT lpPoints,
+    _In_ INT nCount)
+{
+    POINT Stack[16], *pIn = Stack;
+    BOOL bRet = TRUE, bLarge = FALSE, bSaturated = FALSE;
+    INT i;
+
+    if ((UINT)nCount > _countof(Stack))
+    {
+        pIn = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)nCount * sizeof(POINT));
+        if (!pIn)
+            return NtGdiTransformPoints(hdc, lpPoints, lpPoints, nCount, GdiLpToDp);
+    }
+
+    /* Our copy of the points (a pointer that cannot be read fails the call, as the kernel did) */
+    _SEH2_TRY
+    {
+        RtlCopyMemory(pIn, lpPoints, (SIZE_T)nCount * sizeof(POINT));
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        bRet = FALSE;
+    }
+    _SEH2_END;
+
+    if (bRet)
+    {
+        for (i = 0; i < nCount; i++)
+        {
+            if (pIn[i].x >= FIXED_LIMIT || pIn[i].x < -FIXED_LIMIT || pIn[i].y >= FIXED_LIMIT || pIn[i].y < -FIXED_LIMIT)
+                bLarge = TRUE;
+        }
+
+        if (bLarge)
+        {
+            bRet = NtGdiTransformPoints(hdc, lpPoints, lpPoints, nCount, GdiLpToDp);
+        }
+        else
+        {
+            /* the 28.4 values go straight to the caller's points: the kernel fails for a buffer it cannot write */
+            bRet = NtGdiTransformPoints(hdc, pIn, lpPoints, nCount, 2);
+            for (i = 0; bRet && i < nCount; i++)
+            {
+                if (lpPoints[i].x == LONG_MAX || lpPoints[i].x == LONG_MIN)
+                    bSaturated = TRUE;
+                else
+                    lpPoints[i].x = (LONG)(((LONGLONG)lpPoints[i].x + 8) >> 4);
+                if (lpPoints[i].y == LONG_MAX || lpPoints[i].y == LONG_MIN)
+                    bSaturated = TRUE;
+                else
+                    lpPoints[i].y = (LONG)(((LONGLONG)lpPoints[i].y + 8) >> 4);
+            }
+
+            if (bRet && bSaturated)
+            {
+                /* the plain transform of the saved points, for the coordinates that did not fit */
+                bRet = NtGdiTransformPoints(hdc, pIn, pIn, nCount, GdiLpToDp);
+                for (i = 0; bRet && i < nCount; i++)
+                {
+                    if (lpPoints[i].x == LONG_MAX || lpPoints[i].x == LONG_MIN)
+                        lpPoints[i].x = pIn[i].x;
+                    if (lpPoints[i].y == LONG_MAX || lpPoints[i].y == LONG_MIN)
+                        lpPoints[i].y = pIn[i].y;
+                }
+            }
+        }
+    }
+
+    if (pIn != Stack)
+        HeapFree(GetProcessHeap(), 0, pIn);
+    return bRet;
+}
+
 BOOL
 WINAPI
 LPtoDP(
@@ -268,7 +352,12 @@ LPtoDP(
     if (IntIsIdentityTransformDc(hdc, pdcattr))
         return TRUE;
 
-    return NtGdiTransformPoints(hdc, lpPoints, lpPoints, nCount, GdiLpToDp);
+    /* Windows converts through 28.4 fixed point: f = v * 16 rounded, then (f + 8) >> 4 (recorded Windows Server 2022
+       rows: 336 coordinates, 50.4999 gives 51 where plain rounding gives 50). The kernel's mode 2 returns f (a value
+       that is exactly n + 0.5 sixteenths rounds away from zero there; the recorded rows do not tell that from
+       flooring). Only LPtoDP does this: the points the kernel transforms for drawing keep their rounding, and so
+       does DPtoLP. */
+    return IntLPtoDPFixed(hdc, lpPoints, nCount);
 }
 
 /*

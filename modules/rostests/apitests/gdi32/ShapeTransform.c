@@ -157,6 +157,35 @@ static int MeasurePenWidth(int mode, int LogW)
     return n;
 }
 
+/* Where the drawing puts a logical point: the world transform, then the window/viewport mapping, rounded to the nearest
+   pixel. LPtoDP rounds through 28.4 fixed point like Windows, and 50.4999 is 51 there, so it can be a pixel off the
+   drawing; these tests compare the placement of the shapes with the placement of a point, so they place the points
+   with the rounding of the drawing. */
+static void DrawnPoints(HDC hdc, POINT *pt, int n)
+{
+    XFORM xf = { 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f };
+    POINT wo, vo;
+    SIZE we, ve;
+    double x, y, px, py;
+    int i;
+
+    if (GetGraphicsMode(hdc) == GM_ADVANCED)
+        GetWorldTransform(hdc, &xf);
+    GetWindowOrgEx(hdc, &wo);
+    GetViewportOrgEx(hdc, &vo);
+    GetWindowExtEx(hdc, &we);
+    GetViewportExtEx(hdc, &ve);
+    for (i = 0; i < n; i++)
+    {
+        px = xf.eM11 * (double)pt[i].x + xf.eM21 * (double)pt[i].y + xf.eDx;
+        py = xf.eM12 * (double)pt[i].x + xf.eM22 * (double)pt[i].y + xf.eDy;
+        x = (px - wo.x) * ve.cx / we.cx + vo.x;
+        y = (py - wo.y) * ve.cy / we.cy + vo.y;
+        pt[i].x = (LONG)(x < 0 ? x - 0.5 : x + 0.5);
+        pt[i].y = (LONG)(y < 0 ? y - 0.5 : y + 0.5);
+    }
+}
+
 static void PlaceCase(CASE *c, POINT *log, int *pcLog)
 {
     static const POINT TriDev[3] = { { 50, 40 }, { 165, 70 }, { 80, 160 } };
@@ -192,7 +221,7 @@ static void PlaceCase(CASE *c, POINT *log, int *pcLog)
         cr[1].x = log[1].x; cr[1].y = log[0].y;
         cr[2].x = log[1].x; cr[2].y = log[1].y;
         cr[3].x = log[0].x; cr[3].y = log[1].y;
-        LPtoDP(hdcS, cr, 4);
+        DrawnPoints(hdcS, cr, 4);
         for (i = 0; i < 4; i++)
             c->dev[i] = cr[i];
         c->cDev = 4;
@@ -201,7 +230,7 @@ static void PlaceCase(CASE *c, POINT *log, int *pcLog)
     {
         for (i = 0; i < n; i++)
             pt[i] = log[i];
-        LPtoDP(hdcS, pt, n);
+        DrawnPoints(hdcS, pt, n);
         for (i = 0; i < n; i++)
             c->dev[i] = pt[i];
         c->cDev = n;
