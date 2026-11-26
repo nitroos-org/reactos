@@ -76,6 +76,12 @@ NTAPI
 KeThawExecution(IN BOOLEAN Enable)
 {
     ULONG Dropped = 0, GraceDropped = 0;
+    KIRQL OldIrql;
+
+    /* The IRQL to go back to belongs to this freeze, and is read while this processor is still the
+       owner: KxThawExecution gives the freeze up, and the next owner (another processor, entering
+       the debugger from another IRQL) writes its own IRQL there at once */
+    OldIrql = KiOldIrql;
 
     /* A nested freeze of the owner ends with the others still frozen */
 #ifdef CONFIG_SMP
@@ -101,9 +107,9 @@ KeThawExecution(IN BOOLEAN Enable)
     /* Restore the old IRQL (on one processor the freeze raised it only from below
        DISPATCH_LEVEL, the debugger entry may have raised it before the freeze) */
 #ifndef CONFIG_SMP
-    if (KiOldIrql < KeGetCurrentIrql())
+    if (OldIrql < KeGetCurrentIrql())
 #endif
-    KeLowerIrql(KiOldIrql);
+    KeLowerIrql(OldIrql);
 
     /* Re-enable interrupts */
     KeRestoreInterrupts(Enable);

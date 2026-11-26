@@ -124,6 +124,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeApcDelivery.c
     ntos_ke/KeBugCheckCallback.c
     ntos_ke/KeDelayExecution.c
+    ntos_ke/KeDbgPrintIrql.c
     ntos_ke/KeDevQueue.c
     ntos_ke/KeClockTime.c
     ntos_ke/KeDpc.c
