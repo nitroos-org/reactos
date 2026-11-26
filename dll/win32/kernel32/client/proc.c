@@ -2514,12 +2514,13 @@ ProcessIdToSessionId(IN DWORD dwProcessId,
         return FALSE;
     }
 
-    /* Open the process passed in by ID */
+    /* Open the process passed in by ID. The session query needs no more than PROCESS_QUERY_LIMITED_INFORMATION
+       (measured on Windows Server 2022: a process whose DACL grants only that right and SYNCHRONIZE answers) */
     ClientId.UniqueProcess = UlongToHandle(dwProcessId);
     ClientId.UniqueThread = 0;
     InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
     Status = NtOpenProcess(&ProcessHandle,
-                           PROCESS_QUERY_INFORMATION,
+                           PROCESS_QUERY_LIMITED_INFORMATION,
                            &ObjectAttributes,
                            &ClientId);
     if (NT_SUCCESS(Status))

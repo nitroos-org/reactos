@@ -97,6 +97,7 @@ extern void func_CompareObjectHandles(void);
 extern void func_PrivateNamespaceSecurity(void);
 extern void func_PrivateNamespaceBoundary(void);
 extern void func_PrivateNamespaceRace(void);
+extern void func_ProcessIdToSessionId(void);
 extern void func_CancelSynchronousIo(void);
 extern void func_IdnTo(void);
 extern void func_NormalizeString(void);
@@ -399,6 +400,7 @@ const struct test winetest_testlist[] =
     { "PrivateNamespaceSecurity", func_PrivateNamespaceSecurity },
     { "PrivateNamespaceBoundary", func_PrivateNamespaceBoundary },
     { "PrivateNamespaceRace", func_PrivateNamespaceRace },
+    { "ProcessIdToSessionId", func_ProcessIdToSessionId },
     { "CancelSynchronousIo", func_CancelSynchronousIo },
     { "IdnTo", func_IdnTo },
     { "NormalizeString", func_NormalizeString },

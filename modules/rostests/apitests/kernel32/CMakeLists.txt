@@ -220,6 +220,7 @@ list(APPEND SOURCE
     ProcessorNumber.c
     ProcessInformation.c
     ProcessMitigationPolicy.c
+    ProcessIdToSessionId.c
     AdvapiModules.c
     ProcThreadMitigation.c
     QueryCycleTime.c
