@@ -19,6 +19,7 @@
 static HDESK s_hdeskX, s_hdeskA, s_hdeskY;
 static HDC s_hdcHeld;
 static HANDLE s_hMade, s_hQuit, s_hReadyY;
+static HWND s_hwndY;
 static int s_cx, s_cy;
 
 static DWORD WINAPI MakerThread(LPVOID Param)
@@ -50,6 +51,7 @@ static DWORD WINAPI ThreadY(LPVOID Param)
     wc.hbrBackground = CreateSolidBrush(Y_COLOR);
     RegisterClassW(&wc);
     hwnd = CreateWindowExW(0, wc.lpszClassName, L"Y", WS_POPUP | WS_VISIBLE, 0, 0, s_cx, s_cy, NULL, NULL, wc.hInstance, NULL);
+    s_hwndY = hwnd;
     SetEvent(s_hReadyY);
     while (hwnd && WaitForSingleObject(s_hQuit, 20) == WAIT_TIMEOUT)
     {
@@ -132,6 +134,23 @@ START_TEST(ScreenDesktopSerial)
         ok(!ret && err == ERROR_INVALID_HANDLE, "round %d: BitBlt through the DC of a dead desktop: %d, error %lu\n", round, ret, err);
         ok(cColor == 0, "round %d: %d pixels of the screen of the desktop with the input were copied\n", round, cColor);
         SelectObject(hdcMem, hbmOld);
+
+        /* Window handles are not checked against the desktop of the caller: the DC of a window of Y (the desktop with the input)
+           asked for by this thread on A reaches the screen of A, which is not shown */
+        {
+            HDC hdcWnd = GetWindowDC(s_hwndY);
+
+            ok(hdcWnd != NULL, "round %d: no DC of the window of the other desktop\n", round);
+            if (hdcWnd)
+            {
+                px = GetPixel(hdcWnd, 2, 2);
+                ok(px == CLR_INVALID, "round %d: GetPixel through the DC of a window of the desktop with the input read 0x%08lx\n", round, px);
+                SetLastError(0);
+                ret = BitBlt(hdcMem, 0, 0, 64, 64, hdcWnd, 0, 0, SRCCOPY);
+                ok(!ret, "round %d: BitBlt from the DC of a window of the desktop with the input succeeded\n", round);
+                ReleaseDC(s_hwndY, hdcWnd);
+            }
+        }
         DeleteObject(hbm);
         DeleteDC(hdcMem);
 
