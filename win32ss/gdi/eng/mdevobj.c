@@ -108,7 +108,7 @@ MDEVOBJ_Create(
         dwAccelerationLevel = EngpGetDisplayDriverAccelerationLevel(pGraphicsDevice);
 
         /* Get or create a PDEV for these settings */
-        if (LDEVOBJ_bProbeAndCaptureDevmode(pGraphicsDevice, pdm ? pdm : &dmDefault, &localPdm, !pdm))
+        if (LDEVOBJ_bProbeAndCaptureDevmode(pGraphicsDevice, pdm ? pdm : &dmDefault, &localPdm, !pdm, FALSE))
         {
             ppdev = PDEVOBJ_Create(pGraphicsDevice, localPdm, dwAccelerationLevel, LDEV_DEVICE_DISPLAY);
         }

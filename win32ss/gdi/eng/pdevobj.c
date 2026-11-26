@@ -1077,7 +1077,7 @@ PDEVOBJ_lChangeDisplaySettings(
 
     if (pGraphicsDevice)
     {
-        if (!LDEVOBJ_bProbeAndCaptureDevmode(pGraphicsDevice, RequestedMode, &pdm, bSearchClosestMode))
+        if (!LDEVOBJ_bProbeAndCaptureDevmode(pGraphicsDevice, RequestedMode, &pdm, bSearchClosestMode, FALSE))
         {
             ERR("DrvProbeAndCaptureDevmode() failed\n");
             lRet = DISP_CHANGE_BADMODE;

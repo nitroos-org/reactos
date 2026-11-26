@@ -760,7 +760,8 @@ LDEVOBJ_bProbeAndCaptureDevmode(
     _Inout_ PGRAPHICS_DEVICE pGraphicsDevice,
     _In_ PDEVMODEW RequestedMode,
     _Out_ PDEVMODEW *pSelectedMode,
-    _In_ BOOL bSearchClosestMode)
+    _In_ BOOL bSearchClosestMode,
+    _In_ BOOL bRequireListedMode)
 {
     DEVMODEW dmSearch;
     PDEVMODEW pdmCurrent, pdm, pdmSelected = NULL;
@@ -806,7 +807,8 @@ LDEVOBJ_bProbeAndCaptureDevmode(
             dmSearch.dmPelsWidth = RequestedMode->dmPelsWidth;
         if (RequestedMode->dmFields & DM_PELSHEIGHT && RequestedMode->dmPelsHeight != 0)
             dmSearch.dmPelsHeight = RequestedMode->dmPelsHeight;
-        if (RequestedMode->dmFields & DM_DISPLAYFREQUENCY && RequestedMode->dmDisplayFrequency != 0)
+        /* A refresh rate of 0 or 1 asks for the adapter's default */
+        if (RequestedMode->dmFields & DM_DISPLAYFREQUENCY && RequestedMode->dmDisplayFrequency > 1)
             dmSearch.dmDisplayFrequency = RequestedMode->dmDisplayFrequency;
 
         if ((RequestedMode->dmFields & (DM_PANNINGWIDTH | DM_PANNINGHEIGHT)) == (DM_PANNINGWIDTH | DM_PANNINGHEIGHT) &&
@@ -861,7 +863,7 @@ LDEVOBJ_bProbeAndCaptureDevmode(
                     dmSearch.dmPelsWidth = pdmSelected->dmPelsWidth;
                 if (!(RequestedMode->dmFields & DM_PELSHEIGHT) || RequestedMode->dmPelsHeight == 0)
                     dmSearch.dmPelsHeight = pdmSelected->dmPelsHeight;
-                if (!(RequestedMode->dmFields & DM_DISPLAYFREQUENCY) || RequestedMode->dmDisplayFrequency == 0)
+                if (!(RequestedMode->dmFields & DM_DISPLAYFREQUENCY) || RequestedMode->dmDisplayFrequency <= 1)
                     dmSearch.dmDisplayFrequency = pdmSelected->dmDisplayFrequency;
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
@@ -875,7 +877,11 @@ LDEVOBJ_bProbeAndCaptureDevmode(
         }
     }
 
-    /* Now, search the exact mode to return to caller */
+    /* Now, search the exact mode to return to caller. The closest mode found above only served to
+     * fill in what was not requested: for a caller that needs a listed mode it is not an answer */
+    if (bRequireListedMode)
+        pdmSelected = NULL;
+
     for (i = 0; i < pGraphicsDevice->cDevModes; i++)
     {
         pdmCurrent = pGraphicsDevice->pDevModeList[i].pdm;
@@ -887,7 +893,10 @@ LDEVOBJ_bProbeAndCaptureDevmode(
             continue;
         if (pdmCurrent->dmPelsHeight != dmSearch.dmPelsHeight)
             continue;
-        if (pdmCurrent->dmDisplayFrequency != dmSearch.dmDisplayFrequency)
+        /* A mode listed with a rate of 0 or 1 (the adapter's default, as the VBE miniport lists every
+         * mode) is available at any requested rate */
+        if (pdmCurrent->dmDisplayFrequency > 1 &&
+            pdmCurrent->dmDisplayFrequency != dmSearch.dmDisplayFrequency)
             continue;
 
         pdmSelected = pdmCurrent;

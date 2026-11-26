@@ -67,7 +67,8 @@ LDEVOBJ_bProbeAndCaptureDevmode(
     _Inout_ PGRAPHICS_DEVICE pGraphicsDevice,
     _In_ PDEVMODEW RequestedMode,
     _Out_ PDEVMODEW *pSelectedMode,
-    _In_ BOOL bSearchClosestMode);
+    _In_ BOOL bSearchClosestMode,
+    _In_ BOOL bRequireListedMode);
 
 CODE_SEG("INIT")
 NTSTATUS
