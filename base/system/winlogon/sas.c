@@ -514,6 +514,21 @@ FreeWlxMprInfo(
  * away at logoff (the next logon in the session is another logon). Session 0 is never changed.
  */
 static
+BOOL
+WlIsLogonEntry(
+    _In_ PACE_HEADER Ace,
+    _In_ PSID UserSid,
+    _In_ PSID LogonSid)
+{
+    PSID AceSid;
+
+    if (Ace->AceType != ACCESS_ALLOWED_ACE_TYPE)
+        return FALSE;
+    AceSid = (PSID)&((PACCESS_ALLOWED_ACE)Ace)->SidStart;
+    return RtlEqualSid(AceSid, UserSid) || RtlEqualSid(AceSid, LogonSid);
+}
+
+static
 VOID
 WlSetSessionNamespaceAccess(
     _In_ HANDLE UserToken,
@@ -604,22 +619,27 @@ WlSetSessionNamespaceAccess(
             goto Next;
         }
 
-        /* The old entries, without any of this logon's, then this logon's when granting */
-        AclLength = OldDacl->AclSize + 3 * (sizeof(ACCESS_ALLOWED_ACE) + SECURITY_MAX_SID_SIZE);
+        /*
+         * The old entries, without any of this logon's, then this logon's when granting. The new list is sized for
+         * exactly what it holds: the directory keeps the size it is given, so a list sized from the old one grew at
+         * every logon and logoff until it no longer fitted in an ACL (then no logon got its entries).
+         */
+        AclLength = sizeof(ACL);
+        for (i = 0; i < OldDacl->AceCount; i++)
+        {
+            if (NT_SUCCESS(RtlGetAce(OldDacl, i, (PVOID*)&Ace)) && !WlIsLogonEntry(Ace, UserSid, LogonSid))
+                AclLength += Ace->AceSize;
+        }
+        if (Grant)
+            AclLength += 3 * (sizeof(ACCESS_ALLOWED_ACE) - sizeof(ULONG)) + RtlLengthSid(UserSid) + 2 * RtlLengthSid(LogonSid);
         NewDacl = RtlAllocateHeap(RtlGetProcessHeap(), 0, AclLength);
         if (!NewDacl)
             goto Next;
         Status = RtlCreateAcl(NewDacl, AclLength, ACL_REVISION);
         for (i = 0; NT_SUCCESS(Status) && i < OldDacl->AceCount; i++)
         {
-            if (!NT_SUCCESS(RtlGetAce(OldDacl, i, (PVOID*)&Ace)))
+            if (!NT_SUCCESS(RtlGetAce(OldDacl, i, (PVOID*)&Ace)) || WlIsLogonEntry(Ace, UserSid, LogonSid))
                 continue;
-            if (Ace->AceType == ACCESS_ALLOWED_ACE_TYPE)
-            {
-                PSID AceSid = (PSID)&((PACCESS_ALLOWED_ACE)Ace)->SidStart;
-                if (RtlEqualSid(AceSid, UserSid) || RtlEqualSid(AceSid, LogonSid))
-                    continue;
-            }
             Status = RtlAddAce(NewDacl, ACL_REVISION, MAXULONG, Ace, Ace->AceSize);
         }
         if (NT_SUCCESS(Status) && Grant)
