@@ -392,6 +392,9 @@ ExitProcessCallback(PEPROCESS Process)
     ASSERT(*pppi == ppiCurrent);
     *pppi = ppiCurrent->ppiNext;
 
+    /* Give up the clipboard data this process made and never handed to the clipboard */
+    UserClipDataProcessExit(ppiCurrent);
+
     /* Cleanup GDI info */
     GdiProcessDestroy(Process);
 

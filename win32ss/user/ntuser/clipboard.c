@@ -17,6 +17,142 @@ DBG_DEFAULT_CHANNEL(UserClipbrd);
 #define IS_DATA_DELAYED(ce)     ((ce)->hData == DATA_DELAYED)
 #define IS_DATA_SYNTHESIZED(ce) ((ce)->hData == DATA_SYNTH_USER || (ce)->hData == DATA_SYNTH_KRNL)
 
+/* The paged pool the clipboard data of the session may take together. The clipboard keeps what a program gives it
+   and what it makes of that (a bitmap for CF_BITMAP, a second image format) in paged pool, and the tree does not
+   charge GDI objects to a process quota, so the limit is the clipboard's own. It lets through every image a program
+   can paste in both its formats: a 16384 x 16384 image at 32 bits per pixel is 1 GiB packed and 1 GiB as a bitmap
+   (the most IntClipDibValidate lets GDI make), which a 64 bit system takes with room to spare; a 32 bit system
+   has about 360 MB of paged pool in all (3.5 GB of RAM), so it takes an image of up to 256 MB in one format (the
+   bitmap is refused, as the allocation would be refused there). */
+#ifdef _WIN64
+#define CLIP_POOL_LIMIT ((SIZE_T)2304 * 1024 * 1024)
+#else
+#define CLIP_POOL_LIMIT ((SIZE_T)288 * 1024 * 1024)
+#endif
+
+static volatile SIZE_T gcbClipCharged;
+static LIST_ENTRY gClipUnclaimedList = {&gClipUnclaimedList, &gClipUnclaimedList};
+
+/* Before the data object, in the same pool block (the object is aligned for any use) */
+typedef struct _CLIPDATA_BLOCK
+{
+    LIST_ENTRY ListEntry;       /* gClipUnclaimedList while fUnclaimed */
+    PPROCESSINFO ppiCreator;    /* who made it, while fUnclaimed */
+    SIZE_T cbCharged;
+    BOOLEAN fUnclaimed;
+} CLIPDATA_BLOCK, *PCLIPDATA_BLOCK;
+
+#define CLIPDATA_BLOCK_SIZE  ((sizeof(CLIPDATA_BLOCK) + 15) & ~(SIZE_T)15)
+#define CLIPDATA_TO_BLOCK(p) ((PCLIPDATA_BLOCK)((PUCHAR)(p) - CLIPDATA_BLOCK_SIZE))
+
+static BOOLEAN FASTCALL
+IntClipCharge(SIZE_T cb)
+{
+    SIZE_T cbNew = InterlockedExchangeAddSizeT(&gcbClipCharged, cb) + cb;
+
+    if (cbNew < cb || cbNew > CLIP_POOL_LIMIT)
+    {
+        InterlockedExchangeAddSizeT(&gcbClipCharged, (SIZE_T)0 - cb);
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static VOID FASTCALL
+IntClipRefund(SIZE_T cb)
+{
+    InterlockedExchangeAddSizeT(&gcbClipCharged, (SIZE_T)0 - cb);
+}
+
+PVOID FASTCALL
+UserClipDataAlloc(SIZE_T Size)
+{
+    PCLIPDATA_BLOCK pBlock;
+    SIZE_T cbTotal = Size + CLIPDATA_BLOCK_SIZE;
+
+    if (cbTotal < Size || !IntClipCharge(cbTotal))
+        return NULL;
+
+    /* FIXME: this should be the pool of the current session (ReactOS' MM has no session pool yet) */
+    pBlock = ExAllocatePoolZero(PagedPool, cbTotal, USERTAG_CLIPBOARD);
+    if (!pBlock)
+    {
+        IntClipRefund(cbTotal);
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
+
+    pBlock->cbCharged = cbTotal;
+    return (PUCHAR)pBlock + CLIPDATA_BLOCK_SIZE;
+}
+
+VOID FASTCALL
+UserClipDataFree(PVOID Object)
+{
+    PCLIPDATA_BLOCK pBlock = CLIPDATA_TO_BLOCK(Object);
+
+    if (pBlock->fUnclaimed)
+        RemoveEntryList(&pBlock->ListEntry);
+    IntClipRefund(pBlock->cbCharged);
+    ExFreePoolWithTag(pBlock, USERTAG_CLIPBOARD);
+}
+
+VOID FASTCALL
+UserClipDataMarkUnclaimed(PVOID Object)
+{
+    PCLIPDATA_BLOCK pBlock = CLIPDATA_TO_BLOCK(Object);
+
+    if (pBlock->fUnclaimed)
+        return;
+    pBlock->fUnclaimed = TRUE;
+    pBlock->ppiCreator = PsGetCurrentProcessWin32Process();
+    InsertTailList(&gClipUnclaimedList, &pBlock->ListEntry);
+}
+
+VOID FASTCALL
+UserClipDataClaim(PVOID Object)
+{
+    PCLIPDATA_BLOCK pBlock = CLIPDATA_TO_BLOCK(Object);
+
+    if (!pBlock->fUnclaimed)
+        return;
+    pBlock->fUnclaimed = FALSE;
+    RemoveEntryList(&pBlock->ListEntry);
+}
+
+/* An unclaimed data object of the calling process (NULL when it is claimed, or made by another process) */
+static PCLIPBOARDDATA FASTCALL
+IntClipGetUnclaimed(HANDLE hData)
+{
+    PCLIPBOARDDATA pData = (PCLIPBOARDDATA)UserGetObject(gHandleTable, hData, TYPE_CLIPDATA);
+    PCLIPDATA_BLOCK pBlock;
+
+    if (!pData)
+        return NULL;
+    pBlock = CLIPDATA_TO_BLOCK(pData);
+    if (!pBlock->fUnclaimed || pBlock->ppiCreator != PsGetCurrentProcessWin32Process())
+        return NULL;
+    return pData;
+}
+
+/* The process is going away: what it made and the clipboard never took */
+VOID FASTCALL
+UserClipDataProcessExit(PPROCESSINFO ppi)
+{
+    PLIST_ENTRY pEntry = gClipUnclaimedList.Flink;
+
+    while (pEntry != &gClipUnclaimedList)
+    {
+        PCLIPDATA_BLOCK pBlock = CONTAINING_RECORD(pEntry, CLIPDATA_BLOCK, ListEntry);
+        PCLIPBOARDDATA pData = (PCLIPBOARDDATA)((PUCHAR)pBlock + CLIPDATA_BLOCK_SIZE);
+
+        pEntry = pEntry->Flink;
+        if (pBlock->ppiCreator == ppi)
+            UserDeleteObject(pData->head.h, TYPE_CLIPDATA);
+    }
+}
+
 static PWINSTATION_OBJECT FASTCALL
 IntGetWinStaForCbAccess(VOID)
 {
@@ -77,6 +213,13 @@ IntFreeElementData(PCLIP pElement)
             GreSetObjectOwner(pElement->hData, GDI_OBJ_HMGR_POWNED);
             GreDeleteObject(pElement->hData);
         }
+    }
+
+    /* The bitmap the clipboard made for CF_BITMAP is gone: its charge goes back */
+    if (pElement->cbCharge)
+    {
+        IntClipRefund(pElement->cbCharge);
+        pElement->cbCharge = 0;
     }
 }
 
@@ -175,6 +318,7 @@ IntAddFormatedData(PWINSTATION_OBJECT pWinStaObj, UINT fmt, HANDLE hData, BOOLEA
         /* New element is at the end */
         pElement = &pWinStaObj->pClipBase[pWinStaObj->cNumClipFormats];
         pElement->fmt = fmt;
+        pElement->cbCharge = 0;
         pWinStaObj->cNumClipFormats++;
     }
     else if (pElement->hData != hData || pElement->fGlobalHandle != fGlobalHandle)
@@ -496,12 +640,15 @@ IntClipDibValidate(PCLIPBOARDDATA pMemObj, BOOL bV5Source, BOOL bForBitmap)
 
 /* The bitmap of a packed image (CF_DIB or CF_DIBV5 data); NULL when it is not one GDI can make */
 static HBITMAP FASTCALL
-IntSynthesizeBitmap(PCLIPBOARDDATA pMemObj, BOOL bV5Source)
+IntSynthesizeBitmap(PCLIPBOARDDATA pMemObj, BOOL bV5Source, PSIZE_T pcbCharge)
 {
     HDC hdc = NULL;
     PBITMAPINFO pBmi, pConvertedBmi = NULL;
     HBITMAP hBm = NULL;
     ULONG Offset;
+    SIZE_T cbBits = 0;
+
+    *pcbCharge = 0;
 
     if (!IntClipDibValidate(pMemObj, bV5Source, TRUE))
         return NULL;
@@ -520,6 +667,28 @@ IntSynthesizeBitmap(PCLIPBOARDDATA pMemObj, BOOL bV5Source)
     if (!hdc)
         goto cleanup;
 
+    /* The device bitmap keeps its bits in the paged pool object, in the depth of the screen (a 32 bit image is the
+       most it takes) and however few bytes the packed image holds (run length encoded images decode into it):
+       what it will take is charged before GDI is asked, and the bitmap is refused when the clipboard may not
+       hold that much */
+    {
+        ULONGLONG cjRow = (((ULONGLONG)abs(pConvertedBmi->bmiHeader.biWidth) *
+                            (gpsi->BitsPixel ? gpsi->BitsPixel : 32) + 31) / 32) * 4;
+        ULONGLONG cjAll = cjRow * (ULONGLONG)abs(pConvertedBmi->bmiHeader.biHeight) + 1024;
+
+        if (cjAll > CLIP_POOL_LIMIT)
+        {
+            EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            goto cleanup;
+        }
+        cbBits = (SIZE_T)cjAll;
+        if (!IntClipCharge(cbBits))
+        {
+            cbBits = 0;
+            goto cleanup;
+        }
+    }
+
     hBm = GreCreateDIBitmapInternal(hdc,
                                     pConvertedBmi->bmiHeader.biWidth,
                                     pConvertedBmi->bmiHeader.biHeight,
@@ -532,7 +701,14 @@ IntSynthesizeBitmap(PCLIPBOARDDATA pMemObj, BOOL bV5Source)
                                     0);
 
     if (hBm)
+    {
         GreSetObjectOwner(hBm, GDI_OBJ_HMGR_PUBLIC);
+        *pcbCharge = cbBits;
+    }
+    else if (cbBits)
+    {
+        IntClipRefund(cbBits);
+    }
 
 cleanup:
     if (hdc)
@@ -763,6 +939,7 @@ co_IntResolveImageFormat(PWINSTATION_OBJECT pWinSta, UINT target)
     PCLIPBOARDDATA pData;
     HANDLE hNew = NULL, hTemp = NULL;
     HBITMAP hbm = NULL;
+    SIZE_T cbCharge = 0;
     int i;
 
     for (i = 0; i < 2; i++)
@@ -809,7 +986,7 @@ co_IntResolveImageFormat(PWINSTATION_OBJECT pWinSta, UINT target)
             return FALSE;
 
         if (target == CF_BITMAP)
-            hbm = IntSynthesizeBitmap(pData, src == CF_DIBV5);
+            hbm = IntSynthesizeBitmap(pData, src == CF_DIBV5, &cbCharge);
         else if (target == CF_DIB)
             hNew = IntSynthesizeDibFromV5(pData);   /* src is CF_DIBV5 here */
         else
@@ -824,7 +1001,10 @@ co_IntResolveImageFormat(PWINSTATION_OBJECT pWinSta, UINT target)
         if (hNew)
             UserDeleteObject(hNew, TYPE_CLIPDATA);
         if (hbm)
+        {
             GreDeleteObject(hbm);
+            IntClipRefund(cbCharge);
+        }
         return FALSE;
     }
 
@@ -832,6 +1012,7 @@ co_IntResolveImageFormat(PWINSTATION_OBJECT pWinSta, UINT target)
     {
         if (!hbm)
             return FALSE;
+        pTarget->cbCharge = cbCharge;
         pTarget->hData = hbm;
         pTarget->fGlobalHandle = FALSE;
         pTarget->fOwned = TRUE;
@@ -1682,7 +1863,16 @@ UserSetClipboardData(UINT fmt, HANDLE hData, PSETCLIPBDATA scd)
         /* Save data in the clipboard */
         pElement = IntAddFormatedData(pWinStaObj, fmt, hData, scd->fGlobalHandle, FALSE);
         if (pElement)
+        {
             pElement->fOwned = fOwned;
+            if (scd->fGlobalHandle)
+            {
+                /* the data object is the clipboard's now */
+                PCLIPBOARDDATA pTaken = (PCLIPBOARDDATA)UserGetObject(gHandleTable, hData, TYPE_CLIPDATA);
+                if (pTaken)
+                    UserClipDataClaim(pTaken);
+            }
+        }
         TRACE("hData stored\n");
 
         /* Note: Synthesized formats are added in NtUserCloseClipboard */
@@ -1694,7 +1884,11 @@ UserSetClipboardData(UINT fmt, HANDLE hData, PSETCLIPBDATA scd)
         TRACE("SetClipboardData delayed format: %u\n", fmt);
     }
 
-    if (pElement && bChange)
+    /* No room for the format: nothing was stored (the error is set) */
+    if (!pElement)
+        goto cleanup;
+
+    if (bChange)
     {
         pWinStaObj->iClipSerialNumber++;
         pWinStaObj->iClipSequenceNumber++;
@@ -1741,6 +1935,15 @@ NtUserSetClipboardData(UINT fmt, HANDLE hData, PSETCLIPBDATA pUnsafeScd)
         hRet = NULL;
     else
         hRet = UserSetClipboardData(fmt, hData, &scd);
+
+    /* The clipboard did not take the data object the caller had made for it (it was not open, the format could not be
+       stored, the job forbids it): nobody else knows the object, the caller gives it up with the call */
+    if (!hRet && hData && scd.fGlobalHandle)
+    {
+        PCLIPBOARDDATA pLeft = IntClipGetUnclaimed(hData);
+        if (pLeft)
+            UserDeleteObject(hData, TYPE_CLIPDATA);
+    }
 
     UserLeave();
 
@@ -1850,6 +2053,9 @@ NtUserConvertMemHandle(
         goto cleanup;
 
     pMemObj->cbData = cbData;
+
+    /* The clipboard takes it when SetClipboardData stores it; until then it is this process's */
+    UserClipDataMarkUnclaimed(pMemObj);
 
     /* Copy data */
     _SEH2_TRY

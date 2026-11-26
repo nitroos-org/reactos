@@ -235,13 +235,11 @@ static PVOID AllocSysObjectCB(
     UNREFERENCED_PARAMETER(pti);
     ASSERT(Size > sizeof(HEAD));
 
-    /* Allocate the clipboard data */
-    // FIXME: This allocation should be done on the current session pool;
-    // however ReactOS' MM doesn't support session pool yet.
-    Object = ExAllocatePoolZero(/* SESSION_POOL_MASK | */ PagedPool, Size, USERTAG_CLIPBOARD);
+    /* Allocate the clipboard data, charged against what the clipboard may hold */
+    Object = UserClipDataAlloc(Size);
     if (!Object)
     {
-        ERR("ExAllocatePoolZero failed. No object created.\n");
+        ERR("No clipboard data object created.\n");
         return NULL;
     }
 
@@ -258,7 +256,7 @@ static void FreeSysObject(
 static void FreeSysObjectCB(
     _In_ PVOID Object)
 {
-    ExFreePoolWithTag(Object, USERTAG_CLIPBOARD);
+    UserClipDataFree(Object);
 }
 
 static const struct
