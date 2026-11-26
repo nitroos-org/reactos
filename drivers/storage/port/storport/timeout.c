@@ -33,16 +33,39 @@
 
 /* FUNCTIONS ******************************************************************/
 
+/* PortForgetSweptSrb with TimeoutLock held */
+static
+VOID
+PortForgetSweptSrbLocked(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PSCSI_REQUEST_BLOCK Srb)
+{
+    ULONG i;
+
+    for (i = 0; i < STORP_SWEPT_SRBS; i++)
+    {
+        if (FdoExtension->SweptSrbs[i].Srb == (PVOID)Srb)
+        {
+            InterlockedExchangePointer(&FdoExtension->SweptSrbs[i].Srb, NULL);
+            InterlockedDecrement(&FdoExtension->SweptSrbCount);
+        }
+    }
+}
+
 /**
  * @brief Puts a request that is about to reach HwStartIo on the issued list. DISPATCH_LEVEL.
  * The caller reports the return of HwStartIo with PortTimeoutStartIoReturned.
+ * ForgetSweptSrb, when given, is an SRB that storport completed after a restart and that is in use again: it is
+ * forgotten in the same hold of the timeout lock that arms the request (see PortForgetSweptSrb), so that no
+ * completion falls between the two.
  *
  * @return The reset generation the request belongs to.
  */
 ULONG
 PortTimeoutArmRequest(
     _In_ PFDO_DEVICE_EXTENSION FdoExtension,
-    _In_ PQUEUED_REQUEST_REFERENCE RequestReference)
+    _In_ PQUEUED_REQUEST_REFERENCE RequestReference,
+    _In_opt_ PSCSI_REQUEST_BLOCK ForgetSweptSrb)
 {
     KIRQL OldIrql;
     ULONG Generation;
@@ -52,6 +75,8 @@ PortTimeoutArmRequest(
         Timeout = STORP_DEFAULT_TIMEOUT_SECONDS;
 
     KeAcquireSpinLock(&FdoExtension->TimeoutLock, &OldIrql);
+    if (ForgetSweptSrb != NULL)
+        PortForgetSweptSrbLocked(FdoExtension, ForgetSweptSrb);
     Generation = FdoExtension->ResetGeneration;
     RequestReference->TimeoutCounter = Timeout;
     RequestReference->ResetSent = FALSE;
@@ -115,20 +140,12 @@ PortForgetSweptSrb(
     _In_ PSCSI_REQUEST_BLOCK Srb)
 {
     KIRQL OldIrql;
-    ULONG i;
 
     if (InterlockedCompareExchange(&FdoExtension->SweptSrbCount, 0, 0) == 0)
         return;
 
     KeAcquireSpinLock(&FdoExtension->TimeoutLock, &OldIrql);
-    for (i = 0; i < STORP_SWEPT_SRBS; i++)
-    {
-        if (FdoExtension->SweptSrbs[i].Srb == (PVOID)Srb)
-        {
-            InterlockedExchangePointer(&FdoExtension->SweptSrbs[i].Srb, NULL);
-            InterlockedDecrement(&FdoExtension->SweptSrbCount);
-        }
-    }
+    PortForgetSweptSrbLocked(FdoExtension, Srb);
     KeReleaseSpinLock(&FdoExtension->TimeoutLock, OldIrql);
 }
 
@@ -527,6 +544,10 @@ PortInitializeTimeouts(
     InitializeListHead(&FdoExtension->IssuedRequestsListHead);
     KeInitializeTimer(&FdoExtension->TimeoutTimer);
     KeInitializeDpc(&FdoExtension->TimeoutDpc, PortTimeoutDpc, FdoExtension);
+#if DBG
+    KeInitializeSpinLock(&FdoExtension->DebugDeferLock);
+    InitializeListHead(&FdoExtension->DebugDeferList);
+#endif
 }
 
 
@@ -575,8 +596,40 @@ PortStopTimeouts(
     KeFlushQueuedDpcs();
 
 #if DBG
-    /* Held back starts (DebugDeferStartEvery) fire into this adapter: let them abort and drain */
-    FdoExtension->DebugDeferStopping = TRUE;
+    /*
+     * Held back starts (DebugDeferStartEvery) fire into this adapter: cancel the timers that did not
+     * fire yet and abort their requests now, let the ones that fired abort themselves and drain
+     */
+    InterlockedExchange(&FdoExtension->DebugDeferStopping, 1);
+    {
+        LIST_ENTRY Cancelled;
+
+        InitializeListHead(&Cancelled);
+        KeAcquireSpinLock(&FdoExtension->DebugDeferLock, &OldIrql);
+        for (Entry = FdoExtension->DebugDeferList.Flink; Entry != &FdoExtension->DebugDeferList; )
+        {
+            PQUEUED_REQUEST_REFERENCE Request = CONTAINING_RECORD(Entry, QUEUED_REQUEST_REFERENCE, DebugDeferEntry);
+
+            Entry = Entry->Flink;
+            if (KeCancelTimer(&Request->DebugDeferTimer))
+            {
+                /* The timer's DPC will not run: this is the request's last use of the entry */
+                RemoveEntryList(&Request->DebugDeferEntry);
+                InsertTailList(&Cancelled, &Request->DebugDeferEntry);
+            }
+        }
+        KeReleaseSpinLock(&FdoExtension->DebugDeferLock, OldIrql);
+
+        while (!IsListEmpty(&Cancelled))
+        {
+            PQUEUED_REQUEST_REFERENCE Request =
+                CONTAINING_RECORD(RemoveHeadList(&Cancelled), QUEUED_REQUEST_REFERENCE, DebugDeferEntry);
+
+            InitializeListHead(&Request->DebugDeferEntry);
+            PortDebugAbortDeferredStart(FdoExtension, Request);
+            InterlockedDecrement(&FdoExtension->DebugDeferredPending);
+        }
+    }
     while (InterlockedCompareExchange(&FdoExtension->DebugDeferredPending, 0, 0) != 0)
     {
         LARGE_INTEGER Delay;

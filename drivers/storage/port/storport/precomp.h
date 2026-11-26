@@ -403,7 +403,11 @@ typedef struct _FDO_DEVICE_EXTENSION
     ULONG DebugDeferStartSeconds;
     LONG DebugDeferCounter;
     LONG DebugDeferredPending;
-    BOOLEAN DebugDeferStopping;
+    /* Set (interlocked) once the adapter is stopping: a held back start that fires aborts the request */
+    LONG DebugDeferStopping;
+    /* The held back starts whose timer has not fired (DebugDeferEntry of the request), under DebugDeferLock */
+    LIST_ENTRY DebugDeferList;
+    KSPIN_LOCK DebugDeferLock;
     /* Parameters\DebugLateCompletion: completes every swept SRB once more through
        StorPortNotification(RequestComplete) after its packet is freed, as a miniport that
        let go of it late would */
@@ -514,6 +518,7 @@ typedef struct _QUEUED_REQUEST_REFERENCE
     /* DebugDeferStartEvery: the held back start */
     KTIMER DebugDeferTimer;
     KDPC DebugDeferDpc;
+    LIST_ENTRY DebugDeferEntry;
 #endif
 
     /* FIXME: This is solely for debugging and should be removed */
@@ -925,7 +930,8 @@ PortStopTimeouts(
 ULONG
 PortTimeoutArmRequest(
     _In_ PFDO_DEVICE_EXTENSION FdoExtension,
-    _In_ PQUEUED_REQUEST_REFERENCE RequestReference);
+    _In_ PQUEUED_REQUEST_REFERENCE RequestReference,
+    _In_opt_ PSCSI_REQUEST_BLOCK ForgetSweptSrb);
 
 VOID
 PortTimeoutStartIoReturned(
@@ -941,6 +947,13 @@ VOID
 PortForgetSweptSrb(
     _In_ PFDO_DEVICE_EXTENSION FdoExtension,
     _In_ PSCSI_REQUEST_BLOCK Srb);
+
+#if DBG
+VOID
+PortDebugAbortDeferredStart(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PQUEUED_REQUEST_REFERENCE RequestReference);
+#endif
 
 VOID
 PortTimeoutDisarmRequest(

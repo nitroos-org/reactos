@@ -191,19 +191,26 @@ PortHandRequestToMiniport(
      * now the packet may sit on the flow-control waiting lists, and a late completion of the
      * old command must still be recognised (and ignored) rather than claim the new packet.
      * From here on the packet is scheduled and counted, and HwBuildIo may complete it.
+     * Without HwBuildIo nothing can complete it before it is armed: it is forgotten in the same
+     * hold of the timeout lock that arms it, so that no late completion of the old command can
+     * claim the packet between the two.
      */
-    PortForgetSweptSrb(FdoExtension, MiniportSrb);
+    if (HwInitData->HwBuildIo)
+    {
+        PortForgetSweptSrb(FdoExtension, MiniportSrb);
 
-    /* BuildIo may complete the request itself, and then says so */
-    if (HwInitData->HwBuildIo && !HwInitData->HwBuildIo(MiniportExtension, MiniportSrb))
-        return;
+        /* BuildIo may complete the request itself, and then says so */
+        if (!HwInitData->HwBuildIo(MiniportExtension, MiniportSrb))
+            return;
+    }
 
     /*
      * From here on the request is the miniport's, and its timeout runs. A restart waits for
      * this HwStartIo to return before it stops the adapter (PortTimeoutStartIoReturned), so
      * a request it later completes itself was really handed over before the stop.
      */
-    Generation = PortTimeoutArmRequest(FdoExtension, RequestReference);
+    Generation = PortTimeoutArmRequest(FdoExtension, RequestReference,
+                                       HwInitData->HwBuildIo ? NULL : MiniportSrb);
 
 #if DBG
     /* Fault knob for the timeout path (off unless the miniport's Parameters\DebugDropRequestEvery is set) */
@@ -243,6 +250,24 @@ PortHandRequestToMiniport(
 
 
 #if DBG
+/**
+ * @brief The adapter is going away and a held back start never reached the miniport: storport
+ * completes it. The caller drops DebugDeferredPending afterwards.
+ */
+VOID
+PortDebugAbortDeferredStart(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PQUEUED_REQUEST_REFERENCE RequestReference)
+{
+    DPRINT1("storport: fault knob: held back Srb %p aborted, the adapter stops\n", RequestReference->Srb);
+    if (PortClaimRequestCompletion(RequestReference))
+    {
+        RequestReference->Srb->SrbStatus = SRB_STATUS_ABORTED;
+        InterlockedPushEntrySList(&FdoExtension->CompletionList, &RequestReference->CompletionEntry);
+        KeInsertQueueDpc(&FdoExtension->Device->Dpc, NULL, NULL);
+    }
+}
+
 static
 VOID
 NTAPI
@@ -259,17 +284,20 @@ PortDebugDeferredStartDpc(
     UNREFERENCED_PARAMETER(SystemArgument1);
     UNREFERENCED_PARAMETER(SystemArgument2);
 
-    if (FdoExtension->DebugDeferStopping)
+    /* The timer fired: PortStopTimeouts does not cancel this request any more (it is off the list when it did) */
+    KeAcquireSpinLockAtDpcLevel(&FdoExtension->DebugDeferLock);
+    if (!IsListEmpty(&RequestReference->DebugDeferEntry))
+    {
+        RemoveEntryList(&RequestReference->DebugDeferEntry);
+        InitializeListHead(&RequestReference->DebugDeferEntry);
+    }
+    KeReleaseSpinLockFromDpcLevel(&FdoExtension->DebugDeferLock);
+
+    if (InterlockedCompareExchange(&FdoExtension->DebugDeferStopping, 0, 0) != 0)
     {
         /* The adapter is going away (PortStopTimeouts waits for us): never reached the
            miniport, so storport completes it */
-        DPRINT1("storport: fault knob: held back Srb %p aborted, the adapter stops\n", RequestReference->Srb);
-        if (PortClaimRequestCompletion(RequestReference))
-        {
-            RequestReference->Srb->SrbStatus = SRB_STATUS_ABORTED;
-            InterlockedPushEntrySList(&FdoExtension->CompletionList, &RequestReference->CompletionEntry);
-            KeInsertQueueDpc(&FdoExtension->Device->Dpc, NULL, NULL);
-        }
+        PortDebugAbortDeferredStart(FdoExtension, RequestReference);
     }
     else
     {
@@ -346,6 +374,10 @@ PortPdoAfterBuildingScatterGatherList(
         KeInitializeTimer(&RequestReference->DebugDeferTimer);
         KeInitializeDpc(&RequestReference->DebugDeferDpc, PortDebugDeferredStartDpc, RequestReference);
         DueTime.QuadPart = -10000000LL * FdoExtension->DebugDeferStartSeconds;
+        /* On the list before the timer runs: PortStopTimeouts cancels what is still there */
+        KeAcquireSpinLockAtDpcLevel(&FdoExtension->DebugDeferLock);
+        InsertTailList(&FdoExtension->DebugDeferList, &RequestReference->DebugDeferEntry);
+        KeReleaseSpinLockFromDpcLevel(&FdoExtension->DebugDeferLock);
         KeSetTimer(&RequestReference->DebugDeferTimer, DueTime, &RequestReference->DebugDeferDpc);
         KeLowerIrql(OldIrql);
         return;
