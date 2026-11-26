@@ -12,6 +12,7 @@
 #include <ntdll.h>
 #include <compat_undoc.h>
 #include <compatguid_undoc.h>
+#include <reactos/rosrandom.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -464,6 +465,7 @@ LdrpInitSecurityCookie(PLDR_DATA_TABLE_ENTRY LdrEntry)
     PULONG_PTR Cookie;
     LARGE_INTEGER Counter;
     ULONG_PTR NewCookie;
+    ULONG_PTR Random = 0;
 
     /* Fetch address of the cookie */
     Cookie = LdrpFetchAddressOfSecurityCookie(LdrEntry->DllBase, LdrEntry->SizeOfImage);
@@ -493,8 +495,31 @@ LdrpInitSecurityCookie(PLDR_DATA_TABLE_ENTRY LdrEntry)
             NewCookie ^= Int64ShrlMod32(UInt32x32To64(SharedUserData->TickCountMultiplier, SharedUserData->TickCount.LowPart), 24) +
                 (SharedUserData->TickCountMultiplier * (SharedUserData->TickCount.High1Time << 8));
 
-            /* Make the cookie 16bit if necessary */
-            if (*Cookie == 0xBB40) NewCookie &= 0xFFFF;
+            /*
+             * Everything above is known or guessable by a program that runs on the machine (the counter, the ids and
+             * the tick count are 32-bit values, and two images loaded within a tick differ only by the counter): mix in
+             * a value from the system generator. Without the driver (the very early boot, a minimal PE) the cookie
+             * stays what it was.
+             */
+            if (RosSystemRandom(&Random, sizeof(Random)))
+                NewCookie ^= Random;
+
+            if (*Cookie == 0xBB40)
+            {
+                /* Make the cookie 16bit if necessary */
+                NewCookie &= 0xFFFF;
+            }
+            else
+            {
+#ifdef _WIN64
+                /* The default has its upper 16 bits clear: so has the cookie (the 16 below them were clear too) */
+                NewCookie &= 0x0000FFFFFFFFFFFFull;
+#else
+                /* A C runtime makes a new cookie of its own when the upper half is clear: never leave it so here */
+                if (!(NewCookie & 0xFFFF0000))
+                    NewCookie |= 0x5A5A0000;
+#endif
+            }
 
             /* If the result is 0 or the same as we got, just subtract one from the existing value
                and that's it */
@@ -1118,15 +1143,17 @@ LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL)
             }
         }
 
+        /* The cookie of every image that is new in this run: also of one that has no entry point (then there is no
+           root entry at all, and the image would keep the default cookie of the compiler) */
+        if (!(LdrEntry->Flags & LDRP_ENTRY_PROCESSED))
+            LdrpInitSecurityCookie(LdrEntry);
+
         /* Check if we have a Root Entry */
         if (LdrRootEntry)
         {
             /* Check flags */
             if (!(LdrEntry->Flags & LDRP_ENTRY_PROCESSED))
             {
-                /* Setup the Cookie for the DLL */
-                LdrpInitSecurityCookie(LdrEntry);
-
                 /* Check for valid entrypoint */
                 if (LdrEntry->EntryPoint)
                 {
@@ -3809,6 +3836,11 @@ LdrpInitializeProcess(IN PCONTEXT Context,
      * FIXME: Check for special images, SecuROM, SafeDisc and other NX-
      * incompatible images.
      */
+
+    /* The cookie of the executable, before any init routine or TLS callback of it runs (the loader marked the
+       executable as processed, so the run below skips it). A C runtime that finds a cookie that is not the
+       default leaves it. */
+    LdrpInitSecurityCookie(LdrpImageEntry);
 
     /* Now call the Init Routines */
     Status = LdrpRunInitializeRoutines(Context);
