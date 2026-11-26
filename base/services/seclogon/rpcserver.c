@@ -56,6 +56,7 @@ StopRpcServer(VOID)
 typedef struct _SECL_EXIT_WAIT
 {
     SECL_DESKTOP_ACCESS *Access;
+    SECL_NAMESPACE_ACCESS *Namespace;
     HANDLE hProcess;
     HANDLE hToken;
     HANDLE hProfile;
@@ -63,8 +64,8 @@ typedef struct _SECL_EXIT_WAIT
 
 
 /*
- * When the process is gone: takes the logon SID out of the window station and the desktop, and
- * unloads the user profile loaded for it (LOGON_WITH_PROFILE). CreateProcessWithLogonW documents
+ * When the process is gone: takes the logon SID out of the window station and the desktop and out of
+ * the named-object directories of the caller's session, and unloads the user profile loaded for it (LOGON_WITH_PROFILE). CreateProcessWithLogonW documents
  * that the profile stays loaded for the new process and is unloaded after it has terminated.
  */
 static DWORD
@@ -76,6 +77,7 @@ WaitForProcessExit(
 
     WaitForSingleObject(Wait->hProcess, INFINITE);
     SeclRevokeDesktopAccess(Wait->Access);
+    SeclRevokeNamespaceAccess(Wait->Namespace);
     if (Wait->hProfile != NULL)
     {
         if (!UnloadUserProfile(Wait->hToken, Wait->hProfile))
@@ -96,6 +98,7 @@ WaitForProcessExit(
 static BOOL
 StartExitWait(
     _In_opt_ SECL_DESKTOP_ACCESS *Access,
+    _In_opt_ SECL_NAMESPACE_ACCESS *Namespace,
     _In_opt_ HANDLE hToken,
     _In_opt_ HANDLE hProfile,
     _In_ HANDLE hProcess)
@@ -108,6 +111,7 @@ StartExitWait(
         return FALSE;
 
     Wait->Access = Access;
+    Wait->Namespace = Namespace;
     if (!DuplicateHandle(GetCurrentProcess(), hProcess, GetCurrentProcess(), &Wait->hProcess,
                          SYNCHRONIZE, FALSE, 0))
     {
@@ -227,6 +231,7 @@ SeclCreateProcessWithLogonW(
 
     PROFILEINFOW ProfileInfo;
     SECL_DESKTOP_ACCESS *DesktopAccess = NULL;
+    SECL_NAMESPACE_ACCESS *NamespaceAccess = NULL;
     PWSTR pszDesktop = NULL;
     LPVOID pEnvironment = NULL;
     DWORD dwCreationFlags;
@@ -399,20 +404,33 @@ SeclCreateProcessWithLogonW(
     }
 
     /*
+     * The program's named objects in the caller's session (unqualified and Local\ names): the new logon
+     * gets the rights a program of a secondary logon has there on Windows. The process is still suspended
+     * (it runs in another session than this service); the entries go when it has exited.
+     */
+    if (bOtherSession &&
+        SeclGrantNamespaceAccess(hToken, CallerSessionId, &NamespaceAccess) != ERROR_SUCCESS)
+    {
+        WARN("The new logon gets no access to the named objects of session %lu\n", CallerSessionId);
+    }
+
+    /*
      * Keep the access of the logon and the user's profile (HKEY_CURRENT_USER of the new process is
      * its hive) until the process has exited. If that cannot be arranged, the profile stays loaded
      * (it is reference counted, a later logon of the user reuses it) rather than being unloaded
      * under the running process.
      */
-    if (DesktopAccess != NULL || ProfileInfo.hProfile != NULL)
+    if (DesktopAccess != NULL || NamespaceAccess != NULL || ProfileInfo.hProfile != NULL)
     {
-        if (StartExitWait(DesktopAccess, hToken, ProfileInfo.hProfile, ProcessInfo.hProcess))
+        if (StartExitWait(DesktopAccess, NamespaceAccess, hToken, ProfileInfo.hProfile, ProcessInfo.hProcess))
         {
             DesktopAccess = NULL;
+            NamespaceAccess = NULL;
             ProfileInfo.hProfile = NULL;
         }
         else
         {
+            /* The entries in the named-object directories go now (below): never left after the process */
             WARN("Cannot wait for the process to exit, Error %lu\n", GetLastError());
             ProfileInfo.hProfile = NULL;
         }
@@ -475,6 +493,7 @@ done:
         TerminateProcess(ProcessInfo.hProcess, dwError);
 
     SeclRevokeDesktopAccess(DesktopAccess);
+    SeclRevokeNamespaceAccess(NamespaceAccess);
 
     if (pszDesktop)
         HeapFree(GetProcessHeap(), 0, pszDesktop);
