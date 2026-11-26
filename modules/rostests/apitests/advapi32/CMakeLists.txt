@@ -103,6 +103,7 @@ list(APPEND SOURCE
     QueryServiceObjectSecurity.c
     RegConcurrentWrite.c
     RegCreateDeleteStress.c
+    RegClosedKeysDrain.c
     RegCreateKeyEx.c
     RegCreateKeyTransacted.c
     RegDeleteTreeOpenHandles.c
