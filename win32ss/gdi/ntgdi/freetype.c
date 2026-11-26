@@ -247,15 +247,22 @@ do { \
     ExReleaseFastMutexUnsafeAndLeaveCriticalRegion(g_FreeTypeLock); \
 } while(0)
 
-#define MAX_FONT_CACHE 256
+/* The glyph bitmap cache keeps at most MAX_FONT_CACHE glyphs and MAX_FONT_CACHE_BYTES of them (entries and bitmaps),
+ * whichever limit is reached first; the least recently used glyphs go first. With room for 256 glyphs only, a few
+ * fonts in a few sizes (four fonts drawing 80 different characters each) did not fit, and every glyph of every call
+ * was loaded and rendered again: 80 characters of text took 2 ms instead of 20 us. The byte limit also bounds what
+ * large glyphs can hold, which the count alone did not. */
+#define MAX_FONT_CACHE 4096
+#define MAX_FONT_CACHE_BYTES (4 * 1024 * 1024)
 
 static RTL_STATIC_LIST_HEAD(g_FontCacheListHead);
 static UINT g_FontCacheNumEntries;
+static SIZE_T g_FontCacheNumBytes;
 
 /* The list above keeps the entries in the order of their last use (the last one is dropped when the cache is
  * full). A lookup that walked it compared every entry in front of the match, and a text that cycles through
  * many glyphs always matched deep in the list, so the entries are also chained by hash. */
-#define FONT_CACHE_BUCKETS 256
+#define FONT_CACHE_BUCKETS 1024
 static PFONT_CACHE_ENTRY g_FontCacheBuckets[FONT_CACHE_BUCKETS];
 #define FONT_CACHE_BUCKET(dwHash) (((dwHash) ^ ((dwHash) >> 8) ^ ((dwHash) >> 16)) % FONT_CACHE_BUCKETS)
 
@@ -554,6 +561,16 @@ SharedFace_AddRef(PSHARED_FACE Ptr)
     ++Ptr->RefCount;
 }
 
+/* What an entry of the glyph cache holds: the entry, the glyph and its bitmap */
+static SIZE_T
+IntGlyphCacheEntryBytes(PFONT_CACHE_ENTRY Entry)
+{
+    const FT_Bitmap *pBitmap = &Entry->BitmapGlyph->bitmap;
+
+    return sizeof(FONT_CACHE_ENTRY) + sizeof(FT_BitmapGlyphRec) +
+           (SIZE_T)pBitmap->rows * (SIZE_T)abs(pBitmap->pitch);
+}
+
 static void
 RemoveCachedEntry(PFONT_CACHE_ENTRY Entry)
 {
@@ -561,6 +578,8 @@ RemoveCachedEntry(PFONT_CACHE_ENTRY Entry)
 
     ASSERT_FREETYPE_LOCK_HELD();
 
+    ASSERT(g_FontCacheNumBytes >= IntGlyphCacheEntryBytes(Entry));
+    g_FontCacheNumBytes -= IntGlyphCacheEntryBytes(Entry);
     FT_Done_Glyph((FT_Glyph)Entry->BitmapGlyph);
     RemoveEntryList(&Entry->ListEntry);
     for (ppLink = &g_FontCacheBuckets[FONT_CACHE_BUCKET(Entry->dwHash)]; *ppLink != NULL;
@@ -1160,6 +1179,7 @@ InitFontSupport(VOID)
     ULONG ulError;
 
     g_FontCacheNumEntries = 0;
+    g_FontCacheNumBytes = 0;
     RtlZeroMemory(g_FontCacheBuckets, sizeof(g_FontCacheBuckets));
 
     g_FreeTypeLock = ExAllocatePoolWithTag(NonPagedPool, sizeof(FAST_MUTEX), TAG_INTERNAL_SYNC);
@@ -4350,10 +4370,14 @@ IntGetBitmapGlyphWithCache(
     InsertHeadList(&g_FontCacheListHead, &NewEntry->ListEntry);
     NewEntry->HashNext = g_FontCacheBuckets[FONT_CACHE_BUCKET(NewEntry->dwHash)];
     g_FontCacheBuckets[FONT_CACHE_BUCKET(NewEntry->dwHash)] = NewEntry;
-    if (++g_FontCacheNumEntries > MAX_FONT_CACHE)
+    g_FontCacheNumEntries++;
+    g_FontCacheNumBytes += IntGlyphCacheEntryBytes(NewEntry);
+
+    /* Drop the least recently used glyphs while over a limit; never the new one, which the caller is given */
+    while ((g_FontCacheNumEntries > MAX_FONT_CACHE || g_FontCacheNumBytes > MAX_FONT_CACHE_BYTES) &&
+           g_FontCacheListHead.Blink != &NewEntry->ListEntry)
     {
-        NewEntry = CONTAINING_RECORD(g_FontCacheListHead.Blink, FONT_CACHE_ENTRY, ListEntry);
-        RemoveCachedEntry(NewEntry);
+        RemoveCachedEntry(CONTAINING_RECORD(g_FontCacheListHead.Blink, FONT_CACHE_ENTRY, ListEntry));
     }
 
     return BitmapGlyph;
