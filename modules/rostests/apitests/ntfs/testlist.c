@@ -41,6 +41,7 @@ extern void func_NtfsSharing(void);
 extern void func_NtfsStreamsAttrList(void);
 extern void func_NtfsSystemFiles(void);
 extern void func_NtfsTraverse(void);
+extern void func_NtfsTwinHandles(void);
 extern void func_NtfsVolumeAttributes(void);
 extern void func_NtfsVolumeData(void);
 extern void func_NtfsVolumeLabel(void);
@@ -83,6 +84,7 @@ const struct test winetest_testlist[] =
     { "NtfsStreamsAttrList", func_NtfsStreamsAttrList },
     { "NtfsSystemFiles", func_NtfsSystemFiles },
     { "NtfsTraverse", func_NtfsTraverse },
+    { "NtfsTwinHandles", func_NtfsTwinHandles },
     { "NtfsVolumeAttributes", func_NtfsVolumeAttributes },
     { "NtfsVolumeData", func_NtfsVolumeData },
     { "NtfsVolumeLabel", func_NtfsVolumeLabel },
