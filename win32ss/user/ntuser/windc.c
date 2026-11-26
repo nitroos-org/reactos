@@ -110,6 +110,7 @@ DceAllocDCE(PWND Window OPTIONAL, DCE_TYPE Type)
   pDce->bGlass = FALSE;
   pDce->pRedir = NULL;
   pDce->RedirFlags = 0;
+  pDce->pclsClassDC = NULL;
 
   InsertTailList(&LEDce, &pDce->List);
 
@@ -606,7 +607,27 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
                Flags |= DCX_CACHE;
             else
             {
-               if (Wnd->pcls->pdce) hDC = ((PDCE)Wnd->pcls->pdce)->hDC;
+               /*
+                * The class DC went to the DC cache when its window was destroyed (DceFreeWindowDCE): it is a cache DC
+                * now, which the lookup below skips, and it may go with a thread that takes it from the cache. The
+                * class lets go of it. When the class has no DC (that, or the DC was freed: DceFreeDCE), the window's
+                * thread makes one, as a new window of the class does.
+                */
+               PDCE pdceClass = DceGetClassDC(Wnd->pcls);
+
+               if (pdceClass && (pdceClass->DCXFlags & DCX_CACHE) && Wnd->head.pti == GetW32ThreadInfo())
+               {
+                  pdceClass->pclsClassDC = NULL;
+                  Wnd->pcls->pdce = pdceClass = NULL;
+               }
+               if (!pdceClass && Wnd->head.pti == GetW32ThreadInfo())
+               {
+                  pdceClass = DceAllocDCE(Wnd, DCE_CLASS_DC);
+                  Wnd->pcls->pdce = pdceClass;
+                  if (pdceClass)
+                     pdceClass->pclsClassDC = Wnd->pcls;
+               }
+               if (pdceClass) hDC = pdceClass->hDC;
                TRACE("We have CLASS!!\n");
             }
          }
@@ -929,6 +950,18 @@ DceFreeDCE(PDCE pdce, BOOLEAN Force)
   ASSERT(pdce != NULL);
   if (NULL == pdce) return;
 
+  /*
+   * A class DC that went to the cache when its window was destroyed (DceFreeWindowDCE) is freed with the
+   * thread that owns it (DceFreeThreadDCE), while its class lives on: the class must not keep pointing at it.
+   * Its next window gets a class DC of its own (co_UserCreateWindowEx).
+   */
+  if (pdce->pclsClassDC)
+  {
+     if (pdce->pclsClassDC->pdce == pdce)
+        pdce->pclsClassDC->pdce = NULL;
+     pdce->pclsClassDC = NULL;
+  }
+
   pdce->DCXFlags |= DCX_INDESTROY;
 
   if (Force &&
@@ -1076,6 +1109,32 @@ DceFreeWindowDCE(PWND Window)
         }
      }
   }
+}
+
+/*
+ * The class DC of Class, or NULL: Class->pdce only when that DCE is still in the DCE list and is this class object's
+ * (pclsClassDC). A class object can hold a pointer to a DCE that was freed, or that another class object owns; such a
+ * pointer is cleared here and not followed.
+ */
+PDCE FASTCALL
+DceGetClassDC(struct _CLS *Class)
+{
+   PLIST_ENTRY ListEntry;
+   PDCE pdce = Class->pdce;
+
+   if (!pdce)
+      return NULL;
+   for (ListEntry = LEDce.Flink; ListEntry != &LEDce; ListEntry = ListEntry->Flink)
+   {
+      if (CONTAINING_RECORD(ListEntry, DCE, List) == pdce)
+      {
+         if (pdce->pclsClassDC == Class)
+            return pdce;
+         break;
+      }
+   }
+   Class->pdce = NULL;
+   return NULL;
 }
 
 void FASTCALL

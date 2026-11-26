@@ -14,6 +14,7 @@ list(APPEND SOURCE
     LifetimeHeldBlocks.c
     LifetimeStressCrashes.c
     CharFuncs.c
+    ClassDCThreadExit.c
     CloseWindow.c
     CopyImage.c
     CalculatePopupWindowPosition.c
