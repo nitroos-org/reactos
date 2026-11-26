@@ -139,7 +139,8 @@ TfSend(
     _In_ PTF_REQUEST Request,
     _In_ HANDLE Event,
     _In_reads_bytes_(Length) PUCHAR Data,
-    _In_ ULONG Length)
+    _In_ ULONG Length,
+    _In_ BOOLEAN Delivered)
 {
     AFD_SEND_INFO SendInfo;
     AFD_WSABUF Buffer;
@@ -156,7 +157,9 @@ TfSend(
         RtlZeroMemory(&SendInfo, sizeof(SendInfo));
         SendInfo.BufferArray = &Buffer;
         SendInfo.BufferCount = 1;
-        SendInfo.AfdFlags = 0;      /* blocks until AFD has taken the data, whatever the mode of the socket */
+        /* Blocks until AFD has taken the data, whatever the mode of the socket; Delivered: until the transport
+           has handed it to a peer on this machine */
+        SendInfo.AfdFlags = Delivered ? AFD_SEND_DELIVERED : 0;
         SendInfo.TdiFlags = 0;
 
         Iosb.Status = STATUS_PENDING;
@@ -177,33 +180,6 @@ TfSend(
     }
 
     return STATUS_SUCCESS;
-}
-
-/*
- * The transport delivers loopback data a moment after AFD completes the send (measured on this stack: a
- * plain send followed at once by a non-blocking recv on the peer finds nothing in 13% of the tries, the
- * same after TransmitFile in 65%; 50 microseconds of waiting made it 0 of 200), while on Windows the data
- * is there when the send completes. A peer on the same host that reads as soon as TransmitFile returns or
- * completes (the Wine test does) expects it. A short wait after the last send; a sleep would cost a whole
- * clock tick (15.6 ms).
- */
-static
-VOID
-TfDeliveryPause(VOID)
-{
-    LARGE_INTEGER Frequency, Start, Now;
-
-    if (!QueryPerformanceFrequency(&Frequency) || !QueryPerformanceCounter(&Start))
-    {
-        Sleep(0);
-        return;
-    }
-
-    do
-    {
-        YieldProcessor();
-        QueryPerformanceCounter(&Now);
-    } while ((Now.QuadPart - Start.QuadPart) * 1000000 / Frequency.QuadPart < 250);
 }
 
 /*
@@ -393,14 +369,13 @@ TfTransfer(
         if (Fill == 0)
             break;
 
-        Status = TfSend(Request, SendEvent, Buffer, Fill);
+        /* The last send of the call asks for its data to be delivered to a peer on this machine before it completes
+         * (on Windows the peer can read it when TransmitFile returns). Elements that are left, or the rest of the
+         * current one, mean it is not the last */
+        Status = TfSend(Request, SendEvent, Buffer, Fill, i >= Request->Count || (i + 1 == Request->Count && Left == 0));
         if (!NT_SUCCESS(Status))
             goto done;
     }
-
-    /* See TfDeliveryPause */
-    if (Request->Sent != 0)
-        TfDeliveryPause();
 
     /* TF_REUSE_SOCKET disconnects as well: after a call with it alone Windows reports the socket as not connected */
     if (Request->Flags & (TF_DISCONNECT | TF_REUSE_SOCKET))
