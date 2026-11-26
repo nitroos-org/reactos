@@ -100,6 +100,27 @@ static __inline BOOLEAN AfdSendNeedsFill(PIRP Irp)
     return Irp->Tail.Overlay.DriverContext[3] == NULL;
 }
 
+/* The flags of the next TDI send: AFD_TDI_SEND_DELIVERED while a pending request asked for its data to be delivered
+ * to a peer on this machine before it completes (TransmitFile). The transport completes the TDI send then, and with
+ * it the requests it carried, when the data is in the peer's queue. Called with the socket's state lock held */
+static USHORT AfdTdiSendFlags(PAFD_FCB FCB)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = FCB->PendingIrpList[FUNCTION_SEND].Flink;
+         Entry != &FCB->PendingIrpList[FUNCTION_SEND];
+         Entry = Entry->Flink)
+    {
+        PIRP Queued = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+        PAFD_SEND_INFO Req = GetLockedData(Queued, IoGetCurrentIrpStackLocation(Queued));
+
+        if (Req && (Req->AfdFlags & AFD_SEND_DELIVERED))
+            return AFD_TDI_SEND_DELIVERED;
+    }
+
+    return 0;
+}
+
 /* Whether a queued whole send still has bytes to copy: later sends must not overtake it */
 static BOOLEAN AfdSendQueueHasRemainder(PAFD_FCB FCB)
 {
@@ -553,7 +574,7 @@ AfdSendCompleted
     {
         Status = TdiSend( &FCB->SendIrp.InFlightRequest,
                           FCB->Connection.Object,
-                          0,
+                          AfdTdiSendFlags(FCB),
                           FCB->Send.Window,
                           FCB->Send.BytesUsed,
                           SendComplete,
@@ -1211,7 +1232,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     {
         TdiSend(&FCB->SendIrp.InFlightRequest,
                 FCB->Connection.Object,
-                0,
+                AfdTdiSendFlags(FCB),
                 FCB->Send.Window,
                 FCB->Send.BytesUsed,
                 SendComplete,
