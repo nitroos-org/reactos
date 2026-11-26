@@ -4084,7 +4084,9 @@ static void test_select(void)
     FD_ZERO_ALL();
     FD_SET(fdWrite, &writefds);
     FD_SET(fdWrite, &exceptfds);
-    select_timeout.tv_sec = 2; /* requires more time to realize it will not connect */
+    /* The refusal is reported after the stack's SYN retries, about 2.0 s here and 2.04 s on Windows Server 2022:
+     * a bound of 2.25 s fails on a busy machine, on Windows as well */
+    select_timeout.tv_sec = 5;
     ret = select(0, &readfds, &writefds, &exceptfds, &select_timeout);
     ok(ret == 1, "expected 1, got %d\n", ret);
     len = sizeof(id);
