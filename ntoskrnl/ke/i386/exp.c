@@ -449,7 +449,7 @@ KeContextToTrapFrame(IN PCONTEXT Context,
         FxSaveArea->Cr0NpxState &= ~(CR0_EM | CR0_MP | CR0_TS);
 
         /* Check if this is a VDM app */
-        if (PsGetCurrentProcess()->VdmObjects)
+        if (VdmpIsCurrentThreadVdm())
         {
             /* Allow the EM flag */
             FxSaveArea->Cr0NpxState |= Context->FloatSave.Cr0NpxState & (CR0_EM | CR0_MP);
@@ -516,7 +516,7 @@ KeContextToTrapFrame(IN PCONTEXT Context,
         FxSaveArea->Cr0NpxState &= ~(CR0_EM | CR0_MP | CR0_TS);
 
         /* Check if this is a VDM app */
-        if (PsGetCurrentProcess()->VdmObjects)
+        if (VdmpIsCurrentThreadVdm())
         {
             /* Allow the EM flag */
             FxSaveArea->Cr0NpxState |= Context->FloatSave.Cr0NpxState & (CR0_EM | CR0_MP);

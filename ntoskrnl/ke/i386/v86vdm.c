@@ -675,6 +675,7 @@ Ke386CallBios(IN ULONG Int,
     /* Set it up */
     RtlZeroMemory(VdmProcessObjects, sizeof(VDM_PROCESS_OBJECTS));
     VdmProcessObjects->VdmTib = VdmTib;
+    VdmProcessObjects->MainThread = PsGetCurrentThread();
     PsGetCurrentProcess()->VdmObjects = VdmProcessObjects;
 
     /* Set the system affinity for the current thread */
