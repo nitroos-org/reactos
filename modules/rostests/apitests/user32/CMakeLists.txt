@@ -130,6 +130,7 @@ list(APPEND SOURCE
     PngIconRows.c
     RawInput.c
     RealGetWindowClass.c
+    RedirDesktop.c
     RedirGlassKeep.c
     RedirPresent.c
     RedirScroll.c
