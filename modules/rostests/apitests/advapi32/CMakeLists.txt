@@ -6,6 +6,7 @@ list(APPEND SOURCE
     AccessCheckDifferential.c
     AccessCheckMandatory.c
     AccessCheckNoAccess.c
+    AccessCheckWriteRestrictedOwner.c
     AccessCheckGenericAce.c
     AccessCheckMalformedAcl.c
     AccessCheckAppContainer.c
@@ -88,6 +89,7 @@ list(APPEND SOURCE
     LsaLogonUserLocalGroups.c
     LsaClientAccess.c
     LsaPortClients.c
+    LsaRemoveAccountRights.c
     LsaPrivateDataCaller.c
     LsaSubmitLength.c
     LsaLogonUserS4U.c
@@ -146,6 +148,7 @@ list(APPEND SOURCE
     RngKnownAnswer.c
     SaferIdentifyLevel.c
     FileInheritedAce.c
+    TokenDenyOnlyAttributes.c
     TokenFilteredFlags.c
     TokenDefaultDacl.c
     TokenElevation.c
@@ -163,6 +166,7 @@ list(APPEND SOURCE
     ServiceEnv.c
     ServiceFailureActions.c
     ServiceRecovery.c
+    ServiceSetOwner.c
     ServiceSid.c
     ServiceVirtualAccount.c
     ServiceNetwork.c
@@ -182,6 +186,7 @@ list(APPEND SOURCE
     ServiceInheritOnlyGeneric.c
     ServiceSharedToken.c
     ServiceTokenSd.c
+    SystemVolumeRootControl.c
     TokenAdminQuery.c
     ServiceSidToken.c
     PerfCounterValues.c

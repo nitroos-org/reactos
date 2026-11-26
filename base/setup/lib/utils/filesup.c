@@ -323,7 +323,9 @@ SetupSecureSystemVolumeRoot(
     HANDLE RootHandle;
     NTSTATUS Status;
 
-    Status = SetupBuildSd(SetupSystemRootAces, ARRAYSIZE(SetupSystemRootAces), SE_DACL_PROTECTED, &Sd, &Dacl, Sids);
+    /* Protected and auto-inherited, as the root of Windows Server 2022 (D:PAI): what is made below it carries the
+       auto-inherited mark too */
+    Status = SetupBuildSd(SetupSystemRootAces, ARRAYSIZE(SetupSystemRootAces), SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED, &Sd, &Dacl, Sids);
     if (!NT_SUCCESS(Status))
         goto Done;
 

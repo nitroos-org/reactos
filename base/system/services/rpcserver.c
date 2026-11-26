@@ -591,6 +591,80 @@ ScmIsCallerLocalSystem(VOID)
 }
 
 
+/*
+ * Whether the RPC client of the current call may make a SID the owner of a service. Measured on Windows Server 2022
+ * (a service whose descriptor gives Everyone WRITE_OWNER): a standard user may set its own user SID and nothing else
+ * (Users, Everyone, Administrators, SYSTEM and a SID that no account has are ERROR_INVALID_OWNER); an administrator
+ * may set any SID, also with SeRestorePrivilege disabled; the same token without privileges (DISABLE_MAX_PRIVILEGE)
+ * may set a group that has the owner attribute (Administrators) and nothing else. So: the user of the token, a
+ * group of the token with SE_GROUP_OWNER, or any SID when the token holds SeRestorePrivilege (enabled or not).
+ */
+static BOOL
+ScmCallerMayOwn(
+    _In_ PSID pOwner)
+{
+    PTOKEN_USER pUser = NULL;
+    PTOKEN_GROUPS pGroups = NULL;
+    PTOKEN_PRIVILEGES pPrivileges = NULL;
+    HANDLE hToken = NULL;
+    LUID RestoreLuid;
+    DWORD dwLength, i;
+    BOOL bResult = FALSE;
+
+    if (pOwner == NULL || !IsValidSid(pOwner))
+        return FALSE;
+
+    if (ScmGetClientToken(&hToken) != ERROR_SUCCESS)
+        return FALSE;
+
+    GetTokenInformation(hToken, TokenUser, NULL, 0, &dwLength);
+    pUser = HeapAlloc(GetProcessHeap(), 0, dwLength);
+    if (pUser == NULL || !GetTokenInformation(hToken, TokenUser, pUser, dwLength, &dwLength))
+        goto done;
+    if (EqualSid(pOwner, pUser->User.Sid))
+    {
+        bResult = TRUE;
+        goto done;
+    }
+
+    GetTokenInformation(hToken, TokenGroups, NULL, 0, &dwLength);
+    pGroups = HeapAlloc(GetProcessHeap(), 0, dwLength);
+    if (pGroups == NULL || !GetTokenInformation(hToken, TokenGroups, pGroups, dwLength, &dwLength))
+        goto done;
+    for (i = 0; i < pGroups->GroupCount; i++)
+    {
+        if ((pGroups->Groups[i].Attributes & SE_GROUP_OWNER) && EqualSid(pOwner, pGroups->Groups[i].Sid))
+        {
+            bResult = TRUE;
+            goto done;
+        }
+    }
+
+    /* (the LUID of the privilege is fixed: no call to the LSA from the controller) */
+    RestoreLuid.LowPart = SE_RESTORE_PRIVILEGE;
+    RestoreLuid.HighPart = 0;
+    GetTokenInformation(hToken, TokenPrivileges, NULL, 0, &dwLength);
+    pPrivileges = HeapAlloc(GetProcessHeap(), 0, dwLength);
+    if (pPrivileges == NULL || !GetTokenInformation(hToken, TokenPrivileges, pPrivileges, dwLength, &dwLength))
+        goto done;
+    for (i = 0; i < pPrivileges->PrivilegeCount; i++)
+    {
+        if (RtlEqualLuid(&pPrivileges->Privileges[i].Luid, &RestoreLuid))
+        {
+            bResult = TRUE;
+            break;
+        }
+    }
+
+done:
+    if (pUser) HeapFree(GetProcessHeap(), 0, pUser);
+    if (pGroups) HeapFree(GetProcessHeap(), 0, pGroups);
+    if (pPrivileges) HeapFree(GetProcessHeap(), 0, pPrivileges);
+    CloseHandle(hToken);
+    return bResult;
+}
+
+
 DWORD
 ScmAssignNewTag(PSERVICE lpService)
 {
@@ -1909,18 +1983,16 @@ RSetServiceObjectSecurity(
     if (lpService->bDeleted)
         return ERROR_SERVICE_MARKED_FOR_DELETE;
 
-#if 0
-    RpcImpersonateClient(NULL);
+    /* The owner a caller may set is not any SID (measured on Windows Server 2022, see ScmCallerMayOwn) */
+    if (dwSecurityInformation & OWNER_SECURITY_INFORMATION)
+    {
+        PSID pNewOwner = NULL;
+        BOOLEAN bDefaulted;
 
-    Status = NtOpenThreadToken(NtCurrentThread(),
-                               8,
-                               TRUE,
-                               &hToken);
-    if (!NT_SUCCESS(Status))
-        return RtlNtStatusToDosError(Status);
-
-    RpcRevertToSelf();
-#endif
+        RtlGetOwnerSecurityDescriptor((PSECURITY_DESCRIPTOR)lpSecurityDescriptor, &pNewOwner, &bDefaulted);
+        if (!ScmCallerMayOwn(pNewOwner))
+            return ERROR_INVALID_OWNER;
+    }
 
     /* Lock the service database exclusive */
     ScmLockDatabaseExclusive();

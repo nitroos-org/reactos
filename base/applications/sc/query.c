@@ -32,7 +32,11 @@ QueryService(LPCTSTR ServiceName)
                       ServiceName,
                       SERVICE_QUERY_STATUS);
     if (hSc == NULL)
+    {
+        /* as sc.exe of Windows (measured on Windows Server 2022) */
+        _tprintf(_T("[SC] EnumQueryServicesStatus:OpenService FAILED %lu:\n\n"), GetLastError());
         goto fail;
+    }
 
     Ret = QueryServiceStatusEx(hSc,
                                SC_STATUS_PROCESS_INFO,

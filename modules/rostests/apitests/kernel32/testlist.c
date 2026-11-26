@@ -140,6 +140,7 @@ extern void func_GetFileType(void);
 extern void func_GetFinalPathNameByHandle(void);
 extern void func_GetUserDefaultGeoName(void);
 extern void func_GetLocaleInfo(void);
+extern void func_IsNLSDefinedString(void);
 extern void func_GetLogicalProcessorInformationEx(void);
 extern void func_GetModuleFileName(void);
 extern void func_GetNamedPipeServerProcessId(void);
@@ -183,6 +184,7 @@ extern void func_LocalDumps(void);
 extern void func_CrashDialog(void);
 extern void func_LocaleDerivedFields(void);
 extern void func_LocaleEveryName(void);
+extern void func_LCIDToLocaleNameRows(void);
 extern void func_LocaleNameToLCID(void);
 extern void func_LocaleTable(void);
 extern void func_LocalTimeZone(void);
@@ -440,6 +442,7 @@ const struct test winetest_testlist[] =
     { "GetFinalPathNameByHandle",    func_GetFinalPathNameByHandle },
     { "GetUserDefaultGeoName", func_GetUserDefaultGeoName },
     { "GetLocaleInfo",               func_GetLocaleInfo },
+    { "IsNLSDefinedString",          func_IsNLSDefinedString },
     { "GetLogicalProcessorInformationEx", func_GetLogicalProcessorInformationEx },
     { "GetModuleFileName",           func_GetModuleFileName },
     { "GetNamedPipeServerProcessId", func_GetNamedPipeServerProcessId },
@@ -483,6 +486,7 @@ const struct test winetest_testlist[] =
     { "CrashDialog",                 func_CrashDialog },
     { "LocaleDerivedFields",         func_LocaleDerivedFields },
     { "LocaleEveryName",             func_LocaleEveryName },
+    { "LCIDToLocaleNameRows",        func_LCIDToLocaleNameRows },
     { "LocaleNameToLCID",            func_LocaleNameToLCID },
     { "LocaleTable",                 func_LocaleTable },
     { "LocalTimeZone",               func_LocalTimeZone },

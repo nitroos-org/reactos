@@ -2639,6 +2639,9 @@ NlsGetCacheUpdateCount(VOID)
     return 0;
 }
 
+extern const WCHAR NlsDefinedRanges[][2];
+extern const unsigned int NlsDefinedRangeCount;
+
 /*
  * @unimplemented
  */
@@ -2674,7 +2677,11 @@ IsNLSDefinedString(IN NLS_FUNCTION Function,
         return FALSE;
     }
 
-    /* A string is defined when it holds no unpaired surrogate (measured: FALSE with the last error untouched) */
+    /* A string is defined when every character in it is (measured on Windows Server 2022: FALSE with the last error
+       untouched for an unpaired surrogate, an unassigned or private use character, a noncharacter and U+FEFF). The
+       characters of the Basic Multilingual Plane are the ones of NlsDefinedRanges (Unicode 6.0, see mknlsdefined.py);
+       of the supplementary planes the reference calls planes 1 and 2 and the variation selectors supplement
+       (U+E0100 to U+E01EF) defined, and nothing else. */
     if (cchStr < 0)
         cchStr = lstrlenW(lpString);
     for (i = 0; i < cchStr; i++)
@@ -2683,14 +2690,37 @@ IsNLSDefinedString(IN NLS_FUNCTION Function,
 
         if (c >= 0xd800 && c <= 0xdbff)
         {
-            if (i + 1 < cchStr && lpString[i + 1] >= 0xdc00 && lpString[i + 1] <= 0xdfff)
-                i++;
-            else
+            ULONG Code;
+
+            if (i + 1 >= cchStr || lpString[i + 1] < 0xdc00 || lpString[i + 1] > 0xdfff)
+                return FALSE;
+            Code = 0x10000 + (((ULONG)(c - 0xd800)) << 10) + (lpString[i + 1] - 0xdc00);
+            i++;
+            if (Code > 0x2ffff && (Code < 0xe0100 || Code > 0xe01ef))
                 return FALSE;
         }
         else if (c >= 0xdc00 && c <= 0xdfff)
         {
             return FALSE;
+        }
+        else
+        {
+            /* binary search of the ranges */
+            UINT Low = 0, High = NlsDefinedRangeCount;
+
+            while (Low < High)
+            {
+                UINT Mid = (Low + High) / 2;
+
+                if (c < NlsDefinedRanges[Mid][0])
+                    High = Mid;
+                else if (c > NlsDefinedRanges[Mid][1])
+                    Low = Mid + 1;
+                else
+                    break;
+            }
+            if (Low >= High)
+                return FALSE;
         }
     }
     return TRUE;

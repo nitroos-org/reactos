@@ -1621,8 +1621,12 @@ SepPerformTokenFiltering(
                 {
                     AccessToken->TokenFlags |= TOKEN_IS_FILTERED;
                 }
-                AccessToken->UserAndGroups[GroupsInToken].Attributes &= ~(SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT);
-                AccessToken->UserAndGroups[GroupsInToken].Attributes |= SE_GROUP_USE_FOR_DENY_ONLY;
+                /*
+                 * A deny-only group has exactly that attribute: measured on Windows Server 2022, Users and
+                 * Everyone (0x7) and Administrators (0xf) become 0x10, so the mandatory and owner bits go too
+                 * (as they do for the groups a LUA token makes deny-only).
+                 */
+                AccessToken->UserAndGroups[GroupsInToken].Attributes = SE_GROUP_USE_FOR_DENY_ONLY;
 
                 /*
                  * Unlike a deleted privilege, a disabled group SID stays in

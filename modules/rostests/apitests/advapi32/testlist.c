@@ -8,6 +8,7 @@ extern void func_AccessCheckAuditAlarmStress(void);
 extern void func_AccessCheckDifferential(void);
 extern void func_AccessCheckMandatory(void);
 extern void func_AccessCheckNoAccess(void);
+extern void func_AccessCheckWriteRestrictedOwner(void);
 extern void func_AccessCheckGenericAce(void);
 extern void func_AccessCheckMalformedAcl(void);
 extern void func_AccessCheckAppContainer(void);
@@ -88,6 +89,7 @@ extern void func_LsaLogonUserFailure(void);
 extern void func_LsaLogonUserLocalGroups(void);
 extern void func_LsaClientAccess(void);
 extern void func_LsaPortClients(void);
+extern void func_LsaRemoveAccountRights(void);
 extern void func_LsaPrivateDataCaller(void);
 extern void func_LsaSubmitLength(void);
 extern void func_LsaLogonUserS4U(void);
@@ -163,6 +165,7 @@ extern void func_RngKnownAnswer(void);
 extern void func_RngCallersFailure(void);
 extern void func_SaferIdentifyLevel(void);
 extern void func_FileInheritedAce(void);
+extern void func_TokenDenyOnlyAttributes(void);
 extern void func_TokenFilteredFlags(void);
 extern void func_TokenDefaultDacl(void);
 extern void func_TokenElevation(void);
@@ -180,6 +183,7 @@ extern void func_ServiceDependency(void);
 extern void func_ServiceEnv(void);
 extern void func_ServiceFailureActions(void);
 extern void func_ServiceRecovery(void);
+extern void func_ServiceSetOwner(void);
 extern void func_ServiceSid(void);
 extern void func_ServiceVirtualAccount(void);
 extern void func_ServiceNetwork(void);
@@ -211,6 +215,7 @@ extern void func_ServiceProcess(void);
 extern void func_ServiceInheritOnlyGeneric(void);
 extern void func_ServiceSharedToken(void);
 extern void func_ServiceTokenSd(void);
+extern void func_SystemVolumeRootControl(void);
 extern void func_TokenAdminQuery(void);
 extern void func_ServiceSidToken(void);
 extern void func_ServiceStructLayout(void);
@@ -229,6 +234,7 @@ const struct test winetest_testlist[] =
     { "AccessCheckDifferential", func_AccessCheckDifferential },
     { "AccessCheckMandatory", func_AccessCheckMandatory },
     { "AccessCheckNoAccess", func_AccessCheckNoAccess },
+    { "AccessCheckWriteRestrictedOwner", func_AccessCheckWriteRestrictedOwner },
     { "AccessCheckGenericAce", func_AccessCheckGenericAce },
     { "AccessCheckMalformedAcl", func_AccessCheckMalformedAcl },
     { "AccessCheckAppContainer", func_AccessCheckAppContainer },
@@ -318,6 +324,7 @@ const struct test winetest_testlist[] =
     { "LsaLogonUserLocalGroups", func_LsaLogonUserLocalGroups },
     { "LsaClientAccess", func_LsaClientAccess },
     { "LsaPortClients", func_LsaPortClients },
+    { "LsaRemoveAccountRights", func_LsaRemoveAccountRights },
     { "LsaPrivateDataCaller", func_LsaPrivateDataCaller },
     { "LsaSubmitLength", func_LsaSubmitLength },
     { "LsaLogonUserS4U", func_LsaLogonUserS4U },
@@ -394,6 +401,7 @@ const struct test winetest_testlist[] =
     { "RngCallersFailure", func_RngCallersFailure },
     { "SaferIdentifyLevel", func_SaferIdentifyLevel },
     { "FileInheritedAce", func_FileInheritedAce },
+    { "TokenDenyOnlyAttributes", func_TokenDenyOnlyAttributes },
     { "TokenFilteredFlags", func_TokenFilteredFlags },
     { "TokenDefaultDacl", func_TokenDefaultDacl },
     { "TokenElevation", func_TokenElevation },
@@ -411,6 +419,7 @@ const struct test winetest_testlist[] =
     { "ServiceEnv", func_ServiceEnv },
     { "ServiceFailureActions", func_ServiceFailureActions },
     { "ServiceRecovery", func_ServiceRecovery },
+    { "ServiceSetOwner", func_ServiceSetOwner },
     { "ServiceSid", func_ServiceSid },
     { "ServiceVirtualAccount", func_ServiceVirtualAccount },
     { "ServiceNetwork", func_ServiceNetwork },
@@ -431,6 +440,7 @@ const struct test winetest_testlist[] =
     { "ServiceInheritOnlyGeneric", func_ServiceInheritOnlyGeneric },
     { "ServiceSharedToken", func_ServiceSharedToken },
     { "ServiceTokenSd", func_ServiceTokenSd },
+    { "SystemVolumeRootControl", func_SystemVolumeRootControl },
     { "TokenAdminQuery", func_TokenAdminQuery },
     { "ServiceSidToken", func_ServiceSidToken },
     { "ServiceStructLayout", func_ServiceStructLayout },

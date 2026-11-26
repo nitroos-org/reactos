@@ -21,7 +21,11 @@ LCIDToLocaleName(
     DWORD RtlFlags = 0;
     NTSTATUS Status;
 
-    if (cchName < 0)
+    /* Measured on Windows Server 2022: a negative size and any flag but LOCALE_ALLOW_NEUTRAL_NAMES are refused
+       (0x1, 0x2, 0x4, 0x8, 0x80, 0x100, 0x1000, 0x80000000 and 0x10000000 as well), and so is an LCID with no
+       language but a sort order or bits above the sort order (0x10000, 0x20000, 0x30000, 0x400000, 0x10000000) */
+    if (cchName < 0 || (dwFlags & ~LOCALE_ALLOW_NEUTRAL_NAMES) ||
+        (Locale != LOCALE_NEUTRAL && !LANGIDFROMLCID(Locale)))
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
@@ -44,19 +48,12 @@ LCIDToLocaleName(
         RtlFlags |= RTL_LOCALE_ALLOW_NEUTRAL_NAMES;
     }
 
-    if (lpName != NULL)
-    {
-        cchName = min(cchName, LOCALE_NAME_MAX_LENGTH);
-        LocaleNameString.Buffer = lpName;
-        LocaleNameString.Length = 0;
-        LocaleNameString.MaximumLength = (USHORT)(cchName * sizeof(WCHAR));
-    }
-    else
-    {
-        LocaleNameString.Buffer = Buffer;
-        LocaleNameString.Length = 0;
-        LocaleNameString.MaximumLength = sizeof(Buffer);
-    }
+    /* The name is made in a buffer of our own: a size query (cchName 0) leaves the caller's buffer alone and a
+       buffer that is too small is filled as far as it goes (measured on Windows Server 2022: "en" of "en-US"
+       for cchName 3, ERROR_INSUFFICIENT_BUFFER) */
+    LocaleNameString.Buffer = Buffer;
+    LocaleNameString.Length = 0;
+    LocaleNameString.MaximumLength = sizeof(Buffer) - sizeof(WCHAR);
 
     /* Call the RTL function */
     Status = RtlLcidToLocaleName(Locale, &LocaleNameString, RtlFlags, FALSE);
@@ -64,6 +61,10 @@ LCIDToLocaleName(
     {
         /* Without the flag Windows names the locale a neutral LCID stands for; LOCALE_NEUTRAL is the default */
         LCID Specific = Locale ? BasepNeutralLcidToSpecific(Locale) : GetUserDefaultLCID();
+
+        /* a sort order that names no locale is no neutral locale (0x10409 is refused) */
+        if (Locale & 0xffff0000)
+            Specific = 0;
 
         if (Specific)
         {
@@ -79,6 +80,23 @@ LCIDToLocaleName(
         return 0;
     }
 
-    /* Return the length including the terminating null */
-    return (LocaleNameString.Length / sizeof(WCHAR)) + 1;
+    {
+        INT Length = (LocaleNameString.Length / sizeof(WCHAR)) + 1;
+
+        if (cchName == 0 || lpName == NULL)
+            return Length;
+
+        Buffer[LocaleNameString.Length / sizeof(WCHAR)] = UNICODE_NULL;
+        if (cchName < Length)
+        {
+            RtlCopyMemory(lpName, Buffer, (cchName - 1) * sizeof(WCHAR));
+            lpName[cchName - 1] = UNICODE_NULL;
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+
+        /* Return the length including the terminating null */
+        RtlCopyMemory(lpName, Buffer, Length * sizeof(WCHAR));
+        return Length;
+    }
 }

@@ -86,6 +86,7 @@ list(APPEND SOURCE
     winnls/string/IdnToAscii.c
     winnls/string/IdnToUnicode.c
     winnls/string/normalize.c
+    winnls/string/nlsdefined.c
     winnls/string/normdata.c
     client/actctx.c
     client/appcache.c

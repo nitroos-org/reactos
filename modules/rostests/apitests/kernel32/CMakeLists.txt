@@ -138,6 +138,7 @@ list(APPEND SOURCE
     GetFinalPathNameByHandle.c
     GetUserDefaultGeoName.c
     GetLocaleInfo.c
+    IsNLSDefinedString.c
     GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
     GetNamedPipeServerProcessId.c
@@ -181,6 +182,7 @@ list(APPEND SOURCE
     CrashDialog.c
     LocaleDerivedFields.c
     LocaleEveryName.c
+    LCIDToLocaleNameRows.c
     LocaleNameToLCID.c
     LocaleTable.c
     LocalTimeZone.c
