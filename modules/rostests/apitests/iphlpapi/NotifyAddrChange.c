@@ -272,6 +272,102 @@ static void TestBlocking(TARGET *Target)
     ok(AdapterHasAddress(Target), "The address of adapter %lu was not restored\n", Target->Index);
 }
 
+/* A change is a few events of the stack (the address, its route, the DHCP client binding it again); the loop of the
+   defect gave hundreds */
+#define REARM_MAX_WAKES 10
+
+typedef struct _REARM
+{
+    HANDLE Stop;
+    HANDLE Armed;
+    HANDLE Event;
+    OVERLAPPED Overlapped;
+    volatile LONG Wakes;
+} REARM;
+
+/* A waiter that queues its next request as soon as it is woken, at a higher priority than the thread that makes the
+   change, on the same processor: it runs between the completion of its request and the end of the change. */
+static DWORD WINAPI RearmThread(PVOID Context)
+{
+    REARM *Rearm = Context;
+    HANDLE Handle, Wait[2];
+
+    SetThreadAffinityMask(GetCurrentThread(), 1);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    Wait[0] = Rearm->Stop;
+    Wait[1] = Rearm->Event;
+    for (;;)
+    {
+        Handle = NULL;
+        ZeroMemory(&Rearm->Overlapped, sizeof(Rearm->Overlapped));
+        Rearm->Overlapped.hEvent = Rearm->Event;
+        ResetEvent(Rearm->Event);
+        if (NotifyAddrChange(&Handle, &Rearm->Overlapped) != ERROR_IO_PENDING)
+            break;
+        SetEvent(Rearm->Armed);
+        if (WaitForMultipleObjects(2, Wait, FALSE, INFINITE) == WAIT_OBJECT_0)
+        {
+            CancelIPChangeNotify(&Rearm->Overlapped);
+            WaitForSingleObject(Rearm->Event, 5000);
+            break;
+        }
+        InterlockedIncrement(&Rearm->Wakes);
+    }
+    return 0;
+}
+
+/* One change of the address table wakes a waiter once; the request that the waiter queues after it belongs to the
+   next change. A request that was queued while the change was still being reported was completed as well, the waiter
+   queued the next one, and the waiter ran in a loop for as long as it kept up (hundreds of wake-ups a second). */
+static void TestRearm(TARGET *Target)
+{
+    REARM Rearm;
+    HANDLE Thread;
+    LONG AfterRemove, AfterRestore;
+    BOOL Present;
+    DWORD_PTR ProcessMask = 1, SystemMask = 1;
+
+    GetProcessAffinityMask(GetCurrentProcess(), &ProcessMask, &SystemMask);
+    SystemMask = ProcessMask;
+    ZeroMemory(&Rearm, sizeof(Rearm));
+    Rearm.Stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+    Rearm.Armed = CreateEventW(NULL, FALSE, FALSE, NULL);
+    Rearm.Event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    SetThreadAffinityMask(GetCurrentThread(), 1);
+    Thread = CreateThread(NULL, 0, RearmThread, &Rearm, 0, NULL);
+    ok(Thread != NULL, "CreateThread failed\n");
+    if (Thread)
+    {
+        ok(WaitForSingleObject(Rearm.Armed, CHANGE_TIMEOUT) == WAIT_OBJECT_0, "The waiter did not queue its request\n");
+        Sleep(300);
+        ok(Rearm.Wakes == 0, "%ld wake-ups without a change\n", Rearm.Wakes);
+
+        if (RemoveAddress(Target))
+        {
+            Sleep(1500);
+            AfterRemove = Rearm.Wakes;
+            ok(AfterRemove >= 1, "No wake-up when the address was removed\n");
+            ok(AfterRemove <= REARM_MAX_WAKES, "%ld wake-ups for the removal of an address\n", AfterRemove);
+            /* the DHCP client may have bound the address again already: then nothing is added, and nothing wakes */
+            Present = AdapterHasAddress(Target);
+            RestoreAddress(Target);
+            Sleep(1500);
+            AfterRestore = Rearm.Wakes - AfterRemove;
+            if (!Present)
+                ok(AfterRestore >= 1, "No wake-up when the address was added\n");
+            ok(AfterRestore <= REARM_MAX_WAKES, "%ld wake-ups for the addition of an address\n", AfterRestore);
+        }
+        SetEvent(Rearm.Stop);
+        WaitForSingleObject(Thread, 10000);
+        CloseHandle(Thread);
+    }
+    SetThreadAffinityMask(GetCurrentThread(), SystemMask);
+    CloseHandle(Rearm.Stop);
+    CloseHandle(Rearm.Armed);
+    CloseHandle(Rearm.Event);
+    ok(AdapterHasAddress(Target), "The address of adapter %lu was not restored\n", Target->Index);
+}
+
 START_TEST(NotifyAddrChange)
 {
     TARGET Target;
@@ -295,4 +391,5 @@ START_TEST(NotifyAddrChange)
     }
     TestChange(&Target);
     TestBlocking(&Target);
+    TestRearm(&Target);
 }

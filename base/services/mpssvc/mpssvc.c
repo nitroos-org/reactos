@@ -117,9 +117,12 @@ static VOID ReportRules(VOID)
    ADDR_POLL_TICKS poll ticks, which covers IPv6 (no notification there) and a failed notification request, and a
    push happens only when the signature differs from the one of the last push. A change must stay quiet for
    ADDR_QUIET_MS before it is pushed (debounce: DHCP and SLAAC set several addresses), but never longer than
-   ADDR_MAX_MS after the first change (an interface that keeps flapping must not postpone the push for ever). */
+   ADDR_MAX_MS after the first change (an interface that keeps flapping must not postpone the push for ever).
+   A notification is not acted on at once: the addresses are read once, ADDR_COALESCE_MS after it, so the service
+   reads them at most a few times a second however often the stack completes the request. */
 
 #define ADDR_POLL_TICKS    5
+#define ADDR_COALESCE_MS   200      /* after a notification: wait this long for more changes, then check once */
 #define ADDR_QUIET_MS      1500
 #define ADDR_MAX_MS        10000
 
@@ -139,16 +142,22 @@ static ULONG SigAdd(ULONG h, const void *p, SIZE_T n)
     return h;
 }
 
-static ULONG AddrSignature(VOID)
+/* The signature of the addresses now. FALSE when they could not be read (no memory, a table that kept growing, a
+   failing call): the caller then keeps what it has, it never takes an empty answer for "all addresses are gone". No
+   address at all (ERROR_NO_DATA) is a valid answer. */
+static BOOL AddrSignature(ULONG *Sig)
 {
     ULONG h = 2166136261u, len = 0, tries; DWORD rc = ERROR_BUFFER_OVERFLOW;
     IP_ADAPTER_INFO *ai = NULL, *a; IP_ADAPTER_ADDRESSES *aa = NULL, *w;
+    BOOL ok = TRUE;
     for (tries = 0; tries < 3 && rc == ERROR_BUFFER_OVERFLOW; tries++)
     {
         if (ai) HeapFree(GetProcessHeap(), 0, ai);
         ai = len ? HeapAlloc(GetProcessHeap(), 0, len) : NULL;
+        if (len && !ai) { rc = ERROR_NOT_ENOUGH_MEMORY; break; }
         rc = GetAdaptersInfo(ai, &len);
     }
+    if (rc != NO_ERROR && rc != ERROR_NO_DATA) ok = FALSE;
     if (rc == NO_ERROR && ai)
     {
         for (a = ai; a; a = a->Next)
@@ -168,9 +177,10 @@ static ULONG AddrSignature(VOID)
     {
         if (aa) HeapFree(GetProcessHeap(), 0, aa);
         aa = HeapAlloc(GetProcessHeap(), 0, len);
-        if (!aa) break;
+        if (!aa) { ok = FALSE; break; }
         rc = GetAdaptersAddresses(AF_INET6, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, NULL, aa, &len);
     }
+    if (rc == ERROR_BUFFER_OVERFLOW || rc == ERROR_NOT_ENOUGH_MEMORY) ok = FALSE;
     if (aa && rc == NO_ERROR)
     {
         for (w = aa; w; w = w->Next)
@@ -186,7 +196,8 @@ static ULONG AddrSignature(VOID)
         }
     }
     if (aa) HeapFree(GetProcessHeap(), 0, aa);
-    return h;
+    *Sig = h;
+    return ok;
 }
 
 /* queue the next NotifyAddrChange request; without one the signature poll still runs */
@@ -208,26 +219,28 @@ static VOID ArmAddrNotify(VOID)
     if (NotifyAddrChange(&g_AddrFile, &g_AddrOv) == ERROR_IO_PENDING) g_AddrArmed = TRUE;
 }
 
-/* the signature differs from the last push's: (re)start the quiet period */
-static VOID AddrCheck(VOID)
+/* the signature differs from the last push's: (re)start the quiet period. SINCE is when the change was first seen (the
+   tick of the notification, not of the check that the coalescing delayed), so the push is due ADDR_QUIET_MS after the
+   change. The addresses that cannot be read change nothing: the policy in force stays. */
+static VOID AddrCheck(DWORD since)
 {
-    ULONG sig = AddrSignature();
+    ULONG sig;
+    if (!AddrSignature(&sig)) return;
     if (sig == g_LastSig && !g_SigDirty) return;
     if (sig == g_LastSig) { g_SigDirty = FALSE; return; }      /* changed and changed back before the push */
     if (!g_SigDirty || sig != g_PendingSig)
     {
-        DWORD now = GetTickCount();
-        if (!g_SigDirty) g_SigFirst = now;
+        if (!g_SigDirty) g_SigFirst = since;
         g_SigDirty = TRUE; g_PendingSig = sig;
-        g_SigDue = now + ADDR_QUIET_MS;
+        g_SigDue = since + ADDR_QUIET_MS;
         if ((LONG)(g_SigDue - (g_SigFirst + ADDR_MAX_MS)) > 0) g_SigDue = g_SigFirst + ADDR_MAX_MS;   /* upper bound */
     }
 }
 
 static VOID Push(VOID)
 {
-    BOOL present; DWORD err;
-    g_LastSig = AddrSignature();    /* taken before the push reads the addresses: a later change is seen as a difference */
+    BOOL present; DWORD err; ULONG sig;
+    if (AddrSignature(&sig)) g_LastSig = sig;    /* taken before the push reads the addresses: a later change is seen as a difference */
     g_SigDirty = FALSE;
     err = FwPushToKernel(++g_Generation, &present);
     Report(err, present);
@@ -274,15 +287,33 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
     {
         /* wake every POLL_MS for the block prompt; when the device is absent retry every NITROFW_RETRY_SECONDS;
            netsh/COM changes arrive through the key notification */
+        DWORD timeout = POLL_MS; BOOL early = FALSE;
         nWait = g_AddrArmed ? 3 : 2;
-        wait = WaitForMultipleObjects(nWait, hs, FALSE, POLL_MS);
+        if (g_SigDirty)
+        {
+            /* a push is due: wake for it, not at the next poll tick */
+            LONG left = (LONG)(g_SigDue - GetTickCount());
+            if (left < 0) left = 0;
+            if ((DWORD)left < POLL_MS) { timeout = (DWORD)left; early = TRUE; }
+        }
+        wait = WaitForMultipleObjects(nWait, hs, FALSE, timeout);
         if (wait == WAIT_OBJECT_0) break;
-        if (wait == WAIT_OBJECT_0 + 2) { ArmAddrNotify(); AddrCheck(); }
-        else if (wait == WAIT_TIMEOUT && ++addrTicks >= ADDR_POLL_TICKS)
+        if (wait == WAIT_OBJECT_0 + 2)
+        {
+            /* The address table changed. Whatever the stack does, the addresses are read at most once every
+               ADDR_COALESCE_MS: a burst of changes (DHCP, SLAAC) is one check after it, and a notification that
+               completes again at once cannot make this loop spin. The request is queued again before the check, so a
+               change after the check is notified. */
+            DWORD since = GetTickCount();
+            if (WaitForSingleObject(g_hStop, ADDR_COALESCE_MS) == WAIT_OBJECT_0) break;
+            ArmAddrNotify();
+            AddrCheck(since);
+        }
+        else if (wait == WAIT_TIMEOUT && !early && ++addrTicks >= ADDR_POLL_TICKS)
         {
             addrTicks = 0;
             if (g_AddrStuck) ArmAddrNotify();    /* the request of an earlier run may have completed since: notify again */
-            AddrCheck();
+            AddrCheck(GetTickCount());
         }
         AddrPushIfDue();
         if (wait == WAIT_OBJECT_0 + 1)
@@ -295,6 +326,7 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
         else if (wait == WAIT_TIMEOUT)
         {
             HKEY hk; DWORD present = 0, cb = 4, t;
+            if (early) continue;    /* only woken for the push that was due */
             PromptPoll();
             if (++retryTicks < NITROFW_RETRY_SECONDS * 1000 / POLL_MS) continue;
             retryTicks = 0;

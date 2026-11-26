@@ -20,11 +20,19 @@
  * request in the first driver context field */
 #define IRP_FAMILIES(Irp) ((ULONG)(ULONG_PTR)(Irp)->Tail.Overlay.DriverContext[0])
 
-/* Which waiting requests a removal looks for: those of one file object (NULL: any) that wait for one of Families */
+/* The place in the queue of a waiting request: the number the queue gave it when it was inserted (second driver
+ * context field; the fourth one is the cancel-safe queue's own). A change completes the requests that were waiting
+ * when it happened, which are those with a number up to the last one given at that moment. */
+#define IRP_SEQ(Irp) ((ULONG_PTR)(Irp)->Tail.Overlay.DriverContext[1])
+
+/* Which waiting requests a removal looks for: those of one file object (NULL: any) that wait for one of Families,
+ * and, when Limited, that were inserted with a number up to Limit (compared as a distance: the counter may wrap) */
 typedef struct _CHANGE_PEEK
 {
     PFILE_OBJECT FileObject;
     ULONG Families;
+    BOOLEAN Limited;
+    ULONG_PTR Limit;
 } CHANGE_PEEK, *PCHANGE_PEEK;
 
 /* One queue for the address changes, one for the route changes */
@@ -33,6 +41,7 @@ typedef struct _CHANGE_QUEUE
     IO_CSQ Csq;
     LIST_ENTRY List;
     KSPIN_LOCK Lock;
+    ULONG_PTR Seq;      /* the number of the last request inserted; under Lock */
 } CHANGE_QUEUE;
 
 static CHANGE_QUEUE AddrChangeQueue;
@@ -45,7 +54,10 @@ VOID
 NTAPI
 ChangeCsqInsertIrp(PIO_CSQ Csq, PIRP Irp)
 {
-    InsertTailList(&QUEUE_OF(Csq)->List, &Irp->Tail.Overlay.ListEntry);
+    CHANGE_QUEUE *Queue = QUEUE_OF(Csq);
+
+    Irp->Tail.Overlay.DriverContext[1] = (PVOID)++Queue->Seq;
+    InsertTailList(&Queue->List, &Irp->Tail.Overlay.ListEntry);
 }
 
 static
@@ -71,6 +83,9 @@ ChangeCsqPeekNextIrp(PIO_CSQ Csq, PIRP Irp, PVOID PeekContext)
     for (; Entry != Head; Entry = Entry->Flink)
     {
         Next = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+        /* the requests are in the order of their numbers: the first one past the limit ends the search */
+        if (Peek && Peek->Limited && (LONG_PTR)(IRP_SEQ(Next) - Peek->Limit) > 0)
+            return NULL;
         if (!Peek ||
             ((!Peek->FileObject || IoGetCurrentIrpStackLocation(Next)->FileObject == Peek->FileObject) &&
              (IRP_FAMILIES(Next) & Peek->Families)))
@@ -209,7 +224,19 @@ ChangeQueueNotify(CHANGE_QUEUE *Queue, ULONG Families)
     CHANGE_PEEK Peek;
     ULONG Changed;
     PIO_STACK_LOCATION IrpSp;
+    KIRQL OldIrql;
 
+    /*
+     * Only the requests that wait now are completed. A waiter that queues its request again as soon as it was woken
+     * (the usual loop of NotifyAddrChange) has its new request in this queue while this loop still runs; taking that
+     * one for the same change completes it at once, the waiter queues the next one, and so on for as long as the
+     * waiter keeps up with the loop (a service thread that read the whole address table each time, a few hundred
+     * times a second). The next request waits for the next change.
+     */
+    KeAcquireSpinLock(&Queue->Lock, &OldIrql);
+    Peek.Limit = Queue->Seq;
+    KeReleaseSpinLock(&Queue->Lock, OldIrql);
+    Peek.Limited = TRUE;
     Peek.FileObject = NULL;
     Peek.Families = Families;
     while ((Irp = IoCsqRemoveNextIrp(&Queue->Csq, &Peek)) != NULL)
@@ -340,6 +367,8 @@ AddrChangeCancelFile(PFILE_OBJECT FileObject)
     ULONG i;
     CHANGE_PEEK Peek;
 
+    Peek.Limited = FALSE;
+    Peek.Limit = 0;
     Peek.FileObject = FileObject;
     Peek.Families = TCP_CHANGE_FAMILY_IPV4 | TCP_CHANGE_FAMILY_IPV6;
     for (i = 0; i < 2; i++)
