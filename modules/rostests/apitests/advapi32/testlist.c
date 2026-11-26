@@ -174,6 +174,7 @@ extern void func_TokenIntegrity(void);
 extern void func_TraverseRestricted(void);
 extern void func_TokenLogonSid(void);
 extern void func_WellKnownSidTypes(void);
+extern void func_WorkingSetMinimumToken(void);
 extern void func_WriteRestrictedToken(void);
 extern void func_TokenQueryParity(void);
 extern void func_OpenProcessTokenLimited(void);
@@ -411,6 +412,7 @@ const struct test winetest_testlist[] =
     { "TraverseRestricted", func_TraverseRestricted },
     { "TokenLogonSid", func_TokenLogonSid },
     { "WellKnownSidTypes", func_WellKnownSidTypes },
+    { "WorkingSetMinimumToken", func_WorkingSetMinimumToken },
     { "WriteRestrictedToken", func_WriteRestrictedToken },
     { "TokenQueryParity", func_TokenQueryParity },
     { "OpenProcessTokenLimited", func_OpenProcessTokenLimited },

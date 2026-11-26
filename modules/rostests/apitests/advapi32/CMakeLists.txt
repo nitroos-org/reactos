@@ -156,6 +156,7 @@ list(APPEND SOURCE
     TokenIntegrity.c
     TraverseRestricted.c
     TokenLogonSid.c
+    WorkingSetMinimumToken.c
     WriteRestrictedToken.c
     WellKnownSidTypes.c
     TokenQueryParity.c
