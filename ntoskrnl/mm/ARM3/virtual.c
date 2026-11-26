@@ -6513,6 +6513,14 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
                 goto FailPathNoLock;
             }
 
+            /* Measured on Windows Server 2022: a limit below the lowest address leaves no memory, except for a region
+               that is exactly as large as the range up to the limit: that is a conflict as well */
+            if (HighestAddress < (ULONG_PTR)MI_LOWEST_VAD_ADDRESS && PRegionSize - 1 == HighestAddress)
+            {
+                Status = STATUS_CONFLICTING_ADDRESSES;
+                goto FailPathNoLock;
+            }
+
         }
         else
         {

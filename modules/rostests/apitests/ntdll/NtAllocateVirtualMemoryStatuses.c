@@ -46,6 +46,13 @@ START_TEST(NtAllocateVirtualMemoryStatuses)
     /* the range is exactly the size, but starts at the lowest user address */
     CheckAlloc("reserve 1 MB", 12, 0x100000, MEM_RESERVE, STATUS_CONFLICTING_ADDRESSES);
 
+    /* a region exactly as large as the range up to the limit, which is below the lowest user address */
+    CheckAlloc("reserve 4 KB", 20, 0x1000, MEM_RESERVE, STATUS_CONFLICTING_ADDRESSES);
+    CheckAlloc("reserve 8 KB", 19, 0x2000, MEM_RESERVE, STATUS_CONFLICTING_ADDRESSES);
+    CheckAlloc("reserve 64 KB", 16, 0x10000, MEM_RESERVE, STATUS_CONFLICTING_ADDRESSES);
+    CheckAlloc("reserve 4 KB", 21, 0x1000, MEM_RESERVE, STATUS_INVALID_PARAMETER);
+    CheckAlloc("reserve 4 KB", 19, 0x1000, MEM_RESERVE, STATUS_NO_MEMORY);
+
     /* a limit below the lowest user address */
     CheckAlloc("reserve 8 KB", 16, 0x2000, MEM_RESERVE | MEM_COMMIT, STATUS_NO_MEMORY);
     CheckAlloc("reserve 8 KB", 17, 0x2000, MEM_RESERVE | MEM_COMMIT, STATUS_NO_MEMORY);
