@@ -561,6 +561,52 @@ BOOL WINAPI WTSQuerySessionInformationA(
 #endif
 }
 
+#ifdef __REACTOS__
+static BOOL is_interactive_user_token(HANDLE token);
+static HANDLE find_session_user_token(ULONG session_id);
+
+/* The session a query names: WTS_CURRENT_SESSION is the caller's, as the kernel has it (not the PEB copy) */
+static DWORD resolve_session_id(DWORD session_id)
+{
+    DWORD own;
+
+    if (session_id != WTS_CURRENT_SESSION) return session_id;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &own)) own = NtCurrentTeb()->Peb->SessionId;
+    return own;
+}
+
+/*
+ * The user (or the domain) logged on in a session: the account of the logon that started the session's
+ * first user process, when the caller may see it (the user itself, an administrator, the system).
+ * Otherwise nothing: session 0 has no logged-on user, and the account of the caller is not the
+ * session's when the caller runs as another account (runas).
+ */
+static WCHAR *get_session_account(DWORD session_id, BOOL domain)
+{
+    WCHAR name[256], dom[256], *ret;
+    DWORD name_len = ARRAY_SIZE(name), dom_len = ARRAY_SIZE(dom), len;
+    BYTE user_buf[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    SID_NAME_USE use;
+    HANDLE token;
+    BOOL found = FALSE;
+
+    name[0] = dom[0] = 0;
+    token = find_session_user_token(session_id);
+    if (token)
+    {
+        if (GetTokenInformation(token, TokenUser, user_buf, sizeof(user_buf), &len) &&
+            LookupAccountSidW(NULL, ((TOKEN_USER *)user_buf)->User.Sid, name, &name_len, dom, &dom_len, &use))
+            found = TRUE;
+        CloseHandle(token);
+    }
+    if (!found) name[0] = dom[0] = 0;
+
+    ret = heap_alloc((lstrlenW(domain ? dom : name) + 1) * sizeof(WCHAR));
+    if (ret) lstrcpyW(ret, domain ? dom : name);
+    return ret;
+}
+#endif
+
 /************************************************************
  *                WTSQuerySessionInformationW  (WTSAPI32.@)
  */
@@ -600,45 +646,63 @@ BOOL WINAPI WTSQuerySessionInformationW(
                 return FALSE;
             }
 
-            *output = NtCurrentTeb()->Peb->SessionId;
+            /* The session the query names (it was the caller's whatever the query named) */
+            *output = resolve_session_id(SessionId);
             *Buffer = (LPWSTR)output;
             *BytesReturned = size;
             return TRUE;
         }
 
+        /* The account logged on in the session the query names (it was the caller's account whatever the
+           session) */
         case WTSUserName:
+        case WTSDomainName:
         {
-            WCHAR* username;
-            DWORD count = 0;
-
-            GetUserNameW(NULL, &count);
-            if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-                return FALSE;
-            username = heap_alloc(count * sizeof(WCHAR));
-            if (!username)
+            WCHAR* account = get_session_account(resolve_session_id(SessionId), WTSInfoClass == WTSDomainName);
+            if (!account)
             {
                 SetLastError(ERROR_NOT_ENOUGH_MEMORY);
                 return FALSE;
             }
 
-            GetUserNameW(username, &count);
-            *Buffer = username;
-            *BytesReturned = count * sizeof(WCHAR);
+            *Buffer = account;
+            *BytesReturned = (lstrlenW(account) + 1) * sizeof(WCHAR);
             return TRUE;
         }
 
+        /* The state and the name of the session the query names, as WTSEnumerateSessions reports them
+           (the state was WTSActive for every session) */
         case WTSConnectState:
+        case WTSWinStationName:
         {
-            const DWORD size = sizeof(DWORD);
-            WCHAR* output = heap_alloc_zero(size);
-            if (!output)
-            {
-                SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-                return FALSE;
-            }
+            WTS_CONNECTSTATE_CLASS state;
+            const WCHAR *name;
 
-            *Buffer = output;
-            *BytesReturned = size;
+            get_session_state(resolve_session_id(SessionId), &state, &name);
+            if (WTSInfoClass == WTSConnectState)
+            {
+                DWORD* output = heap_alloc_zero(sizeof(DWORD));
+                if (!output)
+                {
+                    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                    return FALSE;
+                }
+                *output = state;
+                *Buffer = (LPWSTR)output;
+                *BytesReturned = sizeof(DWORD);
+            }
+            else
+            {
+                WCHAR* output = heap_alloc((lstrlenW(name) + 1) * sizeof(WCHAR));
+                if (!output)
+                {
+                    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                    return FALSE;
+                }
+                lstrcpyW(output, name);
+                *Buffer = output;
+                *BytesReturned = (lstrlenW(name) + 1) * sizeof(WCHAR);
+            }
             return TRUE;
         }
 
@@ -783,14 +847,12 @@ static BOOL is_interactive_user_token(HANDLE token)
 }
 
 /*
- * The primary token of the user logged on in a session, for a LocalSystem caller holding SeTcbPrivilege
- * (documented contract of WTSQueryUserToken). The user's token is taken from the first process the logon
- * started in the session (the oldest interactive-user process there: userinit or the shell); a program
- * that the user starts later as another account (runas) is younger and is never chosen.
- * Errors: ERROR_INVALID_PARAMETER (no output), ERROR_PRIVILEGE_NOT_HELD, ERROR_NO_TOKEN (no user logged on
- * in the session, or no such session).
+ * The token (query and duplicate access) of the user logged on in a session: the token of the first process
+ * the logon started in the session (the oldest interactive-user process there: userinit or the shell); a
+ * program that the user starts later as another account (runas) is younger and is never chosen. NULL when
+ * the session has no such process or the caller cannot open it (last error set).
  */
-BOOL WINAPI WTSQueryUserToken(ULONG session_id, PHANDLE token)
+static HANDLE find_session_user_token(ULONG session_id)
 {
     SYSTEM_PROCESS_INFORMATION *spi;
     ULONG size = 0x4000;
@@ -798,19 +860,6 @@ BOOL WINAPI WTSQueryUserToken(ULONG session_id, PHANDLE token)
     NTSTATUS status;
     HANDLE best = NULL;
     LARGE_INTEGER best_time;
-
-    if (!token)
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-    *token = NULL;
-
-    if (!caller_has_tcb())
-    {
-        SetLastError(ERROR_PRIVILEGE_NOT_HELD);
-        return FALSE;
-    }
 
     do
     {
@@ -820,7 +869,7 @@ BOOL WINAPI WTSQueryUserToken(ULONG session_id, PHANDLE token)
         if (!buf)
         {
             SetLastError(ERROR_OUTOFMEMORY);
-            return FALSE;
+            return NULL;
         }
         status = NtQuerySystemInformation(SystemProcessInformation, buf, size, NULL);
     }
@@ -830,7 +879,7 @@ BOOL WINAPI WTSQueryUserToken(ULONG session_id, PHANDLE token)
     {
         heap_free(buf);
         SetLastError(RtlNtStatusToDosError(status));
-        return FALSE;
+        return NULL;
     }
 
     best_time.QuadPart = MAXLONGLONG;
@@ -862,6 +911,34 @@ BOOL WINAPI WTSQueryUserToken(ULONG session_id, PHANDLE token)
     }
     heap_free(buf);
 
+    if (!best) SetLastError(ERROR_NO_TOKEN);
+    return best;
+}
+
+/*
+ * The primary token of the user logged on in a session, for a LocalSystem caller holding SeTcbPrivilege
+ * (documented contract of WTSQueryUserToken). The user's token is found by find_session_user_token.
+ * Errors: ERROR_INVALID_PARAMETER (no output), ERROR_PRIVILEGE_NOT_HELD, ERROR_NO_TOKEN (no user logged on
+ * in the session, or no such session).
+ */
+BOOL WINAPI WTSQueryUserToken(ULONG session_id, PHANDLE token)
+{
+    HANDLE best;
+
+    if (!token)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    *token = NULL;
+
+    if (!caller_has_tcb())
+    {
+        SetLastError(ERROR_PRIVILEGE_NOT_HELD);
+        return FALSE;
+    }
+
+    best = find_session_user_token(session_id);
     if (!best)
     {
         SetLastError(ERROR_NO_TOKEN);

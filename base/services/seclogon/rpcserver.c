@@ -143,38 +143,40 @@ StartExitWait(
 }
 
 
-/* The session of the RPC caller, from its token (impersonation) */
+/*
+ * The session of the RPC caller: the session of the process at the other end of the call, which the
+ * kernel recorded when that process opened the pipe. Never the session of the token the call came
+ * with: a token's session id is only what its creator set (a token from LogonUser and the anonymous
+ * token say session 0 whatever session the program runs in), and any program may impersonate one.
+ * The caller must also be the process the request names, the one that gets the handles.
+ */
 static
 DWORD
 SeclGetCallerSession(
     _In_ handle_t hBinding,
+    _In_ DWORD dwRequestProcessId,
     _Out_ PDWORD SessionId)
 {
-    HANDLE hToken;
-    DWORD dwError, Length;
+    ULONG ClientProcessId = 0;
     RPC_STATUS RpcStatus;
 
-    RpcStatus = RpcImpersonateClient(hBinding);
-    if (RpcStatus != RPC_S_OK)
+    RpcStatus = I_RpcBindingInqLocalClientPID(hBinding, &ClientProcessId);
+    if (RpcStatus != RPC_S_OK || ClientProcessId == 0)
     {
-        WARN("RpcImpersonateClient() failed with %lu\n", RpcStatus);
+        WARN("No local client process for the call, RPC status %lu\n", RpcStatus);
         return ERROR_ACCESS_DENIED;
     }
-    dwError = ERROR_SUCCESS;
-    if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &hToken))
+    if (ClientProcessId != dwRequestProcessId)
     {
-        dwError = GetLastError();
+        WARN("The request names process %lu, the caller is process %lu\n", dwRequestProcessId, ClientProcessId);
+        return ERROR_ACCESS_DENIED;
     }
-    else
+    if (!ProcessIdToSessionId(ClientProcessId, SessionId))
     {
-        if (!GetTokenInformation(hToken, TokenSessionId, SessionId, sizeof(*SessionId), &Length))
-            dwError = GetLastError();
-        CloseHandle(hToken);
+        WARN("Cannot read the session of process %lu, Error %lu\n", ClientProcessId, GetLastError());
+        return ERROR_ACCESS_DENIED;
     }
-    RpcRevertToSelf();
-    if (dwError != ERROR_SUCCESS)
-        WARN("Cannot read the caller's session, Error %lu\n", dwError);
-    return dwError;
+    return ERROR_SUCCESS;
 }
 
 /* A copy of the logon SID of a token */
@@ -233,7 +235,7 @@ SeclCreateProcessWithLogonW(
 
     ULONG dwError = ERROR_SUCCESS;
     BOOL rc;
-    DWORD CallerSessionId = 0, TargetSessionId = 0, OwnSessionId = 0;
+    DWORD CallerSessionId = 0, OwnSessionId = 0;
     BOOL bOtherSession = FALSE;
 
     TRACE("SeclCreateProcessWithLogonW(%p %p %p)\n", hBinding, pRequest, pResponse);
@@ -270,19 +272,12 @@ SeclCreateProcessWithLogonW(
 
     /*
      * The program runs in the caller's session, as runas does on Windows (on the caller's desktop). The
-     * session is the one of the caller's token, never anything the request says; the process the handles
-     * go to must be in that session too.
+     * session is the one of the calling process, never anything the request or the caller's token says;
+     * the process the handles go to is the calling process.
      */
-    dwError = SeclGetCallerSession(hBinding, &CallerSessionId);
+    dwError = SeclGetCallerSession(hBinding, pRequest->dwProcessId, &CallerSessionId);
     if (dwError != ERROR_SUCCESS)
         goto done;
-    if (!ProcessIdToSessionId(pRequest->dwProcessId, &TargetSessionId) ||
-        TargetSessionId != CallerSessionId)
-    {
-        WARN("Process %lu is not in the caller's session %lu\n", pRequest->dwProcessId, CallerSessionId);
-        dwError = ERROR_ACCESS_DENIED;
-        goto done;
-    }
     if (!ProcessIdToSessionId(GetCurrentProcessId(), &OwnSessionId))
         OwnSessionId = 0;
     bOtherSession = (CallerSessionId != OwnSessionId);

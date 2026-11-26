@@ -18,6 +18,7 @@
 #include <lm.h>
 #include <sddl.h>
 #include <ndk/cmfuncs.h>
+#include <ndk/psfuncs.h>
 
 #define STEP_WINSTA     1   /* no window station                */
 #define STEP_WINSTANAME 2   /* not WinSta0                      */
@@ -416,6 +417,54 @@ START_TEST(CreateProcessWithLogon)
                Exit & 0xff, Exit >> 8, Exit);
         if (Sid != NULL)
             LocalFree(Sid);
+    }
+
+    /*
+     * The program runs in the session of the calling process, whatever token the calling thread
+     * impersonates: a token from LogonUser has the session id its creator set (0 here), not the caller's
+     */
+    {
+        HANDLE hLogon = NULL;
+        DWORD OwnSession = MAXDWORD, TokenSession = MAXDWORD, ChildSession = MAXDWORD, Length;
+        WCHAR Exe[MAX_PATH], Command[MAX_PATH + 64];
+        STARTUPINFOW Si;
+        PROCESS_INFORMATION Pi;
+        BOOL Ok;
+
+        ProcessIdToSessionId(GetCurrentProcessId(), &OwnSession);
+        if (!LogonUserW(User, L".", TestPassword, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &hLogon))
+        {
+            skip("LogonUser(%ls) failed: %lu\n", User, GetLastError());
+        }
+        else
+        {
+            GetTokenInformation(hLogon, TokenSessionId, &TokenSession, sizeof(TokenSession), &Length);
+            GetModuleFileNameW(NULL, Exe, RTL_NUMBER_OF(Exe));
+            StringCchPrintfW(Command, RTL_NUMBER_OF(Command), L"\"%ls\" CreateProcessWithLogon child console", Exe);
+            ZeroMemory(&Si, sizeof(Si));
+            Si.cb = sizeof(Si);
+            ok(ImpersonateLoggedOnUser(hLogon), "ImpersonateLoggedOnUser failed: %lu\n", GetLastError());
+            SetLastError(0xdeadbeef);
+            Ok = CreateProcessWithLogonW(User, L".", TestPassword, 0, NULL, Command, 0, NULL, NULL, &Si, &Pi);
+            Error = GetLastError();
+            RevertToSelf();
+            ok(Ok, "CreateProcessWithLogonW impersonating a token of session %lu (own session %lu) failed: %lu\n",
+               TokenSession, OwnSession, Error);
+            if (Ok)
+            {
+                PROCESS_SESSION_INFORMATION Info;
+
+                /* By the handle: the account of the child gives the caller no access to it by its id */
+                if (NT_SUCCESS(NtQueryInformationProcess(Pi.hProcess, ProcessSessionInformation, &Info, sizeof(Info), NULL)))
+                    ChildSession = Info.SessionId;
+                ok(ChildSession == OwnSession, "the child is in session %lu, the caller in %lu (token: %lu)\n",
+                   ChildSession, OwnSession, TokenSession);
+                WaitForSingleObject(Pi.hProcess, 60000);
+                CloseHandle(Pi.hThread);
+                CloseHandle(Pi.hProcess);
+            }
+            CloseHandle(hLogon);
+        }
     }
 
     /* A wrong password */
