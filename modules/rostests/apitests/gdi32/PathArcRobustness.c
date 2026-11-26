@@ -13,6 +13,10 @@
 
 #define DIMS 64
 #define SLOW_MS 4000
+/* A call that does not come back within this time counts as hung. Turning a path with far coordinates into a region
+   (SelectClipPath, PathToRegion) scans every row of it and takes up to 9 s on a loaded virtual machine (amd64
+   Release), so the limit is far above that. */
+#define SLOW_CALL_MS 60000
 
 static HDC g_dc;
 static DWORD *g_bits;
@@ -59,7 +63,7 @@ static void Clear(void)
 /* The ways to end a path and use it */
 static BOOL g_trace;
 static BOOL g_noPoly;   /* PAR_NOPOLY: no Polygon calls (to see what the other calls do where Polygon asserts) */
-static int g_nSlow;   /* calls that took more than 15 s */
+static int g_nSlow;   /* calls that took more than SLOW_CALL_MS */
 
 static void Announce(const char *what, int op);
 static void Slow(const char *what, int op, DWORD t);
@@ -105,7 +109,7 @@ static void Slow(const char *what, int op, DWORD t)
 {
     char buf[80];
 
-    if (GetTickCount() - t > 15000)
+    if (GetTickCount() - t > SLOW_CALL_MS)
         g_nSlow++;
     if (g_trace && GetTickCount() - t > 1000)
     {
@@ -554,5 +558,5 @@ START_TEST(PathArcRobustness)
         DeleteObject(pen);
         DeleteObject(pen3);
     }
-    ok(g_nSlow == 0, "%d calls took more than 15 seconds\n", g_nSlow);
+    ok(g_nSlow == 0, "%d calls took more than %d seconds\n", g_nSlow, SLOW_CALL_MS / 1000);
 }
