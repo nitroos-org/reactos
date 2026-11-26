@@ -41,6 +41,7 @@ extern void func_LifetimeSetFocusTopDestroy(void);
 extern void func_LifetimeWinEventUnhook(void);
 extern void func_LifetimeWindowListExitLeak(void);
 extern void func_CharFuncs(void);
+extern void func_ClassDCThreadExit(void);
 extern void func_CloseWindow(void);
 extern void func_CopyImage(void);
 extern void func_CalculatePopupWindowPosition(void);
@@ -272,6 +273,7 @@ const struct test winetest_testlist[] =
     { "LifetimeWinEventUnhook", func_LifetimeWinEventUnhook },
     { "LifetimeWindowListExitLeak", func_LifetimeWindowListExitLeak },
     { "CharFuncs", func_CharFuncs },
+    { "ClassDCThreadExit", func_ClassDCThreadExit },
     { "CloseWindow", func_CloseWindow },
     { "CopyImage", func_CopyImage },
     { "CalculatePopupWindowPosition", func_CalculatePopupWindowPosition },
