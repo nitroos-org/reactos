@@ -3662,6 +3662,14 @@ AccpObjectDaclProtected(IN LPWSTR pObjectName,
     return Protected;
 }
 
+/* The ACL header (revision, size, ACE count) is all zero: no ACL was ever built there */
+static BOOLEAN
+AccpIsZeroAclHeader(IN PACL Acl)
+{
+    return Acl->AclRevision == 0 && Acl->Sbz1 == 0 && Acl->AclSize == 0 &&
+           Acl->AceCount == 0 && Acl->Sbz2 == 0;
+}
+
 /**********************************************************************
  * AccRewriteSetNamedRights				EXPORTED
  *
@@ -3696,6 +3704,7 @@ AccRewriteSetNamedRights(LPWSTR pObjectName,
         SECURITY_DESCRIPTOR InheritedSd;
         SECURITY_DESCRIPTOR_CONTROL Control;
         DWORD Revision;
+        ACL EmptyAcl;
         PWSTR pFullPath = NULL;
         PSECURITY_DESCRIPTOR pOwnSd = NULL;
         PACL pExplicit = NULL, pInherited = NULL;
@@ -3703,6 +3712,23 @@ AccRewriteSetNamedRights(LPWSTR pObjectName,
         BOOLEAN Present = FALSE, Defaulted;
 
         RtlGetDaclSecurityDescriptor(pSecurityDescriptor, &Present, &pExplicit, &Defaulted);
+
+        /*
+         * An ACL whose header is all zero (revision, size and ACE count) is what a program gets from an
+         * uninitialized ACL structure, and WiX Burn passes one to reset the permissions of its cached files
+         * to the inherited ones. It carries no entries, so it is the empty ACL: the object gets the inherited
+         * ACEs and nothing else. Any other ACL that is not valid is still refused.
+         */
+        if (Present && pExplicit != NULL && AccpIsZeroAclHeader(pExplicit) &&
+            GetSecurityDescriptorControl(pSecurityDescriptor, &Control, &Revision) &&
+            !(Control & SE_SELF_RELATIVE))
+        {
+            if (InitializeAcl(&EmptyAcl, sizeof(EmptyAcl), ACL_REVISION) &&
+                NT_SUCCESS(RtlSetDaclSecurityDescriptor(pSecurityDescriptor, TRUE, &EmptyAcl, Defaulted)))
+            {
+                pExplicit = &EmptyAcl;
+            }
+        }
 
         /* a missing or NULL DACL is set as given */
         if (Present && pExplicit != NULL)
