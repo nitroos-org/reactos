@@ -775,6 +775,22 @@ UserUpdateFullscreen(
         gpFullscreen = NULL;
 }
 
+/* Whether the calling process is a 32 bit one: Windows offers those 8 and 16 bit display modes (emulated) */
+static
+BOOLEAN
+IntIsCallerEmulatedDepth(VOID)
+{
+#if defined(_WIN64)
+# if defined(BUILD_WOW64_ENABLED)
+    return PsGetCurrentProcess()->Wow64Process != NULL;
+# else
+    return FALSE;
+# endif
+#else
+    return TRUE;
+#endif
+}
+
 LONG
 APIENTRY
 UserChangeDisplaySettings(
@@ -830,6 +846,14 @@ UserChangeDisplaySettings(
         return DISP_CHANGE_BADPARAM;
     }
 
+    /* Windows refuses a change, and a test of one, that names a color depth of 0 (one that does not name a depth
+     * is fine) */
+    if (pdm && (dm.dmFields & DM_BITSPERPEL) && dm.dmBitsPerPel == 0)
+    {
+        lResult = DISP_CHANGE_BADMODE;
+        goto leave;
+    }
+
     /* Fixup values */
     if (dm.dmBitsPerPel == 0 || !(dm.dmFields & DM_BITSPERPEL))
     {
@@ -841,13 +865,31 @@ UserChangeDisplaySettings(
         dm.dmDisplayFrequency = ppdev->pdmwDev->dmDisplayFrequency;
 
     /* Look for the requested DEVMODE */
-    if (!LDEVOBJ_bProbeAndCaptureDevmode(ppdev->pGraphicsDevice, &dm, &newDevMode, FALSE))
+    if (!LDEVOBJ_bProbeAndCaptureDevmode(ppdev->pGraphicsDevice, &dm, &newDevMode, FALSE, TRUE))
     {
-        ERR("Could not find a matching DEVMODE\n");
-        lResult = DISP_CHANGE_BADMODE;
-        goto leave;
+        BOOLEAN Found = FALSE;
+
+        /* Windows lists 8 and 16 bit modes (every listed resolution) to a 32 bit program, which it emulates, and
+         * accepts them. This display has no emulation: such a program, which got the closest mode so far, keeps
+         * getting the listed resolution at the depth the display has */
+        if (pdm && (dm.dmBitsPerPel == 8 || dm.dmBitsPerPel == 16) && IntIsCallerEmulatedDepth())
+        {
+            DEVMODEW dmCurrentDepth = dm;
+
+            dmCurrentDepth.dmBitsPerPel = ppdev->pdmwDev->dmBitsPerPel;
+            Found = LDEVOBJ_bProbeAndCaptureDevmode(ppdev->pGraphicsDevice, &dmCurrentDepth, &newDevMode, FALSE, TRUE);
+        }
+
+        if (!Found)
+        {
+            ERR("Could not find a matching DEVMODE\n");
+            lResult = DISP_CHANGE_BADMODE;
+            goto leave;
+        }
     }
-    else if (flags & CDS_TEST)
+
+    /* A test never changes anything, whichever way the mode was found */
+    if (flags & CDS_TEST)
     {
         /* It's possible, go ahead! */
         lResult = DISP_CHANGE_SUCCESSFUL;
