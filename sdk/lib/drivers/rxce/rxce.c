@@ -8274,7 +8274,22 @@ RxResumeBlockedOperations_Serially(
  * RxCancelRoutine, which marks the context cancelled: a routine set here
  * successfully is seen by a later cancel, and a cancel that came first makes
  * this fail, so the mini-redirector answers the request itself.
+ * A cancel that came first is also seen in the IRP: IoCancelIrp sets
+ * Irp->Cancel before it calls RxCancelRoutine, which then takes this lock.
+ * The context's flag alone can be lost: RxCancelRoutine sets it under this
+ * lock, but the thread that handles the request changes RxContext->Flags
+ * without it at the same time (RxFspDispatch, RxLowIoSubmit), and such a
+ * read-modify-write can write the flag away. RxCancelRoutine has found no
+ * routine to call then, the IRP's cancel routine is used up, and the request
+ * would wait at the server with nothing left to end it.
+ * A lock request whose handle's cleanup has started is refused as well
+ * (RxpLockRequestOfCleanedUpHandle, rdbss.c).
  */
+BOOLEAN
+NTAPI
+RxpLockRequestOfCleanedUpHandle(
+    IN PRX_CONTEXT RxContext);
+
 NTSTATUS
 NTAPI
 RxSetMinirdrCancelRoutine(
@@ -8286,7 +8301,10 @@ RxSetMinirdrCancelRoutine(
 
     Status = STATUS_SUCCESS;
     KeAcquireSpinLock(&RxStrucSupSpinLock, &OldIrql);
-    if (BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_CANCELLED) && MRxCancelRoutine != NULL)
+    if (MRxCancelRoutine != NULL &&
+        (BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_CANCELLED) ||
+         (RxContext->CurrentIrp != NULL && RxContext->CurrentIrp->Cancel) ||
+         RxpLockRequestOfCleanedUpHandle(RxContext)))
     {
         Status = STATUS_CANCELLED;
     }

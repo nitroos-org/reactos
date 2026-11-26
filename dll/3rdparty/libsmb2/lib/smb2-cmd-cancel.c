@@ -89,6 +89,27 @@ smb2_cmd_cancel_async(struct smb2_context *smb2,
         struct smb2_pdu *req_pdu;
 
         req_pdu = smb2_find_pdu(smb2, msg_id);
+        /*
+         * NitroOS: a request that is still queued to be written (the
+         * outqueue: written when the socket is writable and credits allow)
+         * can be cancelled too: the CANCEL is queued behind it, so it goes
+         * on the wire after the request and the server finds the request by
+         * its MessageId. Without this the cancel of a request queued a moment
+         * earlier was dropped, and a waiting lock stayed at the server.
+         */
+        if (req_pdu == NULL) {
+                struct smb2_pdu *head, *p;
+
+                for (head = smb2->outqueue; head != NULL && req_pdu == NULL; head = head->next) {
+                        for (p = head; p != NULL; p = p->next_compound) {
+                                if (p->header.message_id == msg_id &&
+                                    p->header.command != SMB2_CANCEL) {
+                                        req_pdu = p;
+                                        break;
+                                }
+                        }
+                }
+        }
         if (req_pdu == NULL) {
                 smb2_set_error(smb2, "No pending pdu with message id %ju "
                                "to cancel", (uintmax_t)msg_id);

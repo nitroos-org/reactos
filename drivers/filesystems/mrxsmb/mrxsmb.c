@@ -2062,7 +2062,10 @@ SmbSendLock(PRX_CONTEXT RxContext, ULONG Flags, LONGLONG Offset, LONGLONG Length
         }
         else if (BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_CANCELLED))
         {
-            SmbCancelRequestById(SmbLockRequestId(RxContext));
+            /* Cancelled after the routine was set, before the request could be found by its id: as the
+             * cancel routine would have, so that the server answers the cancel (a lock it grants
+             * meanwhile is not left behind) */
+            SmbLockCancel(RxContext);
         }
         RxDereferenceAndDeleteRxContext(RxContext);
         return Status;
