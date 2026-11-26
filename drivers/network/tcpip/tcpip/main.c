@@ -887,7 +887,7 @@ TiDispatch(
 }
 
 /* WindowsDeviceAcl: the descriptor of \Device\Ip as Windows Server 2022 has it: System and Administrators FILE_ALL_ACCESS,
-   Everyone WorldAccess, nobody else (no Network Service ACE). Without it: System, Administrators and Network Service
+   Everyone WorldAccess, restricted code read and execute (0x1200a9), nobody else (no Network Service ACE). Without it: System, Administrators and Network Service
    FILE_ALL_ACCESS (the descriptor that the privileged control requests are checked against, and of \Device\Tcp).
    Specific rights, not GENERIC_ALL: the access check does not map generic rights inside an ACE (Windows does not). */
 static
@@ -916,7 +916,8 @@ NTSTATUS TiCreateSecurityDescriptor(
                sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeLocalSystemSid) +
                sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeAliasAdminsSid) +
                sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeNetworkServiceSid) +
-               sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeWorldSid);
+               sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeWorldSid) +
+               sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeRestrictedSid);
     Dacl = ExAllocatePoolWithTag(PagedPool,
                                  DaclSize,
                                  DEVICE_OBJ_SECURITY_TAG);
@@ -982,6 +983,22 @@ NTSTATUS TiCreateSecurityDescriptor(
         if (!NT_SUCCESS(Status))
         {
             TI_DbgPrint(MIN_TRACE, ("Failed to add access allowed ACE for World SID (0x%X)\n", Status));
+            goto Quit;
+        }
+    }
+
+    if (WindowsDeviceAcl)
+    {
+        /* The restricted code SID (S-1-5-12), read and execute (0x1200a9), as Windows Server 2022 has it on \Device\Ip
+         * and \Device\Ip6: a token whose only restricting SID is RC passes the second access check and can open the
+         * device for what IcmpCreateFile needs. Not on \Device\Tcp and not on the control descriptor. */
+        Status = RtlAddAccessAllowedAce(Dacl,
+                                        ACL_REVISION,
+                                        FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+                                        SeExports->SeRestrictedSid);
+        if (!NT_SUCCESS(Status))
+        {
+            TI_DbgPrint(MIN_TRACE, ("Failed to add access allowed ACE for Restricted Code SID (0x%X)\n", Status));
             goto Quit;
         }
     }
@@ -1138,9 +1155,8 @@ NTSTATUS TiSecurityStartup(
     }
 
     /* \Device\Ip6 as \Device\Ip: Icmp6CreateFile() opens it with GENERIC_EXECUTE (Windows Server 2022 has the same
-     * descriptor on both). Two differences from Windows are left for the operator to decide: both devices lack the
-     * restricted code ACE (S-1-5-12, read and execute) of Windows, and \Device\Tcp gives Everyone read and write where
-     * Windows gives read and execute only (0x1200a0). */
+     * descriptor on both, with the restricted code ACE). One difference from Windows is left for the operator to decide:
+     * \Device\Tcp gives Everyone read and write where Windows gives read and execute only (0x1200a0). */
     if (Ip6DeviceObject)
     {
         Status = TiSetupTcpDeviceSD(Ip6DeviceObject,

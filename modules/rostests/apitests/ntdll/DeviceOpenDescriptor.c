@@ -9,7 +9,7 @@
  * Windows Server 2022 (measured, descriptors of the device objects, SDDL):
  *   \Device\NamedPipe, \Device\Null, \Device\Afd, \Device\Mailslot, \Device\KsecDD:
  *   O:BAG:SYD:(A;;0x1201bf;;;WD)(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;RC)
- *   \Device\Ip and \Device\Ip6: the same (the RC ACE is not checked: ours has none, see the TCP/IP driver)
+ *   \Device\Ip and \Device\Ip6: the same, checked here including the RC ACE
  */
 
 #include "precomp.h"
@@ -27,7 +27,7 @@ static PACCESS_ALLOWED_ACE FindAce(PACL Dacl, PSID Sid)
     return NULL;
 }
 
-static void CheckDevice(PCWSTR Path)
+static void CheckDevice(PCWSTR Path, BOOLEAN ExpectRestrictedCode)
 {
     UNICODE_STRING Name;
     OBJECT_ATTRIBUTES Attributes;
@@ -42,8 +42,9 @@ static void CheckDevice(PCWSTR Path)
     PACCESS_ALLOWED_ACE Ace;
     SID_IDENTIFIER_AUTHORITY WorldAuthority = { SECURITY_WORLD_SID_AUTHORITY };
     SID_IDENTIFIER_AUTHORITY NtAuthority = { SECURITY_NT_AUTHORITY };
-    UCHAR WorldBuffer[16], SystemBuffer[16], AdminsBuffer[16], ServiceBuffer[16];
+    UCHAR WorldBuffer[16], SystemBuffer[16], AdminsBuffer[16], ServiceBuffer[16], RestrictedBuffer[16];
     PSID World = (PSID)WorldBuffer, System = (PSID)SystemBuffer, Admins = (PSID)AdminsBuffer, Service = (PSID)ServiceBuffer;
+    PSID Restricted = (PSID)RestrictedBuffer;
 
     RtlInitUnicodeString(&Name, Path);
     InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
@@ -71,6 +72,8 @@ static void CheckDevice(PCWSTR Path)
     *RtlSubAuthoritySid(Admins, 1) = DOMAIN_ALIAS_RID_ADMINS;
     RtlInitializeSid(Service, &NtAuthority, 1);
     *RtlSubAuthoritySid(Service, 0) = SECURITY_NETWORK_SERVICE_RID;
+    RtlInitializeSid(Restricted, &NtAuthority, 1);
+    *RtlSubAuthoritySid(Restricted, 0) = SECURITY_RESTRICTED_CODE_RID;
 
     Status = RtlGetDaclSecurityDescriptor(Sd, &Present, &Dacl, &Defaulted);
     ok_hex(Status, STATUS_SUCCESS);
@@ -97,15 +100,25 @@ static void CheckDevice(PCWSTR Path)
 
     /* Windows has no ACE for Network Service on these devices */
     ok(FindAce(Dacl, Service) == NULL, "%ls: has an ACE for Network Service\n", Path);
+
+    /* the restricted code ACE (read and execute): a token whose only restricting SID is RC can open the IP devices
+       for IcmpCreateFile; the TCP and raw devices have none */
+    if (ExpectRestrictedCode)
+    {
+        Ace = FindAce(Dacl, Restricted);
+        ok(Ace != NULL, "%ls: no ACE for the restricted code SID\n", Path);
+        if (Ace)
+            ok(Ace->Mask == 0x001200a9, "%ls: restricted code has 0x%08lx, expected 0x001200a9\n", Path, Ace->Mask);
+    }
 }
 
 START_TEST(DeviceOpenDescriptor)
 {
-    CheckDevice(L"\\Device\\Null");
-    CheckDevice(L"\\Device\\NamedPipe");
-    CheckDevice(L"\\Device\\Mailslot");
-    CheckDevice(L"\\Device\\Afd");
-    CheckDevice(L"\\Device\\KsecDD");
-    CheckDevice(L"\\Device\\Ip");
-    CheckDevice(L"\\Device\\Ip6");
+    CheckDevice(L"\\Device\\Null", FALSE);
+    CheckDevice(L"\\Device\\NamedPipe", FALSE);
+    CheckDevice(L"\\Device\\Mailslot", FALSE);
+    CheckDevice(L"\\Device\\Afd", FALSE);
+    CheckDevice(L"\\Device\\KsecDD", FALSE);
+    CheckDevice(L"\\Device\\Ip", TRUE);
+    CheckDevice(L"\\Device\\Ip6", TRUE);
 }

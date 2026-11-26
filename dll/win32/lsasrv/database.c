@@ -566,15 +566,23 @@ done:
  * the version value of the policy object says it ran (a new database gets the value without a seeding,
  * setup applies the INF to it), so a right that an administrator removed afterwards is never granted again.
  */
-#define LSAP_LOGON_RIGHTS_VERSION   1
+#define LSAP_LOGON_RIGHTS_VERSION   2
 #define LSAP_LOGON_RIGHTS_VERSION_ATTR   L"LgnRtVer"
 
 static BOOLEAN LsapDatabaseCreated = FALSE;
 
-static const PCWSTR LsapSeededLogonRights[] =
+/* Since: the version of the seeding that introduced the right. A database that ran an older seeding gets only the
+   rights that are newer than its version (an administrator's removal of an older one stays). Version 2: the
+   privilege to increase a working set, which the default INF gives to Users, as Windows does. */
+static const struct
 {
-    SE_BATCH_LOGON_NAME,
-    SE_SERVICE_LOGON_NAME
+    PCWSTR Name;
+    ULONG Since;
+} LsapSeededLogonRights[] =
+{
+    { SE_BATCH_LOGON_NAME, 1 },
+    { SE_SERVICE_LOGON_NAME, 1 },
+    { SE_INC_WORKING_SET_NAME, 2 }
 };
 
 static NTSTATUS
@@ -677,7 +685,10 @@ LsapSeedDefaultLogonRights(VOID)
 
         for (i = 0; i < ARRAYSIZE(LsapSeededLogonRights); i++)
         {
-            Status = LsapSeedLogonRight(PolicyHandle, LsapSeededLogonRights[i], InfPath);
+            /* the right is newer than the seeding this database ran (a database without the value ran none) */
+            if (LsapSeededLogonRights[i].Since <= Version)
+                continue;
+            Status = LsapSeedLogonRight(PolicyHandle, LsapSeededLogonRights[i].Name, InfPath);
             if (!NT_SUCCESS(Status))
                 goto done;      /* not marked: the next start tries again (the grants are idempotent) */
         }
