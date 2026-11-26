@@ -203,6 +203,7 @@ BOOLEAN ChewSerialInit(PCHEW_SERIAL_QUEUE Queue, VOID (*Worker)(PLIST_ENTRY Entr
     Queue->Worker = Worker;
     Queue->Count = 0;
     Queue->Limit = Limit;
+    Queue->Inserted = 0;
     Queue->Running = FALSE;
     Queue->Closed = FALSE;
     KeInitializeEvent(&Queue->Idle, NotificationEvent, TRUE);
@@ -211,6 +212,11 @@ BOOLEAN ChewSerialInit(PCHEW_SERIAL_QUEUE Queue, VOID (*Worker)(PLIST_ENTRY Entr
 }
 
 BOOLEAN ChewSerialInsert(PCHEW_SERIAL_QUEUE Queue, PLIST_ENTRY Entry)
+{
+    return ChewSerialInsertTicket(Queue, Entry, NULL);
+}
+
+BOOLEAN ChewSerialInsertTicket(PCHEW_SERIAL_QUEUE Queue, PLIST_ENTRY Entry, PULONG Ticket)
 {
     KIRQL OldIrql;
     BOOLEAN Start = FALSE;
@@ -225,6 +231,9 @@ BOOLEAN ChewSerialInsert(PCHEW_SERIAL_QUEUE Queue, PLIST_ENTRY Entry)
 
     InsertTailList(&Queue->List, Entry);
     Queue->Count++;
+    Queue->Inserted++;
+    if (Ticket)
+        *Ticket = Queue->Inserted;
     if (!Queue->Running)
     {
         Queue->Running = TRUE;

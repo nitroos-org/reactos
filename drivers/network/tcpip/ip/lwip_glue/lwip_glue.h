@@ -82,6 +82,7 @@ struct lwip_callback_msg
         struct {
             err_t Error;
             u32_t Information;
+            ULONG LoopTicket;
         } Send;
         struct {
             err_t Error;
@@ -135,7 +136,8 @@ err_t       LibTCPBind(PCONNECTION_ENDPOINT Connection, const ip_addr_t *ipaddr,
 UINT        LibTCPAllocateEphemeralPort(const ip4_addr_t *RemoteIp, u16_t RemotePort);
 PTCP_PCB    LibTCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog);
 VOID        LibTCPClaimPendingAccept(PCONNECTION_ENDPOINT Listener);
-err_t       LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u32_t len, ULONG *sent, const int safe, PTDI_BUCKET Bucket);
+err_t       LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u32_t len, ULONG *sent, const int safe, PTDI_BUCKET Bucket,
+                       PULONG LoopTicket);
 err_t       LibTCPConnect(PCONNECTION_ENDPOINT Connection, const ip_addr_t *ipaddr, const u16_t port);
 err_t       LibTCPShutdown(PCONNECTION_ENDPOINT Connection, const int shut_rx, const int shut_tx);
 err_t       LibTCPAbort(PCONNECTION_ENDPOINT Connection);

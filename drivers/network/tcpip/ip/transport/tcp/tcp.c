@@ -788,6 +788,7 @@ NTSTATUS TCPSendData
 {
     NTSTATUS Status;
     PTDI_BUCKET Bucket;
+    ULONG LoopTicket = 0;
 
     ReferenceObject(Connection);
 
@@ -813,7 +814,8 @@ NTSTATUS TCPSendData
                                           SendLength,
                                           BytesSent,
                                           FALSE,
-                                          Bucket));
+                                          Bucket,
+                                          (Flags & TCP_SEND_DELIVERED) ? &LoopTicket : NULL));
 
     TI_DbgPrint(DEBUG_TCP,("[IP, TCPSendData] Send: %x, %d\n", Status, SendLength));
 
@@ -831,6 +833,23 @@ NTSTATUS TCPSendData
     }
     else if (Bucket)
     {
+        if (Status == STATUS_SUCCESS && LoopTicket != 0)
+        {
+            /* The segments went to a peer on this machine. The send completes when the loopback worker has handed
+               them to the peer's connection, so that the peer finds the data when the sender goes on (as on
+               Windows); the request stays pending until then, and nothing waits for it here */
+            ReferenceObject(Connection);
+            Bucket->AssociatedEndpoint = Connection;
+            Bucket->Status = STATUS_SUCCESS;
+            Bucket->Information = *BytesSent;
+            if (LoopDeferCompletion(Bucket, LoopTicket))
+            {
+                DereferenceObject(Connection);
+                return STATUS_PENDING;
+            }
+            DereferenceObject(Connection);
+        }
+
         ExFreeToNPagedLookasideList(&TdiBucketLookasideList, Bucket);
     }
 
