@@ -1720,9 +1720,10 @@ IntPrintWindow(
     /*
      * A redirected window (redir.c): its surface holds its content, also where it is covered. As on
      * Windows with DWM, flags 0 repaints it once (one WM_PAINT) and copies it; PW_RENDERFULLCONTENT
-     * copies it with no message.
+     * copies it with no message. Not for a caller of another desktop (UserRedirSameDesktop): the window is
+     * printed as one that is not redirected.
      */
-    if (UserRedirHasSurface(pwnd))
+    if (UserRedirHasSurface(pwnd) && UserRedirSameDesktop(pwnd))
     {
         RECTL rc;
 
@@ -3079,9 +3080,10 @@ NtUserPrintWindow(
        if ( Window )
        {
           /* Validate flags and check it as a mask for 0 or 1. */
-          /* PW_RENDERFULLCONTENT is known only for a redirected window (its surface holds the content) */
+          /* PW_RENDERFULLCONTENT is known only for a redirected window (its surface holds the content) of the caller's desktop */
           if ( (nFlags & PW_CLIENTONLY) == nFlags ||
-               ((nFlags & ~PW_CLIENTONLY) == NITRO_PW_RENDERFULLCONTENT && UserRedirHasSurface(Window)) )
+               ((nFlags & ~PW_CLIENTONLY) == NITRO_PW_RENDERFULLCONTENT && UserRedirHasSurface(Window) &&
+                UserRedirSameDesktop(Window)) )
           {
              USER_REFERENCE_ENTRY Ref;
              UserRefObjectCo(Window, &Ref);
