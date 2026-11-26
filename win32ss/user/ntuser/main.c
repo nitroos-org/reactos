@@ -389,8 +389,9 @@ ExitProcessCallback(PEPROCESS Process)
     {
         pppi = &(*pppi)->ppiNext;
     }
-    ASSERT(*pppi == ppiCurrent);
-    *pppi = ppiCurrent->ppiNext;
+    /* A process whose setup failed (InitProcessCallback) is not in the list yet */
+    if (*pppi == ppiCurrent)
+        *pppi = ppiCurrent->ppiNext;
 
     /* Give up the clipboard data this process made and never handed to the clipboard */
     UserClipDataProcessExit(ppiCurrent);
