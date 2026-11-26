@@ -2111,6 +2111,7 @@ NtUserBeginPaint(HWND hWnd, PAINTSTRUCT* UnsafePs)
    UserRefObjectCo(Window, &Ref);
 
    hDC = IntBeginPaint(Window, &Ps);
+   UserScreenDcOfCaller(hDC, Window);
 
    Status = MmCopyToCaller(UnsafePs, &Ps, sizeof(PAINTSTRUCT));
    if (! NT_SUCCESS(Status))

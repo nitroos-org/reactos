@@ -1427,6 +1427,20 @@ GreGetDCPoint(
 
 BOOL
 WINAPI
+GreSetDCScreenDesk(
+    _In_ HDC hdc,
+    _In_ ULONGLONG ullScreenDesk)
+{
+    PDC dc = DC_LockDc(hdc);
+
+    if (!dc) return FALSE;
+    dc->ullScreenDesk = ullScreenDesk;
+    DC_UnlockDc(dc);
+    return TRUE;
+}
+
+BOOL
+WINAPI
 GreSetDCOrg(
     _In_ HDC hdc,
     _In_ LONG x,

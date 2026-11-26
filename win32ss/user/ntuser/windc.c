@@ -563,6 +563,20 @@ DceReleaseDC(DCE* dce, BOOL EndPaint)
 }
 
 
+/*
+ * Window handles are not checked against the caller's desktop: a program can ask for the DC of a window of the desktop that
+ * has the input. The screen such a DC reaches is the screen of the caller's own desktop, not of the window's (user-mode
+ * entry points only: the system itself paints windows of other desktops, e.g. when it switches to them).
+ */
+VOID FASTCALL
+UserScreenDcOfCaller(HDC hdc, PWND Wnd)
+{
+    PTHREADINFO pti = GetW32ThreadInfo();
+
+    if (hdc && Wnd && Wnd->head.rpdesk != pti->rpdesk)
+        GreSetDCScreenDesk(hdc, UserDesktopScreenId(pti->rpdesk));
+}
+
 HDC FASTCALL
 UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
 {
@@ -1406,6 +1420,7 @@ NtUserGetDCEx(HWND hWnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
       goto Exit; // Return NULL
   }
   Ret = UserGetDCEx(Wnd, ClipRegion, Flags);
+  UserScreenDcOfCaller(Ret, Wnd);
 
 Exit:
   TRACE("Leave NtUserGetDCEx, ret=%p\n", Ret);

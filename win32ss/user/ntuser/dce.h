@@ -63,4 +63,5 @@ HWND FASTCALL UserGethWnd(HDC,PWNDOBJ*);
 void FASTCALL DceFreeWindowDCE(PWND);
 void FASTCALL DceFreeThreadDCE(PTHREADINFO);
 VOID FASTCALL DceUpdateVisRgn(DCE *Dce, PWND Window, ULONG Flags);
+VOID FASTCALL UserScreenDcOfCaller(HDC hdc, PWND Wnd);
 DCE* FASTCALL DceGetDceFromDC(HDC hdc);
