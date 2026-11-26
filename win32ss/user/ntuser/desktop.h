@@ -11,6 +11,8 @@ typedef struct _DESKTOP
     struct _WINSTATION_OBJECT *rpwinstaParent;
     DWORD dwDTFlags;
     DWORD_PTR dwDesktopId;
+    /* Never repeated, never 0 or -1: names the desktop for the screen DCs that were got for it (DC::ullScreenDesk) */
+    ULONGLONG ullScreenSerial;
     PMENU spmenuSys;
     PMENU spmenuDialogSys;
     PMENU spmenuHScroll;

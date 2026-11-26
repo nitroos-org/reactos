@@ -173,7 +173,7 @@ DceSetDrawable( PWND Window OPTIONAL,
 
   /* Set DC Origin and Window Rectangle; and the desktop the DC is got for (the window's, for the desktop DC the thread's) */
   GreSetDCOrg( hDC, rect.left, rect.top, &rect,
-               Window ? (PVOID)Window->head.rpdesk : (PVOID)GetW32ThreadInfo()->rpdesk);
+               UserDesktopScreenId(Window ? Window->head.rpdesk : GetW32ThreadInfo()->rpdesk));
 
   /* And where that surface is on the screen (GetRandomRgn SYSRGN) */
   if (Root)

@@ -530,7 +530,7 @@ DC_vUpdateDC(PDC pdc)
 }
 
 /*
- * A DC that draws on the screen belongs to the desktop its program got it for (pvScreenDesk). The screen is that
+ * A DC that draws on the screen belongs to the desktop its program got it for (ullScreenDesk). The screen is that
  * desktop's only while the desktop has the input: with the logon, lock or elevation-prompt desktop (or any other)
  * shown, a program of another desktop must neither read what is on the monitor nor put anything on it. A primitive
  * on such a DC therefore runs on a black surface of the screen's size (what is read is black, what is drawn is
@@ -591,8 +591,8 @@ DC_vBlindOnScreen(PDC pdc)
     PSURFACE psurfScreen = pdc->dclevel.pSurface, psurf = NULL;
 
     /* Only a display (a printer's direct DC is no screen); one that was got for no desktop is the system's */
-    if ((pdc->fs & DC_BLINDED) || !pdc->pvScreenDesk || !(pdc->ppdev->flFlags & PDEV_DISPLAY) ||
-        !UserDesktopLacksInput(pdc->pvScreenDesk))
+    if ((pdc->fs & DC_BLINDED) || !pdc->ullScreenDesk || !(pdc->ppdev->flFlags & PDEV_DISPLAY) ||
+        !UserDesktopLacksInput(pdc->ullScreenDesk))
         return;
 
     if (psurfScreen)
@@ -1059,7 +1059,7 @@ NtGdiOpenDCW(
             PTHREADINFO ptiOpen = PsGetCurrentThreadWin32Thread();
 
             if (pdcNew->dctype == DCTYPE_DIRECT)
-                pdcNew->pvScreenDesk = ptiOpen ? (PVOID)ptiOpen->rpdesk : NULL;
+                pdcNew->ullScreenDesk = UserDesktopScreenId(ptiOpen ? ptiOpen->rpdesk : NULL);
             DC_UnlockDc(pdcNew);
         }
     }
