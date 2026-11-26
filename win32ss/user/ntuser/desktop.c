@@ -1889,6 +1889,15 @@ UserDesktopLacksInput(ULONGLONG ullDesk)
     return ullDesk != 0 && gpdeskInputDesktop != NULL && ullDesk != gpdeskInputDesktop->ullScreenSerial;
 }
 
+/* Does the desktop of the calling thread (none: a thread without one) lack the input? */
+BOOL FASTCALL
+UserCurrentThreadLacksInput(VOID)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+
+    return UserDesktopLacksInput(UserDesktopScreenId(pti ? pti->rpdesk : NULL));
+}
+
 /* The number a screen DC got for pdesk carries ((ULONGLONG)-1: no desktop) */
 ULONGLONG FASTCALL
 UserDesktopScreenId(PDESKTOP pdesk)

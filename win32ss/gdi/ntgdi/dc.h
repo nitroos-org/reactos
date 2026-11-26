@@ -191,6 +191,7 @@ VOID FASTCALL UserRedirMarkDirty(_In_ PVOID pvRedir, _In_opt_ const RECTL *prcl)
 /* ntuser/desktop.c: the desktop is not the one that has the input (so its screen is not what the monitor shows) */
 BOOL FASTCALL UserDesktopLacksInput(_In_ ULONGLONG ullDesk);
 ULONGLONG FASTCALL UserDesktopScreenId(_In_opt_ struct _DESKTOP *pdesk);
+BOOL FASTCALL UserCurrentThreadLacksInput(VOID);
 // typedef struct _DC *PDC;
 
 extern PDC defaultDCstate;
