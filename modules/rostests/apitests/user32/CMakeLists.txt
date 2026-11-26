@@ -160,6 +160,7 @@ list(APPEND SOURCE
     SetSysColorsWinsta.c
     SetWindowPlacement.c
     SetWindowPosOwned.c
+    ScreenDesktopReads.c
     SetWindowRgn.c
     ShowWindow.c
     SizeNoMaxTrack.c
