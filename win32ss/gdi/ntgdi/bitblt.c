@@ -108,6 +108,10 @@ IntDrawAroundPointer(
     BOOL bRet = TRUE;
     ULONG i;
 
+    /* A DC on a blank surface (its desktop has no input) has no pointer over it, and must not touch the pixels saved under the real one */
+    if (pdc->fs & DC_BLINDED)
+        return pfnPiece(pvCtx, psoScreen, (CLIPOBJ *)&pdc->co, prclDest, &ptlZero, &ptlZero);
+
     /* The clip object is what the engine clips to, also when its last update failed */
     DC_vGetClipLimit(pdc, kind, &rcLimit);
     if (!MouseSafetyGetPointerHit(pdc->ppdev, prclDest, &rcLimit, &rcHit))
@@ -379,6 +383,14 @@ NtGdiAlphaBlend(
     TRACE("Preparing DCs for blit\n");
     DC_vPrepareDCsForBlitEx(DCDest, &DestRect, DCSrc, &SourceRect, (bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_ALPHA) | DCPREP_EXACT_DEST);
 
+    /* A DC of a desktop without the input: nothing is read or drawn, the call fails as on Windows */
+    if (DC_IS_BLIND(DCDest) || DC_IS_BLIND(DCSrc))
+    {
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        bResult = FALSE;
+        goto leave;
+    }
+
     /* Determine surfaces to be used in the bitblt */
     BitmapDest = DCDest->dclevel.pSurface;
     if (!BitmapDest)
@@ -563,6 +575,13 @@ NtGdiTransparentBlt(
     /* Prepare for blit */
     DC_vPrepareDCsForBlitEx(DCDest, &rcDest, DCSrc, &rcSrc, (bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_NOTRIVIAL) | DCPREP_EXACT_DEST);
 
+    /* A DC of a desktop without the input: nothing is read or drawn, the call fails as on Windows */
+    if (DC_IS_BLIND(DCDest) || DC_IS_BLIND(DCSrc))
+    {
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        goto done;
+    }
+
     BitmapDest = DCDest->dclevel.pSurface;
     if (!BitmapDest)
     {
@@ -630,6 +649,7 @@ NtGdiMaskBlt(
     RECTL DestRect, SourceRect;
     POINTL SourcePoint, MaskPoint, BrushOrigin;
     BOOL Status = FALSE;
+    BOOL bBlind = FALSE;
     EXLATEOBJ exlo;
     XLATEOBJ *XlateObj = NULL;
     BOOL UsesSource, UsesPattern, bSplit;
@@ -766,6 +786,13 @@ NtGdiMaskBlt(
     bSplit = DC_IS_SCREEN(DCDest) && (!UsesSource || !DC_IS_SCREEN(DCSrc));
     DC_vPrepareDCsForBlitEx(DCDest, &DestRect, DCSrc, &SourceRect, (bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_BITBLT) | DCPREP_EXACT_DEST);
 
+    /* A DC of a desktop without the input: nothing is read or drawn, the call fails as on Windows */
+    if (DC_IS_BLIND(DCDest) || (UsesSource && DC_IS_BLIND(DCSrc)))
+    {
+        bBlind = TRUE;
+        goto cleanup;
+    }
+
     if (pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(DCDest);
 
@@ -866,7 +893,7 @@ cleanup:
     if(psurfMask) SURFACE_ShareUnlockSurface(psurfMask);
 
     if (!Status)
-        EngSetLastError(ERROR_INVALID_PARAMETER);
+        EngSetLastError(bBlind ? ERROR_INVALID_HANDLE : ERROR_INVALID_PARAMETER);
 
     return Status;
 }
@@ -1061,6 +1088,13 @@ GreStretchBltMask(
      * stretch by a pixel (stretchblt.c), so the hazard of the unsplit call is the destination wider by that pixel. */
     IntStretchHazard(&DestRect, &SourceRect, &rcHazard);
     DC_vPrepareDCsForBlitEx(DCDest, bSplit ? &DestRect : &rcHazard, DCSrc, &SourceRect, (bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_NOTRIVIAL) | DCPREP_EXACT_DEST);
+
+    /* A DC of a desktop without the input: nothing is read or drawn, the call fails as on Windows */
+    if (DC_IS_BLIND(DCDest) || (UsesSource && DC_IS_BLIND(DCSrc)))
+    {
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        goto failed;
+    }
 
     if (pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(DCDest);
@@ -1283,6 +1317,14 @@ IntPatBlt(
 #endif
 
     DC_vPrepareDCsForBlitEx(pdc, &DestRect, NULL, NULL, (DC_IS_SCREEN(pdc) ? DCPREP_SPLIT_DEST : 0) | DCPREP_EXACT_DEST);
+
+    /* A DC of a desktop without the input: nothing is drawn, the call fails as on Windows */
+    if (DC_IS_BLIND(pdc))
+    {
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        DC_vFinishBlit(pdc, NULL);
+        return FALSE;
+    }
 
     psurf = pdc->dclevel.pSurface;
 
@@ -1953,6 +1995,10 @@ NtGdiGetPixel(
 
     /* Prepare DC for blit */
     DC_vPrepareDCsForBlitEx(pdc, &rcDest, NULL, NULL, DCPREP_READ_ONLY);
+
+    /* A DC of a desktop without the input: nothing is read, CLR_INVALID as on Windows */
+    if (DC_IS_BLIND(pdc))
+        goto leave;
 
     /* Check if the pixel is outside the surface */
     psurfSrc = pdc->dclevel.pSurface;

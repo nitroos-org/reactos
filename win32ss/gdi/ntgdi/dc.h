@@ -32,6 +32,7 @@ typedef enum _DCFLAGS
     DC_REDIRECTION       = 0x2000,
     DC_SHAREACCESS       = 0x4000,
     DC_REDIR_ATTRDIRTY   = 0x10000, /* NitroOS: the surface changed (GreRedirBindDC); brushes to realize again */
+    DC_BLINDED           = 0x20000, /* NitroOS: a primitive is running on a blank surface instead of the screen (DC_vBlindOnScreen) */
 #if DBG
     DC_PREPARED          = 0x8000
 #endif
@@ -141,6 +142,7 @@ typedef struct _DC
   PVOID       pvRedir;    /* while fs & DC_REDIRECTION: the redirection record of the window (ntuser/redir.c) */
   RECTL       rclRedirDraw; /* device rectangle of the primitive being drawn into that surface */
   POINTL      ptlRedirScreen; /* while fs & DC_REDIRECTION: where the surface's pixel 0, 0 is on the screen */
+  PVOID       pvScreenDesk; /* DCTYPE_DIRECT: the desktop whose screen the program got this DC for (compared, never used as a pointer); NULL = the system's */
 } DC;
 
 /*
@@ -149,6 +151,9 @@ typedef struct _DC
  * no re-selection of the primary surface. DC_IS_SCREEN tells the DCs that really draw on the screen.
  */
 #define DC_IS_SCREEN(pdc) ((pdc)->dctype == DCTYPE_DIRECT && !((pdc)->fs & DC_REDIRECTION))
+
+/* After DC_vPrepareDCsForBlitEx: the DC's desktop does not have the input; Windows fails the read or draw (ERROR_INVALID_HANDLE) */
+#define DC_IS_BLIND(pdc) (((pdc)->fs & DC_BLINDED) != 0)
 
 /* redirgdi.c (surfaces are used by pointer: their handles have no owner a process can match) */
 #define REDIRBIND_OK    0   /* bound as asked */
@@ -183,6 +188,8 @@ BOOL NTAPI GreRedirClearRect(_In_ struct _SURFACE *psurf, _In_ LONG cx, _In_ LON
 BOOL NTAPI GreRedirLoadFromDC(_In_ struct _SURFACE *psurfDst, _In_ HDC hdcSrc, _In_ LONG xSrc, _In_ LONG ySrc, _In_ const RECTL *prclDst, _Out_ PBOOL pbAlpha, _Out_ PBOOL pbCopied);
 /* ntuser/redir.c */
 VOID FASTCALL UserRedirMarkDirty(_In_ PVOID pvRedir, _In_opt_ const RECTL *prcl);
+/* ntuser/desktop.c: the desktop is not the one that has the input (so its screen is not what the monitor shows) */
+BOOL FASTCALL UserDesktopLacksInput(_In_opt_ PVOID pvDesk);
 // typedef struct _DC *PDC;
 
 extern PDC defaultDCstate;
