@@ -674,7 +674,7 @@ HANDLE
 WINAPI
 SetClipboardData(UINT uFormat, HANDLE hMem)
 {
-    DWORD dwSize;
+    DWORD dwSize, dwError;
     HANDLE hGlobal;
     LPVOID pMem;
     HANDLE hRet = NULL, hTemp;
@@ -788,6 +788,7 @@ SetClipboardData(UINT uFormat, HANDLE hMem)
 
                 /* This is a local memory. Make global memory object */
                 hGlobal = NtUserConvertMemHandle(pMem, dwSize);
+                dwError = GetLastError();
 
                 /* Unlock memory */
                 GlobalUnlock(hMem);
@@ -799,10 +800,16 @@ SetClipboardData(UINT uFormat, HANDLE hMem)
                     scd.fGlobalHandle = TRUE;
                     hRet = NtUserSetClipboardData(uFormat, hGlobal, &scd);
                 }
+                else
+                {
+                    /* The system did not make its copy (it holds no more than a limit): the call fails with the
+                       error of the conversion */
+                    SetLastError(dwError);
+                }
 
                 /* On success NtUserSetClipboardData returns pMem
                    however caller expects us to return hMem */
-                if (hRet == hGlobal)
+                if (hGlobal && hRet == hGlobal)
                 {
                     IntOwnRecord(uFormat, hGlobal, hMem);
                     hRet = hMem;
