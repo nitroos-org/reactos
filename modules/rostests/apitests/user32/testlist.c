@@ -163,6 +163,7 @@ extern void func_ProcessConnectTerminate(void);
 extern void func_RawInput(void);
 extern void func_RealGetWindowClass(void);
 extern void func_RedirDesktop(void);
+extern void func_RedirIntegrity(void);
 extern void func_RedirGlassKeep(void);
 extern void func_RedirPresent(void);
 extern void func_RedirScroll(void);
@@ -397,6 +398,7 @@ const struct test winetest_testlist[] =
     { "PngIconRows", func_PngIconRows },
     { "RealGetWindowClass", func_RealGetWindowClass },
     { "RedirDesktop", func_RedirDesktop },
+    { "RedirIntegrity", func_RedirIntegrity },
     { "RedirGlassKeep", func_RedirGlassKeep },
     { "RedirPresent", func_RedirPresent },
     { "RedirScroll", func_RedirScroll },

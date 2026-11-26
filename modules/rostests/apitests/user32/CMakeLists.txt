@@ -134,6 +134,7 @@ list(APPEND SOURCE
     RawInput.c
     RealGetWindowClass.c
     RedirDesktop.c
+    RedirIntegrity.c
     RedirGlassKeep.c
     RedirPresent.c
     RedirScroll.c
