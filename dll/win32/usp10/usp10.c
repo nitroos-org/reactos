@@ -3141,11 +3141,23 @@ HRESULT WINAPI ScriptIsComplex(const WCHAR *chars, int len, DWORD flag)
     if (!chars || len < 0)
         return E_INVALIDARG;
 
+#ifdef __REACTOS__
+    /* Every text output asks this for its whole string first (LpkExtTextOut); see latin1_scripts */
+    init_latin1_scripts();
+#endif
     for (i = 0; i < len; i+=consumed)
     {
         if ((flag & SIC_ASCIIDIGIT) && chars[i] >= 0x30 && chars[i] <= 0x39)
             return S_OK;
 
+#ifdef __REACTOS__
+        if (chars[i] < 0x100)
+        {
+            script = latin1_scripts[chars[i]];
+            consumed = 1;
+        }
+        else
+#endif
         script = get_char_script(chars,i,len, &consumed);
         if ((scriptInformation[script].props.fComplex && (flag & SIC_COMPLEX))||
             (!scriptInformation[script].props.fComplex && (flag & SIC_NEUTRAL)))
