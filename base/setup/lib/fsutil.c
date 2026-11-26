@@ -746,6 +746,55 @@ InstallNtfsBootCode(
         goto Quit;
     }
 
+    /*
+     * The last sector of the volume (the one after the sectors the boot sector counts) holds a copy of
+     * the boot sector, which the formatter wrote without the boot code. Bring it up to date, as a reader
+     * (a repair tool, another system) takes the copy for the boot sector when it is not the same.
+     * Only a sector that already is an NTFS boot sector is overwritten.
+     */
+    {
+        PNTFS_BOOTSECTOR New = (PNTFS_BOOTSECTOR)NewBootSector.BootCode;
+        UCHAR BackupSector[SECTORSIZE];
+
+        if ((New->BytesPerSector == SECTORSIZE) && (New->SectorCount != 0) &&
+            (New->SectorCount < (MAXLONGLONG / SECTORSIZE) - 1))
+        {
+            FileOffset.QuadPart = (LONGLONG)New->SectorCount * SECTORSIZE;
+            Status = NtReadFile(DstPath,
+                                NULL,
+                                NULL,
+                                NULL,
+                                &IoStatusBlock,
+                                BackupSector,
+                                sizeof(BackupSector),
+                                &FileOffset,
+                                NULL);
+            if (NT_SUCCESS(Status) &&
+                (RtlCompareMemory(&((PNTFS_BOOTSECTOR)BackupSector)->OEMID, "NTFS    ", 8) == 8) &&
+                (((PNTFS_BOOTSECTOR)BackupSector)->EndSector == 0xAA55))
+            {
+                Status = NtWriteFile(DstPath,
+                                     NULL,
+                                     NULL,
+                                     NULL,
+                                     &IoStatusBlock,
+                                     NewBootSector.BootCode,
+                                     SECTORSIZE,
+                                     &FileOffset,
+                                     NULL);
+                if (!NT_SUCCESS(Status))
+                    DPRINT1("NtWriteFile() of the backup bootsector failed (Status %lx)\n", Status);
+                /* The volume boots from the first sector: a copy that stays as it was is not an error */
+                Status = STATUS_SUCCESS;
+            }
+            else
+            {
+                DPRINT1("No NTFS backup bootsector at sector %I64u (Status %lx)\n", New->SectorCount, Status);
+                Status = STATUS_SUCCESS;
+            }
+        }
+    }
+
 Quit:
     /* Free the new bootsector */
     FreeBootCode(&NewBootSector);
