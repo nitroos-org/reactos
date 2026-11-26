@@ -546,6 +546,57 @@ CopyVariable(PWSTR Environment, PCWSTR lpName)
 
 
 /*
+ * The variables of the user's session: the values of 'Volatile Environment\<session id>' in the user's hive,
+ * where the logon writes SESSIONNAME (Console for the console session) and an empty CLIENTNAME; the session
+ * is the one of the token. A value that is empty names no variable. A user whose hive has no key for that
+ * session (a token of another session, a secondary logon of an account that never logged on there) gets none
+ * (measured on Windows Server 2022: CreateEnvironmentBlock with the token of the console session has
+ * SESSIONNAME=Console, the same account's other environment sources and a runas child have none).
+ */
+static
+VOID
+SetSessionEnvironment(PWSTR* Environment,
+                      HKEY hKeyUser,
+                      HANDLE hToken)
+{
+    WCHAR KeyName[64];
+    WCHAR Name[256];
+    WCHAR Data[512];
+    DWORD SessionId, Length, Index, NameLength, DataLength, Type;
+    LONG Error;
+    HKEY hKey;
+
+    if (!GetTokenInformation(hToken, TokenSessionId, &SessionId, sizeof(SessionId), &Length))
+        return;
+
+    if (FAILED(StringCchPrintfW(KeyName, ARRAYSIZE(KeyName), L"Volatile Environment\\%lu", SessionId)))
+        return;
+
+    if (RegOpenKeyExW(hKeyUser, KeyName, 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+        return;
+
+    for (Index = 0; ; Index++)
+    {
+        NameLength = ARRAYSIZE(Name);
+        DataLength = sizeof(Data) - sizeof(WCHAR);
+        Error = RegEnumValueW(hKey, Index, Name, &NameLength, NULL, &Type, (LPBYTE)Data, &DataLength);
+        if (Error == ERROR_MORE_DATA)
+            continue; /* a name or a value too long for the buffers is no variable of ours */
+        if (Error != ERROR_SUCCESS)
+            break;
+
+        if ((Type != REG_SZ && Type != REG_EXPAND_SZ) || DataLength < sizeof(WCHAR) || Data[0] == UNICODE_NULL)
+            continue;
+
+        Data[DataLength / sizeof(WCHAR)] = UNICODE_NULL;
+        SetUserEnvironmentVariable(Environment, Name, Data, (Type == REG_EXPAND_SZ));
+    }
+
+    RegCloseKey(hKey);
+}
+
+
+/*
  * 'APPDATA' and 'LOCALAPPDATA': the user's AppData and Local AppData shell folders, expanded
  * against the block (they name %USERPROFILE%), else the folders under the profile directory.
  * Windows sets them for every user it finds a profile for, also for LocalSystem, whose hive has
@@ -917,6 +968,9 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
         SetUserEnvironment(Environment,
                            hKeyUser,
                            L"Volatile Environment");
+
+        /* Set the variables of the session of the token */
+        SetSessionEnvironment(Environment, hKeyUser, hToken);
 
         RegCloseKey(hKeyUser);
     }

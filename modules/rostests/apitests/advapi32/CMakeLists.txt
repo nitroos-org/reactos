@@ -46,6 +46,7 @@ list(APPEND SOURCE
     CreateProcessWithLogon.c
     CreateProcessWithToken.c
     CreateEnvironmentBlockProfile.c
+    CreateEnvironmentBlockSession.c
     CloseTrace.c
     DuplicateTokenEx.c
     EnableTraceEx2.c

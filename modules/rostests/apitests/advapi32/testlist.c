@@ -42,6 +42,7 @@ extern void func_CreateProcessAsUserTokenSd(void);
 extern void func_CreateProcessWithLogon(void);
 extern void func_CreateProcessWithToken(void);
 extern void func_CreateEnvironmentBlockProfile(void);
+extern void func_CreateEnvironmentBlockSession(void);
 extern void func_CloseTrace(void);
 extern void func_DuplicateTokenEx(void);
 extern void func_EnableTraceEx2(void);
@@ -279,6 +280,7 @@ const struct test winetest_testlist[] =
     { "CreateProcessWithLogon", func_CreateProcessWithLogon },
     { "CreateProcessWithToken", func_CreateProcessWithToken },
     { "CreateEnvironmentBlockProfile", func_CreateEnvironmentBlockProfile },
+    { "CreateEnvironmentBlockSession", func_CreateEnvironmentBlockSession },
     { "CloseTrace", func_CloseTrace },
     { "DuplicateTokenEx", func_DuplicateTokenEx },
     { "EnableTraceEx2", func_EnableTraceEx2 },
