@@ -18,6 +18,7 @@ extern void func_GetOwnerModuleFromTcpEntry(void);
 extern void func_GetOwnerModuleFromUdpEntry(void);
 extern void func_icmp(void);
 extern void func_Icmp6Echo(void);
+extern void func_IcmpRestrictedToken(void);
 extern void func_IfStatistics(void);
 extern void func_IpInterface(void);
 extern void func_SetIpInterfaceEntry(void);
@@ -73,6 +74,7 @@ const struct test winetest_testlist[] =
     { "GetOwnerModuleFromUdpEntry", func_GetOwnerModuleFromUdpEntry },
     { "icmp",                       func_icmp },
     { "Icmp6Echo",                  func_Icmp6Echo },
+    { "IcmpRestrictedToken",        func_IcmpRestrictedToken },
     { "IfStatistics",               func_IfStatistics },
     { "IpInterface",               func_IpInterface },
     { "SetIpInterfaceEntry",       func_SetIpInterfaceEntry },

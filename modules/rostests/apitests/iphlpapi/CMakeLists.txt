@@ -15,6 +15,7 @@ list(APPEND SOURCE
     GetOwnerModuleFromUdpEntry.c
     ArpNeighbor.c
     icmp.c
+    IcmpRestrictedToken.c
     Icmp6Echo.c
     IfStatistics.c
     IpInterface.c
