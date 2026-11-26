@@ -100,6 +100,9 @@ static VOID NgRetireStaleFcbLocked(PNG_FCB Fcb)
 /*
  * Finds the FCB for (MFT record, stream) or inserts Candidate; returns the FCB to use, counted in
  * Opening until the create counts its handle or fails, so a delete of the file's last name sees it.
+ * The caller holds CoreLock, the hold in which its walk read the state Candidate was made from: every
+ * FCB is listed in such a hold, so a record has one listed FCB per stream, and no size change or
+ * unlink (both under CoreLock) can come between the state an FCB was made from and its listing.
  */
 static PNG_FCB NgInsertOrFindFcb(PNG_VCB Vcb, PNG_FCB Candidate)
 {
@@ -140,11 +143,11 @@ static PNG_FCB NgInsertOrFindFcb(PNG_VCB Vcb, PNG_FCB Candidate)
 }
 
 /*
- * The FCB of (MFT record, unnamed stream) of file reference Ref for an open of an existing file, counted as
- * NgInsertOrFindFcb counts a found one (RefCount and Opening), or NULL.  The caller holds CoreLock: FcbListLock is
- * taken inside it, the order a last cleanup uses (NgCleanupGated); no path takes CoreLock with FcbListLock held.
+ * The FCB of (MFT record, stream) of file reference Ref for an open, counted as NgInsertOrFindFcb counts a found one
+ * (RefCount and Opening), or NULL.  The caller holds CoreLock: FcbListLock is taken inside it, the order a last cleanup
+ * uses (NgCleanupGated); no path takes CoreLock with FcbListLock held.
  */
-static PNG_FCB NgFindFcbForOpen(PNG_VCB Vcb, ULONGLONG Ref)
+static PNG_FCB NgFindFcbForOpen(PNG_VCB Vcb, ULONGLONG Ref, PCUNICODE_STRING Stream)
 {
     ULONGLONG MftNo = Ref & 0xffffffffffffULL;
     PLIST_ENTRY Entry, Next, Head = NgFcbBucket(Vcb, MftNo);
@@ -159,7 +162,7 @@ static PNG_FCB NgFindFcbForOpen(PNG_VCB Vcb, ULONGLONG Ref)
             NgRetireStaleFcbLocked(Fcb);
             continue;
         }
-        if (Fcb->MftNo == MftNo && Fcb->Stream.Length == 0)
+        if (Fcb->MftNo == MftNo && RtlEqualUnicodeString(&Fcb->Stream, Stream, TRUE))
         {
             InterlockedIncrement(&Fcb->RefCount);
             Fcb->Opening++;
@@ -1536,20 +1539,50 @@ walked:
         Node = NULL;
     }
     /*
-     * An open of a file that has an FCB already (one a handle keeps, or one Mm and Cc keep alive after the last handle)
-     * takes that FCB here and lets go of the node the walk found, in this hold: a candidate FCB made first and thrown
-     * away when the insertion finds the old one had to put its node under the lock again.  The FCB found is counted
-     * in Opening from here; every exit below goes through out:, which gives it back.
+     * The FCB of what the walk found is found or listed in this hold, so it is made from the state just read: an open
+     * of a file that has an FCB already (one a handle keeps, or one Mm and Cc keep alive after the last handle) takes
+     * that FCB and lets go of the node; otherwise a new FCB takes the node and the state and is listed before the lock
+     * goes.  Listed only after the lock was let go, it could carry a size another FCB of the file had changed meanwhile
+     * (and then been freed), or the node of a file a delete had unlinked meanwhile, next to the FCB a later open lists
+     * for that record.  The FCB is counted in Opening from here; every exit below goes through out:, which gives it back.
      */
-    else if (NT_SUCCESS(Status) && !Created && !Stream.Length && !OpenTarget && Node)
+    else if (NT_SUCCESS(Status) && Node)
     {
-        Fcb = NgFindFcbForOpen(Vcb, St.mft_ref);
+        Fcb = NgFindFcbForOpen(Vcb, St.mft_ref, &Stream);
         if (Fcb)
         {
-            Opening = TRUE;
             ngc_put(Node);
             Node = NULL;
         }
+        else if (Stream.Length > sizeof(((PNG_FCB)NULL)->StreamBuffer) || !(Fcb = NgAllocateFcb(Vcb)))
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        }
+        else
+        {
+            Fcb->Node = Node;
+            Fcb->HasNode = TRUE;
+            Node = NULL;
+            Fcb->IsDirectory = St.is_dir ? TRUE : FALSE;
+            Fcb->IsRoot = (Full.Length == sizeof(WCHAR));
+            RtlInitEmptyUnicodeString(&Fcb->Stream, Fcb->StreamBuffer, sizeof(Fcb->StreamBuffer));
+            RtlCopyUnicodeString(&Fcb->Stream, &Stream);
+            NgSetStat(Fcb, &St);
+            Fcb->LogicalVdl = Fcb->Header.FileSize.QuadPart;
+            /* A new segment holds pages read from the stream, none past its end (a read past it is zero filled) */
+            Fcb->TailZeroFrom = Fcb->Header.FileSize.QuadPart;
+            /* Its record was made by this create: the first flush need not read the disk (not shared yet: no lock needed). */
+            Fcb->HomeFresh = CreatedNode && !Stream.Length;
+            Found = NgInsertOrFindFcb(Vcb, Fcb);
+            if (Found != Fcb)
+            {
+                /* Not expected (every FCB is listed under CoreLock): the listed one is used. */
+                NgDereferenceFcb(Fcb);
+                Fcb = Found;
+            }
+        }
+        if (Fcb)
+            Opening = TRUE;
     }
     if (Exclusive)
         NgReleaseCore(Vcb);
@@ -1715,9 +1748,7 @@ walked:
     }
 
     Ccb = NgAllocateCcb(&Full);
-    if (!Fcb)
-        Fcb = NgAllocateFcb(Vcb);
-    if (!Ccb || !Fcb || Stream.Length > sizeof(Fcb->StreamBuffer))
+    if (!Ccb || !Fcb)
     {
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto out;
@@ -1732,30 +1763,6 @@ walked:
     Ccb->AppendOnly = (Effective & FILE_APPEND_DATA) && !(Effective & FILE_WRITE_DATA);
     Ccb->Granted = Effective;
     Ccb->ReparseIndex = IndexOpen;
-    if (!Opening)
-    {
-        /* No FCB for the file when the walk looked: this one is the candidate (not shared until inserted). */
-        Fcb->Node = Node;
-        Fcb->HasNode = TRUE;
-        Node = NULL;
-        Fcb->IsDirectory = IsDir;
-        Fcb->IsRoot = (Full.Length == sizeof(WCHAR));
-        RtlInitEmptyUnicodeString(&Fcb->Stream, Fcb->StreamBuffer, sizeof(Fcb->StreamBuffer));
-        RtlCopyUnicodeString(&Fcb->Stream, &Stream);
-        NgSetStat(Fcb, &St);    /* the state the walk read under the lock: this FCB is not shared yet */
-        Fcb->LogicalVdl = Fcb->Header.FileSize.QuadPart;
-        /* A new segment holds pages read from the stream, none past its end (a read past it is zero filled) */
-        Fcb->TailZeroFrom = Fcb->Header.FileSize.QuadPart;
-        /* Its record was made by this create: the first flush need not read the disk (not shared yet: no lock needed). */
-        Fcb->HomeFresh = CreatedNode && !Stream.Length;
-        Found = NgInsertOrFindFcb(Vcb, Fcb);
-        Opening = TRUE;
-        if (Found != Fcb)
-        {
-            NgDereferenceFcb(Fcb);
-            Fcb = Found;
-        }
-    }
     if (Fcb->DeletePending)
     {
         Status = STATUS_DELETE_PENDING;
