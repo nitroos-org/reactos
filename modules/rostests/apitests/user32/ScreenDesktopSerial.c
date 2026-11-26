@@ -151,6 +151,29 @@ START_TEST(ScreenDesktopSerial)
                 ReleaseDC(s_hwndY, hdcWnd);
             }
         }
+
+        /* The bitmap GetCurrentObject names for a screen DC is the screen's surface: GetDIBits of it, through any DC, reads nothing */
+        {
+            HDC hdcScr = GetDC(NULL);
+            HBITMAP hbmScr = hdcScr ? GetCurrentObject(hdcScr, OBJ_BITMAP) : NULL;
+            BITMAPINFO bmi;
+            static DWORD buf[64 * 64];
+            int lines;
+
+            ZeroMemory(&bmi, sizeof(bmi));
+            bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+            bmi.bmiHeader.biWidth = 64;
+            bmi.bmiHeader.biHeight = -64;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+            FillMemory(buf, sizeof(buf), 0x5A);
+            lines = hbmScr ? GetDIBits(hdcMem, hbmScr, 0, 64, buf, &bmi, DIB_RGB_COLORS) : 0;
+            ok(lines == 0, "round %d: GetDIBits of the screen's bitmap read %d lines\n", round, lines);
+            ok((buf[0] & 0xFFFFFF) != 0x002184C6 /* Y_COLOR as a pixel */, "round %d: the screen's bitmap gave the colour of the desktop with the input\n", round);
+            if (hdcScr)
+                ReleaseDC(NULL, hdcScr);
+        }
         DeleteObject(hbm);
         DeleteDC(hdcMem);
 
