@@ -337,6 +337,23 @@ UserRedirRootFor(PWND Wnd)
     return Root;
 }
 
+/*
+ * Whether the current thread may reach the surface of the redirected top-level window Root (a DC that draws into it,
+ * PrintWindow copying from it): only a thread of the desktop the window is on. A surface keeps what its window shows
+ * also while that desktop is not on the screen (the secure desktop while Default has the input, and the other way
+ * round), and none of it may reach another desktop. A thread of another desktop gets a DC as without redirection:
+ * it draws on the screen through the window's visible region, which is empty while the window's desktop has not the
+ * input.
+ */
+BOOL
+FASTCALL
+UserRedirSameDesktop(PWND Root)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+
+    return pti && Root && pti->rpdesk && pti->rpdesk == Root->head.rpdesk;
+}
+
 /* Level 2: GDI drawing through a DC bound to the record shows nothing (windc.c gives it an empty visible region) */
 BOOL
 FASTCALL

@@ -437,15 +437,21 @@ DC_vSetOwner(PDC pdc, ULONG ulOwner)
         GreSetObjectOwner(pdc->dclevel.hPath, ulOwner);
     }
 
-    /* Dereference current brush and pen */
-    BRUSH_ShareUnlockBrush(pdc->dclevel.pbrFill);
-    BRUSH_ShareUnlockBrush(pdc->dclevel.pbrLine);
+    /* Dereference current brush and pen (none when a lock below failed at an earlier owner change) */
+    if (pdc->dclevel.pbrFill)
+        BRUSH_ShareUnlockBrush(pdc->dclevel.pbrFill);
+    if (pdc->dclevel.pbrLine)
+        BRUSH_ShareUnlockBrush(pdc->dclevel.pbrLine);
 
-    /* Select the default fill and line brush */
+    /*
+     * Select the default fill and line brush: the stock objects themselves. The attribute in use may still be the
+     * old owner's (user memory of a process that may not be the current one, and whose brushes may be gone): a
+     * brush read from there could not be locked, and the DC kept no brush.
+     */
     pdc->dcattr.hbrush = StockObjects[WHITE_BRUSH];
     pdc->dcattr.hpen = StockObjects[BLACK_PEN];
-    pdc->dclevel.pbrFill = BRUSH_ShareLockBrush(pdc->pdcattr->hbrush);
-    pdc->dclevel.pbrLine = PEN_ShareLockPen(pdc->pdcattr->hpen);
+    pdc->dclevel.pbrFill = BRUSH_ShareLockBrush(StockObjects[WHITE_BRUSH]);
+    pdc->dclevel.pbrLine = PEN_ShareLockPen(StockObjects[BLACK_PEN]);
 
     /* Mark them as dirty */
     pdc->pdcattr->ulDirty_ |= DIRTY_FILL|DIRTY_LINE;
