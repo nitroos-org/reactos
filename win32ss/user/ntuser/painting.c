@@ -1723,7 +1723,7 @@ IntPrintWindow(
      * copies it with no message. Not for a caller of another desktop (UserRedirSameDesktop): the window is
      * printed as one that is not redirected.
      */
-    if (UserRedirHasSurface(pwnd) && UserRedirSameDesktop(pwnd))
+    if (UserRedirHasSurface(pwnd) && UserRedirMayReach(pwnd))
     {
         RECTL rc;
 
@@ -3084,7 +3084,7 @@ NtUserPrintWindow(
           /* PW_RENDERFULLCONTENT is known only for a redirected window (its surface holds the content) of the caller's desktop */
           if ( (nFlags & PW_CLIENTONLY) == nFlags ||
                ((nFlags & ~PW_CLIENTONLY) == NITRO_PW_RENDERFULLCONTENT && UserRedirHasSurface(Window) &&
-                UserRedirSameDesktop(Window)) )
+                UserRedirMayReach(Window)) )
           {
              USER_REFERENCE_ENTRY Ref;
              UserRefObjectCo(Window, &Ref);

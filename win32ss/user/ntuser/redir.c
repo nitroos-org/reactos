@@ -354,6 +354,45 @@ UserRedirSameDesktop(PWND Root)
     return pti && Root && pti->rpdesk && pti->rpdesk == Root->head.rpdesk;
 }
 
+/* The mandatory level (RID) of the primary token of a process; 0 when it has none */
+static
+ULONG
+RedirProcessLevel(PEPROCESS Process)
+{
+    PACCESS_TOKEN Token = PsReferencePrimaryToken(Process);
+    ULONG Level = 0;
+
+    if (Token)
+    {
+        Level = ((PTOKEN)Token)->IntegrityLevel;
+        ObDereferenceObject(Token);
+    }
+    return Level;
+}
+
+/*
+ * Whether the current thread may reach the surface of the redirected top-level window Root: a thread of its desktop
+ * (UserRedirSameDesktop) whose process is not of a LOWER integrity level than the process that owns the window. A
+ * lower-integrity process gets a DC and a PrintWindow as without redirection: it reads and draws what the screen shows
+ * (as in 2026.11-2), not what the window keeps where it is covered or off the screen.
+ *
+ * The levels come from the primary tokens of the two processes, read at every call, so a token that changed (a process
+ * lowered its own level) is seen by the next GetDC or PrintWindow; a DC that was bound before keeps its binding until the
+ * next GetDC of that window (DceRedirBind re-evaluates it there). The same process is the same level: no token is read.
+ */
+BOOL
+FASTCALL
+UserRedirMayReach(PWND Root)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+
+    if (!UserRedirSameDesktop(Root))
+        return FALSE;
+    if (pti->ppi == Root->head.pti->ppi)
+        return TRUE;
+    return RedirProcessLevel(pti->ppi->peProcess) >= RedirProcessLevel(Root->head.pti->ppi->peProcess);
+}
+
 /* Level 2: GDI drawing through a DC bound to the record shows nothing (windc.c gives it an empty visible region) */
 BOOL
 FASTCALL

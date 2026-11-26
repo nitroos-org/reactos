@@ -861,8 +861,8 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
    if (gRedirOn || Dce->pRedir)
    {
       PWND RedirRoot = UserRedirRootFor(Wnd);
-      /* A thread of another desktop draws and reads as without redirection: never through the window's surface */
-      PVOID pRedir = (RedirRoot && UserRedirSameDesktop(RedirRoot)) ? UserRedirGet(RedirRoot) : NULL;
+      /* A thread of another desktop, or of a lower integrity level than the window's process, draws and reads as without redirection: never through the window's surface */
+      PVOID pRedir = (RedirRoot && UserRedirMayReach(RedirRoot)) ? UserRedirGet(RedirRoot) : NULL;
 
       /* Not eligible now (hidden, layered, glass): a surface it had no longer holds what it shows */
       if (!RedirRoot && Wnd)
