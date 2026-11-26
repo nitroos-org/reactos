@@ -3625,10 +3625,12 @@ ProcessUnattendSection(
     {
         DEVMODEW dm = { { 0 } };
         DEVMODEW dmUnattend = { { 0 } };
+        DWORD dwCurrentBpp;
         dm.dmSize = sizeof(dm);
         dmUnattend.dmSize = sizeof(dmUnattend);
         if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm))
         {
+            dwCurrentBpp = dm.dmBitsPerPel;
             do
             {
                 int iValue;
@@ -3689,7 +3691,14 @@ ProcessUnattendSection(
             if (dmUnattend.dmFields & DM_DISPLAYFREQUENCY)
                 dm.dmDisplayFrequency = dmUnattend.dmDisplayFrequency;
 
-            ChangeDisplaySettingsW(&dm, CDS_UPDATEREGISTRY);
+            if (ChangeDisplaySettingsW(&dm, CDS_UPDATEREGISTRY) == DISP_CHANGE_BADMODE &&
+                (dmUnattend.dmFields & DM_BITSPERPEL) && dm.dmBitsPerPel != dwCurrentBpp)
+            {
+                /* The display does not list that depth (Windows refuses such a mode too): the resolution at the
+                 * depth the display has */
+                dm.dmBitsPerPel = dwCurrentBpp;
+                ChangeDisplaySettingsW(&dm, CDS_UPDATEREGISTRY);
+            }
             ApplyDisplaySettingsToInactiveAdapters(&dmUnattend);
         }
     }
