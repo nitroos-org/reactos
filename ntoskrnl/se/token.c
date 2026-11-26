@@ -3322,6 +3322,33 @@ NtOpenThreadTokenEx(
         return STATUS_CANT_OPEN_ANONYMOUS;
     }
 
+    /*
+     * Without OpenAsSelf the token is opened as the client the calling thread impersonates, and an
+     * identification-level client cannot be used for an access check (Windows Server 2022: a thread whose
+     * impersonation came out at the identification level gets ERROR_BAD_IMPERSONATION_LEVEL).
+     */
+    if (!OpenAsSelf)
+    {
+        PTOKEN CallerToken;
+        BOOLEAN CallerCopyOnOpen, CallerEffectiveOnly;
+        SECURITY_IMPERSONATION_LEVEL CallerLevel;
+
+        CallerToken = PsReferenceImpersonationToken(PsGetCurrentThread(),
+                                                    &CallerCopyOnOpen,
+                                                    &CallerEffectiveOnly,
+                                                    &CallerLevel);
+        if (CallerToken != NULL)
+        {
+            PsDereferenceImpersonationToken(CallerToken);
+            if (CallerLevel < SecurityImpersonation)
+            {
+                PsDereferenceImpersonationToken(Token);
+                ObDereferenceObject(Thread);
+                return STATUS_BAD_IMPERSONATION_LEVEL;
+            }
+        }
+    }
+
     /* Revert to self if OpenAsSelf is specified */
     if (OpenAsSelf)
     {
