@@ -108,6 +108,7 @@ list(APPEND SOURCE
     WmCharAnsi.c
     KeyboardLLHook.c
     WallpaperAccess.c
+    WallpaperBitmaps.c
     LayeredCompose.c
     LoadImage.c
     LoadImageGCC.c
