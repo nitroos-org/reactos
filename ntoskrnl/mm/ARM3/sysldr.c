@@ -3665,12 +3665,8 @@ LdrpInitSecurityCookie(PLDR_DATA_TABLE_ENTRY LdrEntry)
     if ((*Cookie == DEFAULT_SECURITY_COOKIE) ||
         (*Cookie == 0))
     {
-        LARGE_INTEGER Counter = KeQueryPerformanceCounter(NULL);
-        /* The address should be unique */
-        NewCookie = (ULONG_PTR)Cookie;
-
-        /* We just need a simple tick, don't care about precision and whatnot */
-        NewCookie ^= (ULONG_PTR)Counter.LowPart;
+        /* From the system generator, or from the processor for the images that load before it is there */
+        ExpGetRandomBytes(&NewCookie, sizeof(NewCookie), NULL);
 #ifdef _WIN64
         /* Some images expect first 16 bits to be kept clean (like in default cookie) */
         if (NewCookie > COOKIE_MAX)

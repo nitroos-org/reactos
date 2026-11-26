@@ -96,6 +96,13 @@ KsecGenRandom(
     PVOID Buffer,
     SIZE_T Length);
 
+/* ntoskrnl: the system generator for the kernel's own secrets (ex/random.c) */
+NTKERNELAPI
+VOID
+NTAPI
+ExRegisterRandomProvider(
+    _In_ NTSTATUS (NTAPI *Provider)(_Out_writes_bytes_(Length) PVOID Buffer, _In_ SIZE_T Length));
+
 /* bcrypt.h values, for the kernel-mode BCryptGenRandom export */
 #define KSEC_BCRYPT_RNG_ALG_HANDLE              ((PVOID)(ULONG_PTR)0x81)
 #define KSEC_BCRYPT_RNG_USE_ENTROPY_IN_BUFFER   0x00000001

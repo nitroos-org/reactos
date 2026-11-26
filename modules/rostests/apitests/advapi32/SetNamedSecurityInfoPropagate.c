@@ -18,6 +18,8 @@
 #include <aclapi.h>
 #include <sddl.h>
 #include <winioctl.h>
+#include <ndk/iofuncs.h>
+#include <ndk/rtlfuncs.h>
 
 #define PROP_DEPTH 520
 
@@ -39,11 +41,20 @@ static PWSTR FileDaclString(PCWSTR Path)
 {
     PSECURITY_DESCRIPTOR Sd = NULL;
     PWSTR String = NULL;
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Iosb;
     HANDLE h;
+    NTSTATUS Status;
 
-    h = CreateFileW(Path, READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
-                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-    if (h == INVALID_HANDLE_VALUE)
+    /* without SYNCHRONIZE (CreateFile asks for it): a DACL may deny it */
+    if (!RtlDosPathNameToNtPathName_U(Path, &Name, NULL, NULL))
+        return NULL;
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&h, READ_CONTROL, &Attributes, &Iosb, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        FILE_OPEN_REPARSE_POINT);
+    RtlFreeUnicodeString(&Name);
+    if (!NT_SUCCESS(Status))
         return NULL;
     if (GetSecurityInfo(h, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, &Sd) == ERROR_SUCCESS)
     {
@@ -474,6 +485,206 @@ static void TestKeys(VOID)
     RegDeleteKeyW(HKEY_CURRENT_USER, Name);
 }
 
+/* Sets the DACL of Path from SDDL (the user's SID in place of every %s), with the protection given */
+static DWORD SetFromSddl(PCWSTR Path, PCWSTR Format, DWORD Protection)
+{
+    PSECURITY_DESCRIPTOR Sd = SdFromSddl(Format);
+    BOOL Present, Defaulted;
+    PACL Dacl = NULL;
+    DWORD Error;
+
+    GetSecurityDescriptorDacl(Sd, &Present, &Dacl, &Defaulted);
+    Error = SetNamedSecurityInfoW((PWSTR)Path, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | Protection, NULL, NULL, Dacl, NULL);
+    LocalFree(Sd);
+    return Error;
+}
+
+/* The control flags of the descriptor of a file or directory (0xFFFF when it cannot be read) */
+static SECURITY_DESCRIPTOR_CONTROL FileControl(PCWSTR Path)
+{
+    SECURITY_DESCRIPTOR_CONTROL Control = 0xFFFF;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    DWORD Revision;
+
+    if (GetNamedSecurityInfoW((PWSTR)Path, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, &Sd) == ERROR_SUCCESS)
+    {
+        GetSecurityDescriptorControl(Sd, &Control, &Revision);
+        LocalFree(Sd);
+    }
+    return Control;
+}
+
+/*
+ * The DACL of a file or directory that SetNamedSecurityInfo or SetSecurityInfo sets is auto-inherited afterwards,
+ * protected or not (Windows Server 2022: D:PAI with PROTECTED_DACL_SECURITY_INFORMATION, D:AI with
+ * UNPROTECTED_DACL_SECURITY_INFORMATION and with neither, through the name and through a handle)
+ */
+static void TestSetDaclAutoInherited(VOID)
+{
+    WCHAR Temp[MAX_PATH], Root[MAX_PATH], Path[MAX_PATH];
+    SECURITY_DESCRIPTOR_CONTROL Control;
+    PSECURITY_DESCRIPTOR Sd;
+    BOOL Present, Defaulted;
+    PACL Dacl = NULL;
+    HANDLE h;
+    DWORD Error;
+
+    GetTempPathW(_countof(Temp), Temp);
+    StringCbPrintfW(Root, sizeof(Root), L"%sPropAI%lu", Temp, GetCurrentProcessId());
+    RemoveTree(Root);
+    ok(CreateDirectoryW(Root, NULL), "%S: %lu\n", Root, GetLastError());
+    ok(SetFromSddl(Root, L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)", PROTECTED_DACL_SECURITY_INFORMATION) == ERROR_SUCCESS,
+       "root\n");
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\d", Root);
+    CreateDirectoryW(Path, NULL);
+
+    Error = SetFromSddl(Path, L"D:(A;OICI;0x1200a9;;;BU)", UNPROTECTED_DACL_SECURITY_INFORMATION);
+    Control = FileControl(Path);
+    ok(Error == ERROR_SUCCESS && (Control & (SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED)) == SE_DACL_AUTO_INHERITED,
+       "unprotected: error %lu, control %#x\n", Error, Control);
+
+    Error = SetFromSddl(Path, L"D:(A;OICI;0x1301bf;;;BU)", 0);
+    Control = FileControl(Path);
+    ok(Error == ERROR_SUCCESS && (Control & (SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED)) == SE_DACL_AUTO_INHERITED,
+       "no protection flag: error %lu, control %#x\n", Error, Control);
+
+    Error = SetFromSddl(Path, L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", PROTECTED_DACL_SECURITY_INFORMATION);
+    Control = FileControl(Path);
+    ok(Error == ERROR_SUCCESS && (Control & (SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED)) == (SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED),
+       "protected: error %lu, control %#x\n", Error, Control);
+
+    /* through a handle */
+    Sd = SdFromSddl(L"D:(A;OICI;0x1200a9;;;BU)");
+    GetSecurityDescriptorDacl(Sd, &Present, &Dacl, &Defaulted);
+    h = CreateFileW(Path, READ_CONTROL | WRITE_DAC, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    ok(h != INVALID_HANDLE_VALUE, "open %S: %lu\n", Path, GetLastError());
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        Error = SetSecurityInfo(h, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL, Dacl, NULL);
+        CloseHandle(h);
+        Control = FileControl(Path);
+        ok(Error == ERROR_SUCCESS && (Control & (SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED)) == SE_DACL_AUTO_INHERITED,
+           "by handle: error %lu, control %#x\n", Error, Control);
+    }
+    LocalFree(Sd);
+
+    RemoveTree(Root);
+}
+
+/*
+ * What a directory passes on to its children is deduplicated: a directory that has an entry of its own (Users modify) and
+ * the inherited entry that it covers (Users read, from its parent) passes on the one entry, and the repeat of an
+ * inherited entry (SYSTEM, Administrators) is not stored again (Windows Server 2022, SetNamedSecurityInfo)
+ */
+static void TestDeduplicated(VOID)
+{
+    WCHAR Temp[MAX_PATH], Root[MAX_PATH], Path[MAX_PATH];
+    PWSTR After;
+    DWORD Error;
+    LONG Count;
+    PWSTR Found;
+
+    GetTempPathW(_countof(Temp), Temp);
+    StringCbPrintfW(Root, sizeof(Root), L"%sPropDedup%lu", Temp, GetCurrentProcessId());
+    RemoveTree(Root);
+    ok(CreateDirectoryW(Root, NULL), "%S: %lu\n", Root, GetLastError());
+    ok(SetFromSddl(Root, L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)", PROTECTED_DACL_SECURITY_INFORMATION) == ERROR_SUCCESS,
+       "root\n");
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a", Root);          CreateDirectoryW(Path, NULL);
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a\\f1", Root);      MakeFile(Path);
+
+    /* Users read on the root, Users modify on a: the file below a has the modify only */
+    Error = SetFromSddl(Root, L"D:P(A;OICI;0x1200a9;;;BU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)", PROTECTED_DACL_SECURITY_INFORMATION);
+    ok(Error == ERROR_SUCCESS, "root: %lu\n", Error);
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a", Root);
+    Error = SetFromSddl(Path, L"D:(A;OICI;0x1301bf;;;BU)", UNPROTECTED_DACL_SECURITY_INFORMATION);
+    ok(Error == ERROR_SUCCESS, "a: %lu\n", Error);
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a\\f1", Root);
+    After = FileDaclString(Path);
+    ok(After && wcsstr(After, L"0x1301bf;;;BU") != NULL && wcsstr(After, L"0x1200a9;;;BU") == NULL,
+       "a\\f1 has the entry that the modify covers: %S\n", After ? After : L"(none)");
+    LocalFree(After);
+
+    /* the entries of a, set again to what it has inherited: the file has each of SYSTEM and Administrators once */
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a", Root);
+    Error = SetFromSddl(Path, L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", UNPROTECTED_DACL_SECURITY_INFORMATION);
+    ok(Error == ERROR_SUCCESS, "a again: %lu\n", Error);
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a\\f1", Root);
+    After = FileDaclString(Path);
+    Count = 0;
+    for (Found = After; Found && (Found = wcsstr(Found, L";;;SY)")) != NULL; Found++)
+        Count++;
+    ok(Count == 1, "a\\f1 has SYSTEM %ld times: %S\n", Count, After ? After : L"(none)");
+    LocalFree(After);
+
+    RemoveTree(Root);
+}
+
+/*
+ * An entry that denies SYNCHRONIZE (to Everyone, say) in the DACL of the directories below the one that is set: the
+ * children cannot be opened with SYNCHRONIZE, but READ_CONTROL | WRITE_DAC and FILE_LIST_DIRECTORY open without it
+ * (Windows Server 2022: an open with SYNCHRONIZE is refused, the others work), and the propagation changes them all.
+ */
+static void TestDeniedSynchronize(VOID)
+{
+    WCHAR Temp[MAX_PATH], Root[MAX_PATH], Path[MAX_PATH], Sub[MAX_PATH];
+    PWSTR After;
+    DWORD Error;
+    static const PCWSTR Names[] = { L"a", L"a\\f1", L"a\\sub", L"a\\sub\\f2" };
+    ULONG i;
+
+    GetTempPathW(_countof(Temp), Temp);
+    StringCbPrintfW(Root, sizeof(Root), L"%sPropSync%lu", Temp, GetCurrentProcessId());
+    RemoveTree(Root);
+    ok(CreateDirectoryW(Root, NULL), "%S: %lu\n", Root, GetLastError());
+    ok(SetFromSddl(Root, L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)", PROTECTED_DACL_SECURITY_INFORMATION) == ERROR_SUCCESS,
+       "root\n");
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a", Root);          CreateDirectoryW(Path, NULL);
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a\\f1", Root);      MakeFile(Path);
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a\\sub", Root);     CreateDirectoryW(Path, NULL);
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a\\sub\\f2", Root); MakeFile(Path);
+
+    /* 1. Everyone is denied SYNCHRONIZE on the root: the children get the entry */
+    Error = SetFromSddl(Root, L"D:P(D;OICI;0x100000;;;WD)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)",
+                        PROTECTED_DACL_SECURITY_INFORMATION);
+    ok(Error == ERROR_SUCCESS, "denying SYNCHRONIZE: %lu\n", Error);
+    for (i = 0; i < _countof(Names); i++)
+    {
+        StringCbPrintfW(Path, sizeof(Path), L"%s\\%s", Root, Names[i]);
+        After = FileDaclString(Path);
+        ok(After && wcsstr(After, L"(D;") != NULL, "%s: %S\n", Names[i], After ? After : L"(none)");
+        LocalFree(After);
+    }
+
+    /* 2. The entry goes again: so does what the children inherited, though they cannot be opened with SYNCHRONIZE */
+    Error = SetFromSddl(Root, L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)", PROTECTED_DACL_SECURITY_INFORMATION);
+    ok(Error == ERROR_SUCCESS, "removing it: %lu\n", Error);
+    for (i = 0; i < _countof(Names); i++)
+    {
+        StringCbPrintfW(Path, sizeof(Path), L"%s\\%s", Root, Names[i]);
+        After = FileDaclString(Path);
+        ok(After && wcsstr(After, L"(D;") == NULL, "%s still has the entry: %S\n", Names[i], After ? After : L"(none)");
+        LocalFree(After);
+    }
+
+    /* 3. The same with a directory in the middle that is reset: a\sub denies SYNCHRONIZE of its own, a is reset */
+    StringCbPrintfW(Sub, sizeof(Sub), L"%s\\a", Root);
+    Error = SetFromSddl(Sub, L"D:(D;OICI;0x100000;;;WD)", UNPROTECTED_DACL_SECURITY_INFORMATION);
+    ok(Error == ERROR_SUCCESS, "denying on a: %lu\n", Error);
+    StringCbPrintfW(Path, sizeof(Path), L"%s\\a\\sub\\f2", Root);
+    After = FileDaclString(Path);
+    ok(After && wcsstr(After, L"(D;") != NULL, "a\\sub\\f2: %S\n", After ? After : L"(none)");
+    LocalFree(After);
+    Error = SetFromSddl(Sub, L"D:", UNPROTECTED_DACL_SECURITY_INFORMATION);
+    ok(Error == ERROR_SUCCESS, "reset of a: %lu\n", Error);
+    After = FileDaclString(Path);
+    ok(After && wcsstr(After, L"(D;") == NULL, "a\\sub\\f2 after the reset of a: %S\n", After ? After : L"(none)");
+    LocalFree(After);
+
+    RemoveTree(Root);
+}
+
 static BOOL Init(VOID)
 {
     UCHAR Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
@@ -513,6 +724,9 @@ START_TEST(SetNamedSecurityInfoPropagate)
     else
     {
         TestFiles();
+        TestSetDaclAutoInherited();
+        TestDeduplicated();
+        TestDeniedSynchronize();
     }
     TestKeys();
     LocalFree(UsersSid);

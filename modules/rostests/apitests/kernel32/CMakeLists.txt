@@ -249,9 +249,11 @@ list(APPEND SOURCE
     SuspendThreadContext.c
     SetWaitableTimerEx.c
     SleepNeverEarly.c
+    DiskCacheInformation.c
     SystemFirmware.c
     PhysicallyInstalledMemory.c
     Toolhelp32.c
+    UnalignedDiskRead.c
     TerminateProcess.c
     ThreadContextNpx.c
     ThreadContextObjects.c

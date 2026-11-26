@@ -342,6 +342,22 @@ BOOLEAN
 NTAPI
 ExLuidInitialization(VOID);
 
+/* Random bytes for the kernel's own secrets (random.c): the system generator once it has registered, else the
+   processor and the clocks */
+typedef NTSTATUS (NTAPI *PEX_RANDOM_PROVIDER)(_Out_writes_bytes_(Length) PVOID Buffer, _In_ SIZE_T Length);
+
+VOID
+NTAPI
+ExRegisterRandomProvider(
+    _In_ PEX_RANDOM_PROVIDER Provider);
+
+VOID
+NTAPI
+ExpGetRandomBytes(
+    _Out_writes_bytes_(Length) PVOID Buffer,
+    _In_ ULONG Length,
+    _Out_opt_ PBOOLEAN FromSystem);
+
 CODE_SEG("INIT")
 VOID
 NTAPI

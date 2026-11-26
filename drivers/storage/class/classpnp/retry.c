@@ -762,8 +762,25 @@ BOOLEAN StepLowMemRetry(PTRANSFER_PACKET Pkt)
              *  AND that it does not cross any page boundaries.
              */
             ULONG bytesToNextPageBoundary;
+            PFUNCTIONAL_DEVICE_EXTENSION fdoExt = Pkt->Fdo->DeviceExtension;
+            ULONG bytesPerSector = fdoExt->DiskGeometry.BytesPerSector;
+
             bytesToNextPageBoundary = PAGE_SIZE-(ULONG)((ULONG_PTR)Pkt->LowMemRetry_remainingBufPtr%PAGE_SIZE);
             thisChunkLen = MIN(Pkt->LowMemRetry_remainingBufLen, bytesToNextPageBoundary);
+
+            /*
+             *  A chunk is a whole number of sectors: a buffer that does not start on a sector boundary of the
+             *  page would end its first chunk on the page boundary in the middle of a sector (and a device
+             *  that counts whole sectors drops the rest), and the last chunk would be a stub of a sector.
+             *  Round the chunk down to a sector; if the page holds less than one, the chunk is that one sector
+             *  and crosses the page boundary (two pages).
+             */
+            if (bytesPerSector != 0 && thisChunkLen < Pkt->LowMemRetry_remainingBufLen && (thisChunkLen % bytesPerSector) != 0) {
+                thisChunkLen -= thisChunkLen % bytesPerSector;
+                if (thisChunkLen == 0) {
+                    thisChunkLen = MIN(Pkt->LowMemRetry_remainingBufLen, bytesPerSector);
+                }
+            }
             NT_ASSERT(Pkt->InLowMemRetry);
         }
 

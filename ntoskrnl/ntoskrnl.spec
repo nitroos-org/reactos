@@ -138,6 +138,7 @@
 @ fastcall ExReInitializeRundownProtection(ptr) ExfReInitializeRundownProtection
 @ fastcall ExReInitializeRundownProtectionCacheAware(ptr) ExfReInitializeRundownProtectionCacheAware
 @ stdcall ExRegisterCallback(ptr ptr ptr)
+@ stdcall ExRegisterRandomProvider(ptr)
 @ stdcall ExReinitializeResourceLite(ptr)
 @ stdcall -arch=x86_64 ExReleaseFastMutex(ptr)
 @ fastcall ExReleaseFastMutexUnsafe(ptr)
