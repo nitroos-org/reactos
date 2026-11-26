@@ -296,6 +296,7 @@ typedef struct _TDI_BUCKET {
     TDI_REQUEST Request;
     NTSTATUS Status;
     ULONG Information;
+    ULONG LoopTicket;                  /* A send to a peer on this machine: completes when the loopback worker has this ticket done */
     CHEW_RESERVED_ITEM ReservedItem;   /* Completion when no Chew work item can be allocated */
 } TDI_BUCKET, *PTDI_BUCKET;
 

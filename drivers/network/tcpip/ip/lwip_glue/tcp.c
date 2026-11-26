@@ -1733,11 +1733,13 @@ LibTCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
 /* Called with the core lock held */
 static
 err_t
-LibTCPSendLocked(PCONNECTION_ENDPOINT Connection, void *Data, u32_t DataLength, PTDI_BUCKET Bucket, u32_t *Information)
+LibTCPSendLocked(PCONNECTION_ENDPOINT Connection, void *Data, u32_t DataLength, PTDI_BUCKET Bucket, u32_t *Information,
+                 PULONG LoopTicket)
 {
     PTCP_PCB pcb = Connection->SocketContext;
     ULONG SendLength;
     UCHAR SendFlags;
+    ULONG LoopSeq;
     err_t Error;
 
     ASSERT(sys_tcpip_core_locked());
@@ -1787,7 +1789,25 @@ LibTCPSendLocked(PCONNECTION_ENDPOINT Connection, void *Data, u32_t DataLength, 
         if (Written != 0)
         {
             /* Queued: try to send it. What was not written stays with the caller, who sends it again */
-            tcp_output(pcb);
+            LoopSeq = LoopCoreSeq;
+            if (LoopTicket &&
+                (ip_addr_isloopback(&pcb->remote_ip) || ip_addr_cmp(&pcb->remote_ip, &pcb->local_ip)) &&
+                !tcp_nagle_disabled(pcb))
+            {
+                /* A peer on this machine acknowledges at once on Windows, so a short segment is never held back
+                 * behind an unacknowledged one; here the acknowledgement waits in the loopback queue, and a send
+                 * would complete with its data not sent. The caller's TCP_NODELAY setting is not changed */
+                tcp_nagle_disable(pcb);
+                tcp_output(pcb);
+                tcp_nagle_enable(pcb);
+            }
+            else
+            {
+                tcp_output(pcb);
+            }
+            /* A datagram that went to the loopback worker: the caller can wait for it to be done */
+            if (LoopTicket && LoopCoreSeq != LoopSeq)
+                *LoopTicket = LoopCoreTicket;
             *Information = Written;
             Error = ERR_OK;
         }
@@ -1822,7 +1842,8 @@ LibTCPSendCallback(void *arg)
                                               msg->Input.Send.Data,
                                               msg->Input.Send.DataLength,
                                               msg->Input.Send.Bucket,
-                                              &msg->Output.Send.Information);
+                                              &msg->Output.Send.Information,
+                                              &msg->Output.Send.LoopTicket);
 
     KeSetEvent(&msg->Event, IO_NO_INCREMENT, FALSE);
 }
@@ -1832,22 +1853,27 @@ LibTCPSendCallback(void *arg)
 
 /* Bucket, if not NULL, is queued as a waiting send request if the data cannot be sent now */
 err_t
-LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u32_t len, ULONG *sent, const int safe, PTDI_BUCKET Bucket)
+LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u32_t len, ULONG *sent, const int safe, PTDI_BUCKET Bucket,
+           PULONG LoopTicket)
 {
     err_t ret;
     u32_t Information = 0;
     struct lwip_callback_msg *msg;
 
+    /* The ticket of the last datagram this send gave to the loopback worker, 0 if it gave it none */
+    if (LoopTicket)
+        *LoopTicket = 0;
+
     if (safe)
     {
         /* From a sent event: the core lock is already held */
-        ret = LibTCPSendLocked(Connection, dataptr, len, Bucket, &Information);
+        ret = LibTCPSendLocked(Connection, dataptr, len, Bucket, &Information, LoopTicket);
     }
     else if (IoGetRemainingStackSize() >= LIBTCP_SEND_INLINE_STACK)
     {
         /* Send on the caller's thread rather than switching to the tcpip thread and back */
         LOCK_TCPIP_CORE();
-        ret = LibTCPSendLocked(Connection, dataptr, len, Bucket, &Information);
+        ret = LibTCPSendLocked(Connection, dataptr, len, Bucket, &Information, LoopTicket);
         UNLOCK_TCPIP_CORE();
     }
     else
@@ -1861,6 +1887,7 @@ LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u32_t len
         msg->Input.Send.Data = dataptr;
         msg->Input.Send.DataLength = len;
         msg->Input.Send.Bucket = Bucket;
+        msg->Output.Send.LoopTicket = 0;
 
         tcpip_callback_with_block(LibTCPSendCallback, msg, 1);
 
@@ -1868,6 +1895,8 @@ LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u32_t len
         {
             ret = msg->Output.Send.Error;
             Information = msg->Output.Send.Information;
+            if (LoopTicket)
+                *LoopTicket = msg->Output.Send.LoopTicket;
         }
         else
             ret = ERR_CLSD;

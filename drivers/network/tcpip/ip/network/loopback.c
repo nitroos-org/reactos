@@ -39,6 +39,79 @@ static NPAGED_LOOKASIDE_LIST LoopPbufItems;
 static BOOLEAN LoopPbufItemsReady;
 static volatile BOOLEAN LoopClosing;
 
+/* Sends whose completion waits for the worker. A TCP send that asks for it (TCP_SEND_DELIVERED: the last send of a
+ * TransmitFile) to a peer on this machine completes when the worker has handed its segments to the peer's
+ * connection, so that the data is in the peer's queue when the sender goes on (on Windows it is; here the worker
+ * runs a moment after the sender queued the segments). Every entry the worker finishes counts in LoopHandled; a
+ * send holds the ticket of its last segment and completes when LoopHandled has reached it. The sender does not
+ * wait: its request stays pending and the worker completes it, so no thread holds a lock another needs while it
+ * waits, and no processor spins. Tickets wrap: they are compared as differences.
+ * Plain sends do not wait: a request that comes back after the worker's round trip made a loopback echo three times
+ * slower (39 to 130 microseconds a round trip) and bulk sends 18% slower, measured on pinned vCPUs */
+static KSPIN_LOCK LoopWaitLock;
+static LIST_ENTRY LoopWaiters;
+static volatile LONG LoopWaiterCount;
+static volatile LONG LoopHandled;
+
+/* Under the core lock, written by LoopTransmitPbuf only */
+ULONG LoopCoreSeq;
+ULONG LoopCoreTicket;
+
+BOOLEAN LoopDeferCompletion(
+  PTDI_BUCKET Bucket,
+  ULONG Ticket)
+{
+  KIRQL OldIrql;
+  BOOLEAN Taken = TRUE;
+
+  Bucket->LoopTicket = Ticket;
+
+  /* The count, the entry and the check are one step under the lock: the worker counts an entry done first and
+     looks at the waiters after, so either this check sees it or the worker sees the entry */
+  KeAcquireSpinLock(&LoopWaitLock, &OldIrql);
+  InsertTailList(&LoopWaiters, &Bucket->Entry);
+  InterlockedIncrement(&LoopWaiterCount);
+  if ((LONG)((ULONG)LoopHandled - Ticket) >= 0)
+  {
+    RemoveEntryList(&Bucket->Entry);
+    InterlockedDecrement(&LoopWaiterCount);
+    Taken = FALSE;
+  }
+  KeReleaseSpinLock(&LoopWaitLock, OldIrql);
+
+  return Taken;
+}
+
+/* On the worker, with no lock held, after an entry is done: completes the sends whose segments are all done */
+static VOID LoopCompleteWaiters(VOID)
+{
+  KIRQL OldIrql;
+  LIST_ENTRY Done;
+  PLIST_ENTRY Entry, Next;
+
+  if (LoopWaiterCount == 0)
+    return;
+
+  InitializeListHead(&Done);
+  KeAcquireSpinLock(&LoopWaitLock, &OldIrql);
+  for (Entry = LoopWaiters.Flink; Entry != &LoopWaiters; Entry = Next)
+  {
+    PTDI_BUCKET Bucket = CONTAINING_RECORD(Entry, TDI_BUCKET, Entry);
+
+    Next = Entry->Flink;
+    if ((LONG)((ULONG)LoopHandled - Bucket->LoopTicket) >= 0)
+    {
+      RemoveEntryList(Entry);
+      InterlockedDecrement(&LoopWaiterCount);
+      InsertTailList(&Done, Entry);
+    }
+  }
+  KeReleaseSpinLock(&LoopWaitLock, OldIrql);
+
+  /* Inline on this thread, which holds nothing (it is in the inline context); a work item otherwise */
+  TCPRunDeferredCompletions(&Done, FALSE);
+}
+
 VOID LoopPassiveWorkItem(
   PVOID Context)
 {
@@ -76,6 +149,10 @@ VOID LoopPassiveWorker(
     LoopInputPbuf(Item);
   else
     LoopPassiveWorkItem(Item);
+
+  /* The segment is with the peer's connection: the sends that waited for it are done */
+  InterlockedIncrement(&LoopHandled);
+  LoopCompleteWaiters();
   TCPLeaveInlineContext();
 
   /* An IPv6 datagram (::1) may have left UDP datagrams for the sockets (udp6.c) */
@@ -100,6 +177,7 @@ BOOLEAN LoopTransmitPbuf(
 {
   struct pbuf *q;
   PLOOP_ITEM Item;
+  ULONG Ticket;
 
   q = pbuf_clone(PBUF_RAW, PBUF_RAM, p);
   if (!q)
@@ -113,10 +191,16 @@ BOOLEAN LoopTransmitPbuf(
   }
 
   Item->Pbuf = q;
-  if (!ChewSerialInsert(&LoopQueue, &Item->ListEntry))
+  if (!ChewSerialInsertTicket(&LoopQueue, &Item->ListEntry, &Ticket))
   {
     pbuf_free(q);
     ExFreeToNPagedLookasideList(&LoopPbufItems, Item);
+  }
+  else
+  {
+    /* Whoever sent this datagram can wait for its ticket (the core lock is held) */
+    LoopCoreTicket = Ticket;
+    LoopCoreSeq++;
   }
 
   return TRUE;
@@ -276,6 +360,11 @@ NDIS_STATUS LoopRegisterAdapter(
   if (!ChewSerialInit(&LoopQueue, LoopPassiveWorker, LOOP_QUEUE_LIMIT))
     return NDIS_STATUS_RESOURCES;
 
+  KeInitializeSpinLock(&LoopWaitLock);
+  InitializeListHead(&LoopWaiters);
+  LoopWaiterCount = 0;
+  LoopHandled = 0;
+
   ExInitializeNPagedLookasideList(&LoopPbufItems, NULL, NULL, 0,
                                   FIELD_OFFSET(LOOP_ITEM, IPPacket), 'pLoL', 0);
   LoopPbufItemsReady = TRUE;
@@ -348,6 +437,8 @@ NDIS_STATUS LoopUnregisterAdapter(
 
       IPUnregisterInterface(Loopback);
       ChewSerialRundown(&LoopQueue);
+      /* The worker has done everything that was queued, and completed the sends that waited for it */
+      ASSERT(LoopWaiterCount == 0);
       if (LoopPbufItemsReady)
       {
         ExDeleteNPagedLookasideList(&LoopPbufItems);

@@ -314,6 +314,10 @@ typedef struct _AFD_TDI_HANDLE_DATA
 #define AFD_IMMEDIATE                   0x4L
 /* ReactOS: complete an overlapped stream send only when all of it is sent (the caller has no thread to continue it) */
 #define AFD_SEND_WHOLE                  0x8L
+/* ReactOS: complete this send only when the transport has delivered it to a peer on this machine (the data is in the
+ * peer's queue, as on Windows). The transport gets AFD_TDI_SEND_DELIVERED with the TDI send that carries the data */
+#define AFD_SEND_DELIVERED              0x10L
+#define AFD_TDI_SEND_DELIVERED          0x8000
 
 /* IOCTL Generation */
 #define FSCTL_AFD_BASE                  FILE_DEVICE_NETWORK

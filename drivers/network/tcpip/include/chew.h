@@ -60,6 +60,7 @@ typedef struct _CHEW_SERIAL_QUEUE
     VOID (*Worker)(PLIST_ENTRY Entry);
     ULONG Count;
     ULONG Limit;
+    ULONG Inserted;                 /* Entries accepted so far (wraps); the last one's position is its ticket */
     BOOLEAN Running;
     BOOLEAN Closed;
     KEVENT Idle;
@@ -76,6 +77,12 @@ BOOLEAN ChewSerialInit(PCHEW_SERIAL_QUEUE Queue, VOID (*Worker)(PLIST_ENTRY Entr
  * is full or ChewSerialRundown has begun; the caller keeps the entry then.
  */
 BOOLEAN ChewSerialInsert(PCHEW_SERIAL_QUEUE Queue, PLIST_ENTRY Entry);
+
+/**
+ * As ChewSerialInsert, and tells the entry's ticket: the number of entries the queue has accepted up to and including
+ * this one. The worker has finished this entry once it has finished that many.
+ */
+BOOLEAN ChewSerialInsertTicket(PCHEW_SERIAL_QUEUE Queue, PLIST_ENTRY Entry, PULONG Ticket);
 
 /**
  * Refuses further entries, waits until the worker has handled every queued

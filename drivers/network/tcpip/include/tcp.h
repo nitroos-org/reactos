@@ -160,6 +160,10 @@ NTSTATUS TCPReceiveData(
   PTCP_COMPLETION_ROUTINE Complete,
   PVOID Context);
 
+/* Flags of TCPSendData (a TDI send flag, AFD_TDI_SEND_DELIVERED in the AFD header): the send completes when the data of
+ * a connection to a peer on this machine has been delivered to the peer's connection, not when it is queued for delivery */
+#define TCP_SEND_DELIVERED 0x8000
+
 NTSTATUS TCPSendData(
   PCONNECTION_ENDPOINT Connection,
   PCHAR Buffer,
@@ -532,6 +536,9 @@ VOID TCPEnterInlineContext(VOID);
 VOID TCPLeaveInlineContext(VOID);
 VOID TCPEnterReceiveWorker(VOID);
 VOID TCPLeaveReceiveWorker(VOID);
+
+/* With no lock held: completes the buckets on Taken (linked by Entry, AssociatedEndpoint set, a reference on it held) */
+VOID TCPRunDeferredCompletions(PLIST_ENTRY Taken, BOOLEAN TcpipThread);
 
 void
 LibTCPDumpPcb(PVOID SocketContext);
