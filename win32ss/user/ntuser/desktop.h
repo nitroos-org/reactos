@@ -364,6 +364,7 @@ DesktopHeapAddressToUser(PVOID lpMem)
 PWND FASTCALL IntGetThreadDesktopWindow(PTHREADINFO);
 PWND FASTCALL co_GetDesktopWindow(PWND);
 BOOL FASTCALL IntPaintDesktop(HDC);
+VOID IntDeleteWallpaperBitmap(_In_opt_ HBITMAP hBitmap);
 BOOL FASTCALL DesktopWindowProc(PWND, UINT, WPARAM, LPARAM, LRESULT *);
 BOOL FASTCALL UserMessageWindowProc(PWND pwnd, UINT Msg, WPARAM wParam, LPARAM lParam, LRESULT *lResult);
 VOID NTAPI DesktopThreadMain(VOID);
