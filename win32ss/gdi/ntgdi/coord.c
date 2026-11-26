@@ -1431,12 +1431,16 @@ GreSetDCOrg(
     _In_ HDC hdc,
     _In_ LONG x,
     _In_ LONG y,
-    _In_opt_ PRECTL Rect)
+    _In_opt_ PRECTL Rect,
+    _In_opt_ PVOID pvScreenDesk)
 {
     PDC dc;
 
     dc = DC_LockDc(hdc);
     if (!dc) return FALSE;
+
+    /* The desktop this DC was got for: what it reaches of the screen depends on that desktop having the input */
+    dc->pvScreenDesk = pvScreenDesk;
 
     /* Set DC Origin */
     dc->ptlDCOrig.x = x;

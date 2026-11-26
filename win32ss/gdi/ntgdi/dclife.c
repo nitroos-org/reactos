@@ -529,6 +529,100 @@ DC_vUpdateDC(PDC pdc)
     pdc->pdcattr->ulDirty_ |= DIRTY_DEFAULT ;
 }
 
+/*
+ * A DC that draws on the screen belongs to the desktop its program got it for (pvScreenDesk). The screen is that
+ * desktop's only while the desktop has the input: with the logon, lock or elevation-prompt desktop (or any other)
+ * shown, a program of another desktop must neither read what is on the monitor nor put anything on it. A primitive
+ * on such a DC therefore runs on a black surface of the screen's size (what is read is black, what is drawn is
+ * lost): DC_vPrepareDCsForBlitEx swaps it in, DC_vFinishBlit puts the screen back. Decided at every primitive, so a
+ * DC got while its desktop had the input is blind from the switch on and sees again when the input returns.
+ * DC_BLINDED also keeps the pointer logic (which draws into the pixels saved under the pointer) away from it.
+ * Without memory for the surface the DC gets the default 1 x 1 bitmap of a memory DC (its primitives clip to it).
+ */
+static PSURFACE gpsurfBlank = NULL;
+static KSPIN_LOCK gsplBlank;    /* gpsurfBlank and its size; held only to take a reference or to swap the pointer */
+
+/* The blank surface of cx x cy, referenced for the caller (GDIOBJ_vDereferenceObject), or NULL */
+static
+PSURFACE
+DC_psurfGetBlank(LONG cx, LONG cy)
+{
+    PSURFACE psurf, psurfNew = NULL, psurfOld;
+    KIRQL OldIrql;
+
+    for (;;)
+    {
+        KeAcquireSpinLock(&gsplBlank, &OldIrql);
+        psurf = gpsurfBlank;
+        if (!psurf || psurf->SurfObj.sizlBitmap.cx != cx || psurf->SurfObj.sizlBitmap.cy != cy)
+        {
+            /* A new size (first use, mode change): the old surface stays alive in the DCs that hold it */
+            psurf = psurfNew;
+            if (psurf)
+            {
+                psurfOld = gpsurfBlank;
+                gpsurfBlank = psurf;
+                psurfNew = NULL;
+                GDIOBJ_vReferenceObjectByPointer(&psurf->BaseObject);
+                KeReleaseSpinLock(&gsplBlank, OldIrql);
+                if (psurfOld)
+                    GreRedirDeleteSurface(psurfOld);
+                return psurf;
+            }
+            KeReleaseSpinLock(&gsplBlank, OldIrql);
+            psurfNew = GreRedirCreateSurface(cx, cy, NULL);
+            if (!psurfNew)
+                return NULL;
+            continue;
+        }
+        GDIOBJ_vReferenceObjectByPointer(&psurf->BaseObject);
+        KeReleaseSpinLock(&gsplBlank, OldIrql);
+        /* Another primitive made the same surface meanwhile: ours goes */
+        if (psurfNew)
+            GreRedirDeleteSurface(psurfNew);
+        return psurf;
+    }
+}
+
+static
+VOID
+DC_vBlindOnScreen(PDC pdc)
+{
+    PSURFACE psurfScreen = pdc->dclevel.pSurface, psurf = NULL;
+
+    /* Only a display (a printer's direct DC is no screen); one that was got for no desktop is the system's */
+    if ((pdc->fs & DC_BLINDED) || !pdc->pvScreenDesk || !(pdc->ppdev->flFlags & PDEV_DISPLAY) ||
+        !UserDesktopLacksInput(pdc->pvScreenDesk))
+        return;
+
+    if (psurfScreen)
+        psurf = DC_psurfGetBlank(psurfScreen->SurfObj.sizlBitmap.cx, psurfScreen->SurfObj.sizlBitmap.cy);
+
+    if (psurf)
+    {
+        DC_vSelectSurface(pdc, psurf);
+        GDIOBJ_vDereferenceObject(&psurf->BaseObject);
+    }
+    else
+    {
+        DC_vSelectSurface(pdc, psurfDefaultBitmap);
+    }
+    pdc->fs |= DC_BLINDED | DC_REDIR_ATTRDIRTY;
+}
+
+/* The screen again after a blind primitive; the brushes were made for the other surface */
+static
+VOID
+DC_vSeeOnScreen(PDC pdc)
+{
+    if (pdc->fs & DC_BLINDED)
+    {
+        pdc->fs &= ~DC_BLINDED;
+        pdc->fs |= DC_REDIR_ATTRDIRTY;
+        DC_vUpdateDCSurface(pdc);
+    }
+}
+
 /* The part of the surface a draw through pdc->co can reach, as the engine call of the given kind clips it. The bounds are
  * what the clip object holds, also when its last update failed and it is an old one; an empty clip is DC_TRIVIAL with empty
  * bounds. Calls that ignore the bounds of a DC_TRIVIAL clip draw everywhere then. */
@@ -704,16 +798,19 @@ DC_vPrepareDCsForBlitEx(
     {
         EngAcquireSemaphore(pdcFirst->ppdev->hsemDevLock);
 
-        /* Update surface if needed */
-        if (pdcFirst->ppdev->pSurface != pdcFirst->dclevel.pSurface)
+        /* Update surface if needed (not one that is blind: the same DC as a blind first one) */
+        if (!(pdcFirst->fs & DC_BLINDED) && pdcFirst->ppdev->pSurface != pdcFirst->dclevel.pSurface)
         {
             DC_vUpdateDC(pdcFirst);
             if (bFirstIsDest)
                 CLIPPING_UpdateGCRegion(pdcFirst);
         }
+
+        /* The desktop of the DC does not have the input: it reads and draws on a blank surface, not on the screen */
+        DC_vBlindOnScreen(pdcFirst);
     }
 
-    if (DC_IS_SCREEN(pdcFirst))
+    if (DC_IS_SCREEN(pdcFirst) && !(pdcFirst->fs & DC_BLINDED))
     {
         DC_vMouseSafetyStart(pdcFirst, prcFirst, (fl & DCPREP_SPLIT_DEST) && bFirstIsDest, (fl & DCPREP_CLIP_MASK) && bFirstIsDest ? (fl & DCPREP_CLIP_MASK) : 0);
     }
@@ -730,16 +827,18 @@ DC_vPrepareDCsForBlitEx(
     {
         EngAcquireSemaphore(pdcSecond->ppdev->hsemDevLock);
 
-        /* Update surface if needed */
-        if (pdcSecond->ppdev->pSurface != pdcSecond->dclevel.pSurface)
+        /* Update surface if needed (not one that is blind: the same DC as a blind first one) */
+        if (!(pdcSecond->fs & DC_BLINDED) && pdcSecond->ppdev->pSurface != pdcSecond->dclevel.pSurface)
         {
             DC_vUpdateDC(pdcSecond);
             if (!bFirstIsDest)
                 CLIPPING_UpdateGCRegion(pdcSecond);
         }
+
+        DC_vBlindOnScreen(pdcSecond);
     }
 
-    if (DC_IS_SCREEN(pdcSecond))
+    if (DC_IS_SCREEN(pdcSecond) && !(pdcSecond->fs & DC_BLINDED))
     {
         DC_vMouseSafetyStart(pdcSecond, prcSecond, (fl & DCPREP_SPLIT_DEST) && !bFirstIsDest, (fl & DCPREP_CLIP_MASK) && !bFirstIsDest ? (fl & DCPREP_CLIP_MASK) : 0);
     }
@@ -754,16 +853,23 @@ VOID
 FASTCALL
 DC_vFinishBlit(PDC pdc1, PDC pdc2)
 {
+    /* Blind before any of the two is put back: the same DC may be both (it is put back once) */
+    BOOL bBlind1 = (pdc1->fs & DC_BLINDED) != 0;
+    BOOL bBlind2 = pdc2 && (pdc2->fs & DC_BLINDED) != 0;
+
     /* Drawn: a present that ran meanwhile may have taken the mark of DC_vPrepareDCsForBlitEx */
     if ((pdc1->fs & DC_REDIRECTION) && pdc1->pvRedir && !RECTL_bIsEmptyRect(&pdc1->rclRedirDraw))
         UserRedirMarkDirty(pdc1->pvRedir, &pdc1->rclRedirDraw);
 
     if (DC_IS_SCREEN(pdc1))
     {
-        MouseSafetyOnDrawEnd(pdc1->ppdev);
+        if (!bBlind1)
+            MouseSafetyOnDrawEnd(pdc1->ppdev);
+        DC_vSeeOnScreen(pdc1);
         EngReleaseSemaphore(pdc1->ppdev->hsemDevLock);
         /* The driver may show what was drawn later (GCAPS2_SYNCTIMER) */
-        PDEVOBJ_vArmDisplaySync(pdc1->ppdev);
+        if (!bBlind1)
+            PDEVOBJ_vArmDisplaySync(pdc1->ppdev);
     }
 #if DBG
     pdc1->fs &= ~DC_PREPARED;
@@ -773,7 +879,9 @@ DC_vFinishBlit(PDC pdc1, PDC pdc2)
     {
         if (DC_IS_SCREEN(pdc2))
         {
-            MouseSafetyOnDrawEnd(pdc2->ppdev);
+            if (!bBlind2)
+                MouseSafetyOnDrawEnd(pdc2->ppdev);
+            DC_vSeeOnScreen(pdc2);
             EngReleaseSemaphore(pdc2->ppdev->hsemDevLock);
         }
 #if DBG
@@ -939,6 +1047,22 @@ NtGdiOpenDCW(
                      hspool,
                      NULL, // FIXME: pDriverInfo2
                      pUMdhpdev ? &dhpdev : NULL);
+
+    /* A DC of the screen is the screen of the desktop of the thread that opens it (what it reaches depends on that
+       desktop having the input, DC_vBlindOnScreen) */
+    if (hdc)
+    {
+        PDC pdcNew = DC_LockDc(hdc);
+
+        if (pdcNew)
+        {
+            PTHREADINFO ptiOpen = PsGetCurrentThreadWin32Thread();
+
+            if (pdcNew->dctype == DCTYPE_DIRECT)
+                pdcNew->pvScreenDesk = ptiOpen ? (PVOID)ptiOpen->rpdesk : NULL;
+            DC_UnlockDc(pdcNew);
+        }
+    }
 
     /* If we got a HDC and a UM dhpdev is requested,... */
     if (hdc && pUMdhpdev)

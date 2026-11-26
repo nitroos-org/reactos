@@ -190,6 +190,7 @@ extern void func_SetScrollRange(void);
 extern void func_SetSysColorsWinsta(void);
 extern void func_SetWindowPlacement(void);
 extern void func_SetWindowPosOwned(void);
+extern void func_ScreenDesktopReads(void);
 extern void func_SetWindowRgn(void);
 extern void func_ShowWindow(void);
 extern void func_SizeNoMaxTrack(void);
@@ -419,6 +420,7 @@ const struct test winetest_testlist[] =
     { "SetSysColorsWinsta", func_SetSysColorsWinsta },
     { "SetWindowPlacement", func_SetWindowPlacement },
     { "SetWindowPosOwned", func_SetWindowPosOwned },
+    { "ScreenDesktopReads", func_ScreenDesktopReads },
     { "SetWindowRgn", func_SetWindowRgn },
     { "ShowWindow", func_ShowWindow },
     { "SizeNoMaxTrack", func_SizeNoMaxTrack },

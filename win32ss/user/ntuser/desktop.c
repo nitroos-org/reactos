@@ -1864,6 +1864,19 @@ IntIsLogonDesktopInput(VOID)
 }
 
 /*
+ * Is the desktop one whose screen is NOT on the monitor: some other desktop has the input (the logon, lock
+ * and elevation-prompt desktops included)? A DC that draws on the screen belongs to the desktop its program
+ * got it for (GDI keeps the pointer only to compare it, DC::pvScreenDesk): while that desktop lacks the input,
+ * what the DC reads and draws is not the real screen (dclife.c, DC_vBlindOnScreen). Before the first desktop
+ * has the input nothing is shown yet, so nothing is withheld.
+ */
+BOOL FASTCALL
+UserDesktopLacksInput(PVOID pvDesk)
+{
+    return pvDesk != NULL && gpdeskInputDesktop != NULL && pvDesk != (PVOID)gpdeskInputDesktop;
+}
+
+/*
  * Every desktop has its own foreground queue (ActiveMessageQueue), always a queue of a thread
  * of that desktop. The foreground queue of the INPUT desktop is the global foreground
  * (gpqForeground): it routes the keyboard and the mouse capture. The others are kept for the
