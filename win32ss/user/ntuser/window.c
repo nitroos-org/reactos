@@ -2476,9 +2476,12 @@ PWND FASTCALL IntCreateWindow(CREATESTRUCTW* Cs,
    InsertTailList (&pti->WindowListHead, &pWnd->ThreadListEntry);
 
    /* Handle "CS_CLASSDC", it is tested first. */
-   if ( (pWnd->pcls->style & CS_CLASSDC) && !(pWnd->pcls->pdce) )
+   if ( (pWnd->pcls->style & CS_CLASSDC) && !DceGetClassDC(pWnd->pcls) )
    {  /* One DCE per class to have CLASS. */
       pWnd->pcls->pdce = DceAllocDCE( pWnd, DCE_CLASS_DC );
+      /* The DCE can be freed without the class (its thread ends after its window went): it clears pdce then */
+      if (pWnd->pcls->pdce)
+         ((PDCE)pWnd->pcls->pdce)->pclsClassDC = pWnd->pcls;
    }
    else if ( pWnd->pcls->style & CS_OWNDC)
    {  /* Allocate a DCE for this window. */

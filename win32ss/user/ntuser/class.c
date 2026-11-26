@@ -264,13 +264,17 @@ IntDestroyClass(IN OUT PCLS Class)
         if (Class->atomNVClassName)
             IntDeregisterClassAtom(Class->atomNVClassName);
 
-        if (Class->pdce)
-        {
-           DceFreeClassDCE(Class->pdce);
-           Class->pdce = NULL;
-        }
-
         IntFreeClassMenuName(Class);
+    }
+
+    /* Every class object (a base or a clone, which makes its own) frees its class DC; a pointer left from a freed or
+       another class object's DC is not followed (DceGetClassDC) */
+    if (Class->pdce)
+    {
+        PDCE pdce = DceGetClassDC(Class);
+        if (pdce)
+            DceFreeClassDCE(pdce);
+        Class->pdce = NULL;
     }
 
     if (Class->spicn)
@@ -688,6 +692,9 @@ IntGetClassForDesktop(IN OUT PCLS BaseClass,
         {
             /* Simply clone the class */
             RtlCopyMemory( Class, BaseClass, ClassSize);
+
+            /* A class DC belongs to one class object (the base's goes with the base): the clone makes its own */
+            Class->pdce = NULL;
 
             /* Reference our objects */
             if (Class->spcur)

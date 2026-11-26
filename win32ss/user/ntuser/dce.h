@@ -32,6 +32,7 @@ typedef struct tagDCE
     BOOL         bGlass;     /* the DC was last set up for a glass window (glassblt.c) */
     PVOID        pRedir;     /* redirection record the DC is bound to (redir.c), or NULL */
     ULONG        RedirFlags; /* DCE_REDIR_* */
+    struct _CLS *pclsClassDC; /* the class whose class DC (pdce) this is, or NULL: DceFreeDCE clears that pointer */
 } DCE, *PDCE;
 
 /* RedirFlags: the binding could not be changed yet (try again); the visible region is not for the current binding */
@@ -57,6 +58,7 @@ void FASTCALL DceFreeDCE(PDCE dce, BOOLEAN Force);
 void FASTCALL DceEmptyCache(void);
 VOID FASTCALL DceResetActiveDCEs(PWND Window);
 void FASTCALL DceFreeClassDCE(PDCE);
+PDCE FASTCALL DceGetClassDC(struct _CLS *Class);
 HWND FASTCALL UserGethWnd(HDC,PWNDOBJ*);
 void FASTCALL DceFreeWindowDCE(PWND);
 void FASTCALL DceFreeThreadDCE(PTHREADINFO);
