@@ -1383,11 +1383,55 @@ static NTSTATUS NgWriteDevice(PNG_VCB Vcb, PFILE_OBJECT Holder, LONGLONG Offset,
  * way, through the core's device path so the journal overlay and the cached boot sector see it.
  */
 #define NG_BOOT_REGION 8192
+
+/*
+ * The copy of the boot sector in the volume's last sector (the one after the sectors the boot sector counts) lies outside
+ * what the core knows: nothing reads, caches or journals it.  Setup brings it up to date with the boot code it put in
+ * sector 0, without the volume lock, so only the boot code may change: the sector that is there must be an NTFS boot
+ * sector and the new one must have the same BIOS parameter block and signature.  Written to the device at once.
+ */
+static NTSTATUS NgWriteBackupBootSector(PNG_VCB Vcb, LONGLONG Offset, PUCHAR Buffer, ULONG Length)
+{
+    PUCHAR Both = ExAllocatePoolWithTag(NonPagedPool, 2 * Length, TAG_NTFSNG);
+    NTSTATUS Status = STATUS_ACCESS_DENIED;
+    NG_SHARED_HOLD Hold;
+
+    if (!Both)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    RtlCopyMemory(Both + Length, Buffer, Length);
+    if (ngos_dev_read(Vcb->StorageDevice, (unsigned long long)Offset, Both, Length))
+    {
+        Status = STATUS_UNEXPECTED_IO_ERROR;
+    }
+    else if (RtlCompareMemory(Both + 3, "NTFS    ", 8) == 8 &&
+             RtlCompareMemory(Both + 3, Both + Length + 3, 0x54 - 3) == 0x54 - 3 &&
+             RtlCompareMemory(Both + 510, Both + Length + 510, 2) == 2)
+    {
+        NgAcquireCoreShared(Vcb, &Hold);
+        if (Vcb->WrongMedia)
+            Status = STATUS_FILE_INVALID;
+        else if (NgDevWriteDurable(Vcb->StorageDevice, (unsigned long long)Offset, Both + Length, Length))
+            Status = STATUS_UNEXPECTED_IO_ERROR;
+        else
+            Status = STATUS_SUCCESS;
+        NgReleaseCoreShared(Vcb, &Hold);
+        DPRINT1("ntfsng: backup boot sector written through the volume handle at %I64d: 0x%lx\n", Offset, Status);
+    }
+    else
+    {
+        DPRINT1("ntfsng: volume write at %I64d refused: it changes the BPB of the backup boot sector\n", Offset);
+    }
+    ExFreePoolWithTag(Both, TAG_NTFSNG);
+    return Status;
+}
+
 static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Length)
 {
     PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
     BOOLEAN Holder = Vcb->LockedBy == FileObject || Vcb->Dismounted;
     BOOLEAN Raw = Vcb->Dismounted || (Holder && Vcb->RawWritten);
+    BOOLEAN Backup = !Holder && Vcb->BootSectors != 0 && Length == Vcb->SectorSize &&
+                     Offset == (LONGLONG)(Vcb->BootSectors * Vcb->SectorSize);
     PMDL Mdl = NULL;
     PVOID Buffer;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -1397,7 +1441,7 @@ static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Leng
         return STATUS_MEDIA_WRITE_PROTECTED;
     if (Offset < 0 || ((ULONG)Offset | Length) & (Vcb->SectorSize - 1))
         return STATUS_INVALID_PARAMETER;
-    if (Offset + Length > NG_BOOT_REGION)
+    if (!Backup && Offset + Length > NG_BOOT_REGION)
     {
         if (!Holder)
         {
@@ -1436,6 +1480,13 @@ static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Leng
     if (!Buffer)
     {
         Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto out;
+    }
+    if (Backup)
+    {
+        Status = NgWriteBackupBootSector(Vcb, Offset, Buffer, Length);
+        if (NT_SUCCESS(Status))
+            Irp->IoStatus.Information = Length;
         goto out;
     }
     if (Offset == 0 && !Raw)

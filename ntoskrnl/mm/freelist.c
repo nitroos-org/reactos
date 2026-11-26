@@ -199,7 +199,7 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
     KIRQL OldIrql;
     PMMPFN Pfn1;
     INT LookForZeroedPages;
-    ULONG Attempt;
+    ULONG Attempt, Purged;
     BOOLEAN Zeroed;
 
     ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
@@ -326,81 +326,84 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
     }
     else
     {
-      /*
-       * NitroPager: the search takes free and zeroed pages only (MiIsPfnFree), and the range can be short
-       * of them because clean private pages wait on standby there, while free pages elsewhere would hide it
-       * from a global count. When the search comes up short and private pages wait on standby, those go
-       * back to the free list (their data is in the paging file) and the range is searched once more.
-       */
-      for (Attempt = 0; Attempt < 2; Attempt++)
-      {
-        if (Attempt != 0)
+        /*
+         * NitroPager: the search takes free and zeroed pages only (MiIsPfnFree), and the range can be short
+         * of them because clean private pages wait on standby there, while free pages elsewhere would hide it
+         * from a global count. When the search comes up short and private pages wait on standby, those go
+         * back to the free list (their data is in the paging file) and the range is searched once more.
+         * A purge that gave nothing back leaves the range as it was: no second search.
+         */
+        for (Attempt = 0; Attempt < 2; Attempt++)
         {
-            if ((PagesFound == PageCount) || (MiNitroPagerMode == 0) || (MmTransitionPrivatePages == 0))
-                break;
-            MiReleasePfnLock(OldIrql);
-            MiPurgePrivateStandbyPages();
-            OldIrql = MiAcquirePfnLock();
-        }
-
-        //
-        // You want specific range of pages. We'll do this in two runs
-        //
-        for (LookForZeroedPages = 1; LookForZeroedPages >= 0; LookForZeroedPages--)
-        {
-            //
-            // Scan the range you specified
-            //
-            for (Page = LowPage; Page < HighPage; Page++)
+            if (Attempt != 0)
             {
-                //
-                // Get the PFN entry for this page
-                //
-                Pfn1 = MiGetPfnEntry(Page);
-                if (!Pfn1) continue;
-
-                //
-                // Make sure it's free and if this is our first pass, zeroed
-                //
-                if (MiIsPfnInUse(Pfn1)) continue;
-                if ((Pfn1->u3.e1.PageLocation == ZeroedPageList) != LookForZeroedPages) continue;
-
-                /* Remove the page from the free or zero list */
-                ASSERT(Pfn1->u3.e1.ReadInProgress == 0);
-                MI_SET_USAGE(MI_USAGE_MDL);
-                MI_SET_PROCESS2("Kernel");
-                MiUnlinkFreeOrZeroedPage(Pfn1);
-
-                //
-                // Sanity checks
-                //
-                ASSERT(Pfn1->u3.e2.ReferenceCount == 0);
-
-                //
-                // Now setup the page and mark it
-                //
-                Pfn1->u3.e2.ReferenceCount = 1;
-                Pfn1->u2.ShareCount = 1;
-                MI_SET_PFN_DELETED(Pfn1);
-                Pfn1->u4.PteFrame = 0x1FFEDCB;
-                Pfn1->u3.e1.StartOfAllocation = 1;
-                Pfn1->u3.e1.EndOfAllocation = 1;
-                Pfn1->u4.VerifierAllocation = 0;
-                Pfn1->u3.e1.CacheAttribute = CacheAttribute;
-
-                //
-                // Save this page into the MDL
-                //
-                *MdlPage++ = Page;
-                if (++PagesFound == PageCount) break;
+                if ((PagesFound == PageCount) || (MiNitroPagerMode == 0) || (MmTransitionPrivatePages == 0))
+                    break;
+                MiReleasePfnLock(OldIrql);
+                Purged = MiPurgePrivateStandbyPages();
+                OldIrql = MiAcquirePfnLock();
+                if (Purged == 0)
+                    break;
             }
 
             //
-            // If the first pass was enough, don't keep going, otherwise, go again
+            // You want specific range of pages. We'll do this in two runs
             //
-            if (PagesFound == PageCount) break;
+            for (LookForZeroedPages = 1; LookForZeroedPages >= 0; LookForZeroedPages--)
+            {
+                //
+                // Scan the range you specified
+                //
+                for (Page = LowPage; Page < HighPage; Page++)
+                {
+                    //
+                    // Get the PFN entry for this page
+                    //
+                    Pfn1 = MiGetPfnEntry(Page);
+                    if (!Pfn1) continue;
+
+                    //
+                    // Make sure it's free and if this is our first pass, zeroed
+                    //
+                    if (MiIsPfnInUse(Pfn1)) continue;
+                    if ((Pfn1->u3.e1.PageLocation == ZeroedPageList) != LookForZeroedPages) continue;
+
+                    /* Remove the page from the free or zero list */
+                    ASSERT(Pfn1->u3.e1.ReadInProgress == 0);
+                    MI_SET_USAGE(MI_USAGE_MDL);
+                    MI_SET_PROCESS2("Kernel");
+                    MiUnlinkFreeOrZeroedPage(Pfn1);
+
+                    //
+                    // Sanity checks
+                    //
+                    ASSERT(Pfn1->u3.e2.ReferenceCount == 0);
+
+                    //
+                    // Now setup the page and mark it
+                    //
+                    Pfn1->u3.e2.ReferenceCount = 1;
+                    Pfn1->u2.ShareCount = 1;
+                    MI_SET_PFN_DELETED(Pfn1);
+                    Pfn1->u4.PteFrame = 0x1FFEDCB;
+                    Pfn1->u3.e1.StartOfAllocation = 1;
+                    Pfn1->u3.e1.EndOfAllocation = 1;
+                    Pfn1->u4.VerifierAllocation = 0;
+                    Pfn1->u3.e1.CacheAttribute = CacheAttribute;
+
+                    //
+                    // Save this page into the MDL
+                    //
+                    *MdlPage++ = Page;
+                    if (++PagesFound == PageCount) break;
+                }
+
+                //
+                // If the first pass was enough, don't keep going, otherwise, go again
+                //
+                if (PagesFound == PageCount) break;
+            }
         }
-      }
     }
 
     //

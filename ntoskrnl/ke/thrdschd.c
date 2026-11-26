@@ -55,9 +55,12 @@ KiThreadLockFault(ULONG Kind, PVOID Thread, LONG64 Word, ULONG_PTR Site)
 #endif
 
 #ifdef KI_THREAD_LOCK_TRACE
-/* Called by KiSystemServiceExit (trace builds): IRQL_GT_ZERO_AT_SYSTEM_SERVICE
-   with the service number of the trap frame, the IRQL, the held thread lock
-   count and the thread */
+/* Called by KiSystemServiceExit (trace builds): IRQL_GT_ZERO_AT_SYSTEM_SERVICE.
+   The parameters are not the documented ones (the system function's address, the
+   IRQL, 0, 0): 1 = the raw service number (RAX saved in the trap frame at the
+   entry, with the table index in bits 12 and 13), 2 = the IRQL, 3 = the number of thread locks held
+   on this processor, 4 = the thread. The exits through KiExceptionExit and
+   KiServiceExit3 are not checked. */
 VOID
 NTAPI
 KiSystemServiceExitCheck(VOID)

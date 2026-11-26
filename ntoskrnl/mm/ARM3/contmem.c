@@ -485,12 +485,15 @@ MiAllocateContiguousMemory(IN SIZE_T NumberOfBytes,
      */
     if (!BaseAddress && (MiNitroPagerMode != 0) && (MmTransitionPrivatePages != 0))
     {
-        MiPurgePrivateStandbyPages();
-        BaseAddress = MiFindContiguousMemory(LowestAcceptablePfn,
-                                             HighestAcceptablePfn,
-                                             BoundaryPfn,
-                                             SizeInPages,
-                                             CacheType);
+        /* A purge that gave nothing back leaves the memory as it was: no second search */
+        if (MiPurgePrivateStandbyPages() != 0)
+        {
+            BaseAddress = MiFindContiguousMemory(LowestAcceptablePfn,
+                                                 HighestAcceptablePfn,
+                                                 BoundaryPfn,
+                                                 SizeInPages,
+                                                 CacheType);
+        }
     }
     if (!BaseAddress)
     {

@@ -563,6 +563,12 @@ MmShutdownSystem(IN ULONG Phase)
         ULONG i;
 
         /*
+         * Views the cache manager's shutdown flush left unmapped lazily (after phase 0 flushed those that were
+         * there) give their pages and segments back now, before the paging files' last use
+         */
+        MmFlushLazyMemoryAreas(NULL);
+
+        /*
          * ClearPageFileAtShutdown: the inactive pages of the paging files are cleared here (see MiClearPagingFile),
          * after the cache manager's and the file systems' shutdown and the lazy writer, when the most slots are
          * free. The file systems still take paging file writes after their shutdown (fastfat and ntfsng do them

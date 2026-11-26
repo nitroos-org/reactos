@@ -6097,6 +6097,11 @@ MiIsPageOnUnflushedLazyView(
     ULONG i;
 
     MI_ASSERT_PFN_LOCK_HELD();
+
+    /* Views are queued and flushed under the PFN lock: none waits for a flush when this is zero */
+    if (MiLazyViewsUnflushed == 0)
+        return FALSE;
+
     for (Entry = MiLazyViewList.Flink; Entry != &MiLazyViewList; Entry = Entry->Flink)
     {
         PMI_LAZY_VIEW View = CONTAINING_RECORD(Entry, MI_LAZY_VIEW, ListEntry);
@@ -6196,6 +6201,11 @@ MiFlushLazyViews(
 
         if (View->PageCount != 0)
         {
+            /*
+             * The kernel address space lock is held: the segment locks are taken after it here. A caller that
+             * holds the lock of this segment would wait for itself (the callers hold none, see the header comment).
+             */
+            ASSERT(View->Segment->Lock.Owner != KeGetCurrentThread());
             MmLockSectionSegment(View->Segment);
             for (i = 0; i < View->PageCount; i++)
             {
@@ -6209,10 +6219,17 @@ MiFlushLazyViews(
                 /* The view's share kept the page in the segment */
                 if (IS_SWAP_FROM_SSE(SegEntry) || (PFN_FROM_SSE(SegEntry) != View->Pages[i]))
                 {
+                    /*
+                     * The view's share kept the page in the segment: the bookkeeping is corrupt. Going on would
+                     * leave the share behind, and the segment's pages could never be purged again.
+                     */
                     DPRINT1("Lazy view page %Ix is not in segment %p at %I64x (entry %Ix)\n",
                             View->Pages[i], View->Segment, Offset.QuadPart, SegEntry);
-                    ASSERT(FALSE);
-                    continue;
+                    KeBugCheckEx(MEMORY_MANAGEMENT,
+                                 (ULONG_PTR)View->Segment,
+                                 (ULONG_PTR)Offset.QuadPart,
+                                 (ULONG_PTR)SegEntry,
+                                 (ULONG_PTR)View->Pages[i]);
                 }
                 /* We don't dirtify for System Space Maps. We let Cc manage that */
                 MmUnsharePageEntrySectionSegment(NULL, View->Segment, &Offset, FALSE, FALSE, &SegEntry);
