@@ -295,6 +295,7 @@ list(APPEND SOURCE
     SectionSparseStore.c
     SectionViewProtect.c
     SectionVirtualLockLeak.c
+    StackGuardCommitLimit.c
     strcpy_s.c
     RtlWaitOnAddress.c
     RtlWow64GetProcessMachines.c
