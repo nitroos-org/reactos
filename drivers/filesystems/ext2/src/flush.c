@@ -161,6 +161,7 @@ Ext2Flush (IN PEXT2_IRP_CONTEXT IrpContext)
     PDEVICE_OBJECT          DeviceObject = NULL;
 
     BOOLEAN                 MainResourceAcquired = FALSE;
+    BOOLEAN                 FlushMetadata = FALSE;
 
     _SEH2_TRY {
 
@@ -229,6 +230,9 @@ Ext2Flush (IN PEXT2_IRP_CONTEXT IrpContext)
 
             Status = Ext2FlushFile(IrpContext, Fcb, Ccb);
             if (NT_SUCCESS(Status)) {
+                /* The data is in the file's cache pages; the inode, the directory entry, the bitmaps and the group
+                 * descriptors that make the file reachable are metadata blocks of the volume: written below */
+                FlushMetadata = TRUE;
                 if (IsFlagOn(FileObject->Flags, FO_FILE_MODIFIED)) {
                     Fcb->Mcb->FileAttr |= FILE_ATTRIBUTE_ARCHIVE;
                     ClearFlag(FileObject->Flags, FO_FILE_MODIFIED);
@@ -244,6 +248,20 @@ Ext2Flush (IN PEXT2_IRP_CONTEXT IrpContext)
 
         if (MainResourceAcquired) {
             ExReleaseResourceLite(&FcbOrVcb->MainResource);
+        }
+
+        /* A file system without a journal has no other way to make a file durable: the volume's metadata that
+         * belongs to it goes to the device before the flush request is passed down (the volume lock comes after
+         * the file's resource is given up, as everywhere else in this driver) */
+        if (FlushMetadata && !IrpContext->ExceptionInProgress && Vcb && !IsVcbReadOnly(Vcb)) {
+            /* The whole volume stream: Ext2FlushVcb leaves out the blocks that a buffer head still holds, and
+             * the directory block or the inode table block of a file created at the same moment by another
+             * thread is held by it. Nothing changes metadata while the volume resource is held. */
+            ExAcquireResourceExclusiveLite(&Vcb->MainResource, TRUE);
+            ExAcquireSharedStarveExclusive(&Vcb->PagingIoResource, TRUE);
+            ExReleaseResourceLite(&Vcb->PagingIoResource);
+            CcFlushCache(&Vcb->SectionObject, NULL, 0, NULL);
+            ExReleaseResourceLite(&Vcb->MainResource);
         }
 
         if (!IrpContext->ExceptionInProgress) {

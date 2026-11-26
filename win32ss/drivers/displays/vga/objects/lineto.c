@@ -310,6 +310,12 @@ DrvLineTo(
     RECT_ENUM RectEnum;
     BOOL EnumMore;
 
+    /* The loops below step the whole line with 32 bit differences: a line much longer than the screen (or one whose
+     * difference does not fit) is left to the engine, which steps only the part inside the clip bounds */
+    if (((LONGLONG)x2 - x1) > 0x10000 || ((LONGLONG)x1 - x2) > 0x10000 ||
+        ((LONGLONG)y2 - y1) > 0x10000 || ((LONGLONG)y1 - y2) > 0x10000)
+        return FALSE;
+
     x = x1;
     y = y1;
     deltax = x2 - x1;

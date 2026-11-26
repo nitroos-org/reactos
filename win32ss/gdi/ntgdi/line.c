@@ -369,9 +369,12 @@ IntGdiPolyline(DC      *dc,
             RtlCopyMemory(Points, pt, Count * sizeof(POINT));
             IntLPtoDP(dc, Points, Count);
 
-            /* Offset the array of points by the DC origin */
+            /* Offset the array of points by the DC origin. Device coordinates beyond +-2^27 wrap around to 28 bits as
+               on Windows (see IntWrapShapeCoord): this is the path of Polyline, PolyBezier and StrokePath */
             for (i = 0; i < Count; i++)
             {
+                Points[i].x = IntWrapShapeCoord(Points[i].x);
+                Points[i].y = IntWrapShapeCoord(Points[i].y);
                 Points[i].x += dc->ptlDCOrig.x;
                 Points[i].y += dc->ptlDCOrig.y;
             }

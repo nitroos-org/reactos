@@ -293,6 +293,23 @@ static CHAR_INDEX_ENTRY g_CharIndexCache[CHAR_INDEX_CACHE_SLOTS];
 #define CHAR_INDEX_SLOT(Face, Code) \
     (((Code) ^ ((Code) >> 10) ^ (UINT)((ULONG_PTR)(Face) >> 5)) % CHAR_INDEX_CACHE_SLOTS)
 
+/* The ABC widths of a glyph at a size, as GetCharABCWidths reports them: each came from a hinted load of the glyph
+ * (3 us), and a layout asks for the same glyphs again and again. Direct mapped, the FreeType lock protects it, the
+ * entries of a face are dropped with it. */
+#define ABC_CACHE_SLOTS 2048
+typedef struct _ABC_CACHE_ENTRY
+{
+    BOOL bValid;
+    FT_Face Face;
+    UINT GlyphIndex;
+    LONG lfHeight;
+    LONG lfWidth;
+    INT lsb;
+    INT bbx;
+    INT adv;
+} ABC_CACHE_ENTRY;
+static ABC_CACHE_ENTRY g_AbcCache[ABC_CACHE_SLOTS];
+
 static PWCHAR g_ElfScripts[32] =   /* These are in the order of the fsCsb[0] bits */
 {
     L"Western", /* 00 */
@@ -564,6 +581,12 @@ RemoveCacheEntries(FT_Face Face)
     {
         if (g_CharIndexCache[i].Face == Face)
             g_CharIndexCache[i].Face = NULL;
+    }
+
+    for (i = 0; i < ABC_CACHE_SLOTS; i++)
+    {
+        if (g_AbcCache[i].bValid && g_AbcCache[i].Face == Face)
+            g_AbcCache[i].bValid = FALSE;
     }
 
     for (CurrentEntry = g_FontCacheListHead.Flink;
@@ -8451,6 +8474,7 @@ GreGetCharABCWidthsW(
     PFONTGDI FontGDI;
     FT_Face face;
     UINT i, glyph_index;
+    LONG lfHeight, lfWidth;
     HFONT hFont = NULL;
 
     dc = DC_LockDc(hDC);
@@ -8486,6 +8510,8 @@ GreGetCharABCWidthsW(
 
     face = FontGDI->SharedFace->Face;
     FT_Set_Transform(face, NULL, NULL);
+    lfHeight = TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfHeight;
+    lfWidth = TextObj->logfont.elfEnumLogfontEx.elfLogFont.lfWidth;
 
     if (!fl)
         SafeBuffF = SafeBuffer;
@@ -8495,26 +8521,51 @@ GreGetCharABCWidthsW(
     for (i = FirstChar; i < FirstChar+Count; i++)
     {
         int adv, lsb, bbx, left, right;
+        ABC_CACHE_ENTRY *pAbc;
 
         if (Safepwch)
             glyph_index = get_glyph_index_flagged(face, Safepwch[i - FirstChar], (fl & GCABCW_INDICES));
         else
             glyph_index = get_glyph_index_flagged(face, i, (fl & GCABCW_INDICES));
 
-        FT_Load_Glyph(face, glyph_index, FT_LOAD_DEFAULT);
+        pAbc = &g_AbcCache[(((ULONG_PTR)face >> 4) ^ (glyph_index * 2654435761U) ^ (lfHeight * 40503U) ^
+                            (lfWidth * 9973U)) % ABC_CACHE_SLOTS];
+        if (pAbc->bValid && pAbc->Face == face && pAbc->GlyphIndex == glyph_index &&
+            pAbc->lfHeight == lfHeight && pAbc->lfWidth == lfWidth)
+        {
+            lsb = pAbc->lsb;
+            bbx = pAbc->bbx;
+            adv = pAbc->adv;
+        }
+        else
+        {
+            FT_Error error = FT_Load_Glyph(face, glyph_index, FT_LOAD_DEFAULT);
 
-        left = (INT)face->glyph->metrics.horiBearingX  & -64;
-        right = (INT)((face->glyph->metrics.horiBearingX + face->glyph->metrics.width) + 63) & -64;
-        adv  = (face->glyph->advance.x + 32) >> 6;
+            if (error == FT_Err_Ok)
+            {
+                left = (INT)face->glyph->metrics.horiBearingX  & -64;
+                right = (INT)((face->glyph->metrics.horiBearingX + face->glyph->metrics.width) + 63) & -64;
+                adv  = (face->glyph->advance.x + 32) >> 6;
 
-//      int test = (INT)(face->glyph->metrics.horiAdvance + 63) >> 6;
-//      DPRINT1("Advance Wine %d and Advance Ros %d\n",test, adv ); /* It's the same! */
+                lsb = left >> 6;
+                bbx = (right - left) >> 6;
 
-        lsb = left >> 6;
-        bbx = (right - left) >> 6;
-        /*
-              DPRINT1("lsb %d and bbx %d\n", lsb, bbx );
-         */
+                pAbc->bValid = TRUE;
+                pAbc->Face = face;
+                pAbc->GlyphIndex = glyph_index;
+                pAbc->lfHeight = lfHeight;
+                pAbc->lfWidth = lfWidth;
+                pAbc->lsb = lsb;
+                pAbc->bbx = bbx;
+                pAbc->adv = adv;
+            }
+            else
+            {
+                /* A glyph that did not load (an index beyond the face) has no widths: it used to report those of the
+                 * glyph that was loaded before it, so that the answer depended on the call before */
+                lsb = bbx = adv = 0;
+            }
+        }
         if (!fl)
         {
             SafeBuffF[i - FirstChar].abcfA = (FLOAT) lsb;

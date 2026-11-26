@@ -470,7 +470,24 @@ EngpUpdateGraphicsDeviceList(VOID)
                 EngpUnlinkGraphicsDevice(pGraphicsDevice);
                 pGraphicsDevice = pGraphicsDevice->pNextGraphicsDevice;
 
-                /* Free memory */
+                /* The globals must not keep pointing at the device that is freed here: the primary device is chosen
+                 * again below, and the next pass of this function registers the display drivers again */
+                if (pToDelete == gpPrimaryGraphicsDevice)
+                    gpPrimaryGraphicsDevice = NULL;
+                if (pToDelete == gpVgaGraphicsDevice)
+                    gpVgaGraphicsDevice = NULL;
+
+                /* Free memory: the mode lists, the device and the file object it holds */
+                if (pToDelete->pDevModeList)
+                    ExFreePoolWithTag(pToDelete->pDevModeList, GDITAG_GDEVICE);
+                while (pToDelete->pdevmodeInfo)
+                {
+                    PDEVMODEINFO pdminfo = pToDelete->pdevmodeInfo;
+                    pToDelete->pdevmodeInfo = pdminfo->pdmiNext;
+                    ExFreePoolWithTag(pdminfo, GDITAG_DEVMODE);
+                }
+                if (pToDelete->FileObject)
+                    ObDereferenceObject(pToDelete->FileObject);
                 ExFreePoolWithTag(pToDelete->pDiplayDrivers, GDITAG_DRVSUP);
                 ExFreePoolWithTag(pToDelete, GDITAG_GDEVICE);
             }

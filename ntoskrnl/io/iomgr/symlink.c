@@ -109,7 +109,7 @@ IoDeleteSymbolicLink(IN PUNICODE_STRING SymbolicLinkName)
 
     /* Make the link temporary and close its handle */
     Status = ZwMakeTemporaryObject(Handle);
-    if (NT_SUCCESS(Status)) ZwClose(Handle);
+    ZwClose(Handle);
 
     /* Return status */
     return Status;

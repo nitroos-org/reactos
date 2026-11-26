@@ -60,6 +60,7 @@ extern void func_GdiGetLocalBrush(void);
 extern void func_GdiGetLocalDC(void);
 extern void func_GdiReleaseLocalDC(void);
 extern void func_GdiSetAttrs(void);
+extern void func_GetCharABCWidthsI(void);
 extern void func_GetCharWidth(void);
 extern void func_GetClipBox(void);
 extern void func_GetClipRgn(void);
@@ -182,6 +183,7 @@ const struct test winetest_testlist[] =
     { "GdiGetLocalDC", func_GdiGetLocalDC },
     { "GdiReleaseLocalDC", func_GdiReleaseLocalDC },
     { "GdiSetAttrs", func_GdiSetAttrs },
+    { "GetCharABCWidthsI", func_GetCharABCWidthsI },
     { "GetCharWidth", func_GetCharWidth },
     { "GetClipBox", func_GetClipBox },
     { "GetClipRgn", func_GetClipRgn },
