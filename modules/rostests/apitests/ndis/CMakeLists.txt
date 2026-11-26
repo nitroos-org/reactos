@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     FakeMiniport.c
+    NetcardDeviceIrp.c
     TcpipUnbind.c
     testlist.c)
 
