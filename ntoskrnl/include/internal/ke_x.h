@@ -136,6 +136,12 @@ KeGetPreviousMode(VOID)
  * acquiring instruction; a per-processor count of held thread locks must be 0
  * wherever a thread can switch or IRQL drops below DISPATCH_LEVEL.
  * Faults bugcheck 0xDEADDEAD (kind, thread, lock word, site).
+ *
+ * Not part of any build as delivered: it is a diagnostic build of amd64 SMP. Define NITRO_THREAD_LOCK_TRACE for the C
+ * and the assembler sources of ntoskrnl together (trap.S tests the same macro), for example by adding
+ * -DNITRO_THREAD_LOCK_TRACE to CMAKE_C_FLAGS and CMAKE_ASM_FLAGS of a separate build directory; defined for the
+ * assembler sources only, the kernel does not link (trap.S calls a check that the C sources do not define); defined for
+ * the C sources only, the check at the exit of a system service is missing.
  */
 #if defined(NITRO_THREAD_LOCK_TRACE) && defined(_M_AMD64) && defined(__GNUC__)
 #define KI_THREAD_LOCK_TRACE

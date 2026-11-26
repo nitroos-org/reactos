@@ -10,7 +10,7 @@
  * and create and terminate short-lived threads (a terminating thread has its priority set); two threads create
  * processes in a loop, so they wait in their subsystem (CSR) call while they are queried and reprioritised. On a multiprocessor this
  * must neither hang nor bug check, every helper must stop and every pair must have made progress.
- * Duration: THREADLOCKSTRESS_SECONDS (default 30).
+ * Duration: THREADLOCKSTRESS_SECONDS (default 10; a soak sets a long one, for example 600).
  */
 
 #include "precomp.h"
@@ -206,18 +206,18 @@ static DWORD WINAPI AffinityThread(PVOID Param)
     return 0;
 }
 
-typedef struct _SHORT
+typedef struct _SHORT_THREAD_ARGS
 {
     HANDLE Started;
     ULONG Spin;
     BOOLEAN Victim;
-} SHORT_ARGS, *PSHORT_ARGS;
+} SHORT_THREAD_ARGS, *PSHORT_THREAD_ARGS;
 
 static HANDLE NeverSet;
 
 static DWORD WINAPI ShortThread(PVOID Param)
 {
-    PSHORT_ARGS Args = Param;
+    PSHORT_THREAD_ARGS Args = Param;
     ULONG Spin = Args->Spin;
     BOOLEAN Victim = Args->Victim;
 
@@ -237,7 +237,7 @@ static DWORD WINAPI ShortThread(PVOID Param)
 static DWORD WINAPI ChurnThread(PVOID Param)
 {
     HANDLE Threads[8];
-    SHORT_ARGS Args[8];
+    SHORT_THREAD_ARGS Args[8];
     ULONG i;
 
     UNREFERENCED_PARAMETER(Param);
@@ -286,7 +286,7 @@ static DWORD WINAPI SpinThread(PVOID Param)
 START_TEST(ThreadLockStress)
 {
     HANDLE Helpers[20];
-    ULONG HelperCount = 0, i, Seconds = 30, Stalled;
+    ULONG HelperCount = 0, i, Seconds = 10, Stalled;
     LONG Before[PAIRS];
     DWORD_PTR SystemMask;
     SYSTEM_INFO Si;
@@ -344,7 +344,7 @@ START_TEST(ThreadLockStress)
     }
     for (i = 0; i < HelperCount; i++) ok(Helpers[i] != NULL, "helper %lu: %lu\n", i, GetLastError());
 
-    /* Count 5-second windows in which a pair made no progress (an idle-priority pair may starve for a while) */
+    /* Count 5-second windows in which a pair made no progress */
     Stalled = 0;
     for (i = 0; i < Seconds; i += 5)
     {
@@ -391,8 +391,14 @@ START_TEST(ThreadLockStress)
         CloseHandle(Pairs[i].Event[1]);
     }
     CloseHandle(NeverSet);
-    trace("%lu s: %lu pair windows without progress (idle-priority pairs may starve); queries %lu, priority %lu, class %lu, "
+    trace("%lu s: %lu pair windows without progress; queries %lu, priority %lu, class %lu, "
           "suspends %lu, affinity %lu, churned %lu, processes %lu\n",
           Seconds, Stalled, (ULONG)Queries, (ULONG)PriorityChanges, (ULONG)ClassChanges, (ULONG)Suspends,
           (ULONG)AffinityChanges, (ULONG)Churned, (ULONG)Spawned);
+    /*
+     * An idle-priority pair may starve for a window (measured on an unchanged kernel: 3 of 12 and 3 of 36 pair windows,
+     * and 0), so a few stalled windows are normal; more than half of all of them is a scheduler that does not wake pairs.
+     */
+    ok(Stalled * 2 <= ((Seconds + 4) / 5) * PAIRS, "%lu pair windows without progress of %lu\n",
+       Stalled, ((Seconds + 4) / 5) * PAIRS);
 }
