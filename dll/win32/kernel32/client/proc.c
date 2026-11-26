@@ -1265,10 +1265,8 @@ SetProcessWorkingSetSizeEx(IN HANDLE hProcess,
                            IN DWORD Flags)
 {
     QUOTA_LIMITS_EX QuotaLimits;
-    NTSTATUS Status, ReturnStatus;
+    NTSTATUS ReturnStatus;
     BOOL Result;
-    PVOID State;
-    ULONG Privilege = SE_INC_BASE_PRIORITY_PRIVILEGE;
 
     /* Zero out the input structure */
     RtlZeroMemory(&QuotaLimits, sizeof(QuotaLimits));
@@ -1281,22 +1279,18 @@ SetProcessWorkingSetSizeEx(IN HANDLE hProcess,
         QuotaLimits.MaximumWorkingSetSize = dwMaximumWorkingSetSize;
         QuotaLimits.Flags = Flags;
 
-        /* Acquire the required privilege */
-        Status = RtlAcquirePrivilege(&Privilege, 1, 0, &State);
-
-        /* Request the new quotas */
+        /*
+         * The call runs with the caller's token as it is: the thread's impersonation token when it has one
+         * (Windows Server 2022: a thread impersonating a token without privileges gets
+         * ERROR_PRIVILEGE_NOT_HELD). It used to reach for SeIncreaseBasePriorityPrivilege with
+         * RtlAcquirePrivilege, which also dropped the thread's impersonation for the call, and the kernel
+         * does not look at that privilege.
+         */
         ReturnStatus = NtSetInformationProcess(hProcess,
                                                ProcessQuotaLimits,
                                                &QuotaLimits,
                                                sizeof(QuotaLimits));
         Result = NT_SUCCESS(ReturnStatus);
-        if (NT_SUCCESS(Status))
-        {
-            /* Release the privilege and set succes code */
-            ASSERT(State != NULL);
-            RtlReleasePrivilege(State);
-            State = NULL;
-        }
     }
     else
     {
