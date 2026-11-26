@@ -214,33 +214,29 @@ static BOOLEAN CantReadMore( PAFD_FCB FCB ) {
     return !BytesAvailable && FCB->TdiReceiveClosed;
 }
 
-static NTSTATUS TryToSatisfyRecvRequestFromBuffer( PAFD_FCB FCB,
-                                                   PAFD_RECV_INFO RecvReq,
-                                                   PUINT TotalBytesCopied ) {
-    UINT i, BytesToCopy = 0, FcbBytesCopied = FCB->Recv.BytesUsed,
-        BytesAvailable =
-        FCB->Recv.Content - FCB->Recv.BytesUsed;
-    PAFD_MAPBUF Map;
-    *TotalBytesCopied = 0;
+/* Where the next byte for the caller goes: the buffer of the request and the offset in it */
+typedef struct _RECV_CURSOR {
+    UINT Index;
+    UINT Offset;
+} RECV_CURSOR;
 
+/* Copies what the window holds (from the first byte not used yet) into the caller's buffers from the cursor on.
+ * A peek leaves the bytes in the window, so it only ever copies the window once. Returns the bytes copied. */
+static UINT CopyWindowToRecvBuffers( PAFD_FCB FCB,
+                                     PAFD_RECV_INFO RecvReq,
+                                     RECV_CURSOR *Cursor ) {
+    UINT FcbBytesCopied = FCB->Recv.BytesUsed,
+        BytesAvailable = FCB->Recv.Content - FCB->Recv.BytesUsed,
+        Total = 0, BytesToCopy;
+    PAFD_MAPBUF Map = (PAFD_MAPBUF)(RecvReq->BufferArray + RecvReq->BufferCount);
 
-    AFD_DbgPrint(MID_TRACE,("Called, BytesAvailable = %u\n", BytesAvailable));
+    while( RecvReq->BufferArray &&
+           BytesAvailable &&
+           Cursor->Index < RecvReq->BufferCount ) {
+        UINT i = Cursor->Index;
+        UINT Room = RecvReq->BufferArray[i].len - Cursor->Offset;
 
-    if( CantReadMore(FCB) ) return STATUS_SUCCESS;
-    if( !BytesAvailable ) return STATUS_PENDING;
-
-    Map = (PAFD_MAPBUF)(RecvReq->BufferArray + RecvReq->BufferCount);
-
-    AFD_DbgPrint(MID_TRACE,("Buffer Count: %u @ %p\n",
-                            RecvReq->BufferCount,
-                            RecvReq->BufferArray));
-    for( i = 0;
-         RecvReq->BufferArray &&
-             BytesAvailable &&
-             i < RecvReq->BufferCount;
-         i++ ) {
-        BytesToCopy =
-            MIN( RecvReq->BufferArray[i].len, BytesAvailable );
+        BytesToCopy = MIN( Room, BytesAvailable );
 
         if( Map[i].Mdl ) {
             Map[i].BufferAddress = MmMapLockedPages( Map[i].Mdl, KernelMode );
@@ -250,30 +246,70 @@ static NTSTATUS TryToSatisfyRecvRequestFromBuffer( PAFD_FCB FCB,
                                     Map[i].BufferAddress,
                                     BytesToCopy));
 
-            RtlCopyMemory( Map[i].BufferAddress,
+            RtlCopyMemory( (PCHAR)Map[i].BufferAddress + Cursor->Offset,
                            FCB->Recv.Window + FcbBytesCopied,
                            BytesToCopy );
 
             MmUnmapLockedPages( Map[i].BufferAddress, Map[i].Mdl );
 
-            *TotalBytesCopied += BytesToCopy;
+            Total += BytesToCopy;
             FcbBytesCopied += BytesToCopy;
             BytesAvailable -= BytesToCopy;
 
             if (!(RecvReq->TdiFlags & TDI_RECEIVE_PEEK))
                 FCB->Recv.BytesUsed += BytesToCopy;
         }
+
+        /* the buffer is full (or has no pages to copy to): the next one */
+        if( BytesToCopy == Room || !Map[i].Mdl ) {
+            Cursor->Index++;
+            Cursor->Offset = 0;
+        } else {
+            Cursor->Offset += BytesToCopy;
+        }
     }
+
+    return Total;
+}
+
+static NTSTATUS TryToSatisfyRecvRequestFromBuffer( PAFD_FCB FCB,
+                                                   PAFD_RECV_INFO RecvReq,
+                                                   PUINT TotalBytesCopied ) {
+    UINT i, BytesAvailable =
+        FCB->Recv.Content - FCB->Recv.BytesUsed;
+    RECV_CURSOR Cursor = { 0, 0 };
+    *TotalBytesCopied = 0;
+
+
+    AFD_DbgPrint(MID_TRACE,("Called, BytesAvailable = %u\n", BytesAvailable));
+
+    if( CantReadMore(FCB) ) return STATUS_SUCCESS;
+    if( !BytesAvailable ) return STATUS_PENDING;
+
+    AFD_DbgPrint(MID_TRACE,("Buffer Count: %u @ %p\n",
+                            RecvReq->BufferCount,
+                            RecvReq->BufferArray));
+    *TotalBytesCopied = CopyWindowToRecvBuffers( FCB, RecvReq, &Cursor );
 
     /* A reader that takes the whole buffer and asked for more is reading faster than the buffer holds: let a recv
        return what it asks for, as on Windows (measured: a 64K recv returns 64K when that much is queued) */
     if (!(RecvReq->TdiFlags & TDI_RECEIVE_PEEK) && *TotalBytesCopied == FCB->Recv.Size)
     {
-        UINT Capacity = 0;
+        UINT Capacity = 0, OldSize = FCB->Recv.Size;
 
         for (i = 0; RecvReq->BufferArray && i < RecvReq->BufferCount; i++)
             Capacity += RecvReq->BufferArray[i].len;
         GrowReceiveWindow(FCB, min(Capacity, AFD_NONPAGED_WINDOW_MAX));
+
+        if (FCB->Recv.Size != OldSize)
+        {
+            /* The data the transport had queued behind the first window arrives while the receive into the new one
+               is started (the transport completes it inside the call): give that to this recv too, as Windows
+               returns everything that is queued up to the buffer of the caller. Data that comes later is for the
+               next recv. */
+            RefillSocketBuffer(FCB);
+            *TotalBytesCopied += CopyWindowToRecvBuffers( FCB, RecvReq, &Cursor );
+        }
     }
 
     /* Issue another receive IRP to keep the buffer well stocked */
