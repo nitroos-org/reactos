@@ -524,14 +524,58 @@ HalpGetHypervisorTscFrequency(VOID)
     return Frequency;
 }
 
-/* Measures the TSC frequency over four RTC interrupts */
+/*
+    Waits for the RTC interrupts of the calibration: four periods of 1 ms take
+    a few milliseconds. Some machines never raise the periodic interrupt (the
+    clock then comes from another timer, see HalpInitializeClock, which runs
+    after this), so the wait is bounded: half a second by the power management
+    timer, and 2^32 TSC ticks (at most a few seconds) in case that timer is
+    missing or does not count either. The stall routines are not calibrated yet.
+    Returns FALSE when the interrupts did not come.
+*/
+/* The reference frequency of the power management timer measurement when there is none */
+#define TSC_NO_REFERENCE (~0ULL)
+#define RTC_WAIT_PM_TIMER_COUNTS (PM_TIMER_FREQUENCY / 2)
+#define RTC_WAIT_TSC_LIMIT (1ULL << 32)
+
 static
-VOID
+BOOLEAN
+HalpWaitForRtcSamples(VOID)
+{
+    ULONG64 Start = __rdtsc();
+    ULONG Port, Mask, Last = 0, Now, Elapsed = 0;
+
+    Port = HalpGetAcpiTimerPort(&Mask);
+    if (Port)
+        Last = __indword((USHORT)Port) & Mask;
+
+    while (TscCalibrationPhase < NUM_SAMPLES)
+    {
+        _ReadWriteBarrier();
+        if (__rdtsc() - Start > RTC_WAIT_TSC_LIMIT)
+            return FALSE;
+        if (Port)
+        {
+            Now = __indword((USHORT)Port) & Mask;
+            Elapsed += (Now - Last) & Mask;
+            Last = Now;
+            if (Elapsed > RTC_WAIT_PM_TIMER_COUNTS)
+                return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/* Measures the TSC frequency over four RTC interrupts; FALSE and the
+   frequency left alone when the RTC raises no periodic interrupt */
+static
+BOOLEAN
 HalpCalibrateTscWithRtc(VOID)
 {
     ULONG_PTR Flags;
     PVOID PreviousHandler;
     UCHAR RegisterA, RegisterB;
+    BOOLEAN Sampled;
 
      /* Save flags and disable interrupts */
     Flags = __readeflags();
@@ -560,7 +604,7 @@ HalpCalibrateTscWithRtc(VOID)
 
     /* Wait for completion */
     _enable();
-    while (TscCalibrationPhase < NUM_SAMPLES) _ReadWriteBarrier();
+    Sampled = HalpWaitForRtcSamples();
     _disable();
 
     /* Disable the periodic interrupt in the CMOS */
@@ -573,12 +617,16 @@ HalpCalibrateTscWithRtc(VOID)
     KeRegisterInterruptHandler(APIC_CLOCK_VECTOR, PreviousHandler);
 
     /* Calculate an average, using simplified linear regression */
-    HalpCpuClockFrequency.QuadPart = DoLinearRegression(NUM_SAMPLES - 1,
-                                                        TscCalibrationArray);
+    if (Sampled)
+    {
+        HalpCpuClockFrequency.QuadPart = DoLinearRegression(NUM_SAMPLES - 1,
+                                                            TscCalibrationArray);
+    }
 
     /* Restore flags */
     __writeeflags(Flags);
 
+    return Sampled;
 }
 
 /*
@@ -665,15 +713,32 @@ HalpInitializeTsc(VOID)
        which can be tried again when it was disturbed; the TSC is not reset
        (on this processor alone it would leave the TSCs of the processors
        out of step) */
-    HalpCalibrateTscWithRtc();
-    RtcFrequency = (ULONG64)HalpCpuClockFrequency.QuadPart;
+    if (HalpCalibrateTscWithRtc())
+    {
+        RtcFrequency = (ULONG64)HalpCpuClockFrequency.QuadPart;
+    }
+    else
+    {
+        /* The RTC raises no periodic interrupt: the power management timer
+           alone, without a reference frequency to check it against */
+        DPRINT1("The RTC raised no periodic interrupt during the TSC calibration\n");
+        RtcFrequency = TSC_NO_REFERENCE;
+    }
     for (Try = 0; Try < PM_TIMER_TRIES; Try++)
     {
         if (HalpCalibrateTscWithPmTimer(RtcFrequency))
             break;
     }
-    DPRINT1("TSC frequency %I64u Hz (RTC %I64u Hz, power management timer %s)\n",
-            HalpCpuClockFrequency.QuadPart, RtcFrequency, HalpTscCalibrated ? "agrees" : "failed");
+    if (RtcFrequency == TSC_NO_REFERENCE)
+    {
+        DPRINT1("TSC frequency %I64u Hz (power management timer %s)\n",
+                HalpCpuClockFrequency.QuadPart, HalpTscCalibrated ? "measured" : "failed, the initial value is kept");
+    }
+    else
+    {
+        DPRINT1("TSC frequency %I64u Hz (RTC %I64u Hz, power management timer %s)\n",
+                HalpCpuClockFrequency.QuadPart, RtcFrequency, HalpTscCalibrated ? "agrees" : "failed");
+    }
     HalpSetQpcScale();
 }
 
