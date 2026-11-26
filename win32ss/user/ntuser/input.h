@@ -80,6 +80,8 @@ typedef struct _INPUT_DEVICE_INFO
     HANDLE hRawDevice;
     IO_STATUS_BLOCK Iosb;
     NTSTATUS Status;
+    /* A read was started and its completion routine (RITReadApc) has not run yet: only the raw input thread touches it */
+    BOOLEAN ReadPending;
     ULONG DeviceType;
     union
     {

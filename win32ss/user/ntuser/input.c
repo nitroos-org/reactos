@@ -248,6 +248,10 @@ StartReadInputDevice(
     else
         return;
 
+    /* Closed (at shutdown): no new read; the device info may be freed once no completion routine is left to run */
+    if (!DeviceInfo->Handle)
+        return;
+
     DeviceInfo->Status = ZwReadFile(
         DeviceInfo->Handle,
         NULL,
@@ -258,6 +262,8 @@ StartReadInputDevice(
         BufferSize,
         &ByteOffset,
         NULL);
+    /* Unless the request failed at once, its completion queues RITReadApc to this thread, also when it is cancelled */
+    DeviceInfo->ReadPending = !NT_ERROR(DeviceInfo->Status);
 }
 
 static
@@ -268,6 +274,8 @@ RITReadApc(
     _In_ ULONG Reserved)
 {
     PINPUT_DEVICE_INFO DeviceInfo = ApcContext;
+
+    DeviceInfo->ReadPending = FALSE;
 
     if (DeviceInfo->Handle && NT_SUCCESS(IoStatusBlock->Status))
     {
@@ -665,15 +673,53 @@ RawInputThreadMain(VOID)
         return;
     }
 
+    /*
+     * Close every device first.  A cancelled read completes with its routine (RITReadApc) queued to this thread, and that
+     * runs as soon as the device list lock is released (the lock holds back kernel APCs): the device infos must still exist
+     * then.  Their handles are NULL from here on, so the routine starts no new read.
+     */
+    AcquireDeviceInfoListMutex();
+    for (DeviceInfo = gpInputDeviceInfo; DeviceInfo; DeviceInfo = DeviceInfo->pNextDeviceInfo)
+    {
+        /* A device is not opened in a session without the console */
+        if (DeviceInfo->Handle)
+        {
+            CloseInputDevice(DeviceInfo);
+            DeviceInfo->Handle = NULL;
+        }
+    }
+    ReleaseDeviceInfoListMutex();
+
+    /*
+     * The completion routines run now; wait (at most 2 s) for one that comes late.  Only this thread changes the list and
+     * the ReadPending flags, so they are read without the lock, which would hold the routines back.
+     */
+    {
+        LARGE_INTEGER Delay;
+        ULONG Waits;
+        BOOLEAN Pending = TRUE;
+
+        Delay.QuadPart = -10 * 1000 * 10;
+        for (Waits = 0; Pending && Waits < 200; Waits++)
+        {
+            Pending = FALSE;
+            for (DeviceInfo = gpInputDeviceInfo; DeviceInfo; DeviceInfo = DeviceInfo->pNextDeviceInfo)
+                Pending = Pending || DeviceInfo->ReadPending;
+            if (Pending)
+                KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        }
+    }
+
     AcquireDeviceInfoListMutex();
     while (gpInputDeviceInfo)
     {
         DeviceInfo = gpInputDeviceInfo;
         gpInputDeviceInfo = DeviceInfo->pNextDeviceInfo;
-        /* A device is not opened in a session without the console */
-        if (DeviceInfo->Handle)
-            CloseInputDevice(DeviceInfo);
-        ExFreePoolWithTag(DeviceInfo, USERTAG_PNP);
+        /* A read whose completion routine has still not run keeps its device info (the system is going down) */
+        if (DeviceInfo->ReadPending)
+            ERR("Raw Input Thread: a read of '%wZ' has not completed, its device info is not freed\n", &DeviceInfo->DeviceName);
+        else
+            ExFreePoolWithTag(DeviceInfo, USERTAG_PNP);
     }
     gpInputDeviceInfo = NULL;
     ReleaseDeviceInfoListMutex();
