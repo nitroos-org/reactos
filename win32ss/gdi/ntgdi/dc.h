@@ -140,10 +140,11 @@ typedef struct _DC
   RECTL       rclGlass;   /* that window's rectangle on the screen */
   PVOID       pvRedir;    /* while fs & DC_REDIRECTION: the redirection record of the window (ntuser/redir.c) */
   RECTL       rclRedirDraw; /* device rectangle of the primitive being drawn into that surface */
+  POINTL      ptlRedirScreen; /* while fs & DC_REDIRECTION: where the surface's pixel 0, 0 is on the screen */
 } DC;
 
 /*
- * A window DC of a redirected window (NitroRedirection, ntuser/redir.c) stays DCTYPE_DIRECT but draws
+ * A window DC of a redirected window (ntuser/redir.c) stays DCTYPE_DIRECT but draws
  * into the window's redirection surface instead of the screen: no pointer exclusion, no device lock,
  * no re-selection of the primary surface. DC_IS_SCREEN tells the DCs that really draw on the screen.
  */
@@ -154,6 +155,7 @@ typedef struct _DC
 #define REDIRBIND_BUSY  1   /* the DC is locked by another process for now: binding unchanged */
 #define REDIRBIND_GONE  2   /* the DC handle is no longer valid (or not a window DC) */
 BOOL NTAPI GreRedirSetDCOrg(_In_ HDC hdc, _In_ LONG x, _In_ LONG y, _In_opt_ PRECTL prcl);
+VOID NTAPI GreRedirSetScreenOrg(_In_ HDC hdc, _In_ LONG x, _In_ LONG y);
 ULONG NTAPI GreRedirBindDC(_In_ HDC hdc, _In_opt_ PVOID pvRedir, _In_opt_ struct _SURFACE *psurf, _Out_ PVOID *ppvOld);
 struct _SURFACE *NTAPI GreRedirCreateSurface(_In_ LONG cx, _In_ LONG cy, _In_opt_ struct _SURFACE *psurfOld);
 VOID NTAPI GreRedirDeleteSurface(_In_ struct _SURFACE *psurf);
@@ -161,7 +163,7 @@ BOOL NTAPI GreRedirPresent(_In_ struct _SURFACE *psurf, _In_ struct _REGION *prg
 BOOL NTAPI GreRedirSeedFromScreen(_In_ struct _SURFACE *psurf, _In_ struct _REGION *prgnScreen, _In_ LONG xWnd, _In_ LONG yWnd);
 BOOL NTAPI GreRedirCopyToDC(_In_ struct _SURFACE *psurf, _In_ HDC hdcDest, _In_ LONG xSrc, _In_ LONG ySrc, _In_ LONG cx, _In_ LONG cy);
 
-/* Level 2 composition (NitroRedirection 2): one window's surface drawn into the frame buffer of a compose pass */
+/* Composition of translucent windows (level 2, not the behaviour yet: redir.c): one window's surface drawn into the frame buffer of a compose pass */
 #define REDIRMODE_COPY      0       /* opaque */
 #define REDIRMODE_ALPHA     1       /* constant alpha over what is below; the surface's own alpha is not used */
 #define REDIRMODE_PREMUL    2       /* premultiplied per-pixel alpha, times the constant alpha (UpdateLayeredWindow) */

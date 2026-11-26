@@ -785,6 +785,10 @@ NtGdiGetRandomRgn(
             {
                 /// \todo FIXME This is not really correct, since we already modified the region
                 ret = REGION_bOffsetRgn(prgnDest, pdc->ptlDCOrig.x, pdc->ptlDCOrig.y);
+                /* A DC that draws into a redirected window's surface has the surface's device coordinates: the
+                   system region is in screen coordinates */
+                if (ret && (pdc->fs & DC_REDIRECTION))
+                    ret = REGION_bOffsetRgn(prgnDest, pdc->ptlRedirScreen.x, pdc->ptlRedirScreen.y);
             }
             REGION_UnlockRgn(prgnDest);
         }

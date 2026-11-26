@@ -24,7 +24,7 @@
  * is older than another one that overlaps it is not touched; when a record is used, the records saved after
  * it that overlap it are dropped (they hold pixels of this window). The pixels are held in a surface that
  * only win32k reaches (GreRedirCreateSurface), not in a bitmap a process could read. All of it runs under
- * the USER lock. Not used while windows are redirected (NitroRedirection), which keeps what is covered.
+ * the USER lock. Not used where windows are redirected (amd64, redir.c), which keeps what is covered.
  */
 
 #include <win32k.h>
@@ -143,7 +143,7 @@ static
 BOOL
 SpbEligible(PWND Wnd)
 {
-    return gRedirLevel == 0 && !gbHeadlessSession &&
+    return !gRedirOn && !gbHeadlessSession &&
            Wnd->pcls != NULL && (Wnd->pcls->style & CS_SAVEBITS) &&
            !(Wnd->style & WS_CHILD) && !(Wnd->ExStyle & WS_EX_LAYERED) &&
            Wnd->spwndParent != NULL && UserIsDesktopWindow(Wnd->spwndParent) &&

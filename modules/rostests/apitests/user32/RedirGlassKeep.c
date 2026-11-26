@@ -2,7 +2,7 @@
  * PROJECT:     ReactOS API Tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     A call that does not change the glass state of a window keeps what the window drew
- *              (NitroRedirection levels 0, 1 and 2)
+ *              (window redirection: amd64; none on i386)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * dwmapi's DwmExtendFrameIntoClientArea marks a window as glass through the private user32 export
@@ -31,32 +31,10 @@ static LONG g_cPaint;
 
 static int GetRedirectionLevel(void)
 {
-    HKEY hKey;
-    DWORD Value = 0, cb = sizeof(Value);
-    WCHAR Options[512] = L"";
     SYSTEM_INFO si;
 
     GetNativeSystemInfo(&si);
-    if (si.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_AMD64)
-        return 0;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        if (RegQueryValueExW(hKey, L"NitroRedirection", NULL, NULL, (BYTE *)&Value, &cb) != ERROR_SUCCESS || Value > 2)
-            Value = 0;
-        RegCloseKey(hKey);
-    }
-    if (Value && RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        cb = sizeof(Options) - sizeof(WCHAR);
-        if (RegQueryValueExW(hKey, L"SystemStartOptions", NULL, NULL, (BYTE *)Options, &cb) == ERROR_SUCCESS)
-        {
-            _wcsupr(Options);
-            if (wcsstr(Options, L"NOREDIRECTION"))
-                Value = 0;
-        }
-        RegCloseKey(hKey);
-    }
-    return (int)Value;
+    return si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 ? 1 : 0;
 }
 
 static void Pump(void)
@@ -149,7 +127,7 @@ START_TEST(RedirGlassKeep)
     int Share, i;
 
     g_Level = GetRedirectionLevel();
-    trace("NitroRedirection level %d\n", g_Level);
+    trace("window redirection level %d\n", g_Level);
 
     pSetGlass = (PFN_SETGLASS)GetProcAddress(GetModuleHandleW(L"user32.dll"), "NitroSetWindowGlass");
     if (!pSetGlass)

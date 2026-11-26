@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS API Tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     What a window shows after ScrollWindowEx and ScrollDC is the same at every NitroRedirection level
+ * PURPOSE:     What a window shows after ScrollWindowEx and ScrollDC is the same with and without window redirection
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * A pattern that depends on the pixel position is painted into a popup window (and a child window of it). The
@@ -25,6 +25,16 @@
 static LONG g_cPaint;
 static HBITMAP g_hbmPattern;
 static HDC g_hdcPattern;
+static int g_Level;
+
+/* The window redirection level of the system: 1 on amd64 (top-level windows draw into surfaces of their own), 0 on i386 */
+static int GetRedirectionLevel(void)
+{
+    SYSTEM_INFO si;
+
+    GetNativeSystemInfo(&si);
+    return si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 ? 1 : 0;
+}
 
 static COLORREF Pat(int x, int y)
 {
@@ -590,6 +600,177 @@ static void Test_BurstHeldDC(HWND hwnd, HWND hChild)
     Pump(100);
 }
 
+/* Reads the window through its DC and the screen at the window's place (x0, y0) and counts the differing pixels in the columns [0, cxOn) */
+static int DiffWindowScreen(HWND hwnd, int x0, int y0, int cxOn, int *px, int *py)
+{
+    static FRAME win, scr;
+    HDC hdc = GetDC(hwnd);
+    int x, y, n = 0;
+
+    ReadDC(hdc, 0, 0, &win);
+    ReleaseDC(hwnd, hdc);
+    hdc = GetDC(NULL);
+    ReadDC(hdc, x0, y0, &scr);
+    ReleaseDC(NULL, hdc);
+    for (y = 0; y < CY; y++)
+        for (x = 0; x < cxOn; x++)
+            if (win.a[y * CX + x] != scr.a[y * CX + x])
+            {
+                if (!n)
+                {
+                    *px = x;
+                    *py = y;
+                }
+                n++;
+            }
+    return n;
+}
+
+/* The window shows on the screen what its DC reads (within a second: the end of a burst of scrolls may come later) */
+static void CheckWindowIsScreen(HWND hwnd, int x0, int y0, int cxOn, const char *what)
+{
+    DWORD Start = GetTickCount();
+    int n, x = 0, y = 0;
+
+    for (;;)
+    {
+        n = DiffWindowScreen(hwnd, x0, y0, cxOn, &x, &y);
+        if (n == 0 || GetTickCount() - Start >= 1000)
+            break;
+        Pump(10);
+    }
+    ok(n == 0, "%s: the screen differs from the window in %d pixels, first at %d, %d\n", what, n, x, y);
+}
+
+/*
+ * A burst of ScrollDC through GetDC / ReleaseDC, the exposed part painted through the same DC each time: window and
+ * screen show the model, and the last scroll reaches the screen within two frames (as ScrollWindowEx, Test_BurstTail).
+ */
+static void Test_BurstScrollDC(HWND hwnd, HWND hChild)
+{
+    static FRAME model, got;
+    RECT rcChild;
+    LARGE_INTEGER Freq, t0, t1;
+    double Ms, Worst = 0;
+    int i, pass, n, x = 0, y = 0;
+
+    QueryPerformanceFrequency(&Freq);
+    ShowWindow(hChild, SW_HIDE);
+    for (pass = 0; pass < 6; pass++)
+    {
+        Reset(hwnd, &model, NULL, &rcChild);
+        FillPattern(&model);
+        for (i = 0; i < 60; i++)
+        {
+            int dx = (pass & 1) ? ((i & 1) ? 3 : -4) : 0, dy = (i % 3 == 2) ? 16 : -16;
+            HDC hdc = GetDC(hwnd);
+            HRGN hrgn = CreateRectRgn(0, 0, 0, 0);
+
+            ScrollDC(hdc, dx, dy, NULL, NULL, hrgn, NULL);
+            SelectClipRgn(hdc, hrgn);
+            BitBlt(hdc, 0, 0, CX, CY, g_hdcPattern, 0, 0, SRCCOPY);
+            SelectClipRgn(hdc, NULL);
+            ReleaseDC(hwnd, hdc);
+            DeleteObject(hrgn);
+            ModelScroll(&model, dx, dy, NULL, NULL, NULL);
+        }
+        QueryPerformanceCounter(&t0);
+        for (;;)
+        {
+            HDC hdc = GetDC(NULL);
+
+            ReadDC(hdc, WX, WY, &got);
+            ReleaseDC(NULL, hdc);
+            n = Diff(&got, &model, &x, &y);
+            QueryPerformanceCounter(&t1);
+            Ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)Freq.QuadPart;
+            if (n == 0 || Ms >= 1000)
+                break;
+        }
+        ok(n == 0, "ScrollDC burst %d: the screen differs from the model in %d pixels a second after the last scroll, first at %d, %d\n",
+           pass, n, x, y);
+        /* A read of the whole window from the screen takes a few ms of its own: the limit has one more frame. Without
+           redirection the scrolls are on the screen at once: only the result is checked there */
+        if (g_Level >= 1)
+            ok(Ms <= TAIL_LIMIT_MS + 17.0, "ScrollDC burst %d: the last scroll reached the screen %.1f ms after the scroll\n", pass, Ms);
+        if (Ms > Worst)
+            Worst = Ms;
+        CheckWindow(hwnd, &model, "ScrollDC burst, window");
+    }
+    trace("ScrollDC burst tail worst %.1f ms\n", Worst);
+}
+
+/*
+ * A burst of scrolls of a window another window covers in part, then the cover goes: what the screen shows there is
+ * what the window holds. With redirection (level >= 1) the window keeps the covered part, so it is the model; without
+ * it, the covered part was invalid and painted again (not the model: only window = screen is checked).
+ */
+static void Test_Covered(HWND hwnd, HWND hChild)
+{
+    FRAME model;
+    RECT rcChild;
+    HWND hCover;
+    int i;
+
+    ShowWindow(hChild, SW_HIDE);
+    Reset(hwnd, &model, NULL, &rcChild);
+    FillPattern(&model);
+    hCover = CreateWindowExW(WS_EX_TOPMOST, L"RedirScrollChild", L"", WS_POPUP | WS_VISIBLE, WX + 200, WY + 100, 200, 100,
+                             NULL, NULL, GetModuleHandleW(NULL), NULL);
+    ok(hCover != NULL, "CreateWindowExW of the cover failed: %lu\n", GetLastError());
+    UpdateWindow(hCover);
+    Pump(50);
+    for (i = 0; i < 40; i++)
+    {
+        int dy = (i % 3 == 2) ? 16 : -16;
+
+        ScrollWindowEx(hwnd, 0, dy, NULL, NULL, NULL, NULL, SW_INVALIDATE | SW_ERASE);
+        UpdateWindow(hwnd);
+        ModelScroll(&model, 0, dy, NULL, NULL, NULL);
+    }
+    if (g_Level >= 1)
+        CheckWindow(hwnd, &model, "partly covered burst, window");
+    if (hCover)
+        DestroyWindow(hCover);
+    UpdateWindow(hwnd);
+    Pump(100);
+    CheckWindowIsScreen(hwnd, WX, WY, CX, "partly covered burst, cover gone");
+    if (g_Level >= 1)
+        CheckScreenIdle(&model, "partly covered burst, cover gone");
+}
+
+/* The same with the window partly off the screen (its right part), then moved back */
+static void Test_OffScreen(HWND hwnd, HWND hChild)
+{
+    FRAME model;
+    RECT rcChild;
+    int i, cxScreen = GetSystemMetrics(SM_CXSCREEN), xOff = cxScreen - CX / 2;
+
+    ShowWindow(hChild, SW_HIDE);
+    Reset(hwnd, &model, NULL, &rcChild);
+    FillPattern(&model);
+    SetWindowPos(hwnd, NULL, xOff, WY, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    UpdateWindow(hwnd);
+    Pump(50);
+    for (i = 0; i < 40; i++)
+    {
+        int dx = (i & 1) ? 5 : -7, dy = (i % 3 == 2) ? 16 : -16;
+
+        ScrollWindowEx(hwnd, dx, dy, NULL, NULL, NULL, NULL, SW_INVALIDATE | SW_ERASE);
+        UpdateWindow(hwnd);
+        ModelScroll(&model, dx, dy, NULL, NULL, NULL);
+    }
+    if (g_Level >= 1)
+        CheckWindow(hwnd, &model, "partly off-screen burst, window");
+    CheckWindowIsScreen(hwnd, xOff, WY, cxScreen - xOff, "partly off-screen burst, part on the screen");
+    SetWindowPos(hwnd, NULL, WX, WY, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    UpdateWindow(hwnd);
+    Pump(100);
+    CheckWindowIsScreen(hwnd, WX, WY, CX, "partly off-screen burst, moved back");
+    if (g_Level >= 1)
+        CheckScreenIdle(&model, "partly off-screen burst, moved back");
+}
+
 START_TEST(RedirScroll)
 {
     WNDCLASSW wc = { 0 };
@@ -600,6 +781,8 @@ START_TEST(RedirScroll)
     static FRAME pat;
     int i;
 
+    g_Level = GetRedirectionLevel();
+    trace("window redirection level %d\n", g_Level);
     hdcScreen = GetDC(NULL);
     if (GetDeviceCaps(hdcScreen, BITSPIXEL) < 24)
     {
@@ -644,6 +827,9 @@ START_TEST(RedirScroll)
         Test_BurstThenDraw(hwnd, hChild);
         Test_BurstTail(hwnd, hChild);
         Test_BurstHeldDC(hwnd, hChild);
+        Test_BurstScrollDC(hwnd, hChild);
+        Test_Covered(hwnd, hChild);
+        Test_OffScreen(hwnd, hChild);
     }
 
     DestroyWindow(hwnd);

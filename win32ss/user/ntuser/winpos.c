@@ -2333,7 +2333,7 @@ co_WinPosSetWindowPosEx(
 
       /* A redirected window that keeps its size keeps its content in its surface: what it shows now is
          not painted again, also where it was covered or off the screen before (W1, redir.c) */
-      bRedirKeep = gRedirLevel && VisAfter != NULL &&
+      bRedirKeep = gRedirOn && VisAfter != NULL &&
                    (WinPos.flags & (SWP_NOSIZE | SWP_NOCLIENTSIZE)) == (SWP_NOSIZE | SWP_NOCLIENTSIZE) &&
                    !(WinPos.flags & (SWP_NOCOPYBITS | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_HIDEWINDOW)) &&
                    !(WvrFlags & WVR_REDRAW) &&
@@ -2387,7 +2387,7 @@ co_WinPosSetWindowPosEx(
             REGION_Delete(CopyRgn);
             CopyRgn = NULL;
          }
-         else if ( gRedirLevel &&
+         else if ( gRedirOn &&
                    (OldWindowRect.left != NewWindowRect.left || OldWindowRect.top != NewWindowRect.top) &&
                    !(WinPos.flags & SWP_FRAMECHANGED) &&
                    UserRedirHasSurface(Window) )
@@ -2694,10 +2694,10 @@ co_WinPosSetWindowPosEx(
    }
 
    /* A redirected window that moved or came up in the z-order shows its content (kept in its surface) */
-   if (gRedirLevel && (bRedirKeep || OldWindowRect.left != NewWindowRect.left || OldWindowRect.top != NewWindowRect.top))
+   if (gRedirOn && (bRedirKeep || OldWindowRect.left != NewWindowRect.left || OldWindowRect.top != NewWindowRect.top))
       UserRedirWindowMoved(Window);
    /* Level 2: translucent windows over the old and the new place show what is below them now */
-   if (gRedirLevel >= 2 && (WinPos.flags & SWP_AGG_STATUSFLAGS) != SWP_AGG_NOPOSCHANGE)
+   if (gRedirCompose && (WinPos.flags & SWP_AGG_STATUSFLAGS) != SWP_AGG_NOPOSCHANGE)
       UserRedirLayoutChanged(Window, &OldWindowRect);
 
    /* And last, send the WM_WINDOWPOSCHANGED message */

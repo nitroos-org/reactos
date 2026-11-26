@@ -1,21 +1,24 @@
 /*
  * PROJECT:     NitroOS win32k
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     Redirected window surfaces, stages R0-R2 (fes/2026-11-09-win32k-redirected-window-surfaces.md)
+ * PURPOSE:     Redirected window surfaces (fes/2026-11-09-win32k-redirected-window-surfaces.md)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
- * HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\NitroRedirection (DWORD, amd64 only):
- * 0 (default) = windows draw on the screen as always; 1 = every eligible top-level window draws into a
- * surface of its own (its DCs and its children's DCs select it, in window coordinates), and what it drew
- * there is copied onto the screen through the window's visible region when a DC is released or ends a
- * paint, within a frame for DCs that stay in use, and all of it when the window moved. Covered content
- * is kept: GetDC/GetWindowDC of a covered window reads it. The boot option /NOREDIRECTION forces 0.
+ * On amd64 every eligible top-level window draws into a surface of its own (its DCs and its children's DCs
+ * select it, in window coordinates), and what it drew there is copied onto the screen through the window's
+ * visible region when a DC is released or ends a paint, within a frame for DCs that stay in use, and all of
+ * it when the window moved. Covered content is kept: GetDC/GetWindowDC of a covered window reads it, and
+ * what a window uncovers is shown from the surfaces of the windows below without WM_PAINT (as on Windows
+ * with desktop composition). There is no setting for it. i386 keeps drawing on the screen: the surfaces
+ * (up to a quarter of RAM, at most 256 MB per session) do not fit the 32-bit kernel address space.
  *
  * Not redirected: the desktop window, message-only windows, hidden windows, windows past the memory
- * budget, and at level 1 layered windows and glass windows (NitroSetWindowGlass). They draw as always.
- * R0 keeps USER's painting rules (WM_PAINT on uncover); R1 changes them.
+ * budget, layered windows and glass windows (NitroSetWindowGlass). They draw on the screen as always.
  *
- * Level 2 also redirects layered and glass windows ("translucent" records, bTrans) and composes them:
+ * Composition of layered and glass windows (gRedirCompose; formerly redirection level 2) is not
+ * part of the behaviour yet: the code below that does it is kept for that work and is not reached (its
+ * comments call it level 2, the windows without it level 1). It redirects layered and glass windows
+ * ("translucent" records, bTrans) and composes them:
  * what the screen shows where one of them is is built bottom up in a frame buffer from the surfaces of
  * the windows there (copied, or blended for the translucent ones) and copied to the screen in one blit
  * (RedirCompose). SetLayeredWindowAttributes alpha and colour key apply to what the window paints;
@@ -81,7 +84,13 @@ typedef struct _REDIR
     COLORREF UlwKey;
 } REDIR, *PREDIR;
 
-ULONG gRedirLevel = 0;
+/* Top-level windows draw into surfaces of their own (amd64, set once at initialization) */
+BOOLEAN gRedirOn = FALSE;
+/*
+ * Layered and glass windows are redirected too and composed with what is below them (formerly redirection level 2).
+ * Not the behaviour yet: nothing sets it, the code it guards is kept for that work (file header).
+ */
+BOOLEAN gRedirCompose = FALSE;
 PKTIMER gRedirTimer = NULL;
 PKTIMER gRedirTailTimer = NULL;
 static LIST_ENTRY gRedirList = { &gRedirList, &gRedirList };
@@ -91,14 +100,13 @@ static ATOM AtomUlwSeen;     /* level 2: the window has had UpdateLayeredWindow 
 static volatile LONG gRedirTimerArmed;
 static volatile LONG gRedirTailArmed;
 static LONG gRedirTailBusy;             /* tail-timer passes that found the USER lock held (raw input thread only) */
-static BOOL gRedirScrollRelease;        /* the DC being released is the one of a scroll (USER lock) */
 static LONGLONG gRedirFrameQpc;         /* a frame (REDIR_FRAME_100NS) in performance counter units */
 static LONGLONG gRedirQuietQpc;         /* half a frame: no release this long ends a burst of scrolls */
 static LONG gRedirBusyFrames;           /* frame-timer passes that found the USER lock held (raw input thread only) */
 static volatile LONG gRedirDirtyCount;   /* records with Dirty set: the timer takes the USER lock only then */
 static ULONG gRedirCreated, gRedirRefused, gRedirPresents;
 static volatile LONG gRedirRetries;     /* DCEs with DCE_REDIR_RETRY (windc.c) */
-static ULONG gRedirComposes, gRedirDebug;
+static ULONG gRedirComposes;
 static PSURFACE gRedirFB;               /* frame buffer of the compose passes (USER lock) */
 
 /* Records whose last reference a DC dropped without the USER lock: the frame timer frees them */
@@ -142,75 +150,12 @@ RedirArmTail(VOID)
     }
 }
 
-#ifdef _M_AMD64
-/* Whether the loader options (rewritten by the kernel at every boot) carry the token NOREDIRECTION */
-static BOOL
-RedirBootOptionOff(VOID)
-{
-    HKEY hKey;
-    WCHAR Buffer[512];
-    ULONG cb = sizeof(Buffer) - sizeof(WCHAR);
-    PWSTR p;
-    BOOL bOff = FALSE;
-
-    if (!NT_SUCCESS(RegOpenKey(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control", &hKey)))
-        return FALSE;
-    RtlZeroMemory(Buffer, sizeof(Buffer));
-    if (NT_SUCCESS(RegQueryValue(hKey, L"SystemStartOptions", REG_SZ, Buffer, &cb)))
-    {
-        for (p = Buffer; *p; )
-        {
-            PWSTR Token;
-            SIZE_T Len;
-
-            while (*p == L' ' || *p == L'\t' || *p == L'/')
-                p++;
-            Token = p;
-            while (*p && *p != L' ' && *p != L'\t' && *p != L'/')
-                p++;
-            Len = p - Token;
-            if (Len == 13 && _wcsnicmp(Token, L"NOREDIRECTION", 13) == 0)
-            {
-                bOff = TRUE;
-                break;
-            }
-        }
-    }
-    ZwClose(hKey);
-    return bOff;
-}
-#endif
-
 VOID
 NTAPI
 UserRedirInit(VOID)
 {
 #ifdef _M_AMD64
-    HKEY hKey;
-    DWORD Value = 0;
     SYSTEM_BASIC_INFORMATION Sbi;
-
-    if (NT_SUCCESS(RegOpenKey(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\GraphicsDrivers", &hKey)))
-    {
-        if (RegReadDWORD(hKey, L"NitroRedirection", &Value))
-            gRedirLevel = Value;
-        /* 1: a debug line per compose pass (level 2) */
-        if (RegReadDWORD(hKey, L"NitroRedirectionDebug", &Value))
-            gRedirDebug = Value;
-        ZwClose(hKey);
-    }
-    if (gRedirLevel > 2)
-    {
-        DbgPrint("win32k: NitroRedirection %lu is not a level (0, 1, 2): window redirection off\n", gRedirLevel);
-        gRedirLevel = 0;
-    }
-    if (gRedirLevel && RedirBootOptionOff())
-    {
-        DbgPrint("win32k: window redirection off (/NOREDIRECTION)\n");
-        gRedirLevel = 0;
-    }
-    if (!gRedirLevel)
-        return;
 
     /* A quarter of RAM, at most 256 MB, of surfaces per session */
     gRedirBudget = 256 * 1024 * 1024;
@@ -225,20 +170,24 @@ UserRedirInit(VOID)
     AtomRedir = IntAddGlobalAtom(L"NitroRedir", TRUE);
     if (!gRedirTimer || !AtomRedir)
     {
-        ERR("Redirection: no timer or atom, staying off\n");
-        gRedirLevel = 0;
+        /* Out of memory this early: windows draw on the screen */
+        ERR("Redirection: no timer or atom, windows draw on the screen\n");
+        /* The raw input thread waits on the timer when there is one: no timer that was never initialized */
+        if (gRedirTimer)
+        {
+            ExFreePoolWithTag(gRedirTimer, USERTAG_REDIRSURF);
+            gRedirTimer = NULL;
+        }
         return;
     }
-    /* Only level 2 uses this atom: without it level 2 is not offered, the level below it is unaffected */
-    if (gRedirLevel >= 2)
+    /* Only the composition of translucent windows uses this atom: without it they are not composed */
+    if (gRedirCompose)
     {
         AtomUlwSeen = IntAddGlobalAtom(L"NitroUlwSeen", TRUE);
         if (!AtomUlwSeen)
-        {
-            ERR("Redirection: no atom for level 2, staying at level 1\n");
-            gRedirLevel = 1;
-        }
+            gRedirCompose = FALSE;
     }
+    gRedirOn = TRUE;
     /* A synchronization timer: the wait of the raw input thread resets it (a notification timer stays signaled) */
     KeInitializeTimerEx(gRedirTimer, SynchronizationTimer);
     /* Without the tail timer a burst of scrolls is not deferred (gRedirFrameQpc stays 0) */
@@ -252,8 +201,7 @@ UserRedirInit(VOID)
         gRedirFrameQpc = Freq.QuadPart * 16 / 1000;
         gRedirQuietQpc = Freq.QuadPart * 8 / 1000;
     }
-    DbgPrint("win32k: window redirection level %lu (NitroRedirection), surface budget %Iu MB\n",
-             gRedirLevel, gRedirBudget >> 20);
+    DbgPrint("win32k: window surfaces on, surface budget %Iu MB\n", gRedirBudget >> 20);
 #endif
 }
 
@@ -267,7 +215,7 @@ RedirIsGlass(PWND Wnd)
 static BOOL
 RedirIsTransWnd(PWND Wnd)
 {
-    return gRedirLevel >= 2 && ((Wnd->ExStyle & WS_EX_LAYERED) || RedirIsGlass(Wnd));
+    return gRedirCompose && ((Wnd->ExStyle & WS_EX_LAYERED) || RedirIsGlass(Wnd));
 }
 
 /* Level 2: a top-level window whose content UpdateLayeredWindow gave (kept while it is hidden) */
@@ -276,7 +224,7 @@ RedirIsUlwWnd(PWND Wnd)
 {
     PREDIR r;
 
-    if (gRedirLevel < 2 || !(Wnd->ExStyle & WS_EX_LAYERED))
+    if (!gRedirCompose || !(Wnd->ExStyle & WS_EX_LAYERED))
         return FALSE;
     r = UserGetProp(Wnd, AtomRedir, TRUE);
     return r && r->bUlw;
@@ -289,7 +237,7 @@ RedirIsUlwWnd(PWND Wnd)
 static BOOL
 RedirIsLayeredUnset(PWND Wnd)
 {
-    return gRedirLevel >= 2 && (Wnd->ExStyle & WS_EX_LAYERED) && !GetLayeredStatus(Wnd) && !RedirIsUlwWnd(Wnd) &&
+    return gRedirCompose && (Wnd->ExStyle & WS_EX_LAYERED) && !GetLayeredStatus(Wnd) && !RedirIsUlwWnd(Wnd) &&
            !UserGetProp(Wnd, AtomUlwSeen, TRUE);
 }
 
@@ -298,7 +246,7 @@ VOID
 FASTCALL
 UserRedirUlwSeen(PWND Wnd)
 {
-    if (gRedirLevel >= 2 && Wnd && !UserGetProp(Wnd, AtomUlwSeen, TRUE))
+    if (gRedirCompose && Wnd && !UserGetProp(Wnd, AtomUlwSeen, TRUE))
         UserSetProp(Wnd, AtomUlwSeen, (HANDLE)1, TRUE);
 }
 
@@ -322,7 +270,7 @@ VOID
 FASTCALL
 UserRedirUlwForget(PWND Wnd)
 {
-    if (gRedirLevel >= 2 && Wnd)
+    if (gRedirCompose && Wnd)
         UserRemoveProp(Wnd, AtomUlwSeen, TRUE);
 }
 
@@ -331,7 +279,7 @@ BOOL
 FASTCALL
 UserRedirLayeredFits(PWND Wnd, LONG cx, LONG cy)
 {
-    if (gRedirLevel < 2 || !Wnd || !Wnd->spwndParent || !UserIsDesktopWindow(Wnd->spwndParent) || UserIsMessageWindow(Wnd))
+    if (!gRedirCompose || !Wnd || !Wnd->spwndParent || !UserIsDesktopWindow(Wnd->spwndParent) || UserIsMessageWindow(Wnd))
         return FALSE;
     return RedirSizeAllowed(UserGetProp(Wnd, AtomRedir, TRUE), cx, cy);
 }
@@ -343,7 +291,7 @@ UserRedirLayeredHasSize(PWND Wnd, LONG cx, LONG cy)
 {
     PREDIR r;
 
-    if (gRedirLevel < 2 || !Wnd)
+    if (!gRedirCompose || !Wnd)
         return FALSE;
     r = UserGetProp(Wnd, AtomRedir, TRUE);
     return r && r->psurf && r->cx == cx && r->cy == cy;
@@ -357,7 +305,7 @@ VOID
 FASTCALL
 UserRedirLayeredNoSurface(PWND Wnd)
 {
-    if (gRedirLevel >= 2)
+    if (gRedirCompose)
         UserRedirDetachWindow(Wnd);
 }
 
@@ -368,7 +316,7 @@ UserRedirRootFor(PWND Wnd)
 {
     PWND Root = Wnd;
 
-    if (!gRedirLevel || !Wnd)
+    if (!gRedirOn || !Wnd)
         return NULL;
     while (Root->spwndParent && !UserIsDesktopWindow(Root->spwndParent))
         Root = Root->spwndParent;
@@ -379,7 +327,7 @@ UserRedirRootFor(PWND Wnd)
     /* Level 2: a hidden UpdateLayeredWindow window keeps its content (it has no other) */
     if (!(Root->style & WS_VISIBLE) && !RedirIsUlwWnd(Root))
         return NULL;
-    if (gRedirLevel < 2)
+    if (!gRedirCompose)
     {
         if (Root->ExStyle & WS_EX_LAYERED)
             return NULL;
@@ -402,7 +350,7 @@ BOOL
 FASTCALL
 UserRedirNoPaint(PWND Wnd)
 {
-    if (gRedirLevel < 2 || !Wnd || !Wnd->spwndParent || !UserIsDesktopWindow(Wnd->spwndParent))
+    if (!gRedirCompose || !Wnd || !Wnd->spwndParent || !UserIsDesktopWindow(Wnd->spwndParent))
         return FALSE;
     return RedirIsLayeredUnset(Wnd) || RedirIsUlwWnd(Wnd);
 }
@@ -590,7 +538,7 @@ UserRedirDetachWindow(PWND Wnd)
 {
     PREDIR r;
 
-    if (!gRedirLevel || !Wnd)
+    if (!gRedirOn || !Wnd)
         return;
     r = UserGetProp(Wnd, AtomRedir, TRUE);
     if (!r)
@@ -609,7 +557,7 @@ UserRedirHasSurface(PWND Wnd)
 {
     PREDIR r;
 
-    if (!gRedirLevel || !Wnd)
+    if (!gRedirOn || !Wnd)
         return FALSE;
     r = UserGetProp(Wnd, AtomRedir, TRUE);
     if (!r || !r->psurf ||
@@ -796,7 +744,7 @@ RedirTransKind(PWND Wnd, PREDIR *pr)
     PREDIR r;
 
     *pr = NULL;
-    if (gRedirLevel < 2 || !((Wnd->ExStyle & WS_EX_LAYERED) || RedirIsGlass(Wnd)))
+    if (!gRedirCompose || !((Wnd->ExStyle & WS_EX_LAYERED) || RedirIsGlass(Wnd)))
         return TK_NONE;
     r = UserGetProp(Wnd, AtomRedir, TRUE);
     if ((Wnd->ExStyle & WS_EX_LAYERED) && !(r && r->bUlw) && !GetLayeredStatus(Wnd) && !UserGetProp(Wnd, AtomUlwSeen, TRUE))
@@ -963,7 +911,7 @@ RedirCompose(PWND Desk, PREGION Damage)
     RECTL rcDamage, rcBox, rcScreen;
     LONG cx, cy;
 
-    if (gRedirLevel < 2 || !Desk || !Damage || Desk->head.rpdesk != gpdeskInputDesktop || !UserIsEnteredExclusive())
+    if (!gRedirCompose || !Desk || !Damage || Desk->head.rpdesk != gpdeskInputDesktop || !UserIsEnteredExclusive())
         return;
     if (REGION_GetRgnBox(Damage, &rcDamage) == NULLREGION)
         return;
@@ -1148,11 +1096,8 @@ RedirCompose(PWND Desk, PREGION Damage)
     /* To the screen, in one blit */
     GreRedirPresent(gRedirFB, D, rcBox.left, rcBox.top);
     gRedirComposes++;
-    if (gRedirDebug)
-    {
-        DbgPrint("win32k: redirection compose %lu: (%ld,%ld)-(%ld,%ld), %lu layers, %Iu of %Iu bytes in use\n", gRedirComposes,
-                 rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, cEntries, gRedirBytes, gRedirBudget);
-    }
+    TRACE("Compose %lu: (%ld,%ld)-(%ld,%ld), %lu layers, %Iu of %Iu bytes in use\n", gRedirComposes,
+          rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, cEntries, gRedirBytes, gRedirBudget);
 
 done:
     if (Entries)
@@ -1198,7 +1143,7 @@ RedirComposeRect(PWND Wnd, const RECTL *prc)
     PREGION Rgn;
     PWND Desk = Wnd ? Wnd->spwndParent : NULL;
 
-    if (gRedirLevel < 2 || !Desk || !UserIsDesktopWindow(Desk) || RECTL_bIsEmptyRect(prc) || !RedirTransNear(Desk, prc))
+    if (!gRedirCompose || !Desk || !UserIsDesktopWindow(Desk) || RECTL_bIsEmptyRect(prc) || !RedirTransNear(Desk, prc))
         return;
     Rgn = IntSysCreateRectpRgnIndirect(prc);
     if (Rgn)
@@ -1216,7 +1161,7 @@ UserRedirLayoutChanged(PWND Wnd, const RECTL *prcOld)
     PREGION Rgn, New;
     RECTL rcBoth;
 
-    if (gRedirLevel < 2 || !Wnd || !Wnd->spwndParent || !UserIsDesktopWindow(Wnd->spwndParent))
+    if (!gRedirCompose || !Wnd || !Wnd->spwndParent || !UserIsDesktopWindow(Wnd->spwndParent))
         return;
     RECTL_bUnionRect(&rcBoth, prcOld, &Wnd->rcWindow);
     if (!RedirTransNear(Wnd->spwndParent, &rcBoth))
@@ -1238,7 +1183,7 @@ UserRedirLayeredSet(PWND Wnd, BOOL bFirst)
 {
     PREDIR r;
 
-    if (gRedirLevel < 2 || !Wnd)
+    if (!gRedirCompose || !Wnd)
         return;
     r = UserGetProp(Wnd, AtomRedir, TRUE);
     if (r && r->bUlw)
@@ -1274,7 +1219,7 @@ UserRedirUpdateLayered(
     BOOL bAlpha = FALSE, bCopied;
 
     *pbRet = FALSE;
-    if (gRedirLevel < 2 || !Wnd || !Wnd->spwndParent || !UserIsDesktopWindow(Wnd->spwndParent) ||
+    if (!gRedirCompose || !Wnd || !Wnd->spwndParent || !UserIsDesktopWindow(Wnd->spwndParent) ||
         UserIsMessageWindow(Wnd) || (Wnd->state & WNDS_DESTROYED) || (Wnd->state2 & WNDS2_INDESTROY))
     {
         return FALSE;
@@ -1372,9 +1317,24 @@ RedirPresentRect(PREDIR r, const REDIR_DIRTY *pd)
         gRedirPresents++;
         return;
     }
+    /* All of it (the window moved or came to the top): what it still has to paint is not shown from the surface */
+    if (!pd && Root->hrgnUpdate == HRGN_WINDOW)
+        return;
     Rgn = VIS_ComputeVisibleRegion(Root, FALSE, FALSE, TRUE);
     if (!Rgn)
         return;
+    if (!pd && Root->hrgnUpdate)
+    {
+        /* As where it is uncovered (UserRedirExpose), and as the screen copy of a move leaves out the update region
+           without redirection: that part shows what the window paints, not what the surface held before */
+        PREGION RgnUpdate = REGION_LockRgn(Root->hrgnUpdate);
+
+        if (RgnUpdate)
+        {
+            IntGdiCombineRgn(Rgn, Rgn, RgnUpdate, RGN_DIFF);
+            REGION_UnlockRgn(RgnUpdate);
+        }
+    }
     if (pd)
     {
         /* Only what was drawn: the rectangles (their bounding box if the region cannot be made) */
@@ -1423,18 +1383,11 @@ RedirPresentDirty(PREDIR r)
 }
 
 /*
- * ScrollWindowEx releases its DC with this set: a scroll moves the whole scrolled rectangle, so each one copied to the
- * screen costs as much as the scroll on the screen itself, on top of the scroll in the surface.
- */
-VOID
-FASTCALL
-UserRedirScrollRelease(BOOL bScroll)
-{
-    gRedirScrollRelease = bScroll;
-}
-
-/*
  * A DC bound to the record is released (ReleaseDC or EndPaint): what it drew goes to the screen.
+ *
+ * bScroll: the DC scrolled (ScrollWindowEx's DC, or a window DC passed to ScrollDC, windc.c DCE_REDIR_SCROLLED). A
+ * scroll moves the whole scrolled rectangle, so each one copied to the screen costs as much as the scroll on the
+ * screen itself, on top of the scroll in the surface.
  *
  * Scrolls that follow each other within a frame (a list or text scrolled in a loop) are the exception: the first
  * scroll after a pause is shown at once, and while the next ones come within a frame of the one before, the window is
@@ -1443,17 +1396,20 @@ UserRedirScrollRelease(BOOL bScroll)
  * shows what is left when the releases stop presenting (two frames without one), not before, so the raw input thread
  * does not copy the window on another processor while the scrolling thread draws into it. What is shown is the same,
  * a few frames later at the end of a burst, and a loop of scrolls copies once per frame instead of once per scroll.
+ *
+ * The burst state is the top-level window's (the record's), not the scrolled child's: scrolls of two children of one
+ * window in turn are one burst, and a child's paint during the burst of another waits for the frame too.
  */
 VOID
 FASTCALL
-UserRedirReleased(PVOID pv)
+UserRedirReleased(PVOID pv, BOOL bScroll)
 {
     PREDIR r = pv;
     LONGLONG Now;
 
     if (!r->pwnd)
         return;
-    if (gRedirScrollRelease)
+    if (bScroll)
     {
         BOOL bBurst;
 
@@ -1501,7 +1457,7 @@ UserRedirWindowMoved(PWND Wnd)
     PREDIR r;
     REDIR_DIRTY Dirty;
 
-    if (!gRedirLevel || !Wnd)
+    if (!gRedirOn || !Wnd)
         return;
     r = UserGetProp(Wnd, AtomRedir, TRUE);
     if (r)
@@ -1619,6 +1575,9 @@ UserRedirPresentPending(VOID)
         }
         else if (r->Dirty && r->pwnd)
         {
+            /* A burst of scrolls that is over (two frames without a present of it) ends here, not at the next release */
+            if (r->HoldUntil && KeQueryPerformanceCounter(NULL).QuadPart >= r->HoldUntil)
+                r->HoldUntil = 0;
             /* RedirPresentDirty may detach r; the next entry was taken first, and r stays alive while a DC holds it */
             InterlockedIncrement(&r->cRefs);
             RedirPresentDirty(r);
@@ -1684,6 +1643,8 @@ UserRedirPresentTail(VOID)
         /* RedirPresentDirty may detach r; the next entry was taken first, and r stays alive while a DC holds it */
         InterlockedIncrement(&r->cRefs);
         r->LastPresent = KeQueryPerformanceCounter(NULL).QuadPart;
+        /* The last frame of the burst: the burst ends (a scroll within a frame of the last one starts it again) */
+        r->HoldUntil = 0;
         RedirPresentDirty(r);
         RedirRelease(r);
     }
@@ -1704,7 +1665,7 @@ UserRedirExpose(PWND DesktopWnd, PREGION RgnScreen)
 {
     PWND Child;
 
-    if (!gRedirLevel || !DesktopWnd || !RgnScreen || DesktopWnd->head.rpdesk != gpdeskInputDesktop)
+    if (!gRedirOn || !DesktopWnd || !RgnScreen || DesktopWnd->head.rpdesk != gpdeskInputDesktop)
         return;
 
     for (Child = DesktopWnd->spwndChild; Child; Child = Child->spwndNext)
@@ -1718,7 +1679,7 @@ UserRedirExpose(PWND DesktopWnd, PREGION RgnScreen)
         if (!(Child->style & WS_VISIBLE) || !RECTL_bIntersectRect(&rcBox, &rcBox, &Child->rcWindow))
             continue;
         /* Level 2: where a translucent window is, the compositor draws it and what is below it */
-        if (gRedirLevel >= 2 && RedirTransKind(Child, &r) != TK_NONE)
+        if (gRedirCompose && RedirTransKind(Child, &r) != TK_NONE)
         {
             Vis = VIS_ComputeVisibleRegion(Child, FALSE, FALSE, TRUE);
             if (!Vis)

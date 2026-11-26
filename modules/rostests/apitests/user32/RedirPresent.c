@@ -2,7 +2,7 @@
  * PROJECT:     ReactOS API Tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     What a window draws through its DC is on the screen when the DC is released or the paint ends, for each
- *              kind of primitive, and nothing else of the window is copied there (NitroRedirection levels 0, 1 and 2)
+ *              kind of primitive, and nothing else of the window is copied there (window redirection: amd64; none on i386)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * At level 0 a window draws on the screen. At levels 1 and 2 (amd64) it draws into its surface, and what each
@@ -34,35 +34,16 @@ static int g_Level;
 static int g_PaintMode;   /* 0: the paint draws nothing, 1: a red line at y 200 */
 static LONG g_cPaint;
 
-/* The window redirection level in effect: NitroRedirection on an amd64 system without /NOREDIRECTION */
+/*
+ * The window redirection level of the system: 1 on amd64 (top-level windows draw into surfaces of their own), 0 on
+ * i386. Level 2 (layered and glass windows composed) is not the behaviour yet: its rows do not run.
+ */
 static int GetRedirectionLevel(void)
 {
-    HKEY hKey;
-    DWORD Value = 0, cb = sizeof(Value);
-    WCHAR Options[512] = L"";
     SYSTEM_INFO si;
 
     GetNativeSystemInfo(&si);
-    if (si.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_AMD64)
-        return 0;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        if (RegQueryValueExW(hKey, L"NitroRedirection", NULL, NULL, (BYTE *)&Value, &cb) != ERROR_SUCCESS || Value > 2)
-            Value = 0;
-        RegCloseKey(hKey);
-    }
-    if (Value && RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        cb = sizeof(Options) - sizeof(WCHAR);
-        if (RegQueryValueExW(hKey, L"SystemStartOptions", NULL, NULL, (BYTE *)Options, &cb) == ERROR_SUCCESS)
-        {
-            _wcsupr(Options);
-            if (wcsstr(Options, L"NOREDIRECTION"))
-                Value = 0;
-        }
-        RegCloseKey(hKey);
-    }
-    return (int)Value;
+    return si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 ? 1 : 0;
 }
 
 static void Pump(void)
@@ -597,6 +578,49 @@ static void Test_RestStays(HWND hwnd)
     ok(ScreenPixel(301, 11) == BLACK, "drawing over the mark: 0x%06lx\n", ScreenPixel(301, 11));
 }
 
+/*
+ * GetRandomRgn(SYSRGN) of a window DC is in screen coordinates (MSDN, GetRandomRgn), also when the window draws into
+ * a surface of its own: for the window, a child window, and after the window moved while the DC was held.
+ */
+static void CheckSysRgn(HDC hdc, HWND hwnd, const char *what)
+{
+    HRGN hrgn = CreateRectRgn(0, 0, 0, 0);
+    RECT rcWin, rcRgn;
+    int ret = GetRandomRgn(hdc, hrgn, 4 /* SYSRGN */);
+
+    GetWindowRect(hwnd, &rcWin);
+    GetRgnBox(hrgn, &rcRgn);
+    ok(ret == 1, "%s: GetRandomRgn returned %d\n", what, ret);
+    ok(!IsRectEmpty(&rcRgn) && rcRgn.left >= rcWin.left && rcRgn.top >= rcWin.top && rcRgn.right <= rcWin.right &&
+       rcRgn.bottom <= rcWin.bottom, "%s: region (%ld,%ld)-(%ld,%ld) not inside the window (%ld,%ld)-(%ld,%ld)\n", what,
+       rcRgn.left, rcRgn.top, rcRgn.right, rcRgn.bottom, rcWin.left, rcWin.top, rcWin.right, rcWin.bottom);
+    DeleteObject(hrgn);
+}
+
+static void Test_SysRgn(HWND hwnd)
+{
+    HWND hChild = CreateWindowExW(0, L"RedirPresentTest", L"", WS_CHILD | WS_VISIBLE, 30, 40, 100, 60, hwnd, NULL,
+                                  GetModuleHandleW(NULL), NULL);
+    HDC hdc;
+
+    Pump();
+    hdc = GetDC(hwnd);
+    CheckSysRgn(hdc, hwnd, "window DC");
+    SetWindowPos(hwnd, NULL, WX + 37, WY + 21, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    Pump();
+    CheckSysRgn(hdc, hwnd, "window DC held across a move");
+    ReleaseDC(hwnd, hdc);
+    if (hChild)
+    {
+        hdc = GetDC(hChild);
+        CheckSysRgn(hdc, hChild, "child window DC");
+        ReleaseDC(hChild, hdc);
+        DestroyWindow(hChild);
+    }
+    SetWindowPos(hwnd, NULL, WX, WY, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    Pump();
+}
+
 START_TEST(RedirPresent)
 {
     WNDCLASSW wc = { 0 };
@@ -604,7 +628,7 @@ START_TEST(RedirPresent)
     HDC hdcScreen;
 
     g_Level = GetRedirectionLevel();
-    trace("NitroRedirection level %d\n", g_Level);
+    trace("window redirection level %d\n", g_Level);
 
     hdcScreen = GetDC(NULL);
     if (GetDeviceCaps(hdcScreen, BITSPIXEL) < 24)
@@ -631,6 +655,7 @@ START_TEST(RedirPresent)
 
     Test_Primitives(hwnd);
     Test_RestStays(hwnd);
+    Test_SysRgn(hwnd);
 
     DestroyWindow(hwnd);
     Pump();

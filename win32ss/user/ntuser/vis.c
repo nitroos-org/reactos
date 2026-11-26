@@ -212,7 +212,7 @@ co_VIS_WindowLayoutChanged(
                          Wnd->rcWindow.top - Parent->rcClient.top);
 
        /* Redirected top-level windows show what was below from their surfaces: no WM_PAINT for them (redir.c) */
-       if (gRedirLevel && UserIsDesktopWindow(Parent))
+       if (gRedirOn && UserIsDesktopWindow(Parent))
        {
            REGION_bOffsetRgn(TempRgn, Parent->rcClient.left, Parent->rcClient.top);
            UserRedirExpose(Parent, TempRgn);

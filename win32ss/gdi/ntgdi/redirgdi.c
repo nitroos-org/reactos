@@ -4,7 +4,7 @@
  * PURPOSE:     Redirection surfaces of windows: allocation and presentation on the screen (GDI side)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
- * With NitroRedirection (ntuser/redir.c), a top-level window draws into a 32 bpp surface of its own,
+ * With window redirection (ntuser/redir.c, amd64), a top-level window draws into a 32 bpp surface of its own,
  * the size of its window rectangle. Its DCs select that surface (GreRedirBindDC, dclife.c) and what the
  * window drew is copied onto the screen through its visible region (GreRedirPresent). The surface keeps
  * the content when the window is covered.
@@ -223,7 +223,7 @@ GreRedirSeedFromScreen(
 }
 
 /*
- * Level 2 (NitroRedirection 2): a compose pass builds what the screen shows in a frame buffer (psurfFB, whose
+ * Level 2 (composition of translucent windows, not the behaviour yet: redir.c): a compose pass builds what the screen shows in a frame buffer (psurfFB, whose
  * pixel 0, 0 is at xFB, yFB on the screen), from the bottom window up, and copies it to the screen in one blit.
  * Draws the layer pl through prgnScreen (screen coordinates) into the frame buffer: copied, or blended with
  * what the windows below put there. Both surfaces are 32 bpp B, G, R, A in memory.

@@ -172,6 +172,10 @@ DceSetDrawable( PWND Window OPTIONAL,
 
   /* Set DC Origin and Window Rectangle */
   GreSetDCOrg( hDC, rect.left, rect.top, &rect);
+
+  /* And where that surface is on the screen (GetRandomRgn SYSRGN) */
+  if (Root)
+      GreRedirSetScreenOrg(hDC, Root->rcWindow.left, Root->rcWindow.top);
 }
 
 
@@ -488,10 +492,11 @@ DceReleaseDC(DCE* dce, BOOL EndPaint)
    /* What a redirected window drew goes to the screen now; a cache DC lets go of its surface */
    if (dce->pRedir)
    {
-      UserRedirReleased(dce->pRedir);
+      UserRedirReleased(dce->pRedir, (dce->RedirFlags & DCE_REDIR_SCROLLED) != 0);
       if (dce->DCXFlags & DCX_CACHE)
          DceRedirBind(dce, NULL);
    }
+   dce->RedirFlags &= ~DCE_REDIR_SCROLLED;
 
    /* The clip region (the update region of a paint) goes first: the visible region restored below must not keep
     * it, or what the owner draws through a held CS_OWNDC / CS_CLASSDC DC after a paint reaches only the part
@@ -816,8 +821,8 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
 
    if (IntGdiSetHookFlags(Dce->hDC, DCHF_VALIDATEVISRGN)) bUpdateVisRgn = TRUE;
 
-   /* NitroRedirection: a DC of a redirected window draws into its top-level window's surface */
-   if (gRedirLevel || Dce->pRedir)
+   /* A DC of a redirected window draws into its top-level window's surface (redir.c) */
+   if (gRedirOn || Dce->pRedir)
    {
       PWND RedirRoot = UserRedirRootFor(Wnd);
       PVOID pRedir = RedirRoot ? UserRedirGet(RedirRoot) : NULL;
@@ -868,7 +873,7 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
       Not when it draws into a surface at level 2: the copies keep their alpha there and the compositor blends a glass
       top-level window; a glass child of an opaque top-level is drawn opaque (DWM glass is for top-level windows: verify). */
    {
-      BOOL bGlass = Wnd && !(gRedirLevel >= 2 && Dce->pRedir) && UserGetProp(Wnd, gpsi->atomFrostedWindowProp, TRUE) != NULL;
+      BOOL bGlass = Wnd && !(gRedirCompose && Dce->pRedir) && UserGetProp(Wnd, gpsi->atomFrostedWindowProp, TRUE) != NULL;
 
       if (bGlass || Dce->bGlass)
       {
@@ -1209,6 +1214,9 @@ DceResetActiveDCEs(PWND Window)
                NtGdiOffsetRgn(pDCE->hrgnClip, DeltaX, DeltaY);
             }
          }
+         /* Where the surface of a redirected DC is on the screen now (GetRandomRgn SYSRGN) */
+         dc->ptlRedirScreen.x = RootX;
+         dc->ptlRedirScreen.y = RootY;
          DC_UnlockDc(dc);
 
          DceUpdateVisRgn(pDCE, CurrentWindow, pDCE->DCXFlags);

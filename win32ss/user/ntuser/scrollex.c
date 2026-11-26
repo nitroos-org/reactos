@@ -152,6 +152,15 @@ UserScrollDC(
       return ERROR;
    }
 
+   /* A window DC that draws into a redirected window's surface: its release is one of a scroll (redir.c) */
+   if (gRedirOn)
+   {
+      PDCE Dce = DceGetDceFromDC(hDC);
+
+      if (Dce && Dce->pRedir)
+         Dce->RedirFlags |= DCE_REDIR_SCROLLED;
+   }
+
    /* Calculate the region that was invalidated by moving or
       could not be copied, because it was not visible */
    if (RgnUpdate || hrgnUpdate || prcUpdate)
@@ -339,9 +348,7 @@ IntScrollWindowEx(
                           RgnUpdate,
                           prcUpdate);
 
-   UserRedirScrollRelease(TRUE);
    UserReleaseDC(Window, hDC, FALSE);
-   UserRedirScrollRelease(FALSE);
 
    /*
     * Take into account the fact that some damage may have occurred during
