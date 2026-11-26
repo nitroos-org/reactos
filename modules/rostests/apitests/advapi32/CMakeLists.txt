@@ -69,6 +69,7 @@ list(APPEND SOURCE
     LockServiceDatabase.c
     LabelAutoInherit.c
     LookupPrivilegeNames.c
+    TokenIncreaseWorkingSet.c
     LookupAccountSidCaller.c
     LogonUser.c
     LogonUserCleartext.c
