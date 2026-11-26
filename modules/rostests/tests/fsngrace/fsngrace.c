@@ -8,8 +8,11 @@
  *              it is. A sector of a canary that holds anything else, or a churn read that returns a canary's
  *              sector, means a transfer reached clusters that had gone to another file. Other threads list the
  *              directory and query attributes meanwhile.
+ *              "Twin" threads (the optional fourth argument) open one of a few shared files through two handles at
+ *              the same time, while others delete and recreate it, and check that what one handle writes, truncates
+ *              or extends (cached or through a mapped view) is what the other handle reads and reports as the size.
  *
- * usage: fsngrace <dir> <seconds> [threads]
+ * usage: fsngrace <dir> <seconds> [threads] [twin threads]
  * exit code 0: no mismatch, 1: mismatches (count printed), 2: usage or setup failure
  */
 
@@ -438,6 +441,309 @@ Worker(PVOID Param)
     return 0;
 }
 
+/* --- twins: one file, two handles */
+
+#define TWIN_FILES      2
+#define TWIN_MAX        (256 * 1024)
+#define TWIN_BLOCK_MAX  (16 * 1024)
+#define TWIN_BUFFER     (TWIN_MAX + 4 * TWIN_BLOCK_MAX)
+
+/* Under TwinLock[File]: the size the file was last given and its file ID (TwinSize -1: not known) */
+static CRITICAL_SECTION TwinLock[TWIN_FILES];
+static LONGLONG TwinSizeNow[TWIN_FILES];
+static DWORD TwinIdHigh[TWIN_FILES], TwinIdLow[TWIN_FILES];
+static volatile LONG TwinChecks, TwinBad, TwinOther, TwinGen, TwinChanges;
+
+static VOID
+TwinPath(WCHAR *Path, ULONG File)
+{
+    _snwprintf(Path, MAX_PATH, L"%s\\twin%lu.bin", Dir, File);
+}
+
+static VOID
+TwinReport(const char *What, ULONG File, LONGLONG A, LONGLONG B, LONGLONG C)
+{
+    if (InterlockedIncrement(&TwinBad) > 40)
+        return;
+    EnterCriticalSection(&PrintLock);
+    printf("TWIN MISMATCH %s: twin%lu %I64d %I64d %I64d\n", What, File, A, B, C);
+    fflush(stdout);
+    LeaveCriticalSection(&PrintLock);
+}
+
+static LONGLONG
+TwinSize(HANDLE h)
+{
+    LARGE_INTEGER Size;
+    return GetFileSizeEx(h, &Size) ? Size.QuadPart : -1;
+}
+
+/* Reads Length bytes at Offset through h; the count read, or -1. */
+static LONG
+TwinRead(HANDLE h, LONGLONG Offset, PUCHAR Buffer, ULONG Length)
+{
+    OVERLAPPED Ov;
+    DWORD Done = 0;
+
+    ZeroMemory(&Ov, sizeof(Ov));
+    Ov.Offset = (DWORD)Offset;
+    Ov.OffsetHigh = (DWORD)(Offset >> 32);
+    if (!ReadFile(h, Buffer, Length, &Done, &Ov))
+        return GetLastError() == ERROR_HANDLE_EOF ? 0 : -1;
+    return (LONG)Done;
+}
+
+static BOOL
+TwinWrite(HANDLE h, LONGLONG Offset, const UCHAR *Buffer, ULONG Length)
+{
+    OVERLAPPED Ov;
+    DWORD Done = 0;
+
+    ZeroMemory(&Ov, sizeof(Ov));
+    Ov.Offset = (DWORD)Offset;
+    Ov.OffsetHigh = (DWORD)(Offset >> 32);
+    return WriteFile(h, Buffer, Length, &Done, &Ov) && Done == Length;
+}
+
+static BOOL
+TwinSetSize(HANDLE h, LONGLONG Size)
+{
+    LARGE_INTEGER Pos;
+    Pos.QuadPart = Size;
+    return SetFilePointerEx(h, Pos, NULL, FILE_BEGIN) && SetEndOfFile(h);
+}
+
+/*
+ * The changer of a twin file: under the file's lock it deletes the file and creates it again, or changes the size of
+ * the existing one, through a handle without the cache, writes stamps over the whole file and records its size and
+ * file ID; the handle is closed before the lock is let go.  A file that nobody opened through the cache has no cache
+ * map, so its control block goes with that close, and the next open builds a new one: the opens of the checkers
+ * race with these changes.
+ */
+static VOID
+TwinChange(ULONG File, ULONG *Seed, PUCHAR Buffer)
+{
+    BY_HANDLE_FILE_INFORMATION I;
+    WCHAR Path[MAX_PATH];
+    HANDLE h;
+    ULONG Sectors = 1 + Next(Seed) % (TWIN_MAX / SECTOR), Gen;
+    BOOL Recreate = Next(Seed) % 4 == 0;
+
+    TwinPath(Path, File);
+    EnterCriticalSection(&TwinLock[File]);
+    TwinSizeNow[File] = -1;
+    if (Recreate)
+        DeleteFileW(Path);
+    /* a checker's handle keeps a deleted file (delete pending): then the create fails until it is closed */
+    h = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                    OPEN_ALWAYS, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH, NULL);
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        Gen = (ULONG)InterlockedIncrement(&TwinGen);
+        FillSectors(Buffer, 0, Sectors, MAGIC_CHURN, 300 + File, Gen);
+        if (TwinSetSize(h, (LONGLONG)Sectors * SECTOR) && TwinWrite(h, 0, Buffer, Sectors * SECTOR) &&
+            GetFileInformationByHandle(h, &I))
+        {
+            TwinSizeNow[File] = (LONGLONG)Sectors * SECTOR;
+            TwinIdHigh[File] = I.nFileIndexHigh;
+            TwinIdLow[File] = I.nFileIndexLow;
+            InterlockedIncrement(&TwinChanges);
+        }
+        CloseHandle(h);
+    }
+    LeaveCriticalSection(&TwinLock[File]);
+    Sleep(Next(Seed) % 3);
+}
+
+/*
+ * Opens a twin file through two handles at once (the changer's deletes, creates and size changes race with these
+ * opens; both handles go through the cache, or one time in three both without it), then, holding the file's lock so
+ * that nothing changes it meanwhile: a read of the whole file through the second handle, before anything asks the file
+ * system for the size, must return exactly the size the file was last given (what the handle's file control block
+ * says, not a size query, which refreshes it); then a change through one handle
+ * and a check through the other: the size each reports, the bytes a cached read returns after a cached or mapped write,
+ * the end after a truncation, zeros after an extension.  Two handles of one file must agree on all of it.
+ */
+static VOID
+TwinOp(ULONG *Seed, PUCHAR Buffer, PUCHAR Back)
+{
+    ULONG File = Next(Seed) % TWIN_FILES, Op = Next(Seed) % 100, Gen, Length, i;
+    /* one time in three both handles go without the cache: then no cache map keeps the file's control block */
+    DWORD Flags = (Next(Seed) % 3 == 0) ? FILE_FLAG_NO_BUFFERING : FILE_ATTRIBUTE_NORMAL;
+    BY_HANDLE_FILE_INFORMATION I1, I2;
+    WCHAR Path[MAX_PATH];
+    HANDLE h1, h2, Map;
+    LONGLONG Size1, Size2, Offset, NewSize;
+    LONG Got;
+
+    TwinPath(Path, File);
+    h1 = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                     OPEN_EXISTING, Flags, NULL);
+    if (h1 == INVALID_HANDLE_VALUE)
+        return;
+    h2 = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                     OPEN_EXISTING, Flags, NULL);
+    if (h2 == INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(h1);
+        return;
+    }
+    /* A delete between the two opens can leave them on two files: then there is nothing to compare. */
+    if (!GetFileInformationByHandle(h1, &I1) || !GetFileInformationByHandle(h2, &I2) ||
+        I1.nFileIndexHigh != I2.nFileIndexHigh || I1.nFileIndexLow != I2.nFileIndexLow)
+    {
+        InterlockedIncrement(&TwinOther);
+        CloseHandle(h2);
+        CloseHandle(h1);
+        return;
+    }
+
+    EnterCriticalSection(&TwinLock[File]);
+    if (TwinSizeNow[File] < 0 || TwinIdHigh[File] != I1.nFileIndexHigh || TwinIdLow[File] != I1.nFileIndexLow)
+    {
+        /* opened a file the changer has replaced since, or one whose size is not known */
+        LeaveCriticalSection(&TwinLock[File]);
+        InterlockedIncrement(&TwinOther);
+        CloseHandle(h2);
+        CloseHandle(h1);
+        return;
+    }
+    InterlockedIncrement(&TwinChecks);
+    Got = TwinRead(h2, 0, Back, TWIN_BUFFER - TWIN_BLOCK_MAX);
+    if (Got != TwinSizeNow[File])
+        TwinReport(Flags == FILE_FLAG_NO_BUFFERING ? "read (no cache) of the whole file: other length than the file has" :
+                   "cached read of the whole file: other length than the file has", File, Got,
+                   TwinSizeNow[File], 0);
+    Size1 = TwinSize(h1);
+    Size2 = TwinSize(h2);
+    if (Size1 != Size2 || Size1 != TwinSizeNow[File])
+        TwinReport("sizes of two handles differ", File, Size1, Size2, TwinSizeNow[File]);
+
+    Offset = (LONGLONG)(Next(Seed) % (TWIN_MAX / SECTOR)) * SECTOR;
+    Length = (1 + Next(Seed) % (TWIN_BLOCK_MAX / SECTOR)) * SECTOR;
+    Gen = (ULONG)InterlockedIncrement(&TwinGen);
+    /* What the reading handle has cached before the change is what a second cache would keep. */
+    TwinRead(h2, Offset, Back, Length);
+
+    if (Op < 50)
+    {
+        /* cached write through one handle, cached read through the other */
+        FillSectors(Buffer, (ULONG)(Offset / SECTOR), Length / SECTOR, MAGIC_CHURN, 100 + File, Gen);
+        if (TwinWrite(h1, Offset, Buffer, Length))
+        {
+            Got = TwinRead(h2, Offset, Back, Length);
+            if (Got != (LONG)Length)
+                TwinReport("read after write: length", File, Offset, Length, Got);
+            else if (memcmp(Buffer, Back, Length))
+                TwinReport("read after write: other bytes", File, Offset, Length, Gen);
+            Size1 = TwinSize(h1);
+            Size2 = TwinSize(h2);
+            if (Size1 != Size2 || Size2 < Offset + Length)
+                TwinReport("size after write", File, Size1, Size2, Offset + Length);
+        }
+    }
+    else if (Op < 65)
+    {
+        /* through a mapped view of one handle, cached read through the other (a read without the cache is not
+         * coherent with a mapped view: only with cached handles) */
+        if (Size1 >= SECTOR && Flags != FILE_FLAG_NO_BUFFERING)
+        {
+            Offset = (LONGLONG)(Next(Seed) % (ULONG)(Size1 / SECTOR)) * SECTOR;
+            Length = SECTOR;
+            FillSectors(Buffer, (ULONG)(Offset / SECTOR), 1, MAGIC_CHURN, 200 + File, Gen);
+            Map = CreateFileMappingW(h1, NULL, PAGE_READWRITE, 0, 0, NULL);
+            if (Map)
+            {
+                PUCHAR View = MapViewOfFile(Map, FILE_MAP_WRITE, 0, 0, 0);
+                if (View)
+                {
+                    memcpy(View + Offset, Buffer, SECTOR);
+                    Got = TwinRead(h2, Offset, Back, SECTOR);
+                    if (Got != SECTOR || memcmp(Buffer, Back, SECTOR))
+                        TwinReport("read after a mapped write", File, Offset, Got, Gen);
+                    UnmapViewOfFile(View);
+                }
+                CloseHandle(Map);
+            }
+        }
+    }
+    else if (Op < 85)
+    {
+        /* truncation through one handle: the other sees the new end and nothing past it */
+        /* whole sectors: a handle without the cache reads at sector offsets only */
+        NewSize = (LONGLONG)(Next(Seed) % (TWIN_MAX / SECTOR) / (Op < 75 ? 8 : 1)) * SECTOR;
+        if (NewSize < Size1 && TwinSetSize(h1, NewSize))
+        {
+            Size2 = TwinSize(h2);
+            if (Size2 != NewSize)
+                TwinReport("size after truncation", File, Size1, NewSize, Size2);
+            Got = TwinRead(h2, NewSize, Back, SECTOR);
+            if (Got != 0)
+                TwinReport("read past the end after truncation", File, NewSize, Got, Size1);
+            if (NewSize >= SECTOR)
+            {
+                Got = TwinRead(h2, NewSize - SECTOR, Back, 2 * SECTOR);
+                if (Got != SECTOR)
+                    TwinReport("read at the end after truncation", File, NewSize, Got, Size1);
+            }
+        }
+    }
+    else
+    {
+        /* extension through the second handle: the first reads zeros there */
+        NewSize = Size1 + (1 + Next(Seed) % 64) * SECTOR;
+        if (NewSize <= TWIN_MAX + TWIN_BLOCK_MAX && TwinSetSize(h2, NewSize))
+        {
+            Size1 = TwinSize(h1);
+            if (Size1 != NewSize)
+                TwinReport("size after extension", File, Size1, NewSize, 0);
+            Got = TwinRead(h1, NewSize - SECTOR, Back, SECTOR);
+            if (Got != SECTOR)
+                TwinReport("read of the extension: length", File, NewSize, Got, 0);
+            else
+                for (i = 0; i < SECTOR; i++)
+                    if (Back[i])
+                    {
+                        TwinReport("extension not zero", File, NewSize - SECTOR + i, Back[i], 0);
+                        break;
+                    }
+        }
+    }
+    /* what the next checker must find (a size query answers from the file system) */
+    TwinSizeNow[File] = TwinSize(h2);
+    LeaveCriticalSection(&TwinLock[File]);
+    if (Op & 1)
+    {
+        CloseHandle(h1);
+        CloseHandle(h2);
+    }
+    else
+    {
+        CloseHandle(h2);
+        CloseHandle(h1);
+    }
+}
+
+static DWORD WINAPI
+Twin(PVOID Param)
+{
+    ULONG Index = (ULONG)(ULONG_PTR)Param, Seed = 0x7717 + Index * 104729;
+    PUCHAR Buffer = VirtualAlloc(NULL, 2 * TWIN_BUFFER, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+    if (!Buffer)
+        return 1;
+    /* one thread in four changes a file (they take the files in turn), the others check */
+    while (!Stop)
+    {
+        if (Index % 4 == 0)
+            TwinChange((Index / 4) % TWIN_FILES, &Seed, Buffer);
+        else
+            TwinOp(&Seed, Buffer, Buffer + TWIN_BUFFER);
+    }
+    VirtualFree(Buffer, 0, MEM_RELEASE);
+    return 0;
+}
+
 static DWORD WINAPI
 Lister(PVOID Param)
 {
@@ -464,8 +770,8 @@ Lister(PVOID Param)
 int
 wmain(int argc, WCHAR **argv)
 {
-    HANDLE Threads[40];
-    ULONG Count, Seconds, i, n = 0, StuckNames;
+    HANDLE Threads[80];
+    ULONG Count, Twins, Seconds, i, n = 0, StuckNames;
     WCHAR Path[MAX_PATH];
 
     if (argc < 3)
@@ -478,6 +784,9 @@ wmain(int argc, WCHAR **argv)
     Count = argc > 3 ? _wtoi(argv[3]) : 6;
     if (Count < 1 || Count > 32)
         Count = 6;
+    Twins = argc > 4 ? _wtoi(argv[4]) : 0;
+    if (Twins > 32)
+        Twins = 32;
     CreateDirectoryW(Dir, NULL);
     if (GetFileAttributesW(Dir) == INVALID_FILE_ATTRIBUTES)
     {
@@ -485,9 +794,13 @@ wmain(int argc, WCHAR **argv)
         return 2;
     }
     InitializeCriticalSection(&PrintLock);
+    for (i = 0; i < TWIN_FILES; i++)
+        InitializeCriticalSection(&TwinLock[i]);
 
     for (i = 0; i < Count; i++)
         Threads[n++] = CreateThread(NULL, 0, Worker, (PVOID)(ULONG_PTR)i, 0, NULL);
+    for (i = 0; i < Twins; i++)
+        Threads[n++] = CreateThread(NULL, 0, Twin, (PVOID)(ULONG_PTR)i, 0, NULL);
     Threads[n++] = CreateThread(NULL, 0, Lister, NULL, 0, NULL);
     Threads[n++] = CreateThread(NULL, 0, Lister, NULL, 0, NULL);
 
@@ -496,23 +809,32 @@ wmain(int argc, WCHAR **argv)
         Sleep(1000);
         if (i % 30 == 29)
         {
-            printf("t=%lu canaries checked %ld bad %ld, churn ops %ld bad %ld, lists %ld, errors %ld\n",
-                   i + 1, CanaryOk, CanaryBad, ChurnOps, ChurnBad, Lists, Errors);
+            printf("t=%lu canaries checked %ld bad %ld, churn ops %ld bad %ld, lists %ld, errors %ld, "
+                   "twin checks %ld bad %ld\n",
+                   i + 1, CanaryOk, CanaryBad, ChurnOps, ChurnBad, Lists, Errors, TwinChecks, TwinBad);
             fflush(stdout);
         }
     }
     Stop = 1;
-    WaitForMultipleObjects(n, Threads, TRUE, 120000);
+    /* WaitForMultipleObjects takes at most MAXIMUM_WAIT_OBJECTS handles */
+    for (i = 0; i < n; i += MAXIMUM_WAIT_OBJECTS)
+        WaitForMultipleObjects(min(n - i, MAXIMUM_WAIT_OBJECTS), Threads + i, TRUE, 120000);
 
     for (i = 0; i < CHURN_FILES; i++)
     {
         ChurnPath(Path, i);
         DeleteFileW(Path);
     }
+    for (i = 0; i < TWIN_FILES; i++)
+    {
+        TwinPath(Path, i);
+        DeleteFileW(Path);
+    }
     Sleep(3000);
     StuckNames = ProbeFailedNames();
     printf("RESULT canaries checked %ld bad %ld, churn ops %ld bad %ld, lists %ld, errors %ld, "
-           "names that failed %lu, of them unusable afterwards %lu\n",
-           CanaryOk, CanaryBad, ChurnOps, ChurnBad, Lists, Errors, FailedCount, StuckNames);
-    return (CanaryBad || ChurnBad || StuckNames) ? 1 : 0;
+           "names that failed %lu, of them unusable afterwards %lu, twin checks %ld bad %ld (opens on two files %ld)\n",
+           CanaryOk, CanaryBad, ChurnOps, ChurnBad, Lists, Errors, FailedCount, StuckNames, TwinChecks, TwinBad,
+           TwinOther);
+    return (CanaryBad || ChurnBad || StuckNames || TwinBad) ? 1 : 0;
 }

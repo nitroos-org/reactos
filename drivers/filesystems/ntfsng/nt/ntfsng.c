@@ -365,9 +365,10 @@ int NgEnsureNode(PNG_FCB Fcb)
 
 /*
  * Only under an exclusive hold: a shared holder may be using the node.  The node may belong to a file that lost
- * its last name while this FCB held it (an open whose walk found the file listed its FCB after a delete through
- * another FCB had unlinked it): this put frees the record, whose number a new file can then get, so the FCB is
- * deleted and leaves the lookup list here, before a create of that new file could find it by the number.
+ * its last name while this FCB held it (opens list their FCB in the hold of their walk, so no longer the open that
+ * raced a delete; kept for any other path that unlinks a file this FCB does not know of): this put frees the record,
+ * whose number a new file can then get, so the FCB is deleted and leaves the lookup list here, before a create of
+ * that new file could find it by the number.
  */
 VOID NgParkNode(PNG_FCB Fcb)
 {
