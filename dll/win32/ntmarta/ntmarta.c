@@ -2111,10 +2111,24 @@ AccpReopenKeyForSacl(IN HANDLE Handle,
     BYTE Buffer[sizeof(OBJECT_NAME_INFORMATION) + 520 * sizeof(WCHAR)];
     POBJECT_NAME_INFORMATION Name = (POBJECT_NAME_INFORMATION)Buffer;
     OBJECT_ATTRIBUTES Oa;
+    UNICODE_STRING Empty;
     NTSTATUS Status;
 
     *Reopened = NULL;
 
+    /*
+     * The key itself, not whatever has its name now: an open relative to the handle with an empty name. It cannot
+     * pick another key after a rename, has no limit on the length of the name and does not resolve a link or a
+     * redirected view again (OBJ_OPENLINK keeps a link key that was opened as such).
+     */
+    RtlInitUnicodeString(&Empty, L"");
+    InitializeObjectAttributes(&Oa, &Empty, OBJ_CASE_INSENSITIVE | OBJ_OPENLINK, Handle, NULL);
+    Status = NtOpenKey(Reopened, READ_CONTROL | ACCESS_SYSTEM_SECURITY, &Oa);
+    if (NT_SUCCESS(Status))
+        return ERROR_SUCCESS;
+    *Reopened = NULL;
+
+    /* Fallback: the name of the key (a rename in between can pick another key) */
     Status = NtQueryObject(Handle, ObjectNameInformation, Buffer, sizeof(Buffer), NULL);
     if (!NT_SUCCESS(Status) || Name->Name.Length == 0)
         return ERROR_INVALID_HANDLE;
