@@ -6294,7 +6294,9 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
     if ((((ULONG_PTR)MM_HIGHEST_VAD_ADDRESS + 1) - (ULONG_PTR)PBaseAddress) < PRegionSize)
     {
         DPRINT1("Region size would overflow into kernel-memory\n");
-        return STATUS_INVALID_PARAMETER_4;
+
+        /* Measured on Windows Server 2022: a request the process can never satisfy is a plain invalid parameter without an address */
+        return PBaseAddress ? STATUS_INVALID_PARAMETER_4 : STATUS_INVALID_PARAMETER;
     }
 
     /* Make sure there's a size specified */
@@ -6490,8 +6492,34 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
             if (HighestRequired && (HighestRequired < HighestAddress))
                 HighestAddress = HighestRequired;
 
+            /*
+             * Measured on Windows Server 2022: a region larger than the range ZeroBits allows is an invalid
+             * parameter (not a failure to find room), and a region that does not fit between the lowest
+             * address and that limit finds no address range.
+             */
+            if (PRegionSize - 1 > HighestAddress)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                goto FailPathNoLock;
+            }
+
             /* A 64-bit process without LARGEADDRESSAWARE gets automatic placement below 2 GB */
             HighestAddress = min(HighestAddress, MmGetProcessAutoPlacementLimit(Process));
+
+            if (HighestAddress >= (ULONG_PTR)MI_LOWEST_VAD_ADDRESS &&
+                PRegionSize - 1 > HighestAddress - (ULONG_PTR)MI_LOWEST_VAD_ADDRESS)
+            {
+                Status = STATUS_CONFLICTING_ADDRESSES;
+                goto FailPathNoLock;
+            }
+
+            /* Measured on Windows Server 2022: a limit below the lowest address leaves no memory, except for a region
+               that is exactly as large as the range up to the limit: that is a conflict as well */
+            if (HighestAddress < (ULONG_PTR)MI_LOWEST_VAD_ADDRESS && PRegionSize - 1 == HighestAddress)
+            {
+                Status = STATUS_CONFLICTING_ADDRESSES;
+                goto FailPathNoLock;
+            }
 
         }
         else

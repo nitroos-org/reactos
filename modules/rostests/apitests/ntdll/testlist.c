@@ -58,6 +58,7 @@ extern void func_NtAccessCheckByTypeResultListAndAuditAlarmByHandle(void);
 extern void func_NtAdjustGroupsToken(void);
 extern void func_NtAdjustPrivilegesToken(void);
 extern void func_NtAllocateVirtualMemory(void);
+extern void func_NtAllocateVirtualMemoryStatuses(void);
 extern void func_NtApphelpCacheControl(void);
 extern void func_NtCompareTokens(void);
 extern void func_NtConnectPortTerminate(void);
@@ -364,6 +365,7 @@ const struct test winetest_testlist[] =
     { "NtAdjustGroupsToken",            func_NtAdjustGroupsToken },
     { "NtAdjustPrivilegesToken",        func_NtAdjustPrivilegesToken },
     { "NtAllocateVirtualMemory",        func_NtAllocateVirtualMemory },
+    { "NtAllocateVirtualMemoryStatuses", func_NtAllocateVirtualMemoryStatuses },
     { "NtApphelpCacheControl",          func_NtApphelpCacheControl },
     { "NtCompareTokens",                func_NtCompareTokens },
     { "NtConnectPortTerminate",         func_NtConnectPortTerminate },

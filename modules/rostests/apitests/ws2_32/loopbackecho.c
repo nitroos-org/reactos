@@ -67,8 +67,7 @@ TestRecvTakesWhatIsQueued(VOID)
     setsockopt(Server, SOL_SOCKET, SO_RCVTIMEO, (PCHAR)&Timeout, sizeof(Timeout));
     FillMemory(Buffer, sizeof(Buffer), 0x5A);
 
-    /* The first recv of a socket may return less than is queued here (Windows: all of it); once a reader has shown
-       that it takes more than the first buffer, a recv returns what is queued, up to its buffer */
+    /* From the first recv of a socket on, a recv returns what is queued, up to its buffer (Windows Server 2022) */
     for (Round = 0; Round < 3; Round++)
     {
         Sent = send(Client, (PCHAR)Buffer, CHUNK, 0);
@@ -85,11 +84,10 @@ TestRecvTakesWhatIsQueued(VOID)
         ZeroMemory(Buffer, sizeof(Buffer));
         Length = recv(Server, (PCHAR)Buffer, sizeof(Buffer), 0);
         ok(Length > 0, "round %d: recv returned %d, error %d\n", Round, Length, WSAGetLastError());
-        if (Round >= 1)
-            ok(Length == CHUNK, "round %d: recv with %d bytes queued returned %d\n", Round, CHUNK, Length);
-        else if (Length > 0 && Length < CHUNK)
+        ok(Length == CHUNK, "round %d: recv with %d bytes queued returned %d\n", Round, CHUNK, Length);
+        if (Length > 0 && Length < CHUNK)
         {
-            /* Drains the rest of the first chunk */
+            /* Drains the rest of the chunk */
             while (Length < CHUNK)
             {
                 INT More = recv(Server, (PCHAR)Buffer, CHUNK - Length, 0);

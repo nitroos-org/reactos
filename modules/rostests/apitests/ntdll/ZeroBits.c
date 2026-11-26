@@ -117,6 +117,13 @@ TestInvalidAndTiny(HANDLE Section, BOOLEAN MasksSupported)
 
         if (Rejected || Values[i] == 63)
             Expected = ParamStatus(STATUS_INVALID_PARAMETER_3);
+        else if (Values[i] == 21 || Values[i] == 32)
+        {
+            /* The range ZeroBits 21 allows (2 KB), and the one of the mask 32 (0x20), are smaller than the page: an
+               invalid parameter, not a failure to find room (Windows Server 2022, x86 and x64; a Windows 10 22H2
+               oracle answered STATUS_NO_MEMORY) */
+            Expected = STATUS_INVALID_PARAMETER;
+        }
         Base = NULL;
         Size = PAGE_SIZE;
         Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, Values[i], &Size,
