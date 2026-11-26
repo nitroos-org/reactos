@@ -2133,20 +2133,23 @@ co_IntCreateDefaultImeWindow(
     pImeWnd = co_UserCreateWindowEx(&Cs, &ClassName, (PLARGE_STRING)&WindowName, NULL, WINVER);
     if (pImeWnd)
     {
+        /* The window has no IME data when its memory could not be had */
         pimeui = IntGetImeUIFromWnd(pImeWnd);
-        ASSERT(pimeui);
-        _SEH2_TRY
+        if (pimeui)
         {
-            ProbeForWrite(pimeui, sizeof(*pimeui), 1);
-            pimeui->fDefault = TRUE;
-            if (IS_WND_CHILD(pwndTarget) && pwndTarget->spwndParent->head.pti != pti)
-                pimeui->fChildThreadDef = TRUE;
+            _SEH2_TRY
+            {
+                ProbeForWrite(pimeui, sizeof(*pimeui), 1);
+                pimeui->fDefault = TRUE;
+                if (IS_WND_CHILD(pwndTarget) && pwndTarget->spwndParent->head.pti != pti)
+                    pimeui->fChildThreadDef = TRUE;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                ERR("Exception in co_IntCreateDefaultImeWindow: %p\n", pimeui);
+            }
+            _SEH2_END;
         }
-        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-        {
-            ERR("Exception in co_IntCreateDefaultImeWindow: %p\n", pimeui);
-        }
-        _SEH2_END;
     }
 
     UserDerefObjectCo(pwndTarget);
