@@ -310,6 +310,21 @@ typedef struct _ABC_CACHE_ENTRY
 } ABC_CACHE_ENTRY;
 static ABC_CACHE_ENTRY g_AbcCache[ABC_CACHE_SLOTS];
 
+/* The size request last made of a face. Text output and measuring request the size of their font on every call,
+ * and FreeType carries out every request, the same one too: it computes the scaled metrics again and drops the
+ * face's hinting state, so that the next glyph load runs the TrueType prep program again. A request that is the
+ * one the face had last is skipped (IntRequestFaceSize). Direct mapped by face; the FreeType lock protects it; the
+ * entry of a face is dropped with its other caches. */
+#define SIZE_REQUEST_CACHE_SLOTS 64
+typedef struct _SIZE_REQUEST_ENTRY
+{
+    FT_Face Face;               /* NULL: empty */
+    FT_Size Size;               /* the face's active size object, which holds the result */
+    FT_Size_RequestRec Request;
+} SIZE_REQUEST_ENTRY;
+static SIZE_REQUEST_ENTRY g_SizeRequestCache[SIZE_REQUEST_CACHE_SLOTS];
+#define SIZE_REQUEST_SLOT(Face) ((UINT)(((ULONG_PTR)(Face) >> 6) ^ ((ULONG_PTR)(Face) >> 12)) % SIZE_REQUEST_CACHE_SLOTS)
+
 static PWCHAR g_ElfScripts[32] =   /* These are in the order of the fsCsb[0] bits */
 {
     L"Western", /* 00 */
@@ -588,6 +603,9 @@ RemoveCacheEntries(FT_Face Face)
         if (g_AbcCache[i].bValid && g_AbcCache[i].Face == Face)
             g_AbcCache[i].bValid = FALSE;
     }
+
+    if (g_SizeRequestCache[SIZE_REQUEST_SLOT(Face)].Face == Face)
+        g_SizeRequestCache[SIZE_REQUEST_SLOT(Face)].Face = NULL;
 
     for (CurrentEntry = g_FontCacheListHead.Flink;
          CurrentEntry != &g_FontCacheListHead;
@@ -4539,6 +4557,41 @@ static unsigned int get_bezier_glyph_outline(FT_Outline *outline, unsigned int b
     return needed;
 }
 
+/* FT_Request_Size, skipped when the request is the one the face had last (see g_SizeRequestCache) */
+static FT_Error
+IntRequestFaceSize(
+    _In_ FT_Face face,
+    _In_ FT_Size_Request req)
+{
+    SIZE_REQUEST_ENTRY *pEntry = &g_SizeRequestCache[SIZE_REQUEST_SLOT(face)];
+    FT_Error error;
+
+    ASSERT_FREETYPE_LOCK_HELD();
+
+    if (pEntry->Face == face && pEntry->Size == face->size &&
+        pEntry->Request.type == req->type &&
+        pEntry->Request.width == req->width &&
+        pEntry->Request.height == req->height &&
+        pEntry->Request.horiResolution == req->horiResolution &&
+        pEntry->Request.vertResolution == req->vertResolution)
+    {
+        return FT_Err_Ok;
+    }
+
+    error = FT_Request_Size(face, req);
+    if (error)
+    {
+        if (pEntry->Face == face)
+            pEntry->Face = NULL;
+        return error;
+    }
+
+    pEntry->Face = face;
+    pEntry->Size = face->size;
+    pEntry->Request = *req;
+    return FT_Err_Ok;
+}
+
 static FT_Error
 IntRequestFontSizeEx(
     _In_ FT_Face face,
@@ -4680,7 +4733,7 @@ IntRequestFontSizeEx(
     req.height         = (EmHeight << 6);
     req.horiResolution = 0;
     req.vertResolution = 0;
-    error = FT_Request_Size(face, &req);
+    error = IntRequestFaceSize(face, &req);
     if (error)
     {
         ERR("%s: Failed to request font size.\n", face->family_name);
