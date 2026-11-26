@@ -90,7 +90,9 @@ extern void func_OffsetClipRgn(void);
 extern void func_OffsetRgn(void);
 extern void func_PaintRgn(void);
 extern void func_PatBlt(void);
+extern void func_PathArcRobustness(void);
 extern void func_PolyPatBlt(void);
+extern void func_PolygonClipInvariance(void);
 extern void func_Rectangle(void);
 extern void func_RegionAllocFailClip(void);
 extern void func_RegionAllocFailVis(void);
@@ -213,7 +215,9 @@ const struct test winetest_testlist[] =
     { "OffsetRgn", func_OffsetRgn },
     { "PaintRgn", func_PaintRgn },
     { "PatBlt", func_PatBlt },
+    { "PathArcRobustness", func_PathArcRobustness },
     { "PolyPatBlt", func_PolyPatBlt },
+    { "PolygonClipInvariance", func_PolygonClipInvariance },
     { "Rectangle", func_Rectangle },
     { "RegionAllocFailClip", func_RegionAllocFailClip },
     { "RegionAllocFailVis", func_RegionAllocFailVis },

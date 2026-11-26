@@ -230,7 +230,16 @@ DeviceReset(IN PVOID DeviceExtension)
     {
         return TRUE;
     }
-    ASSERT(adaptExt->tmf_infly == FALSE);
+    if (adaptExt->tmf_infly)
+    {
+        /*
+         * The reset of an earlier call is not answered yet and owns the one task management request
+         * and its buffers: a second one must not overwrite them. That reset already paused the adapter
+         * and resumes it when the device answers; a restart (ScsiRestartAdapter) abandons it.
+         */
+        RhelDbgPrint(TRACE_LEVEL_WARNING, " reset while the previous reset is still in flight\n");
+        return TRUE;
+    }
     Srb->SrbExtension = srbExt;
     RtlZeroMemory((PVOID)cmd, sizeof(VirtIOSCSICmd));
     cmd->srb = (PVOID)Srb;
