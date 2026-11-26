@@ -39,9 +39,21 @@ GdiProcessCreate(PEPROCESS Process)
     ppiCurrent->pPoolDcAttr = GdiPoolCreate(sizeof(DC_ATTR), 'acdG');
     ppiCurrent->pPoolBrushAttr = GdiPoolCreate(sizeof(BRUSH_ATTR), 'arbG');
     ppiCurrent->pPoolRgnAttr = GdiPoolCreate(sizeof(RGN_ATTR), 'agrG');
-    ASSERT(ppiCurrent->pPoolDcAttr);
-    ASSERT(ppiCurrent->pPoolBrushAttr);
-    ASSERT(ppiCurrent->pPoolRgnAttr);
+
+    /* The pools are made in the address space of the process, which may have none left to give */
+    if (!ppiCurrent->pPoolDcAttr || !ppiCurrent->pPoolBrushAttr || !ppiCurrent->pPoolRgnAttr)
+    {
+        if (ppiCurrent->pPoolDcAttr)
+            GdiPoolDestroy(ppiCurrent->pPoolDcAttr);
+        if (ppiCurrent->pPoolBrushAttr)
+            GdiPoolDestroy(ppiCurrent->pPoolBrushAttr);
+        if (ppiCurrent->pPoolRgnAttr)
+            GdiPoolDestroy(ppiCurrent->pPoolRgnAttr);
+        ppiCurrent->pPoolDcAttr = NULL;
+        ppiCurrent->pPoolBrushAttr = NULL;
+        ppiCurrent->pPoolRgnAttr = NULL;
+        return STATUS_NO_MEMORY;
+    }
 
     return STATUS_SUCCESS;
 }
@@ -58,10 +70,13 @@ GdiProcessDestroy(PEPROCESS Process)
     /* And GDI ones too */
     GDI_CleanupForProcess(Process);
 
-    /* So we can now free the pools */
-    GdiPoolDestroy(ppiCurrent->pPoolDcAttr);
-    GdiPoolDestroy(ppiCurrent->pPoolBrushAttr);
-    GdiPoolDestroy(ppiCurrent->pPoolRgnAttr);
+    /* So we can now free the pools (a process that did not get them has none) */
+    if (ppiCurrent->pPoolDcAttr)
+        GdiPoolDestroy(ppiCurrent->pPoolDcAttr);
+    if (ppiCurrent->pPoolBrushAttr)
+        GdiPoolDestroy(ppiCurrent->pPoolBrushAttr);
+    if (ppiCurrent->pPoolRgnAttr)
+        GdiPoolDestroy(ppiCurrent->pPoolRgnAttr);
 
     return STATUS_SUCCESS;
 }

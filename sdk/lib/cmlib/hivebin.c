@@ -26,6 +26,7 @@ HvpAddBin(
     ULONG BinSize;
     ULONG i;
     ULONG BitmapSize;
+    PULONG BitmapBuffer;
     ULONG BlockCount;
     ULONG OldBlockListSize;
     ULONG NewBlockListSize;
@@ -95,6 +96,30 @@ HvpAddBin(
         Retired = NULL;
     }
 
+    /* The dirty vector of a stable hive grows with the bin: get its memory now, while the hive
+       is still unchanged and the bin can be given up when there is none */
+    BitmapSize = 0;
+    BitmapBuffer = NULL;
+    if (Storage == Stable)
+    {
+        /* Calculate bitmap size in bytes (always a multiple of 32 bits). */
+        BitmapSize = ROUND_UP(NewBlockListSize, sizeof(ULONG) * 8) / 8;
+
+        if (BitmapSize > RegistryHive->DirtyVector.SizeOfBitMap / 8)
+        {
+            BitmapBuffer = RegistryHive->Allocate(BitmapSize, TRUE, TAG_CM);
+            if (BitmapBuffer == NULL)
+            {
+                if (BlockList != RegistryHive->Storage[Storage].BlockList)
+                    RegistryHive->Free(BlockList, 0);
+                if (Retired != NULL)
+                    RegistryHive->Free(Retired, 0);
+                RegistryHive->Free(Bin, 0);
+                return NULL;
+            }
+        }
+    }
+
     /* The new entries are past Length, so no reader can look them up yet */
     for (i = 0; i < BlockCount; i++)
     {
@@ -132,16 +157,9 @@ HvpAddBin(
 
     if (Storage == Stable)
     {
-        /* Calculate bitmap size in bytes (always a multiple of 32 bits). */
-        BitmapSize = ROUND_UP(RegistryHive->Storage[Stable].Length,
-                              sizeof(ULONG) * 8) / 8;
-
-        /* Grow bitmap if necessary. */
-        if (BitmapSize > RegistryHive->DirtyVector.SizeOfBitMap / 8)
+        /* Grow bitmap if necessary (its memory was taken above). */
+        if (BitmapBuffer != NULL)
         {
-            PULONG BitmapBuffer;
-
-            BitmapBuffer = RegistryHive->Allocate(BitmapSize, TRUE, TAG_CM);
             RtlZeroMemory(BitmapBuffer, BitmapSize);
             if (RegistryHive->DirtyVector.SizeOfBitMap > 0)
             {
