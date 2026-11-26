@@ -779,6 +779,59 @@ SeSinglePrivilegeCheck(
 
 /**
  * @brief
+ * Tells whether the token of the calling thread holds a privilege, enabled or not.
+ * Windows asks for this (not for an enabled privilege) before it lets a process raise
+ * the minimum of its own working set.
+ *
+ * @param[in] PrivilegeValue
+ * The privilege to look for.
+ *
+ * @return
+ * TRUE if the effective token (the impersonation token at the impersonation level or
+ * above, else the primary token) lists the privilege, FALSE otherwise.
+ */
+BOOLEAN
+NTAPI
+SeSinglePrivilegeHeld(
+    _In_ LUID PrivilegeValue)
+{
+    SECURITY_SUBJECT_CONTEXT SubjectContext;
+    PTOKEN Token;
+    BOOLEAN Held = FALSE;
+    ULONG i;
+
+    PAGED_CODE();
+
+    SeCaptureSubjectContext(&SubjectContext);
+
+    if (SubjectContext.ClientToken == NULL)
+        Token = SubjectContext.PrimaryToken;
+    else if (SubjectContext.ImpersonationLevel >= SecurityImpersonation)
+        Token = SubjectContext.ClientToken;
+    else
+        Token = NULL;
+
+    if (Token != NULL)
+    {
+        SepAcquireTokenLockShared(Token);
+        for (i = 0; i < Token->PrivilegeCount; i++)
+        {
+            if (RtlEqualLuid(&Token->Privileges[i].Luid, &PrivilegeValue))
+            {
+                Held = TRUE;
+                break;
+            }
+        }
+        SepReleaseTokenLock(Token);
+    }
+
+    SeReleaseSubjectContext(&SubjectContext);
+
+    return Held;
+}
+
+/**
+ * @brief
  * Checks a privileged object if such object has
  * the specific privilege submitted by the caller.
  *

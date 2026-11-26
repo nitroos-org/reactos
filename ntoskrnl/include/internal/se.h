@@ -783,6 +783,11 @@ SepPrivilegeCheck(
     _In_ ULONG PrivilegeControl,
     _In_ KPROCESSOR_MODE PreviousMode);
 
+BOOLEAN
+NTAPI
+SeSinglePrivilegeHeld(
+    _In_ LUID PrivilegeValue);
+
 NTSTATUS
 NTAPI
 SePrivilegePolicyCheck(
