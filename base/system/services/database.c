@@ -5099,6 +5099,15 @@ ScmStartService(PSERVICE Service,
 }
 
 
+/* The boot pass starts a service like a StartService does: what it depends on first (the dependencies that are
+   started by this are not started again when the pass reaches them: ScmLoadService finds them running) */
+static VOID
+ScmAutoStartOneService(PSERVICE Service)
+{
+    ScmStartService(Service, 0, NULL);
+}
+
+
 VOID
 ScmAutoStartServices(VOID)
 {
@@ -5141,8 +5150,11 @@ ScmAutoStartServices(VOID)
     if (dwError != ERROR_SUCCESS)
         SafeBootEnabled = 0;
 
-    /* Acquire the service control critical section, to synchronize starts */
-    EnterCriticalSection(&ControlServiceCriticalSection);
+    /*
+     * The control critical section is taken by each start (ScmStartOneService), not for the whole pass: the pass waits
+     * for a dependency to report its running state, and a service that calls the service controller from its start
+     * code (a StartService, a ControlService) must not wait for the pass while the pass waits for it.
+     */
 
     /* Clear 'ServiceVisited' flag (or set if not to start in Safe Mode) */
     ServiceEntry = ServiceListHead.Flink;
@@ -5235,7 +5247,7 @@ ScmAutoStartServices(VOID)
                     (CurrentService->dwTag == CurrentGroup->TagArray[i]))
                 {
                     CurrentService->ServiceVisited = TRUE;
-                    ScmLoadService(CurrentService, 0, NULL);
+                    ScmAutoStartOneService(CurrentService);
                 }
 
                 ServiceEntry = ServiceEntry->Flink;
@@ -5253,7 +5265,7 @@ ScmAutoStartServices(VOID)
                 (CurrentService->ServiceVisited == FALSE))
             {
                 CurrentService->ServiceVisited = TRUE;
-                ScmLoadService(CurrentService, 0, NULL);
+                ScmAutoStartOneService(CurrentService);
             }
 
             ServiceEntry = ServiceEntry->Flink;
@@ -5273,7 +5285,7 @@ ScmAutoStartServices(VOID)
             (CurrentService->ServiceVisited == FALSE))
         {
             CurrentService->ServiceVisited = TRUE;
-            ScmLoadService(CurrentService, 0, NULL);
+            ScmAutoStartOneService(CurrentService);
         }
 
         ServiceEntry = ServiceEntry->Flink;
@@ -5290,7 +5302,7 @@ ScmAutoStartServices(VOID)
             (CurrentService->ServiceVisited == FALSE))
         {
             CurrentService->ServiceVisited = TRUE;
-            ScmLoadService(CurrentService, 0, NULL);
+            ScmAutoStartOneService(CurrentService);
         }
 
         ServiceEntry = ServiceEntry->Flink;
@@ -5304,9 +5316,6 @@ ScmAutoStartServices(VOID)
         CurrentService->ServiceVisited = FALSE;
         ServiceEntry = ServiceEntry->Flink;
     }
-
-    /* Release the critical section */
-    LeaveCriticalSection(&ControlServiceCriticalSection);
 }
 
 

@@ -3380,6 +3380,17 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             if (NT_SUCCESS(Status)) Status = Io.Status;
         }
         IoEnd(a[4], &Io); return Status;
+    case W64_NtQueryDirectoryFileEx:
+        /* NtQueryDirectoryFile with the query flags in place of the single-entry and restart flags */
+        if (a[2] || a[3]) UNSUPPORTED(MODE, 1);
+        Status = NtQueryDirectoryFileEx(H(0), H(1), NULL, NULL, IoBegin(a[4], &Io), P(5), a[6], a[7], a[8],
+                                         String32(&Name, P(9)));
+        if (Status == STATUS_PENDING && a[4])
+        {
+            Status = NtWaitForSingleObject(a[1] ? H(1) : H(0), FALSE, NULL);
+            if (NT_SUCCESS(Status)) Status = Io.Status;
+        }
+        IoEnd(a[4], &Io); return Status;
     case W64_NtQueryVolumeInformationFile:
     case W64_NtSetVolumeInformationFile:
         /* The volume records have the same layout in both ABIs */

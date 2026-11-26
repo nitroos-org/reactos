@@ -332,4 +332,5 @@
     SVC_(NotifyChangeDirectoryFileEx, 10)
     SVC_(CreatePrivateNamespace, 4)
     SVC_(OpenPrivateNamespace, 4)
+    SVC_(QueryDirectoryFileEx, 10)
 #endif

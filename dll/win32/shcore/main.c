@@ -2348,14 +2348,15 @@ DWORD WINAPI SHQueryValueExW(HKEY hkey, const WCHAR *name, DWORD *reserved, DWOR
             length = data_len;
             value = malloc(length);
             RegQueryValueExW(hkey, name, reserved, NULL, (BYTE *)value, &length);
-            length = ExpandEnvironmentStringsW(value, NULL, 0);
+            /* characters (with the terminator): the sizes of this function are bytes */
+            length = ExpandEnvironmentStringsW(value, NULL, 0) * sizeof(WCHAR);
         }
         else
         {
             length = (lstrlenW(buff) + 1) * sizeof(WCHAR);
             value = malloc(length);
             memcpy(value, buff, length);
-            length = ExpandEnvironmentStringsW(value, buff, *buff_len / sizeof(WCHAR));
+            length = ExpandEnvironmentStringsW(value, buff, *buff_len / sizeof(WCHAR)) * sizeof(WCHAR);
             if (length > *buff_len) ret = ERROR_MORE_DATA;
         }
         data_len = max(data_len, length);

@@ -133,6 +133,9 @@ START_TEST(connectbyname)
     {
         setsockopt(S, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
         ok(LocalLength == sizeof(SOCKADDR_IN6), "A: local address length %lu\n", LocalLength);
+        /* the local address comes back without its port (Windows Server 2022) */
+        ok(((SOCKADDR_IN6 *)&Local)->sin6_port == 0 && ((SOCKADDR_IN *)&Local)->sin_port == 0,
+           "A: local address has a port\n");
         CheckConnected(S, L, Port, &Remote, RemoteLength, "A");
     }
     closesocket(S);
@@ -160,6 +163,18 @@ START_TEST(connectbyname)
         ok(getpeername(S, (SOCKADDR *)&Remote, (int *)&RemoteLength) == 0, "getpeername failed: %d\n", WSAGetLastError());
         CheckConnected(S, L, Port, &Remote, RemoteLength, "no addresses");
     }
+    closesocket(S);
+
+    /* a local address buffer that is too small: WSAEFAULT, the lengths stay as given (Windows Server 2022); the
+       connection it made stays in the listener's queue, nothing reads it */
+    S = DualSocket();
+    LocalLength = sizeof(SOCKADDR_IN) - 4;
+    RemoteLength = sizeof(Remote);
+    SetLastError(0xdeadbeef);
+    Ret = pA(S, "localhost", PortA, &LocalLength, (LPSOCKADDR)&Local, &RemoteLength, (LPSOCKADDR)&Remote, NULL, NULL);
+    ok(!Ret, "WSAConnectByNameA with a small local buffer succeeded\n");
+    ok(GetLastError() == WSAEFAULT, "small local buffer: error %lu\n", GetLastError());
+    ok(LocalLength == sizeof(SOCKADDR_IN) - 4, "small local buffer: length changed to %lu\n", LocalLength);
     closesocket(S);
 
     /* nothing listens on the port any more: no address answers */

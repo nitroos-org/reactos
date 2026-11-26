@@ -40,8 +40,11 @@
 /* Sources one socket may list for one group (Windows takes at least 1100: release notes) */
 #define NITRO_MCAST_MAX_SOURCES         1024
 
-/* Groups one socket may join, per family (Windows takes at least 300: release notes) */
-#define NITRO_MCAST_MAX_GROUPS          20
+/* Groups one socket may join over IPv4: a fixed limit so that one socket cannot pin unbounded nonpaged pool (Windows
+   took 70000 without an error). Over IPv6 the limit stays 20 (a process also holds at most 32 table entries there) */
+#define NITRO_MCAST_MAX_GROUPS          1024
+#define NITRO_MCAST_MAX_GROUPS6         20
+#define NITRO_MCAST_MAX_GROUPS_OF(Family) ((Family) == NITRO_MCAST_FAMILY_IP6 ? NITRO_MCAST_MAX_GROUPS6 : NITRO_MCAST_MAX_GROUPS)
 
 typedef struct _NITRO_MCAST_FILTER {
     unsigned long InterfaceIndex;

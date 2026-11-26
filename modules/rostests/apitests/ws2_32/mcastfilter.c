@@ -117,12 +117,13 @@ typedef struct _MCAST_EXPECT {
 
 #include "mcastfilter.inc"
 
-/* Where NitroOS differs by design (release notes): at most 1024 sources per group (WSAENOBUFS beyond) and 20 groups
-   per socket (the stack's limit, WSAEADDRNOTAVAIL beyond); Windows took 1100 sources and 300 groups */
+/* Where NitroOS differs by design (release notes): at most 1024 sources per group (WSAENOBUFS beyond) and 1024 IPv4
+   or 20 IPv6 groups per socket (the stack's limit, WSAEADDRNOTAVAIL beyond); Windows took 1100 sources, 70000 IPv4
+   groups and 300 IPv6 groups */
 static const MCAST_EXPECT Differs[] = {
     { "4.E01.max-ssm-sources", "E10055", "count=1024" },
     { "4.E05.max-blocked", "E10055", "count=1024" },
-    { "4.E07.max-groups", "E10049", "count=20" },
+    { "4.E07.max-groups", "E10049", "count=1024" },
     { "6.E01.max-ssm-sources", "E10055", "count=1024" },
     { "6.E05.max-blocked", "E10055", "count=1024" },
     { "6.E07.max-groups", "E10049", "count=20" },
@@ -363,7 +364,7 @@ family_rows(int fam)
     char name[96], extra[128];
     SOCKADDR_STORAGE g[10], s[3], other, uni, any, mc;
     const char **gt = fam == 4 ? G4 : G6, **st = fam == 4 ? S4 : S6;
-    int L = lvl(fam), i, n, rc;
+    int L = lvl(fam), i, n, rc, maxgroups;
     ULONG I = ifx(fam);
     SOCKET so;
     DWORD v;
@@ -535,7 +536,9 @@ family_rows(int fam)
     sprintf(extra, "count=%d", n);
     row(name, n < 1100 ? -1 : 0, extra);
     R("E06.leave", grp(so, L, MCAST_LEAVE_GROUP, fam, I, &g[9]));
-    for (n = 0; n < 300; n++)
+    /* IPv4: Windows took 70000 joins on one socket (the rows ask for 1100), IPv6: 300 */
+    maxgroups = fam == 4 ? 1100 : 300;
+    for (n = 0; n < maxgroups; n++)
     {
         SOCKADDR_STORAGE gg;
         gengrp(fam, n, &gg);
@@ -544,7 +547,7 @@ family_rows(int fam)
     }
     sprintf(name, "%d.E07.max-groups", fam);
     sprintf(extra, "count=%d", n);
-    row(name, n < 300 ? -1 : 0, extra);
+    row(name, n < maxgroups ? -1 : 0, extra);
     for (i = 0; i < n; i++)
     {
         SOCKADDR_STORAGE gg;
@@ -723,15 +726,15 @@ joined(SOCKET s, ULONG ifidx, const SOCKADDR_STORAGE *g)
 
 /*
  * What NitroOS does by design where Windows has no row (the table above is Windows'): a socket's groups before the
- * bind wait in the Winsock helper (bounded: 20 per family, the stack's own limit, however often one is joined and
- * left), the stack gets them at the bind, and one it refuses there is dropped and fails the bind
+ * bind wait in the Winsock helper (bounded: 1024 IPv4 or 20 IPv6 per socket, the stack's own limit, however often one
+ * is joined and left), the stack gets them at the bind, and one it refuses there is dropped and fails the bind
  */
 static void
 unbound_rows(int fam)
 {
     SOCKADDR_STORAGE gg, any;
     SOCKET so, a, b;
-    int L = lvl(fam), n, rc = 0, bad = 0;
+    int L = lvl(fam), n, rc = 0, bad = 0, limit = fam == 4 ? 1024 : 20;
     ULONG I = ifx(fam);
     int len = fam == 4 ? sizeof(SOCKADDR_IN) : sizeof(SOCKADDR_IN6);
 
@@ -740,7 +743,7 @@ unbound_rows(int fam)
 
     /* the limit holds before the bind too */
     so = usock(fam, 0);
-    for (n = 0; n < 40; n++)
+    for (n = 0; n < limit + 20; n++)
     {
         gengrp(fam, 100 + n, &gg);
         if (grp(so, L, MCAST_JOIN_GROUP, fam, I, &gg))
@@ -749,8 +752,8 @@ unbound_rows(int fam)
             break;
         }
     }
-    ok(n == 20 && rc == WSAEADDRNOTAVAIL, "%d: unbound joins stopped at %d with %d, want 20 and %d\n", fam, n, rc,
-       WSAEADDRNOTAVAIL);
+    ok(n == limit && rc == WSAEADDRNOTAVAIL, "%d: unbound joins stopped at %d with %d, want %d and %d\n", fam, n, rc,
+       limit, WSAEADDRNOTAVAIL);
     gengrp(fam, 100, &gg);
     ok(grp(so, L, MCAST_LEAVE_GROUP, fam, I, &gg) == 0, "%d: unbound leave failed: %d\n", fam, WSAGetLastError());
     ok(!joined(so, I, &gg), "%d: left group still reported\n", fam);

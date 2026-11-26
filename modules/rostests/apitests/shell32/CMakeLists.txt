@@ -66,6 +66,7 @@ list(APPEND SOURCE
     SHGetUnreadMailCountW.cpp
     SHIsBadInterfacePtr.cpp
     SHParseDisplayName.cpp
+    SHQueryValueExExpand.cpp
     SHRestricted.cpp
     SHShouldShowWizards.cpp
     SHEnumerateUnreadMailAccountsW.cpp

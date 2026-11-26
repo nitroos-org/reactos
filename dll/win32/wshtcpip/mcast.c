@@ -39,9 +39,9 @@
  *     no source leaves the group; the answer is as long as the filter (GROUP_FILTER_SIZE / IP_MSFILTER_SIZE);
  *     SIO_*_MULTICAST_FILTER on an AF_INET6 socket WSAEINVAL;
  *   - the options are not readable (getsockopt WSAENOPROTOOPT, the generic answer).
- * Differences (release notes): at most NITRO_MCAST_MAX_SOURCES sources per group and 20 groups per socket (Windows
- * took 1100 and 300 without an error); a source of the other family is taken as Windows takes it, but which source
- * Windows then filters is not known (here: the IPv4-mapped form, or the last four bytes).
+ * Differences (release notes): at most NITRO_MCAST_MAX_SOURCES sources per group and 1024 IPv4 or 20 IPv6 groups per
+ * socket (Windows took 1100 sources, 70000 IPv4 and 300 IPv6 groups without an error); a source of the other family is taken as Windows
+ * takes it, but which source Windows then filters is not known (here: the IPv4-mapped form, or the last four bytes).
  */
 
 #include "wshtcpip.h"
@@ -418,7 +418,7 @@ WshMcastCommit(PSOCKET_CONTEXT Context, HANDLE AddressHandle, PWSH_MCAST Entry, 
     if (NumSources > NITRO_MCAST_MAX_SOURCES)
         return WSAENOBUFS;
     /* The socket's limit, as the stack answers one past it (also before the bind, where nothing else would) */
-    if (!Entry && WshMcastCount(Context, Family) >= NITRO_MCAST_MAX_GROUPS)
+    if (!Entry && WshMcastCount(Context, Family) >= NITRO_MCAST_MAX_GROUPS_OF(Family))
         return WSAEADDRNOTAVAIL;
     IfIndex = Entry ? Entry->IfIndex : WshMcastJoinIndex(Family, Given);
 

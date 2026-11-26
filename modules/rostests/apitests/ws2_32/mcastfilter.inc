@@ -80,7 +80,7 @@ static const MCAST_EXPECT Expected[] = {
     { "4.E04.join-asm", "OK", "" },
     { "4.E05.max-blocked", "OK", "count=1100" },
     { "4.E06.leave", "OK", "" },
-    { "4.E07.max-groups", "OK", "count=300" },
+    { "4.E07.max-groups", "OK", "count=1100" },
     { "4.E08.setf-include-64", "OK", "" },
     { "4.E09.getf-cap8", "E10014", "bytes=0" },
     { "4.E10.setf-include-400", "OK", "" },
