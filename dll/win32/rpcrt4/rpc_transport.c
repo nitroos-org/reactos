@@ -3699,7 +3699,12 @@ static const struct connection_ops conn_protseq_list[] = {
     rpcrt4_conn_np_impersonate_client,
     rpcrt4_conn_np_revert_to_self,
     RPCRT4_default_inquire_auth_client,
+#ifdef __REACTOS__
+    /* The process at the client end, as the pipe recorded it when it was opened (a local caller) */
+    rpcrt4_ncalrpc_inquire_client_pid,
+#else
     NULL,
+#endif
     rpcrt4_conn_np_is_idle_alive
   },
   { "ncalrpc",
