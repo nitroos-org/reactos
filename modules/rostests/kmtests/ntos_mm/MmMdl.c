@@ -429,7 +429,11 @@ TestMmAllocatePagesForMdlZeroed(VOID)
         NonZero = 0;
         for (Round = 0; Round < ZERO_TEST_ROUNDS; Round++)
         {
-            Mdl = MmAllocatePagesForMdl(Low, High, Skip, ZERO_TEST_BYTES);
+            /* Every other round the pages that get the pattern were taken with MM_DONT_ZERO_ALLOCATION */
+            if (Round & 1)
+                Mdl = MmAllocatePagesForMdlEx(Low, High, Skip, ZERO_TEST_BYTES, MmCached, MM_DONT_ZERO_ALLOCATION);
+            else
+                Mdl = MmAllocatePagesForMdl(Low, High, Skip, ZERO_TEST_BYTES);
             if (!Mdl)
                 continue;
             CountNonZeroPages(Mdl, TRUE);

@@ -838,12 +838,6 @@ KiGeneralProtectionFaultUserMode(
     return Status;
 }
 
-/*
- * A kernel-mode #GP that is not explained here ends in KMODE_EXCEPTION_NOT_HANDLED with STATUS_UNSUCCESSFUL,
- * which tells nothing about the cause (a non-canonical address, a bad selector or descriptor, an XSAVE area
- * fault...). Print what the trap knows on the debug port first, in every build: the faulting instruction
- * (bytes at RIP), the error code (a selector, or 0), the selectors and the registers the trap saved.
- */
 /* A canonical address with both ends of Length bytes mapped: readable here without a nested fault */
 static
 BOOLEAN
@@ -858,9 +852,20 @@ KiIsKernelRangeReadable(
     return MmIsAddressValid(Address) && MmIsAddressValid(Address + Length - 1);
 }
 
-/* At most this many reports per boot: kernel #GPs that a handler catches must not flood the debug port */
+/*
+ * At most this many reports per boot: kernel #GPs that a handler catches must not flood the debug port.
+ * A #GP at an instruction that was reported lately is not reported again and does not use the budget
+ * (a handler that catches the same fault over and over would otherwise leave nothing for a fatal one).
+ */
 #define KI_GP_REPORT_LIMIT 32
+#define KI_GP_REPORT_RECENT 8
 
+/*
+ * A kernel-mode #GP that is not explained here ends in KMODE_EXCEPTION_NOT_HANDLED with STATUS_UNSUCCESSFUL,
+ * which tells nothing about the cause (a non-canonical address, a bad selector or descriptor, an XSAVE area
+ * fault...). Print what the trap knows on the debug port first, in every build: the faulting instruction
+ * (bytes at RIP), the error code (a selector, or 0), the selectors and the registers the trap saved.
+ */
 static
 VOID
 KiReportKernelGeneralProtectionFault(
@@ -868,18 +873,30 @@ KiReportKernelGeneralProtectionFault(
     _In_ PCSTR Why)
 {
     static LONG Reports;
+    static volatile ULONG_PTR Recent[KI_GP_REPORT_RECENT];
+    static LONG RecentNext;
     PUCHAR Rip = (PUCHAR)TrapFrame->Rip;
     UCHAR Bytes[16];
     ULONG i;
-    LONG Number;
+    LONG Number, Old;
 
-    Number = InterlockedIncrement(&Reports);
-    if (Number > KI_GP_REPORT_LIMIT)
+    /* The same instruction as one of the last reports: nothing new to tell */
+    for (i = 0; i < KI_GP_REPORT_RECENT; i++)
     {
-        if (Number == KI_GP_REPORT_LIMIT + 1)
-            DbgPrint("KE-GP: more unexplained kernel #GPs, no more reports\n");
-        return;
+        if (Recent[i] == (ULONG_PTR)Rip)
+            return;
     }
+
+    /* The count stops at the limit (it must not wrap around) */
+    do
+    {
+        Old = Reports;
+        if (Old >= KI_GP_REPORT_LIMIT)
+            return;
+    } while (InterlockedCompareExchange(&Reports, Old + 1, Old) != Old);
+    Number = Old + 1;
+
+    Recent[(ULONG)InterlockedIncrement(&RecentNext) % KI_GP_REPORT_RECENT] = (ULONG_PTR)Rip;
 
     DbgPrint("KE-GP: unexplained kernel #GP (%s): rip %p err %I64x cs %04x ss %04x rsp %p efl %08lx irql %u cpu %u "
              "thread %p (%.16s)\n",
@@ -906,6 +923,9 @@ KiReportKernelGeneralProtectionFault(
     {
         DbgPrint("KE-GP: rip not mapped\n");
     }
+
+    if (Number == KI_GP_REPORT_LIMIT)
+        DbgPrint("KE-GP: more unexplained kernel #GPs, no more reports\n");
 }
 
 /*
