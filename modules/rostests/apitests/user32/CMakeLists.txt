@@ -168,6 +168,7 @@ list(APPEND SOURCE
     SetWindowPosOwned.c
     ScreenDesktopReads.c
     ScreenDesktopSerial.c
+    ScreenSurfaceHandle.c
     SetWindowRgn.c
     ShowWindow.c
     SizeNoMaxTrack.c

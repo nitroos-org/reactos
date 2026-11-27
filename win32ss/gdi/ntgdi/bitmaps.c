@@ -67,7 +67,10 @@ UnsafeSetBitmapBits(
     lDeltaDst = psurf->SurfObj.lDelta;
     lDeltaDstAbs = labs(lDeltaDst);
     lDeltaSrc = WIDTH_BYTES_ALIGN16(nWidth, cBitsPixel);
-    NT_ASSERT(lDeltaSrc <= lDeltaDstAbs);
+
+    /* A surface without bits in memory (a device surface) or with rows shorter than a bitmap's takes nothing this way */
+    if (!pjDst || lDeltaSrc > lDeltaDstAbs)
+        return 0;
 
     cbDst = lDeltaDstAbs * nHeight;
     cbSrc = lDeltaSrc * nHeight;
@@ -517,6 +520,35 @@ NtGdiGetBitmapDimension(
 }
 
 
+/*
+ * The surface of a bitmap handle a program passed. GetCurrentObject(OBJ_BITMAP) of a screen DC gives the handle of the
+ * screen's own surface (the device's primary surface), which every process can use; whatever a program does with it
+ * (reads its bits, selects it into a memory DC, copies it into a brush, writes into it) reaches the monitor directly,
+ * without a DC of its desktop. While the caller's desktop does not have the input the monitor shows another desktop
+ * (the logon, lock or elevation-prompt desktop): the handle is then refused as an invalid one.
+ */
+PSURFACE
+NTAPI
+SURFACE_ShareLockSurfaceForCaller(
+    _In_ HGDIOBJ hbmp)
+{
+    PSURFACE psurf = SURFACE_ShareLockSurface(hbmp);
+
+    if (!psurf)
+        return NULL;
+
+    /* Compared with the displays' own surfaces: the bitmap's hdev is not followed (a bitmap holds no reference on the
+       device it was made compatible with) */
+    if (UserCurrentThreadLacksInput() && PDEVOBJ_bIsDisplayPrimarySurface(psurf))
+    {
+        SURFACE_ShareUnlockSurface(psurf);
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        return NULL;
+    }
+
+    return psurf;
+}
+
 LONG
 FASTCALL
 UnsafeGetBitmapBits(
@@ -538,7 +570,10 @@ UnsafeGetBitmapBits(
     lDeltaSrc = psurf->SurfObj.lDelta;
     lDeltaSrcAbs = labs(lDeltaSrc);
     lDeltaDst = WIDTH_BYTES_ALIGN16(nWidth, cBitsPixel);
-    NT_ASSERT(lDeltaSrcAbs >= lDeltaDst);
+
+    /* A surface without bits in memory (a device surface) or with rows shorter than a bitmap's has nothing this can copy */
+    if (!pjSrc || lDeltaSrcAbs < lDeltaDst)
+        return 0;
 
     cbSrc = nHeight * lDeltaSrcAbs;
     cbDst = nHeight * lDeltaDst;
@@ -585,7 +620,7 @@ NtGdiGetBitmapBits(
     }
 
     /* Lock the bitmap */
-    psurf = SURFACE_ShareLockSurface(hBitmap);
+    psurf = SURFACE_ShareLockSurfaceForCaller(hBitmap);
     if (!psurf)
     {
         EngSetLastError(ERROR_INVALID_HANDLE);
@@ -644,7 +679,7 @@ NtGdiSetBitmapBits(
         return 0;
     }
 
-    psurf = SURFACE_ShareLockSurface(hBitmap);
+    psurf = SURFACE_ShareLockSurfaceForCaller(hBitmap);
     if (psurf == NULL)
     {
         EngSetLastError(ERROR_INVALID_HANDLE);
@@ -735,9 +770,16 @@ BITMAP_CopyBitmap(HBITMAP hBitmap)
     if (hBitmap == NULL) return 0;
 
     /* Lock the source bitmap */
-    psurfSrc = SURFACE_ShareLockSurface(hBitmap);
+    psurfSrc = SURFACE_ShareLockSurfaceForCaller(hBitmap);
     if (psurfSrc == NULL)
     {
+        return 0;
+    }
+
+    /* A device surface has no bits in memory to copy */
+    if (psurfSrc->SurfObj.pvBits == NULL)
+    {
+        SURFACE_ShareUnlockSurface(psurfSrc);
         return 0;
     }
 

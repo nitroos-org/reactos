@@ -90,6 +90,13 @@ enum _SURFACEFLAGS
 /* NOTE: Use shared locks! */
 #define  SURFACE_ShareLockSurface(hBMObj) \
   ((PSURFACE) GDIOBJ_ShareLockObj ((HGDIOBJ) hBMObj, GDI_OBJECT_TYPE_BITMAP))
+
+/* A bitmap handle a program passed (bitmaps.c): as SURFACE_ShareLockSurface, but NULL for the screen's own surface
+   while the caller's desktop does not have the input (the screen then shows another desktop) */
+PSURFACE
+NTAPI
+SURFACE_ShareLockSurfaceForCaller(
+    _In_ HGDIOBJ hbmp);
 FORCEINLINE
 VOID
 SURFACE_ShareLockByPointer(PSURFACE psurf)

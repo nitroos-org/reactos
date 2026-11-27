@@ -161,6 +161,11 @@ typedef struct _PDEVOBJ
 
 /* Function prototypes ********************************************************/
 
+BOOL
+NTAPI
+PDEVOBJ_bIsDisplayPrimarySurface(
+    _In_ struct _SURFACE *psurf);
+
 PPDEVOBJ
 NTAPI
 EngpGetPDEV(
