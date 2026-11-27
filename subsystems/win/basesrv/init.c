@@ -881,7 +881,7 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
         if ((NT_SUCCESS(Status)) && SessionId == 0) NtClose(SymHandle);
 
         /*
-         * Sessions other than 0 (NitroSessions): AppContainerNamedObjects
+         * Sessions other than 0: AppContainerNamedObjects
          * points to the session's directory for AppContainer packages,
          * \Sessions\<id>\AppContainerNamedObjects, which is created here.
          * Session 0 keeps its set of objects until the phase that makes it
