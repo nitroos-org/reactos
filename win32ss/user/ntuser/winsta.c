@@ -47,41 +47,79 @@ InitWindowStationImpl(VOID)
     return STATUS_SUCCESS;
 }
 
-/* The DACL of session 0's WindowStations directory (pool, USERTAG_SECURITY), or NULL */
+/*
+ * The security of a WindowStations directory (every session's). Measured on Windows Server 2022 (\Windows\WindowStations
+ * and \Sessions\1\Windows\WindowStations alike): owner Administrators, group SYSTEM; the world and the restricted
+ * code may only traverse it (0x2), Administrators may also query it and create objects in it (0x5), nobody else has
+ * a right on it. Window stations get there through win32k only (NtUserCreateWindowStation looks the directory up
+ * without the caller's create check, so programs, Winlogon and the services still create theirs), and nothing
+ * else can be put into it.
+ *
+ * What a window station created there without a security descriptor of its own inherits is kept as it was
+ * before (the inheritable entries of \Windows: the world and the restricted code read, write and execute,
+ * Administrators and the creator full access). Windows' directory makes such a window station inherit full access
+ * for the world and the restricted code, which is wider; that is not copied.
+ *
+ * Returns an absolute descriptor in one pool block (USERTAG_SECURITY), or NULL.
+ */
 static
 PSECURITY_DESCRIPTOR
-IntGetSession0WinStaDirSecurity(VOID)
+IntBuildWinStaDirSecurity(VOID)
 {
-    UNICODE_STRING Name = RTL_CONSTANT_STRING(WINSTA_OBJ_DIR);
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    PSECURITY_DESCRIPTOR Sd = NULL;
-    HANDLE hDir;
-    ULONG Length = 0;
+    static const struct
+    {
+        UCHAR Flags;
+        ACCESS_MASK Mask;
+        ULONG Sid; /* 0 world, 1 restricted, 2 Administrators, 3 creator owner */
+    } Entries[] =
+    {
+        { 0, DIRECTORY_TRAVERSE, 0 },
+        { 0, DIRECTORY_TRAVERSE, 1 },
+        { 0, DIRECTORY_QUERY | DIRECTORY_CREATE_OBJECT, 2 },
+        { OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE, GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE, 0 },
+        { OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE, GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE, 1 },
+        { OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE, GENERIC_ALL, 2 },
+        { OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE, GENERIC_ALL, 3 },
+    };
+    PSID Sids[4];
+    PSECURITY_DESCRIPTOR Sd;
+    PACL Dacl;
+    ULONG AclLength = sizeof(ACL), i;
+    PACCESS_ALLOWED_ACE Ace;
     NTSTATUS Status;
 
-    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
-    Status = ZwOpenDirectoryObject(&hDir, READ_CONTROL, &ObjectAttributes);
+    Sids[0] = SeExports->SeWorldSid;
+    Sids[1] = SeExports->SeRestrictedSid;
+    Sids[2] = SeExports->SeAliasAdminsSid;
+    Sids[3] = SeExports->SeCreatorOwnerSid;
+    for (i = 0; i < RTL_NUMBER_OF(Entries); i++)
+        AclLength += FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + RtlLengthSid(Sids[Entries[i].Sid]);
+
+    Sd = ExAllocatePoolWithTag(PagedPool, sizeof(SECURITY_DESCRIPTOR) + AclLength, USERTAG_SECURITY);
+    if (!Sd)
+        return NULL;
+    Dacl = (PACL)((PUCHAR)Sd + sizeof(SECURITY_DESCRIPTOR));
+    Status = RtlCreateSecurityDescriptor(Sd, SECURITY_DESCRIPTOR_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlCreateAcl(Dacl, AclLength, ACL_REVISION);
+    for (i = 0; NT_SUCCESS(Status) && i < RTL_NUMBER_OF(Entries); i++)
+    {
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, Entries[i].Mask, Sids[Entries[i].Sid]);
+        if (NT_SUCCESS(Status) && NT_SUCCESS(RtlGetAce(Dacl, i, (PVOID*)&Ace)))
+            Ace->Header.AceFlags = Entries[i].Flags;
+    }
+    if (NT_SUCCESS(Status))
+        Status = RtlSetDaclSecurityDescriptor(Sd, TRUE, Dacl, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetOwnerSecurityDescriptor(Sd, SeExports->SeAliasAdminsSid, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetGroupSecurityDescriptor(Sd, SeExports->SeLocalSystemSid, FALSE);
     if (!NT_SUCCESS(Status))
     {
-        ERR("Cannot open %wZ for its DACL, Status 0x%08lx\n", &Name, Status);
+        ERR("Cannot build the security of the WindowStations directory, Status 0x%08lx\n", Status);
+        ExFreePoolWithTag(Sd, USERTAG_SECURITY);
         return NULL;
     }
-    Status = ZwQuerySecurityObject(hDir, DACL_SECURITY_INFORMATION, NULL, 0, &Length);
-    if ((Status == STATUS_BUFFER_TOO_SMALL) && Length)
-    {
-        Sd = ExAllocatePoolWithTag(PagedPool, Length, USERTAG_SECURITY);
-        if (Sd)
-        {
-            Status = ZwQuerySecurityObject(hDir, DACL_SECURITY_INFORMATION, Sd, Length, &Length);
-            if (!NT_SUCCESS(Status))
-            {
-                ExFreePoolWithTag(Sd, USERTAG_SECURITY);
-                Sd = NULL;
-            }
-        }
-    }
-    if (!Sd) ERR("Cannot read the DACL of %wZ, Status 0x%08lx\n", &Name, Status);
-    ZwClose(hDir);
     return Sd;
 }
 
@@ -118,13 +156,13 @@ UserCreateWinstaDirectory(VOID)
     }
 
     /*
-     * Session 0's directory inherits its DACL from \Windows (the world and the restricted code may create
-     * window stations there, Administrators have full access). \Sessions\<id>\Windows has no inheritable
-     * entries (its DACL is the measured Windows one), so the directory of another session would get the
-     * default DACL of csrss alone (SYSTEM full, Administrators query): no program of the session could
-     * create a window station. It gets the DACL of session 0's directory instead.
+     * Every session's directory gets the security measured on Windows (see IntBuildWinStaDirSecurity). Before,
+     * session 0's inherited it from \Windows and another session's was a copy of that: the world could create
+     * any object in it.
      */
-    SessionSd = (SessionId != 0) ? IntGetSession0WinStaDirSecurity() : NULL;
+    SessionSd = IntBuildWinStaDirSecurity();
+    if (!SessionSd)
+        return STATUS_INSUFFICIENT_RESOURCES;
 
     InitializeObjectAttributes(&ObjectAttributes,
                                &gustrWindowStationsDir,
@@ -132,7 +170,7 @@ UserCreateWinstaDirectory(VOID)
                                NULL,
                                SessionSd);
     Status = ZwCreateDirectoryObject(&ghWinStaDir, DIRECTORY_CREATE_OBJECT, &ObjectAttributes);
-    if (SessionSd) ExFreePoolWithTag(SessionSd, USERTAG_SECURITY);
+    ExFreePoolWithTag(SessionSd, USERTAG_SECURITY);
     if (!NT_SUCCESS(Status))
         ERR("Could not create %wZ directory (Status 0x%X)\n", &gustrWindowStationsDir, Status);
     else
@@ -900,6 +938,13 @@ IntCreateWindowStation(
     }
     RtlZeroMemory(WindowStation, sizeof(WINSTATION_OBJECT));
 
+    /*
+     * The handle goes to the caller, never into the kernel's handle table, whatever the attributes ask for: an
+     * object created for a lookup in kernel mode (OwnerMode) keeps OBJ_KERNEL_HANDLE from the attributes
+     */
+    if (AccessMode != KernelMode && OBJECT_TO_OBJECT_HEADER(WindowStation)->ObjectCreateInfo)
+        OBJECT_TO_OBJECT_HEADER(WindowStation)->ObjectCreateInfo->Attributes &= ~OBJ_KERNEL_HANDLE;
+
     /* Assign the session ID to the window station */
     WindowStation->dwSessionId = PsGetCurrentProcessSessionId(); // gSessionId
 
@@ -1291,11 +1336,17 @@ NtUserCreateWindowStation(
 
     UserEnterExclusive();
 
-    /* Create the window station */
+    /*
+     * Create the window station. Its directory is looked up without the caller's create check: the
+     * WindowStations directory of a session gives programs no right to create objects there (as on
+     * Windows), only window stations go in, and only through here, which accepts nothing but a leaf name
+     * in this session's directory (IntCheckWindowStationDirectory, IntCheckWindowStationLanded). Opening
+     * an existing one is still checked against its own security.
+     */
     Status = IntCreateWindowStation(&hWinSta,
                                     ObjectAttributes,
                                     UserMode,
-                                    OwnerMode,
+                                    KernelMode,
                                     dwDesiredAccess,
                                     Unknown2,
                                     Unknown3,

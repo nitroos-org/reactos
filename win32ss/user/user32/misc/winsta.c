@@ -106,8 +106,10 @@ CreateWindowStationW(
                                    NULL,
                                    NULL);
 
+        /* Only as the root of the name: win32k puts the window station into it (programs get no right
+           to create objects in that directory themselves) */
         Status = NtOpenDirectoryObject(&hWindowStationsDir,
-                                       DIRECTORY_CREATE_OBJECT,
+                                       DIRECTORY_TRAVERSE,
                                        &ObjectAttributes);
         if (!NT_SUCCESS(Status))
         {
