@@ -2919,10 +2919,25 @@ RtlAllocateHeap(IN PVOID HeapPtr,
 
         if (Index > Heap->DeCommitFreeBlockThreshold)
         {
-            /* Find an entry from the non dedicated list */
-            FreeEntry = CONTAINING_RECORD(Heap->FreeHints[0],
-                                      HEAP_FREE_ENTRY,
-                                      FreeList);
+            /* Find an entry from the non dedicated list: the first one that is not smaller (the smallest that
+               fits). With the index the walk starts at the first block of the request's class, or of the next class
+               that has one; the blocks in front of it are all smaller than the request. */
+            PHEAP_LARGE_INDEX LargeIndex = RtlpHeapLargeIndex(Heap);
+            PLIST_ENTRY Start = Heap->FreeHints[0];
+
+            if (LargeIndex)
+            {
+                ULONG Class = RtlpHeapLargeFindClass(LargeIndex, RtlpHeapLargeClass(Heap, Index));
+
+                /* The largest block fits (checked above), so some class from the request's on has a block */
+                ASSERT(Class < HEAP_LARGE_CLASSES);
+                if (Class < HEAP_LARGE_CLASSES)
+                    Start = LargeIndex->ClassHints[Class];
+            }
+
+            FreeEntry = CONTAINING_RECORD(Start,
+                                          HEAP_FREE_ENTRY,
+                                          FreeList);
 
             while (FreeEntry->Size < Index)
             {
