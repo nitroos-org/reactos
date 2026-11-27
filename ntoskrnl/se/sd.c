@@ -1699,6 +1699,93 @@ SepAclHasEffectiveLabel(
     return FALSE;
 }
 
+/*
+ * An explicit label of a new object may not be above the creator's level
+ * (Token, the client token when the creator impersonates) unless
+ * SeRelabelPrivilege is enabled in it. The caller holds the subject context
+ * locked. With ObjectLabelOnly only a label of the object itself counts
+ * (inherit-only ones are not checked).
+ */
+static
+NTSTATUS
+SepCheckExplicitLabel(
+    _In_ PISECURITY_DESCRIPTOR ExplicitDescriptor,
+    _In_ PTOKEN Token,
+    _In_ BOOLEAN ObjectLabelOnly)
+{
+    LUID_AND_ATTRIBUTES Relabel;
+    BOOLEAN HasLabel;
+    ULONG ExplicitLevel;
+    NTSTATUS Status;
+
+    Status = SepGetDescriptorLabel(ExplicitDescriptor, &HasLabel, &ExplicitLevel, NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (!HasLabel || ExplicitLevel <= Token->IntegrityLevel)
+        return STATUS_SUCCESS;
+    if (ObjectLabelOnly &&
+        !SepDescriptorHasObjectLabelAbove(ExplicitDescriptor, Token->IntegrityLevel))
+    {
+        return STATUS_SUCCESS;
+    }
+
+    Relabel.Luid = SeRelabelPrivilege;
+    Relabel.Attributes = SE_PRIVILEGE_ENABLED;
+    if (SepPrivilegeCheck(Token, &Relabel, 1, PRIVILEGE_SET_ALL_NECESSARY, UserMode))
+        return STATUS_SUCCESS;
+
+    /*
+     * Measured on Windows Server 2022 (V13): a creator below Medium
+     * whose only labels above its level are inherit-only gets
+     * ERROR_INVALID_LABEL (CreateDirectory of a Low process with
+     * S:(ML;OICIIO;NW;;;HI)); every other case (an object label
+     * above the creator, or a Medium creator) ERROR_PRIVILEGE_NOT_HELD
+     */
+    if (Token->IntegrityLevel < SECURITY_MANDATORY_MEDIUM_RID &&
+        !SepDescriptorHasObjectLabelAbove(ExplicitDescriptor, Token->IntegrityLevel))
+    {
+        return STATUS_INVALID_LABEL;
+    }
+    return STATUS_PRIVILEGE_NOT_HELD;
+}
+
+/*
+ * The label check of a new access token (SepAssignSecurity does not make it,
+ * a token has a label of its own): a user-mode creator may not give the new
+ * token a label of the object above its own level unless SeRelabelPrivilege
+ * is enabled; measured on Windows Server 2022 for DuplicateTokenEx,
+ * ERROR_PRIVILEGE_NOT_HELD with or without privileges and for an
+ * administrator and a standard user alike. Kernel-mode requestors, and
+ * descriptors a kernel component built itself, are not checked.
+ */
+NTSTATUS
+NTAPI
+SepCheckTokenCreatorLabel(
+    _In_opt_ PSECURITY_DESCRIPTOR ExplicitDescriptor,
+    _In_ PSECURITY_SUBJECT_CONTEXT SubjectContext,
+    _In_ KPROCESSOR_MODE RequestorMode)
+{
+    PISECURITY_DESCRIPTOR Descriptor = ExplicitDescriptor;
+    PTOKEN Token;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (Descriptor == NULL || RequestorMode == KernelMode ||
+        !(Descriptor->Control & SE_SACL_PRESENT))
+    {
+        return STATUS_SUCCESS;
+    }
+
+    SeLockSubjectContext(SubjectContext);
+    Token = SubjectContext->ClientToken != NULL ?
+            SubjectContext->ClientToken : SubjectContext->PrimaryToken;
+    Status = SepCheckExplicitLabel(Descriptor, Token, TRUE);
+    SeUnlockSubjectContext(SubjectContext);
+    return Status;
+}
+
 /**
  * @brief
  * SeAssignSecurityEx, with the choice whether an object created by a subject
@@ -1835,35 +1922,9 @@ SepAssignSecurity(
      */
     if (CreatorLabel && ExplicitDescriptor != NULL && (ExplicitDescriptor->Control & SE_SACL_PRESENT))
     {
-        LUID_AND_ATTRIBUTES Relabel;
-        BOOLEAN HasLabel;
-        ULONG ExplicitLevel;
-
-        Status = SepGetDescriptorLabel(ExplicitDescriptor, &HasLabel, &ExplicitLevel, NULL);
+        Status = SepCheckExplicitLabel(ExplicitDescriptor, Token, FALSE);
         if (!NT_SUCCESS(Status))
         {
-            SeUnlockSubjectContext(SubjectContext);
-            return Status;
-        }
-
-        Relabel.Luid = SeRelabelPrivilege;
-        Relabel.Attributes = SE_PRIVILEGE_ENABLED;
-        if (HasLabel && ExplicitLevel > Token->IntegrityLevel &&
-            !SepPrivilegeCheck(Token, &Relabel, 1, PRIVILEGE_SET_ALL_NECESSARY, UserMode))
-        {
-            /*
-             * Measured on Windows Server 2022 (V13): a creator below Medium
-             * whose only labels above its level are inherit-only gets
-             * ERROR_INVALID_LABEL (CreateDirectory of a Low process with
-             * S:(ML;OICIIO;NW;;;HI)); every other case (an object label
-             * above the creator, or a Medium creator) ERROR_PRIVILEGE_NOT_HELD
-             */
-            Status = STATUS_PRIVILEGE_NOT_HELD;
-            if (Token->IntegrityLevel < SECURITY_MANDATORY_MEDIUM_RID &&
-                !SepDescriptorHasObjectLabelAbove(ExplicitDescriptor, Token->IntegrityLevel))
-            {
-                Status = STATUS_INVALID_LABEL;
-            }
             SeUnlockSubjectContext(SubjectContext);
             return Status;
         }
