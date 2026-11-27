@@ -341,12 +341,28 @@ TCPBindAndConnect(
 {
     NTSTATUS Status;
     u16_t BoundPort;
+    BOOLEAN Moved = FALSE;
     PTDI_BUCKET Bucket;
 
-    Status = TCPTranslateError(LibTCPBind(Connection,
-                                          BindIp,
-                                          Connection->AddressFile->Port,
-                                          &BoundPort));
+    if (AddrEphemeralPortMovable(Connection->AddressFile))
+    {
+        /* An IPv6 socket's port was chosen when it was opened, without the remote endpoint: if a TIME-WAIT of this
+           remote endpoint holds it, the bind takes a port it does not (as the IPv4 connect's bind does) */
+        Status = TCPTranslateError(LibTCPBindForConnect(Connection,
+                                                        BindIp,
+                                                        Connection->AddressFile->Port,
+                                                        ConnectIp,
+                                                        RemotePort,
+                                                        &BoundPort,
+                                                        &Moved));
+    }
+    else
+    {
+        Status = TCPTranslateError(LibTCPBind(Connection,
+                                              BindIp,
+                                              Connection->AddressFile->Port,
+                                              &BoundPort));
+    }
 
     if (!NT_SUCCESS(Status))
     {
@@ -363,6 +379,11 @@ TCPBindAndConnect(
     {
         /* LibTCPBind reserved an ephemeral port in the port bitmap */
         Connection->AddressFile->Port = BoundPort;
+    }
+    else if (Moved)
+    {
+        /* LibTCPBindForConnect reserved another port in the port bitmap: the address file takes it over */
+        AddrMoveEphemeralPort(Connection->AddressFile, BoundPort);
     }
 
     Bucket = ExAllocateFromNPagedLookasideList(&TdiBucketLookasideList);

@@ -40,6 +40,10 @@ struct lwip_callback_msg
             PCONNECTION_ENDPOINT Connection;
             const ip_addr_t *IpAddress;
             u16_t Port;
+            /* A connect's bind with a port chosen without knowing the remote endpoint (LibTCPBindForConnect):
+               NULL for any other bind. RemotePort is in network order */
+            const ip_addr_t *RemoteIp;
+            u16_t RemotePort;
         } Bind;
         struct {
             PCONNECTION_ENDPOINT Connection;
@@ -75,6 +79,7 @@ struct lwip_callback_msg
         struct {
             err_t Error;
             u16_t Port;
+            BOOLEAN Moved;      /* LibTCPBindForConnect bound a port other than the one asked for */
         } Bind;
         struct {
             struct tcp_pcb *NewPcb;
@@ -129,6 +134,13 @@ PTCP_PCB    LibTCPSocket(void *arg);
 VOID        LibTCPFreeSocket(PTCP_PCB pcb);
 /* ipaddr: an IPv4 or IPv6 address, or IP_ANY_TYPE for a dual stack socket on the unspecified address */
 err_t       LibTCPBind(PCONNECTION_ENDPOINT Connection, const ip_addr_t *ipaddr, const u16_t port, u16_t *const BoundPort);
+/* The bind of a connect to RemoteIp:RemotePort (network order) from a port that was chosen without knowing the remote
+   endpoint (the implicit bind of an IPv6 socket). When a TIME-WAIT of that remote endpoint holds the port, another
+   port is chosen as for an IPv4 connect (only a TIME-WAIT of this remote endpoint counts) and bound instead, and
+   *Moved is set; the caller then owns the new port in the port bitmap and gives up the old one. Errors as LibTCPBind,
+   ERR_USE when every free port has a TIME-WAIT of this remote endpoint, ERR_MEM when every port is taken */
+err_t       LibTCPBindForConnect(PCONNECTION_ENDPOINT Connection, const ip_addr_t *ipaddr, const u16_t port,
+                                 const ip_addr_t *RemoteIp, u16_t RemotePort, u16_t *const BoundPort, BOOLEAN *Moved);
 /* RemoteIp NULL: no remote endpoint known, ports with any TIME-WAIT PCB are skipped. Otherwise only the TIME-WAIT of that
    remote endpoint (RemotePort in host order) counts. Returns the port in network order, (UINT)-1 when every port is taken,
    or LIBTCP_PORT_TIME_WAIT when only that remote endpoint's TIME-WAIT keeps the free ports from it */

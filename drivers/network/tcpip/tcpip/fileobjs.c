@@ -509,6 +509,49 @@ static VOID AddrReleasePort(
     TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
 }
 
+/* Whether the port of an address file is one the transport chose (the socket did not ask for it) on a file that no
+ * other handle shares, so that a connect may replace it by a better choice (AddrMoveEphemeralPort). Only an IPv6 TCP
+ * file: an IPv4 socket's implicit bind already names the remote endpoint (TCP_CONNECT_HINT). */
+BOOLEAN AddrEphemeralPortMovable(
+    PADDRESS_FILE AddrFile)
+{
+    return AddrFile->Protocol == IPPROTO_TCP &&
+           AddrFile->Family == TDI_ADDRESS_TYPE_IP6 &&
+           !AddrFile->ExplicitPort &&
+           AddrFile->Sharers == 1;
+}
+
+/* Gives the address file another ephemeral port, already reserved in the port bitmap by the caller. The old port is
+ * given up unless another address file shares it, as when the file closes. */
+VOID AddrMoveEphemeralPort(
+    PADDRESS_FILE AddrFile,
+    USHORT NewPort)
+{
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+    BOOLEAN Shared = FALSE;
+    USHORT OldPort;
+
+    TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
+    OldPort = AddrFile->Port;
+    for (Entry = AddressFileListHead.Flink; Entry != &AddressFileListHead; Entry = Entry->Flink)
+    {
+        PADDRESS_FILE Other = CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry);
+
+        if (Other != AddrFile && Other->Port == OldPort && Other->Protocol == AddrFile->Protocol)
+        {
+            Shared = TRUE;
+            break;
+        }
+    }
+    RemoveEntryList(&AddrFile->FwPortEntry);
+    AddrFile->Port = NewPort;
+    InsertTailList(&AddressFilePortHash[ADDRESS_FILE_PORT_BUCKET(NewPort)], &AddrFile->FwPortEntry);
+    if (!Shared)
+        TCPFreePort(OldPort);
+    TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
+}
+
 VOID AddrFileFree(
     PVOID Object)
 /*

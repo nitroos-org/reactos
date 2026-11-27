@@ -1521,7 +1521,7 @@ LibTCPLocalPortUsed(ULONG Port)
    port, so that the search in the port bitmap only tests bits */
 static
 UINT
-LibTCPAllocateEphemeralPortLocked(const ip4_addr_t *RemoteIp, u16_t RemotePort)
+LibTCPAllocateEphemeralPortLocked(const ip_addr_t *RemoteIp, u16_t RemotePort)
 {
     struct tcp_pcb *pcb;
     UINT Port;
@@ -1538,7 +1538,7 @@ LibTCPAllocateEphemeralPortLocked(const ip4_addr_t *RemoteIp, u16_t RemotePort)
     LibTCPHintValid = RemoteIp != NULL;
     if (RemoteIp)
     {
-        ip_addr_copy_from_ip4(LibTCPHintIp, *RemoteIp);
+        ip_addr_copy(LibTCPHintIp, *RemoteIp);
         LibTCPHintPort = RemotePort;
     }
 
@@ -1570,9 +1570,13 @@ UINT
 LibTCPAllocateEphemeralPort(const ip4_addr_t *RemoteIp, u16_t RemotePort)
 {
     UINT Port;
+    ip_addr_t Remote;
+
+    if (RemoteIp)
+        ip_addr_copy_from_ip4(Remote, *RemoteIp);
 
     LOCK_TCPIP_CORE();
-    Port = LibTCPAllocateEphemeralPortLocked(RemoteIp, RemotePort);
+    Port = LibTCPAllocateEphemeralPortLocked(RemoteIp ? &Remote : NULL, RemotePort);
     UNLOCK_TCPIP_CORE();
 
     return Port;
@@ -1586,8 +1590,11 @@ LibTCPBindCallback(void *arg)
     PTCP_PCB pcb = msg->Input.Bind.Connection->SocketContext;
     UINT Port = msg->Input.Bind.Port;
     ip_addr_t BindAddr;
+    BOOLEAN Moved = FALSE;
 
     ASSERT(msg);
+
+    msg->Output.Bind.Moved = FALSE;
 
     if (!msg->Input.Bind.Connection->SocketContext)
     {
@@ -1610,6 +1617,32 @@ LibTCPBindCallback(void *arg)
         }
     }
 
+    /* The port of an IPv6 socket was chosen when it was opened, before its connect named the remote endpoint,
+       so a TIME-WAIT of this very remote endpoint may hold it (the 4-tuple would be taken: WSAEADDRINUSE). Choose
+       as an IPv4 connect does, which knows the remote endpoint then: a port only a TIME-WAIT of another remote
+       endpoint holds is as good as a free one */
+    if (Port && msg->Input.Bind.RemoteIp &&
+        tcp_tw_remote_used(lwip_ntohs((u16_t)Port), msg->Input.Bind.RemoteIp,
+                           lwip_ntohs(msg->Input.Bind.RemotePort)))
+    {
+        UINT NewPort = LibTCPAllocateEphemeralPortLocked(msg->Input.Bind.RemoteIp,
+                                                         lwip_ntohs(msg->Input.Bind.RemotePort));
+
+        if (NewPort == LIBTCP_PORT_TIME_WAIT)
+        {
+            /* Every free port has a TIME-WAIT of this remote endpoint */
+            msg->Output.Bind.Error = ERR_USE;
+            goto done;
+        }
+        if (NewPort == (UINT)-1)
+        {
+            msg->Output.Bind.Error = ERR_MEM;
+            goto done;
+        }
+        Port = NewPort;
+        Moved = TRUE;
+    }
+
     /* An IPv4 address as before; an IPv6 one (with its zone) or IP_ANY_TYPE (dual stack) makes the PCB of that
        type: tcp_bind sets the local address whenever its type differs from the PCB's */
     ip_addr_copy(BindAddr, *msg->Input.Bind.IpAddress);
@@ -1617,10 +1650,13 @@ LibTCPBindCallback(void *arg)
                                       &BindAddr,
                                       lwip_ntohs((u16_t)Port));
 
-    if (!msg->Input.Bind.Port)
+    if (!msg->Input.Bind.Port || Moved)
     {
         if (msg->Output.Bind.Error == ERR_OK)
+        {
             msg->Output.Bind.Port = (u16_t)Port;
+            msg->Output.Bind.Moved = Moved;
+        }
         else
             TCPFreePort(Port);
     }
@@ -1631,8 +1667,10 @@ done:
 
 /* Port 0 binds an ephemeral port, which stays reserved in the port bitmap;
    it is returned in *BoundPort (network order) */
+static
 err_t
-LibTCPBind(PCONNECTION_ENDPOINT Connection, const ip_addr_t *ipaddr, const u16_t port, u16_t *const BoundPort)
+LibTCPBindWithRemote(PCONNECTION_ENDPOINT Connection, const ip_addr_t *ipaddr, const u16_t port,
+                     const ip_addr_t *RemoteIp, u16_t RemotePort, u16_t *const BoundPort, BOOLEAN *Moved)
 {
     struct lwip_callback_msg *msg;
     err_t ret;
@@ -1644,7 +1682,10 @@ LibTCPBind(PCONNECTION_ENDPOINT Connection, const ip_addr_t *ipaddr, const u16_t
         msg->Input.Bind.Connection = Connection;
         msg->Input.Bind.IpAddress = ipaddr;
         msg->Input.Bind.Port = port;
+        msg->Input.Bind.RemoteIp = RemoteIp;
+        msg->Input.Bind.RemotePort = RemotePort;
         msg->Output.Bind.Port = port;
+        msg->Output.Bind.Moved = FALSE;
 
         LibTCPDispatch(LibTCPBindCallback, msg);
 
@@ -1655,6 +1696,8 @@ LibTCPBind(PCONNECTION_ENDPOINT Connection, const ip_addr_t *ipaddr, const u16_t
 
         if (ret == ERR_OK && BoundPort)
             *BoundPort = msg->Output.Bind.Port;
+        if (ret == ERR_OK && Moved)
+            *Moved = msg->Output.Bind.Moved;
 
         ExFreeToNPagedLookasideList(&MessageLookasideList, msg);
 
@@ -1662,6 +1705,19 @@ LibTCPBind(PCONNECTION_ENDPOINT Connection, const ip_addr_t *ipaddr, const u16_t
     }
 
     return ERR_MEM;
+}
+
+err_t
+LibTCPBind(PCONNECTION_ENDPOINT Connection, const ip_addr_t *ipaddr, const u16_t port, u16_t *const BoundPort)
+{
+    return LibTCPBindWithRemote(Connection, ipaddr, port, NULL, 0, BoundPort, NULL);
+}
+
+err_t
+LibTCPBindForConnect(PCONNECTION_ENDPOINT Connection, const ip_addr_t *ipaddr, const u16_t port,
+                     const ip_addr_t *RemoteIp, u16_t RemotePort, u16_t *const BoundPort, BOOLEAN *Moved)
+{
+    return LibTCPBindWithRemote(Connection, ipaddr, port, RemoteIp, RemotePort, BoundPort, Moved);
 }
 
 static
