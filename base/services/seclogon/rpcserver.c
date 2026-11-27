@@ -53,100 +53,6 @@ StopRpcServer(VOID)
 }
 
 
-typedef struct _SECL_EXIT_WAIT
-{
-    SECL_DESKTOP_ACCESS *Access;
-    SECL_NAMESPACE_ACCESS *Namespace;
-    HANDLE hProcess;
-    HANDLE hToken;
-    HANDLE hProfile;
-} SECL_EXIT_WAIT, *PSECL_EXIT_WAIT;
-
-
-/*
- * When the process is gone: takes the logon SID out of the window station and the desktop and out of
- * the named-object directories of the caller's session, and unloads the user profile loaded for it (LOGON_WITH_PROFILE). CreateProcessWithLogonW documents
- * that the profile stays loaded for the new process and is unloaded after it has terminated.
- */
-static DWORD
-WINAPI
-WaitForProcessExit(
-    _In_ PVOID Context)
-{
-    PSECL_EXIT_WAIT Wait = Context;
-
-    WaitForSingleObject(Wait->hProcess, INFINITE);
-    SeclRevokeDesktopAccess(Wait->Access);
-    SeclRevokeNamespaceAccess(Wait->Namespace);
-    if (Wait->hProfile != NULL)
-    {
-        if (!UnloadUserProfile(Wait->hToken, Wait->hProfile))
-            WARN("UnloadUserProfile() failed with Error %lu\n", GetLastError());
-    }
-    if (Wait->hToken != NULL)
-        CloseHandle(Wait->hToken);
-    CloseHandle(Wait->hProcess);
-    HeapFree(GetProcessHeap(), 0, Wait);
-    return 0;
-}
-
-
-/*
- * Hands the desktop access and the loaded profile (each may be NULL) to a thread that releases
- * them when the process exits. On success the thread owns both; on failure the caller keeps them.
- */
-static BOOL
-StartExitWait(
-    _In_opt_ SECL_DESKTOP_ACCESS *Access,
-    _In_opt_ SECL_NAMESPACE_ACCESS *Namespace,
-    _In_opt_ HANDLE hToken,
-    _In_opt_ HANDLE hProfile,
-    _In_ HANDLE hProcess)
-{
-    PSECL_EXIT_WAIT Wait;
-    HANDLE hThread;
-
-    Wait = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Wait));
-    if (Wait == NULL)
-        return FALSE;
-
-    Wait->Access = Access;
-    Wait->Namespace = Namespace;
-    if (!DuplicateHandle(GetCurrentProcess(), hProcess, GetCurrentProcess(), &Wait->hProcess,
-                         SYNCHRONIZE, FALSE, 0))
-    {
-        HeapFree(GetProcessHeap(), 0, Wait);
-        return FALSE;
-    }
-
-    /* UnloadUserProfile needs the token of the logon the profile was loaded for */
-    if (hProfile != NULL)
-    {
-        if (!DuplicateHandle(GetCurrentProcess(), hToken, GetCurrentProcess(), &Wait->hToken,
-                             0, FALSE, DUPLICATE_SAME_ACCESS))
-        {
-            CloseHandle(Wait->hProcess);
-            HeapFree(GetProcessHeap(), 0, Wait);
-            return FALSE;
-        }
-        Wait->hProfile = hProfile;
-    }
-
-    hThread = CreateThread(NULL, 0, WaitForProcessExit, Wait, 0, NULL);
-    if (hThread == NULL)
-    {
-        if (Wait->hToken != NULL)
-            CloseHandle(Wait->hToken);
-        CloseHandle(Wait->hProcess);
-        HeapFree(GetProcessHeap(), 0, Wait);
-        return FALSE;
-    }
-
-    CloseHandle(hThread);
-    return TRUE;
-}
-
-
 /*
  * The session of the RPC caller: the session of the process at the other end of the call, which the
  * kernel recorded when that process opened the pipe. Never the session of the token the call came
@@ -183,42 +89,6 @@ SeclGetCallerSession(
     return ERROR_SUCCESS;
 }
 
-/* A copy of the logon SID of a token */
-static
-BOOL
-SeclCopyLogonSid(
-    _In_ HANDLE hToken,
-    _Out_writes_bytes_(Size) PBYTE Buffer,
-    _In_ DWORD Size,
-    _Out_ PDWORD Length)
-{
-    PTOKEN_GROUPS Groups;
-    DWORD Needed = 0, i;
-    BOOL Found = FALSE;
-
-    *Length = 0;
-    GetTokenInformation(hToken, TokenGroups, NULL, 0, &Needed);
-    if (!Needed) return FALSE;
-    Groups = HeapAlloc(GetProcessHeap(), 0, Needed);
-    if (!Groups) return FALSE;
-    if (GetTokenInformation(hToken, TokenGroups, Groups, Needed, &Needed))
-    {
-        for (i = 0; i < Groups->GroupCount; i++)
-        {
-            if ((Groups->Groups[i].Attributes & SE_GROUP_LOGON_ID) != SE_GROUP_LOGON_ID) continue;
-            if (GetLengthSid(Groups->Groups[i].Sid) <= Size &&
-                CopySid(Size, Buffer, Groups->Groups[i].Sid))
-            {
-                *Length = GetLengthSid(Groups->Groups[i].Sid);
-                Found = TRUE;
-            }
-            break;
-        }
-    }
-    HeapFree(GetProcessHeap(), 0, Groups);
-    return Found;
-}
-
 VOID
 __stdcall
 SeclCreateProcessWithLogonW(
@@ -233,6 +103,7 @@ SeclCreateProcessWithLogonW(
     SECL_DESKTOP_ACCESS *DesktopAccess = NULL;
     SECL_NAMESPACE_ACCESS *NamespaceAccess = NULL;
     PWSTR pszDesktop = NULL;
+    PCWSTR ClientDesktop = NULL;
     LPVOID pEnvironment = NULL;
     DWORD dwCreationFlags;
     HANDLE hToken = NULL;
@@ -351,8 +222,8 @@ SeclCreateProcessWithLogonW(
     }
     else
     {
-        /* This service cannot reach the window stations of another session: the caller grants the access
-           (SECL_RESPONSE_GRANT_DESKTOP), the process waits suspended until it has */
+        /* This service cannot reach the window stations of another session: its helper there gives the access
+           (SeclGrantClientDesktop), the process waits suspended until it has */
         StartupInfo.lpDesktop = pRequest->Desktop ? pRequest->Desktop : L"WinSta0\\Default";
     }
 
@@ -415,14 +286,39 @@ SeclCreateProcessWithLogonW(
     }
 
     /*
-     * Keep the access of the logon and the user's profile (HKEY_CURRENT_USER of the new process is
-     * its hive) until the process has exited. If that cannot be arranged, the profile stays loaded
-     * (it is reference counted, a later logon of the user reuses it) rather than being unloaded
-     * under the running process.
+     * The window station and the desktop in the caller's session: the helper gives the new logon its entries there,
+     * as far as the caller may change them itself (it opens both with the caller's token; the caller waits for
+     * this answer). A name that is not a plain window station and desktop name gets no entry.
      */
-    if (DesktopAccess != NULL || NamespaceAccess != NULL || ProfileInfo.hProfile != NULL)
+    if (bOtherSession)
     {
-        if (StartExitWait(DesktopAccess, NamespaceAccess, hToken, ProfileInfo.hProfile, ProcessInfo.hProcess))
+        PSID LogonSid = SeclGetLogonSid(hToken);
+
+        if (LogonSid != NULL && SeclValidDesktopName(StartupInfo.lpDesktop))
+        {
+            ClientDesktop = StartupInfo.lpDesktop;
+            if (!SeclGrantClientDesktop(CallerSessionId, pRequest->dwProcessId, LogonSid, ClientDesktop))
+                WARN("The new logon gets no access to desktop %S of session %lu\n", ClientDesktop, CallerSessionId);
+        }
+        else
+        {
+            WARN("No window station and desktop access for the new logon (desktop name refused)\n");
+        }
+        if (LogonSid != NULL)
+            HeapFree(GetProcessHeap(), 0, LogonSid);
+    }
+
+    /*
+     * Keep the access of the logon and the user's profile (HKEY_CURRENT_USER of the new process is
+     * its hive) until the logon has no process left: the program may be a launcher that starts the real
+     * one and exits. In another session the window station and desktop entries the helper gave are taken
+     * back by the helper as well. If that cannot be arranged, the profile stays loaded (it is reference
+     * counted, a later logon of the user reuses it) rather than being unloaded under the running process.
+     */
+    if (DesktopAccess != NULL || NamespaceAccess != NULL || ProfileInfo.hProfile != NULL || bOtherSession)
+    {
+        if (SeclStartLogonWait(DesktopAccess, NamespaceAccess, hToken, ProfileInfo.hProfile, ProcessInfo.hProcess,
+                               CallerSessionId, ClientDesktop))
         {
             DesktopAccess = NULL;
             NamespaceAccess = NULL;
@@ -470,22 +366,11 @@ SeclCreateProcessWithLogonW(
         pResponse->hThread = (DWORD)(ULONG_PTR)hThreadCopy;
         pResponse->dwProcessId = ProcessInfo.dwProcessId;
         pResponse->dwThreadId = ProcessInfo.dwThreadId;
-
-        if (bOtherSession)
-        {
-            /* The logon SID the caller grants the access to (CreateProcessWithLogonW resumes the thread) */
-            if (!SeclCopyLogonSid(hToken, pResponse->LogonSid, sizeof(pResponse->LogonSid),
-                                  &pResponse->dwLogonSidLength))
-            {
-                dwError = ERROR_NO_SUCH_LOGON_SESSION;
-                DuplicateHandle(hTargetProcessHandle, hProcessCopy, NULL, NULL, 0, FALSE, DUPLICATE_CLOSE_SOURCE);
-                DuplicateHandle(hTargetProcessHandle, hThreadCopy, NULL, NULL, 0, FALSE, DUPLICATE_CLOSE_SOURCE);
-                pResponse->hProcess = pResponse->hThread = 0;
-                goto done;
-            }
-            pResponse->dwFlags |= SECL_RESPONSE_GRANT_DESKTOP;
-        }
     }
+
+    /* Created suspended in another session for the grant: it runs now, unless the caller asked otherwise */
+    if (bOtherSession && !(pRequest->dwCreationFlags & CREATE_SUSPENDED))
+        ResumeThread(ProcessInfo.hThread);
 
 done:
     /* A process created suspended for the caller that the caller will not get is ended */

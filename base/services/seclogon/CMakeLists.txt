@@ -5,6 +5,7 @@ spec2def(seclogon.dll seclogon.spec ADD_IMPORTLIB)
 
 list(APPEND SOURCE
     desktop.c
+    logon.c
     namespace.c
     rpcserver.c
     seclogon.c
@@ -22,3 +23,9 @@ target_link_libraries(seclogon wine ${PSEH_LIB})
 add_importlibs(seclogon userenv user32 advapi32 rpcrt4 msvcrt kernel32 ntdll)
 add_pch(seclogon precomp.h SOURCE)
 add_cd_file(TARGET seclogon DESTINATION reactos/system32 FOR all)
+
+# The service's helper in another session (see SeclHelperMain): no window, no console
+add_executable(seclhelp seclhelp.c)
+set_module_type(seclhelp win32gui UNICODE)
+add_importlibs(seclhelp seclogon msvcrt kernel32 ntdll)
+add_cd_file(TARGET seclhelp DESTINATION reactos/system32 FOR all)

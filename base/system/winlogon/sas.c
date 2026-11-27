@@ -572,12 +572,70 @@ WlIsLogonEntry(
     return RtlEqualSid(AceSid, UserSid) || RtlEqualSid(AceSid, LogonSid);
 }
 
+/*
+ * The Secondary Logon service changes the same two DACLs (an entry for the logon of a program it starts in this
+ * session), also by read, change, write. Both take this mutex of the session around their change, so that neither
+ * loses the other's entry. It is in \Sessions\<n>\Windows, where only SYSTEM may create objects, and only SYSTEM
+ * may open it. Returns the owned mutex, or NULL when it could not be had in time (the change is made anyway: a
+ * lost entry is better than a logon that never completes).
+ */
+static
+HANDLE
+WlLockSessionNamespace(VOID)
+{
+    static SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    UCHAR AclBuffer[sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) + SECURITY_MAX_SID_SIZE];
+    PACL Dacl = (PACL)AclBuffer;
+    SECURITY_DESCRIPTOR Sd;
+    PSID SystemSid = NULL;
+    WCHAR Path[64];
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Mutant = NULL;
+    NTSTATUS Status;
+
+    Status = RtlAllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &SystemSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlCreateAcl(Dacl, sizeof(AclBuffer), ACL_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, MUTANT_ALL_ACCESS, SystemSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlCreateSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetDaclSecurityDescriptor(&Sd, TRUE, Dacl, FALSE);
+    if (NT_SUCCESS(Status))
+    {
+        StringCchPrintfW(Path, RTL_NUMBER_OF(Path), L"\\Sessions\\%lu\\Windows\\NamedObjectsAccessLock", WlSessionId);
+        RtlInitUnicodeString(&Name, Path);
+        InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE | OBJ_OPENIF, NULL, &Sd);
+        Status = NtCreateMutant(&Mutant, MUTANT_ALL_ACCESS, &ObjectAttributes, FALSE);
+    }
+    if (SystemSid)
+        RtlFreeSid(SystemSid);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("WL: no lock for the named-object directories, Status 0x%08lx\n", Status);
+        return NULL;
+    }
+    switch (WaitForSingleObject(Mutant, 30000))
+    {
+        case WAIT_OBJECT_0:
+        case WAIT_ABANDONED:
+            return Mutant;
+        default:
+            ERR("WL: the lock of the named-object directories is not free\n");
+            NtClose(Mutant);
+            return NULL;
+    }
+}
+
 static
 VOID
 WlSetSessionNamespaceAccess(
     _In_ HANDLE UserToken,
     _In_ BOOL Grant)
 {
+    HANDLE Lock;
     static const PCWSTR Directories[] = { L"BaseNamedObjects", L"AppContainerNamedObjects" };
     const ACCESS_MASK LogonAccess = DIRECTORY_QUERY | DIRECTORY_TRAVERSE | DIRECTORY_CREATE_OBJECT |
                                     DIRECTORY_CREATE_SUBDIRECTORY | READ_CONTROL;
@@ -625,6 +683,7 @@ WlSetSessionNamespaceAccess(
         goto Quit;
     }
 
+    Lock = WlLockSessionNamespace();
     for (d = 0; d < RTL_NUMBER_OF(Directories); d++)
     {
         WCHAR Path[64];
@@ -709,6 +768,11 @@ Next:
         if (NewDacl) RtlFreeHeap(RtlGetProcessHeap(), 0, NewDacl);
         if (OldSd) RtlFreeHeap(RtlGetProcessHeap(), 0, OldSd);
         NtClose(Directory);
+    }
+    if (Lock)
+    {
+        NtReleaseMutant(Lock, NULL);
+        NtClose(Lock);
     }
 
 Quit:
