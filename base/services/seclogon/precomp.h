@@ -48,8 +48,48 @@ VOID
 SeclRevokeDesktopAccess(
     _In_opt_ SECL_DESKTOP_ACCESS *Access);
 
-/* namespace.c */
+PSID
+SeclGetLogonSid(
+    _In_ HANDLE hToken);
+
+BOOL
+SeclValidDesktopName(
+    _In_opt_ PCWSTR pszDesktop);
+
+/* logon.c */
 typedef struct _SECL_NAMESPACE_ACCESS SECL_NAMESPACE_ACCESS;
+
+BOOL
+SeclStartLogonWait(
+    _In_opt_ SECL_DESKTOP_ACCESS *Access,
+    _In_opt_ SECL_NAMESPACE_ACCESS *Namespace,
+    _In_ HANDLE hToken,
+    _In_opt_ HANDLE hProfile,
+    _In_ HANDLE hProcess,
+    _In_ DWORD ClientSessionId,
+    _In_opt_ PCWSTR ClientDesktop);
+
+VOID
+SeclWaitForLogonProcesses(
+    _In_ PSID LogonSid);
+
+VOID
+SeclRevokeClientDesktop(
+    _In_ DWORD SessionId,
+    _In_ PSID LogonSid,
+    _In_ PCWSTR Desktop);
+
+BOOL
+SeclGrantClientDesktop(
+    _In_ DWORD SessionId,
+    _In_ DWORD CallerProcessId,
+    _In_ PSID LogonSid,
+    _In_ PCWSTR Desktop);
+
+/* namespace.c */
+VOID
+SeclSweepNamespaceAccess(VOID);
+
 
 VOID
 SeclInitNamespaceAccess(VOID);

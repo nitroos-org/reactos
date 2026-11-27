@@ -145,6 +145,9 @@ SvcEntry_Seclogon(
 
     UpdateServiceStatus(SERVICE_START_PENDING);
 
+    /* Entries of secondary logons an earlier run of the service could not take back */
+    SeclSweepNamespaceAccess();
+
     dwError = StartRpcServer();
     if (dwError != ERROR_SUCCESS)
     {

@@ -11,6 +11,10 @@
  */
 
 #include "precomp.h"
+#include <ndk/exfuncs.h>
+#include <ndk/obfuncs.h>
+#include <sddl.h>
+#include <strsafe.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(seclogon);
 
@@ -39,8 +43,9 @@ static BOOL DesktopLockInitialized = FALSE;
 
 /* FUNCTIONS *****************************************************************/
 
-static PSID
-GetLogonSid(
+/* A heap copy of the logon SID of the token, or NULL */
+PSID
+SeclGetLogonSid(
     _In_ HANDLE hToken)
 {
     PTOKEN_GROUPS Groups = NULL;
@@ -78,9 +83,111 @@ GetLogonSid(
 }
 
 
-/* Adds an access allowed ACE for Sid to the DACL of the object, or removes the ACEs of Sid from it. */
+/*
+ * The lock every changer of a window station or desktop DACL for a secondary logon takes. Only SYSTEM code changes
+ * them: this service in its own session, its helper (seclhelp.exe) in another one. In session 0 that is this process
+ * alone: a critical section. In another session it is a mutex in \Sessions\<n>\Windows, where only SYSTEM may create
+ * objects, that only SYSTEM may open: no program of the session can hold it. Without it, a grant made at the same
+ * time as a revoke could put back the entry the revoke had just taken out. Returns what UnlockDesktopAccess takes;
+ * NULL when the mutex could not be had (the change is made anyway).
+ */
+static CRITICAL_SECTION DesktopDaclLock;
+#define LOCKED_BY_SECTION ((HANDLE)(ULONG_PTR)1)
+
+static HANDLE
+LockDesktopAccess(VOID)
+{
+    static SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    UCHAR AclBuffer[sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) + SECURITY_MAX_SID_SIZE];
+    PACL Dacl = (PACL)AclBuffer;
+    SECURITY_DESCRIPTOR Sd;
+    PSID SystemSid = NULL;
+    WCHAR Path[64];
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Mutant = NULL;
+    DWORD Session = 0, Wait;
+    NTSTATUS Status;
+
+    ProcessIdToSessionId(GetCurrentProcessId(), &Session);
+    if (Session == 0)
+    {
+        EnterCriticalSection(&DesktopDaclLock);
+        return LOCKED_BY_SECTION;
+    }
+
+    Status = RtlAllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &SystemSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlCreateAcl(Dacl, sizeof(AclBuffer), ACL_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, MUTANT_ALL_ACCESS, SystemSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlCreateSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetDaclSecurityDescriptor(&Sd, TRUE, Dacl, FALSE);
+    if (NT_SUCCESS(Status))
+    {
+        StringCchPrintfW(Path, ARRAYSIZE(Path), L"\\Sessions\\%lu\\Windows\\DesktopAccessLock", Session);
+        RtlInitUnicodeString(&Name, Path);
+        InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE | OBJ_OPENIF, NULL, &Sd);
+        Status = NtCreateMutant(&Mutant, MUTANT_ALL_ACCESS, &ObjectAttributes, FALSE);
+    }
+    if (SystemSid)
+        RtlFreeSid(SystemSid);
+    if (!NT_SUCCESS(Status))
+    {
+        WARN("No window station and desktop lock in session %lu, Status 0x%08lx\n", Session, Status);
+        return NULL;
+    }
+    Wait = WaitForSingleObject(Mutant, 30000);
+    if (Wait == WAIT_OBJECT_0 || Wait == WAIT_ABANDONED)
+        return Mutant;
+    WARN("The window station and desktop lock of session %lu is not free\n", Session);
+    NtClose(Mutant);
+    return NULL;
+}
+
+static VOID
+UnlockDesktopAccess(
+    _In_opt_ HANDLE Mutant)
+{
+    if (Mutant == LOCKED_BY_SECTION)
+    {
+        LeaveCriticalSection(&DesktopDaclLock);
+        return;
+    }
+    if (Mutant == NULL)
+        return;
+    NtReleaseMutant(Mutant, NULL);
+    NtClose(Mutant);
+}
+
+static BOOL
+ChangeObjectDaclUnlocked(
+    _In_ HANDLE hObject,
+    _In_ PSID Sid,
+    _In_ ACCESS_MASK Mask,
+    _In_ BOOL Add,
+    _Out_ PBOOL Changed);
+
+/* Adds an access allowed ACE for Sid to the DACL of the object, or removes the ACEs of Sid from it, under the lock */
 static BOOL
 ChangeObjectDacl(
+    _In_ HANDLE hObject,
+    _In_ PSID Sid,
+    _In_ ACCESS_MASK Mask,
+    _In_ BOOL Add,
+    _Out_ PBOOL Changed)
+{
+    HANDLE Lock = LockDesktopAccess();
+    BOOL Result = ChangeObjectDaclUnlocked(hObject, Sid, Mask, Add, Changed);
+
+    UnlockDesktopAccess(Lock);
+    return Result;
+}
+
+static BOOL
+ChangeObjectDaclUnlocked(
     _In_ HANDLE hObject,
     _In_ PSID Sid,
     _In_ ACCESS_MASK Mask,
@@ -122,7 +229,27 @@ ChangeObjectDacl(
     if (!GetAclInformation(Dacl, &AclInfo, sizeof(AclInfo), AclSizeInformation))
         goto done;
 
-    NewSize = AclInfo.AclBytesInUse + sizeof(ACCESS_ALLOWED_ACE) + GetLengthSid(Sid);
+    /*
+     * The new list has the size of the old one, plus the entry that is added or minus the entries that are taken
+     * out: an entry added and taken out again leaves the descriptor as it was, byte for byte (the object keeps the
+     * size it is given; sizing from the bytes in use would change it, and adding room would let it grow)
+     */
+    NewSize = Dacl->AclSize;
+    if (Add)
+    {
+        NewSize += sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(Sid);
+    }
+    else
+    {
+        for (i = 0; i < AclInfo.AceCount; i++)
+        {
+            if (GetAce(Dacl, i, &Ace) && ((PACE_HEADER)Ace)->AceType == ACCESS_ALLOWED_ACE_TYPE &&
+                EqualSid(Sid, &((PACCESS_ALLOWED_ACE)Ace)->SidStart))
+            {
+                NewSize -= ((PACE_HEADER)Ace)->AceSize;
+            }
+        }
+    }
     NewDacl = HeapAlloc(GetProcessHeap(), 0, NewSize);
     if (NewDacl == NULL)
         goto done;
@@ -182,7 +309,34 @@ VOID
 SeclInitDesktopAccess(VOID)
 {
     InitializeCriticalSection(&DesktopLock);
+    InitializeCriticalSection(&DesktopDaclLock);
     DesktopLockInitialized = TRUE;
+}
+
+
+/* "WinSta\Desktop" or "Desktop" (on WinSta0) into its two names */
+static BOOL
+SplitDesktopName(
+    _In_ PCWSTR pszDesktop,
+    _Out_writes_(MAX_PATH) PWSTR WinStaName,
+    _Out_ PCWSTR *DesktopName)
+{
+    PCWSTR Slash = wcschr(pszDesktop, L'\\');
+    SIZE_T Length;
+
+    if (Slash == NULL)
+    {
+        wcscpy(WinStaName, L"WinSta0");
+        *DesktopName = pszDesktop;
+        return TRUE;
+    }
+    Length = Slash - pszDesktop;
+    if (Length == 0 || Length >= MAX_PATH)
+        return FALSE;
+    memcpy(WinStaName, pszDesktop, Length * sizeof(WCHAR));
+    WinStaName[Length] = UNICODE_NULL;
+    *DesktopName = Slash + 1;
+    return TRUE;
 }
 
 
@@ -199,7 +353,7 @@ SeclGrantDesktopAccess(
 {
     SECL_DESKTOP_ACCESS *Access;
     WCHAR WinStaName[MAX_PATH];
-    PCWSTR DesktopName, Slash;
+    PCWSTR DesktopName;
     HWINSTA hOldWinSta;
     SIZE_T Length;
     PWSTR Full;
@@ -223,27 +377,14 @@ SeclGrantDesktopAccess(
     memcpy(Full, pszDesktop, Length * sizeof(WCHAR));
     *ppszDesktopName = Full;
 
-    Slash = wcschr(pszDesktop, L'\\');
-    if (Slash != NULL)
-    {
-        Length = Slash - pszDesktop;
-        if (Length == 0 || Length >= RTL_NUMBER_OF(WinStaName))
-            return ERROR_INVALID_PARAMETER;
-        memcpy(WinStaName, pszDesktop, Length * sizeof(WCHAR));
-        WinStaName[Length] = UNICODE_NULL;
-        DesktopName = Slash + 1;
-    }
-    else
-    {
-        wcscpy(WinStaName, L"WinSta0");
-        DesktopName = pszDesktop;
-    }
+    if (!SplitDesktopName(pszDesktop, WinStaName, &DesktopName))
+        return ERROR_INVALID_PARAMETER;
 
     Access = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Access));
     if (Access == NULL)
         return ERROR_NOT_ENOUGH_MEMORY;
 
-    Access->LogonSid = GetLogonSid(hToken);
+    Access->LogonSid = SeclGetLogonSid(hToken);
     if (Access->LogonSid == NULL)
     {
         /* No logon SID, nothing that could be granted */
@@ -321,4 +462,226 @@ SeclRevokeDesktopAccess(
         HeapFree(GetProcessHeap(), 0, Access->LogonSid);
 
     HeapFree(GetProcessHeap(), 0, Access);
+}
+
+
+/*
+ * A window station and desktop name the service passes on to its helper: "WinSta\Desktop" or "Desktop", from the
+ * request of the caller of CreateProcessWithLogonW. A name may hold any character but a backslash; here also no
+ * control character and no quote (it goes onto a command line), at most one separator (between the window station
+ * and the desktop), each part not empty, at most 255 characters in all. Another name gets no entry at all.
+ */
+BOOL
+SeclValidDesktopName(
+    _In_opt_ PCWSTR pszDesktop)
+{
+    size_t Length, i, Separators = 0;
+
+    if (pszDesktop == NULL || FAILED(StringCchLengthW(pszDesktop, 256, &Length)) || Length == 0)
+        return FALSE;
+    for (i = 0; i < Length; i++)
+    {
+        if (pszDesktop[i] < L' ' || pszDesktop[i] == L'"' || pszDesktop[i] == 0x7F)
+            return FALSE;
+        if (pszDesktop[i] == L'\\')
+        {
+            if (++Separators > 1 || i == 0 || i == Length - 1)
+                return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/* Copies the field at p (up to the next space) to Out; returns what follows the space, or NULL */
+static PCWSTR
+NextField(
+    _In_ PCWSTR p,
+    _Out_writes_(Size) PWSTR Out,
+    _In_ SIZE_T Size)
+{
+    PCWSTR Space = wcschr(p, L' ');
+    SIZE_T Length;
+
+    if (Space == NULL)
+        return NULL;
+    Length = Space - p;
+    if (Length == 0 || Length >= Size)
+        return NULL;
+    memcpy(Out, p, Length * sizeof(WCHAR));
+    Out[Length] = UNICODE_NULL;
+    return Space + 1;
+}
+
+/* A heap copy of a logon SID (S-1-5-5-x-y, nothing else) from its string form */
+static PSID
+ParseLogonSid(
+    _In_ PCWSTR String)
+{
+    static SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID Sid = NULL, Copy = NULL;
+
+    if (!ConvertStringSidToSidW(String, &Sid))
+        return NULL;
+    if (*GetSidSubAuthorityCount(Sid) == SECURITY_LOGON_IDS_RID_COUNT &&
+        !memcmp(GetSidIdentifierAuthority(Sid), &NtAuthority, sizeof(NtAuthority)) &&
+        *GetSidSubAuthority(Sid, 0) == SECURITY_LOGON_IDS_RID)
+    {
+        Copy = HeapAlloc(GetProcessHeap(), 0, GetLengthSid(Sid));
+        if (Copy != NULL && !CopySid(GetLengthSid(Sid), Copy, Sid))
+        {
+            HeapFree(GetProcessHeap(), 0, Copy);
+            Copy = NULL;
+        }
+    }
+    LocalFree(Sid);
+    return Copy;
+}
+
+/* Opens the window station and the desktop of Name for READ_CONTROL | WRITE_DAC, with the thread's token */
+static DWORD
+OpenDesktopObjects(
+    _Inout_ SECL_DESKTOP_ACCESS *Access,
+    _In_ PCWSTR Name)
+{
+    WCHAR WinStaName[MAX_PATH];
+    PCWSTR DesktopName;
+    HWINSTA hOldWinSta;
+    DWORD dwError = ERROR_SUCCESS;
+
+    if (!SplitDesktopName(Name, WinStaName, &DesktopName))
+        return ERROR_INVALID_PARAMETER;
+    Access->hWinSta = OpenWindowStationW(WinStaName, FALSE, READ_CONTROL | WRITE_DAC);
+    if (Access->hWinSta == NULL)
+        return GetLastError();
+    hOldWinSta = GetProcessWindowStation();
+    if (SetProcessWindowStation(Access->hWinSta))
+    {
+        Access->hDesktop = OpenDesktopW(DesktopName, 0, FALSE, READ_CONTROL | WRITE_DAC);
+        if (Access->hDesktop == NULL)
+            dwError = GetLastError();
+        SetProcessWindowStation(hOldWinSta);
+    }
+    else
+    {
+        dwError = GetLastError();
+    }
+    return dwError;
+}
+
+/*
+ * The helper of the service in another session (seclhelp.exe, started by the service as SYSTEM in that session, on
+ * its Winlogon desktop: no program of the session can hook a thread of it or reach a window of it; it makes no
+ * window). Command line after the program name:
+ *   grant <caller process id> <logon SID> <WinSta\Desktop>
+ *       The caller of CreateProcessWithLogonW waits for the service's answer meanwhile. The window station and the
+ *       desktop are opened with the CALLER's token (a copy of it, impersonated): only what the caller may change
+ *       itself is changed, as when the caller made this change before. Then the entry of the logon SID is added.
+ *   revoke <logon SID> <WinSta\Desktop>
+ *       When the logon has no process left: the entries of that logon SID (and of nothing else) are taken out.
+ * Both under the session's lock (LockDesktopAccess). Returns 0 or a Win32 error.
+ */
+DWORD
+WINAPI
+SeclHelperMain(
+    _In_ PCWSTR CommandLine)
+{
+    WCHAR Mode[8], Pid[16], SidString[96];
+    PCWSTR Name;
+    SECL_DESKTOP_ACCESS *Access;
+    HANDLE hProcess = NULL, hPrimary = NULL, hImpersonation = NULL;
+    DWORD ProcessId = 0, Session = MAXDWORD, OwnSession = MAXDWORD, dwError;
+    BOOL Grant;
+    SIZE_T i;
+
+    /* The fields, each followed by one space; the name is the rest of the line */
+    if (CommandLine == NULL)
+        return ERROR_INVALID_PARAMETER;
+    Name = NextField(CommandLine, Mode, ARRAYSIZE(Mode));
+    if (Name == NULL)
+        return ERROR_INVALID_PARAMETER;
+    if (!wcscmp(Mode, L"grant"))
+        Grant = TRUE;
+    else if (!wcscmp(Mode, L"revoke"))
+        Grant = FALSE;
+    else
+        return ERROR_INVALID_PARAMETER;
+    if (Grant)
+        Name = NextField(Name, Pid, ARRAYSIZE(Pid));
+    if (Name != NULL)
+        Name = NextField(Name, SidString, ARRAYSIZE(SidString));
+    if (Name == NULL || !SeclValidDesktopName(Name))
+        return ERROR_INVALID_PARAMETER;
+
+    Access = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Access));
+    if (Access == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    Access->LogonSid = ParseLogonSid(SidString);
+    if (Access->LogonSid == NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, Access);
+        return ERROR_INVALID_SID;
+    }
+
+    if (!Grant)
+    {
+        /* Only entries of this logon SID go: whatever the name, nothing else changes */
+        OpenDesktopObjects(Access, Name);
+        Access->WinStaChanged = Access->DesktopChanged = TRUE;
+        SeclRevokeDesktopAccess(Access);
+        return ERROR_SUCCESS;
+    }
+
+    /* The caller: a process of this session (it waits for the service's answer, so its id is its own) */
+    for (i = 0; Pid[i]; i++)
+    {
+        if (Pid[i] < L'0' || Pid[i] > L'9')
+        {
+            SeclRevokeDesktopAccess(Access);
+            return ERROR_INVALID_PARAMETER;
+        }
+        ProcessId = ProcessId * 10 + (Pid[i] - L'0');
+    }
+    ProcessIdToSessionId(GetCurrentProcessId(), &OwnSession);
+    hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, ProcessId);
+    if (hProcess == NULL || !ProcessIdToSessionId(ProcessId, &Session) || Session != OwnSession ||
+        !OpenProcessToken(hProcess, TOKEN_DUPLICATE, &hPrimary) ||
+        !DuplicateTokenEx(hPrimary, TOKEN_IMPERSONATE | TOKEN_QUERY, NULL, SecurityImpersonation,
+                          TokenImpersonation, &hImpersonation))
+    {
+        dwError = GetLastError();
+        if (dwError == ERROR_SUCCESS)
+            dwError = ERROR_ACCESS_DENIED;
+        goto done;
+    }
+
+    /* Opened as the caller: what it may not change itself, it does not get changed */
+    if (!SetThreadToken(NULL, hImpersonation))
+    {
+        dwError = GetLastError();
+        goto done;
+    }
+    dwError = OpenDesktopObjects(Access, Name);
+    SetThreadToken(NULL, NULL);
+    if (Access->hWinSta != NULL)
+        ChangeObjectDacl(Access->hWinSta, Access->LogonSid, SECL_WINSTA_RIGHTS, TRUE, &Access->WinStaChanged);
+    if (Access->hDesktop != NULL)
+        ChangeObjectDacl(Access->hDesktop, Access->LogonSid, SECL_DESKTOP_RIGHTS, TRUE, &Access->DesktopChanged);
+    if (dwError == ERROR_SUCCESS && (!Access->WinStaChanged || !Access->DesktopChanged))
+        dwError = ERROR_ACCESS_DENIED;
+
+done:
+    /* The entries stay (the service takes them out when the logon ends); the handles go */
+    if (Access->hDesktop != NULL)
+        CloseDesktop(Access->hDesktop);
+    if (Access->hWinSta != NULL)
+        CloseWindowStation(Access->hWinSta);
+    HeapFree(GetProcessHeap(), 0, Access->LogonSid);
+    HeapFree(GetProcessHeap(), 0, Access);
+    if (hImpersonation != NULL)
+        CloseHandle(hImpersonation);
+    if (hPrimary != NULL)
+        CloseHandle(hPrimary);
+    if (hProcess != NULL)
+        CloseHandle(hProcess);
+    return dwError;
 }
