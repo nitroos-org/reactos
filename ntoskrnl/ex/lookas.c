@@ -415,7 +415,7 @@ ExInitializeNPagedLookasideList(IN PNPAGED_LOOKASIDE_LIST Lookaside,
 
     /*
      * Insert it into the list, which system threads walk to tune the depths. Not a list in session space
-     * (a session image's, NitroSessions): it is reachable only from its session, and keeps its depth
+     * (a session image's): it is reachable only from its session, and keeps its depth
      */
     if (MmIsSessionAddress(Lookaside))
     {

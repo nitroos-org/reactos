@@ -554,7 +554,7 @@ typedef struct _MM_SESSION_SPACE_FLAGS
 {
     ULONG Initialized:1;
     ULONG DeletePending:1;
-    ULONG Win32kLoaded:1;   /* NitroSessions: win32k (a session image) is loaded and initialized in the session */
+    ULONG Win32kLoaded:1;   /* win32k (a session image) is loaded and initialized in the session */
     ULONG Filler:29;
 } MM_SESSION_SPACE_FLAGS;
 

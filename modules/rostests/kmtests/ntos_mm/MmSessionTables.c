@@ -2,7 +2,7 @@
  * PROJECT:     ReactOS kernel tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     Every process maps the session space of its own session and of
- *              no other one, whoever created it and when (NitroSessions)
+ *              no other one, whoever created it and when
  * COPYRIGHT:   Copyright 2026 Tomas Srnka
  */
 

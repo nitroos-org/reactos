@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS kernel tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     Session space is private to each session (NitroSessions)
+ * PURPOSE:     Session space is private to each session
  * COPYRIGHT:   Copyright 2026 Tomas Srnka
  */
 
