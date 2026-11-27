@@ -369,8 +369,8 @@ static void TestGetTcpTable(DWORD Loopback, USHORT AnyPort, USHORT LoopPort, USH
     FreeRows(&Rows);
 }
 
-/* The rows of AF_INET6 TCP sockets: both ends of a loopback connection, and the listener. Needs the IPv6 switch
-   (Ipv6Enable); skipped without */
+/* The rows of AF_INET6 TCP sockets: both ends of a loopback connection, and the listener. Skipped while the stack
+   has no IPv6 sockets */
 static const UCHAR Loopback6[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
 
 static BOOL Has6Row(const MIB_TCP6TABLE_OWNER_PID *T, DWORD State, USHORT LocalPort, USHORT RemotePort, DWORD *Count)

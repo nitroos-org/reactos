@@ -9,8 +9,8 @@
  * An install made before they were added has neither, so IPv6 sockets could not be made on it.
  *
  * Winlogon calls UpgradeNetworkCatalog at every start, in the SYSTEM context. The stack always has IPv6 now (the
- * loopback interface stays up even with Tcpip\Parameters\Ipv6Enable = 0), so it does not look at that value. It does
- * nothing once it has settled the INF that is on the
+ * loopback interface stays up even with Tcpip6\Parameters\DisabledComponents = 0xFF), so it does not look at that
+ * value. It does nothing once it has settled the INF that is on the
  * disk: the size and last write time of nettcpip.inf are kept in the registry (Winsock2\Parameters\Ipv6CatalogInf)
  * when the catalog holds every entry of the INF section TCPIP_AddReg_Ipv6.NT or was left alone on purpose. So the
  * one-shot is per version of the INF: a later INF with more entries is looked at once.

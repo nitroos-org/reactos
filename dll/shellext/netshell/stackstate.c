@@ -17,8 +17,8 @@
 
 /*
  * TCP/IPv4 is there when the stack has an interface for the adapter (NDIS bound it: Tcpip\Linkage), TCP/IPv6 when
- * that interface has IPv6 (IP_ADAPTER_IPV6_ENABLED: off with Tcpip6\Parameters\DisabledComponents 0x10 or
- * Tcpip\Parameters\Ipv6Enable = 0). S_FALSE: the stack has no interface for the adapter (not started, disabled), so
+ * that interface has IPv6 (IP_ADAPTER_IPV6_ENABLED: off with Tcpip6\Parameters\DisabledComponents 0x10).
+ * S_FALSE: the stack has no interface for the adapter (not started, disabled), so
  * nothing is known.
  */
 HRESULT

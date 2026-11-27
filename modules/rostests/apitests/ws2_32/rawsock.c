@@ -27,7 +27,7 @@
 #define T_IPPROTO_ICMPV6    58
 
 static const UCHAR Loopback6[16] = { 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1 };
-/* The stack makes IPv6 sockets (not with Tcpip\\Parameters\\Ipv6Enable 0 on this stack): the IPv6 rows run only then */
+/* The stack makes IPv6 sockets: the IPv6 rows run only then */
 static BOOL Have6;
 
 static void Init6(SOCKADDR_IN6_LH *Sa, USHORT PortN)

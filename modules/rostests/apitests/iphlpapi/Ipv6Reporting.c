@@ -3,7 +3,7 @@
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
  * PURPOSE:     What iphlpapi reports about IPv6: the addresses, flags and interface rows the way a Windows 10 22H2
  *              system reports them for the loopback interface and an Ethernet adapter; and, while IPv6 is off on
- *              the adapters (Tcpip\Parameters\Ipv6Enable = 0 or Tcpip6\Parameters\DisabledComponents with 0x10),
+ *              the adapters (Tcpip6\Parameters\DisabledComponents with 0x10),
  *              that only the loopback interface has IPv6 (the stack itself is always up)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
@@ -109,23 +109,14 @@ static PFREE_MIB_TABLE pFreeMibTable;
 static BOOL Ipv6On;
 
 /* Whether IPv6 is on the adapters: what the stack read when it started (it is not changed while the system runs).
-   Ipv6Enable = 0 and DisabledComponents with 0x10 (0xFF has it) leave IPv6 on the loopback interface only; an
-   absent value is on */
+   DisabledComponents with 0x10 (0xFF has it) leaves IPv6 on the loopback interface only; an absent value is on */
 static BOOL ReadSwitch(void)
 {
     HKEY Key;
     DWORD Value = 0, Size = sizeof(Value), Type = 0;
     BOOL On = TRUE;
 
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", 0, KEY_READ, &Key) ==
-        ERROR_SUCCESS)
-    {
-        if (RegQueryValueExA(Key, "Ipv6Enable", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
-            Type == REG_DWORD && Value == 0)
-            On = FALSE;
-        RegCloseKey(Key);
-    }
-    if (On && RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters", 0, KEY_READ,
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters", 0, KEY_READ,
                             &Key) == ERROR_SUCCESS)
     {
         Size = sizeof(Value);

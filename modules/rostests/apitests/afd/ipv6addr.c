@@ -70,7 +70,7 @@ START_TEST(ipv6addr)
     HANDLE Socket;
     UCHAR Buffer[BIND6_LENGTH + 16];
     PAFD_BIND_DATA Bind = (PAFD_BIND_DATA)Buffer;
-    /* the stack always takes IPv6 addresses (loopback), whatever Ipv6Enable says */
+    /* the stack always takes IPv6 addresses (loopback), whatever DisabledComponents says */
     BOOL On = TRUE;
     int i;
 

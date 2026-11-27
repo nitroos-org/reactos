@@ -2,7 +2,7 @@
  * PROJECT:     ReactOS API tests
  * LICENSE:     LGPL-2.1-or-later
  * PURPOSE:     AF_INET6 sockets before the stack has IPv6 sockets: with the stack's IPv6 switch off
- *              (Tcpip\Parameters\Ipv6Enable) an IPv6 socket fails with WSAEAFNOSUPPORT, as it always did; with
+ *              an IPv6 socket fails with WSAEAFNOSUPPORT, as it always did; with
  *              the switch on one is made and its address buffers are checked (lengths, family) before any
  *              address reaches the stack, which says no (a defined error) until it takes IPv6 sockets.
  *              The Winsock helper (wshtcpip) is tested directly: socket address kinds, the wildcard address

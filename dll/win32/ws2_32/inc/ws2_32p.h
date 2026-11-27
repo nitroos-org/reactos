@@ -893,7 +893,7 @@ WsGetProcess(VOID)
     return CurrentWsProcess;
 }
 
-/* src/ipv6state.c: whether the stack has IPv6 on (Tcpip\Parameters\Ipv6Enable), and what addresses it has */
+/* src/ipv6state.c: whether the stack has IPv6 on, and what addresses it has */
 #define WS_IPV6_MAX_LINKLOCAL 8
 typedef struct _WS_IPV6_INFO
 {

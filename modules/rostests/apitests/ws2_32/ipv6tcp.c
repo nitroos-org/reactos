@@ -4,7 +4,7 @@
  * PURPOSE:     AF_INET6 TCP sockets on ::1 and through the dual stack: connect, accept, data both ways, shutdown,
  *              the address layout of getsockname, getpeername, accept and AcceptEx, IPV6_V6ONLY both ways,
  *              ::ffff:a.b.c.d on a dual stack socket, and the IPv6 forms of WSAAddressToString and
- *              WSAStringToAddress. Runs only while the stack takes IPv6 sockets (Tcpip\Parameters\Ipv6Enable);
+ *              WSAStringToAddress. Runs only while the stack takes IPv6 sockets;
  *              the error codes asserted only as "not success" are to be verified on Windows.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */

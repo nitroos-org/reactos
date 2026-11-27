@@ -14,7 +14,7 @@
 #include <tcpioctl.h>
 
 /*
- * tcpip.sys answers IP_IPV6_TABLE_ENTRY_ID: the IPv6 switch (Tcpip\Parameters\Ipv6Enable) as it was when the stack
+ * tcpip.sys answers IP_IPV6_TABLE_ENTRY_ID: the IPv6 state of the stack as it was when it
  * started, the interfaces and their IPv6 addresses. A stack that does not know the request, or any failure, counts
  * as IPv6 off, and getaddrinfo then answers as it does on a system without IPv6.
  */
