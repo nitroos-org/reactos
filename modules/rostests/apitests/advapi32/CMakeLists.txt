@@ -62,6 +62,7 @@ list(APPEND SOURCE
     GetSecurityInfoSaclReopen.c
     GetSecurityInfoSequence.c
     ObjectLockStress.c
+    ObjectOwner.c
     KeyCreateIntegrity.c
     OpenThreadTokenLeak.c
     Hash.c
