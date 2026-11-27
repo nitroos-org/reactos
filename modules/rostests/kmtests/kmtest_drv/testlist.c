@@ -170,6 +170,7 @@ KMT_TESTFUNC Test_SeAccessCheckLargeDaclPerf;
 KMT_TESTFUNC Test_SeAccessCheckMalformedAcl;
 KMT_TESTFUNC Test_SeAccessCheckMalformedAclRows;
 KMT_TESTFUNC Test_SeAccessCheckMalformedScans;
+KMT_TESTFUNC Test_SeAssignOwner;
 KMT_TESTFUNC Test_SeAutoInherit;
 KMT_TESTFUNC Test_SeInheritance;
 KMT_TESTFUNC Test_SeInheritMalformedParent;
@@ -376,6 +377,7 @@ const KMT_TEST TestList[] =
     { "SeAccessCheckMalformedAcl",          Test_SeAccessCheckMalformedAcl },
     { "-SeAccessCheckMalformedAclRows",     Test_SeAccessCheckMalformedAclRows },
     { "SeAccessCheckMalformedScans",        Test_SeAccessCheckMalformedScans },
+    { "SeAssignOwner",                      Test_SeAssignOwner },
     { "SeAutoInherit",                      Test_SeAutoInherit },
     { "SeInheritance",                      Test_SeInheritance },
     { "SeInheritMalformedParent",           Test_SeInheritMalformedParent },
