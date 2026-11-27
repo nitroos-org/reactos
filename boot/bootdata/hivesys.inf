@@ -1047,7 +1047,7 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000450","Layout File",
 HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000450","Layout Text",0x00000000,%MONGOLIAN_CYRILLIC%
 HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000450","Layout Display Name",0x00000000,"@%SystemRoot%\system32\input.dll,-5127"
 
-HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000452","Layout File",0x00000000,"kbdbukx.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000452","Layout File",0x00000000,"kbdukx.dll"
 HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000452","Layout Text",0x00000000,%UK_EXTENDED%
 HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000452","Layout Display Name",0x00000000,"@%SystemRoot%\system32\input.dll,-5145"
 
