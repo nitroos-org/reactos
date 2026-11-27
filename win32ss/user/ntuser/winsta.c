@@ -329,7 +329,11 @@ IntWinStaOkToClose(
     PWIN32_OKAYTOCLOSEMETHOD_PARAMETERS OkToCloseParameters = Parameters;
     PPROCESSINFO ppi;
 
-    ppi = PsGetCurrentProcessWin32Process();
+    /* The process whose handle it is, not the one the callout runs in (it can be attached to another) */
+    if (OkToCloseParameters->Process)
+        ppi = PsGetProcessWin32Process(OkToCloseParameters->Process);
+    else
+        ppi = PsGetCurrentProcessWin32Process();
 
     if (ppi && (OkToCloseParameters->Handle == ppi->hwinsta))
     {
@@ -2376,6 +2380,9 @@ BuildDesktopNameList(
          DesktopEntry = DesktopEntry->Flink)
     {
         DesktopObject = CONTAINING_RECORD(DesktopEntry, DESKTOP, ListEntry);
+        /* A desktop that failed to get its DESKTOPINFO stays linked until its deferred delete runs */
+        if (DesktopObject->pDeskInfo == NULL)
+            continue;
         RtlInitUnicodeString(&DesktopName, DesktopObject->pDeskInfo->szDesktopName);
         ReturnLength += DesktopName.Length + sizeof(WCHAR);
         EntryCount++;
@@ -2417,6 +2424,8 @@ BuildDesktopNameList(
          DesktopEntry = DesktopEntry->Flink)
     {
         DesktopObject = CONTAINING_RECORD(DesktopEntry, DESKTOP, ListEntry);
+        if (DesktopObject->pDeskInfo == NULL)
+            continue;
         RtlInitUnicodeString(&DesktopName, DesktopObject->pDeskInfo->szDesktopName);
         Status = MmCopyToCaller(lpBuffer, DesktopName.Buffer, DesktopName.Length);
         if (! NT_SUCCESS(Status))

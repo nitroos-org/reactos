@@ -17,10 +17,10 @@ static NTSTATUS
 UserInitializeDesktop(PDESKTOP pdesk, PUNICODE_STRING DesktopName, PWINSTATION_OBJECT pwinsta);
 
 static NTSTATUS
-IntMapDesktopView(IN PDESKTOP pdesk);
+IntMapDesktopView(IN PDESKTOP pdesk, IN PEPROCESS Process, IN PPROCESSINFO ppi);
 
 static NTSTATUS
-IntUnmapDesktopView(IN PDESKTOP pdesk);
+IntUnmapDesktopView(IN PDESKTOP pdesk, IN PEPROCESS Process, IN PPROCESSINFO ppi);
 
 static VOID
 IntFreeDesktopHeap(IN PDESKTOP pdesk);
@@ -129,8 +129,14 @@ IntDesktopObjectParse(IN PVOID ParseObject,
             continue;
         }
 
+        /* A desktop that failed to get its DESKTOPINFO stays linked until its deferred delete runs */
+        if (Desktop->pDeskInfo == NULL)
+        {
+            NextEntry = NextEntry->Flink;
+            continue;
+        }
+
         /* Get the desktop name */
-        ASSERT(Desktop->pDeskInfo != NULL);
         RtlInitUnicodeString(&DesktopName, Desktop->pDeskInfo->szDesktopName);
 
         /* Compare the name */
@@ -686,7 +692,7 @@ IntDesktopOkToClose(
     PWIN32_OKAYTOCLOSEMETHOD_PARAMETERS OkToCloseParameters = Parameters;
     PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
 
-    if (pti == NULL)
+    if (pti == NULL || pti->ppi == NULL)
     {
         /* This happens when we leak desktop handles */
         return STATUS_SUCCESS;
@@ -714,7 +720,19 @@ IntDesktopObjectOpen(
         return STATUS_SUCCESS;
 
     UserEnterExclusive();
-    Ret = IntMapDesktopView((PDESKTOP)OpenParameters->Object);
+    /*
+     * The view belongs to the process the handle is opened in. The callout can run
+     * attached to another process (a process outside the desktop's session is called
+     * out through a process of that session): the current process is not the one to use.
+     * Look at the process info again under the lock: it can have gone while waiting.
+     */
+    ppi = PsGetProcessWin32Process(OpenParameters->Process);
+    if (ppi == NULL)
+        Ret = STATUS_SUCCESS;
+    else
+        Ret = IntMapDesktopView((PDESKTOP)OpenParameters->Object,
+                                OpenParameters->Process,
+                                ppi);
     UserLeave();
     return Ret;
 }
@@ -735,7 +753,20 @@ IntDesktopObjectClose(
     }
 
     UserEnterExclusive();
-    Ret = IntUnmapDesktopView((PDESKTOP)CloseParameters->Object);
+    /*
+     * The view belongs to the process whose handle is closed, which is not always the
+     * current process (the callout runs attached to a process of the desktop's session
+     * when the closing one is outside it). The process info can also have been torn down
+     * while this thread waited for the lock: look again, and take nothing from the
+     * current process.
+     */
+    ppi = PsGetProcessWin32Process(CloseParameters->Process);
+    if (ppi == NULL)
+        Ret = STATUS_SUCCESS;
+    else
+        Ret = IntUnmapDesktopView((PDESKTOP)CloseParameters->Object,
+                                  CloseParameters->Process,
+                                  ppi);
     UserLeave();
     return Ret;
 }
@@ -3756,6 +3787,9 @@ NtUserOpenDesktop(
     if (SharedUserData->NtMajorVersion >= 6)
         dwDesiredAccess |= DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS;
 
+    /* The lookup walks the list of the desktops of the window station, which NtUserCreateDesktop changes
+       under the USER lock (a desktop is linked before its DESKTOPINFO exists) */
+    UserEnterExclusive();
     Status = ObOpenObjectByName(
                  ObjectAttributes,
                  ExDesktopObjectType,
@@ -3764,6 +3798,7 @@ NtUserOpenDesktop(
                  dwDesiredAccess,
                  NULL,
                  (HANDLE*)&Desktop);
+    UserLeave();
 
     if (!NT_SUCCESS(Status))
     {
@@ -4371,15 +4406,16 @@ Quit:
 }
 
 static NTSTATUS
-IntUnmapDesktopView(IN PDESKTOP pdesk)
+IntUnmapDesktopView(IN PDESKTOP pdesk, IN PEPROCESS Process, IN PPROCESSINFO ppi)
 {
-    PPROCESSINFO ppi;
     PW32HEAP_USER_MAPPING HeapMapping, *PrevLink;
     NTSTATUS Status = STATUS_SUCCESS;
 
     TRACE("IntUnmapDesktopView called for desktop object %p\n", pdesk);
 
-    ppi = PsGetCurrentProcessWin32Process();
+    /* A process without process info has no views */
+    if (ppi == NULL)
+        return STATUS_SUCCESS;
 
     /*
      * Unmap if we're the last thread using the desktop.
@@ -4397,8 +4433,15 @@ IntUnmapDesktopView(IN PDESKTOP pdesk)
                 *PrevLink = HeapMapping->Next;
 
                 TRACE("ppi 0x%p unmapped heap of desktop 0x%p\n", ppi, pdesk);
-                Status = MmUnmapViewOfSection(PsGetCurrentProcess(),
-                                              HeapMapping->UserMapping);
+                /*
+                 * Another process than the current one is a process that is going away
+                 * (see IntFreeProcessDesktopViews): its address space is not touched
+                 */
+                if (Process == PsGetCurrentProcess())
+                {
+                    Status = MmUnmapViewOfSection(Process,
+                                                  HeapMapping->UserMapping);
+                }
 
                 ObDereferenceObject(pdesk);
 
@@ -4415,9 +4458,8 @@ IntUnmapDesktopView(IN PDESKTOP pdesk)
 }
 
 static NTSTATUS
-IntMapDesktopView(IN PDESKTOP pdesk)
+IntMapDesktopView(IN PDESKTOP pdesk, IN PEPROCESS Process, IN PPROCESSINFO ppi)
 {
-    PPROCESSINFO ppi;
     PW32HEAP_USER_MAPPING HeapMapping, *PrevLink;
     PVOID UserBase = NULL;
     SIZE_T ViewSize = 0;
@@ -4426,7 +4468,9 @@ IntMapDesktopView(IN PDESKTOP pdesk)
 
     TRACE("IntMapDesktopView called for desktop object 0x%p\n", pdesk);
 
-    ppi = PsGetCurrentProcessWin32Process();
+    /* A process without process info has no views and gets none */
+    if (ppi == NULL)
+        return STATUS_SUCCESS;
 
     /*
      * Find out if another thread already mapped the desktop heap.
@@ -4450,9 +4494,9 @@ IntMapDesktopView(IN PDESKTOP pdesk)
     /* We're the first, map the heap */
     Offset.QuadPart = 0;
     Status = MmMapViewOfSection(pdesk->hsectionDesktop,
-                                PsGetCurrentProcess(),
+                                Process,
                                 &UserBase,
-                                Win32kUserViewZeroBits(PsGetCurrentProcess()),
+                                Win32kUserViewZeroBits(Process),
                                 0,
                                 &Offset,
                                 &ViewSize,
@@ -4471,7 +4515,7 @@ IntMapDesktopView(IN PDESKTOP pdesk)
     HeapMapping = UserHeapAlloc(sizeof(*HeapMapping));
     if (HeapMapping == NULL)
     {
-        MmUnmapViewOfSection(PsGetCurrentProcess(), UserBase);
+        MmUnmapViewOfSection(Process, UserBase);
         ERR("UserHeapAlloc() failed!\n");
         return STATUS_NO_MEMORY;
     }
@@ -4603,7 +4647,7 @@ IntSetThreadDesktop(IN HDESK hDesktop,
     /* Before doing the switch, map the new desktop heap and allocate the new pcti */
     if (pdesk != NULL)
     {
-        Status = IntMapDesktopView(pdesk);
+        Status = IntMapDesktopView(pdesk, PsGetCurrentProcess(), pti->ppi);
         if (!NT_SUCCESS(Status))
         {
             ERR("Failed to map desktop heap!\n");
@@ -4616,7 +4660,7 @@ IntSetThreadDesktop(IN HDESK hDesktop,
         if (pctiNew == NULL)
         {
             ERR("Failed to allocate new pcti\n");
-            IntUnmapDesktopView(pdesk);
+            IntUnmapDesktopView(pdesk, PsGetCurrentProcess(), pti->ppi);
             ObDereferenceObject(pdesk);
             EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
             return FALSE;
@@ -4665,7 +4709,7 @@ IntSetThreadDesktop(IN HDESK hDesktop,
             if (pdesk)
             {
                 DesktopHeapFree(pdesk, pctiNew);
-                IntUnmapDesktopView(pdesk);
+                IntUnmapDesktopView(pdesk, PsGetCurrentProcess(), pti->ppi);
                 ObDereferenceObject(pdesk);
             }
             return FALSE;
@@ -4724,7 +4768,7 @@ IntSetThreadDesktop(IN HDESK hDesktop,
     {
         RemoveEntryList(&pti->PtiLink);
         if (pctiOld) DesktopHeapFree(pdeskOld, pctiOld);
-        IntUnmapDesktopView(pdeskOld);
+        IntUnmapDesktopView(pdeskOld, PsGetCurrentProcess(), pti->ppi);
         ObDereferenceObject(pdeskOld);
     }
 

@@ -572,6 +572,17 @@ typedef BOOL (FASTCALL *nonOverlapProcp)(PREGION, PRECT, PRECT, INT, INT);
 
 #define RGN_DEFAULT_RECTS    2
 
+/*
+ * The most point blocks REGION_SetPolyPolygonRgn buffers for one region: 20000 blocks of 200 points,
+ * 4 million points, 32 MB of paged pool (the rects made from them take as much again). A polygon
+ * whose edges are crossed on a hundred rows or so fills one block per hundred rows, and a coordinate of a
+ * GDI call reaches 2^27: a few points far apart ask for tens of gigabytes, which is more than the pool
+ * of the session holds, and every other user of that pool fails with it. A region of a real
+ * drawing spans some thousand rows (a display is at most 16384 rows high) and has a few hundred
+ * edges per row at the most; this is some five times what the largest of them needs.
+ */
+#define MAX_POLY_POINT_BLOCKS 20000
+
 // Used to allocate buffers for points and link the buffers together
 typedef struct _POINTBLOCK
 {
@@ -3448,6 +3459,12 @@ REGION_SetPolyPolygonRgn(
                 /* Send out the buffer */
                 if (iPts == NUMPTSTOBUFFER)
                 {
+                    if (numFullPtBlocks >= MAX_POLY_POINT_BLOCKS)
+                    {
+                        DPRINT1("The polygon region needs more than %u point blocks\n", MAX_POLY_POINT_BLOCKS);
+                        goto Cleanup;
+                    }
+
                     tmpPtBlock = ExAllocatePoolWithTag(PagedPool,
                                                        sizeof(POINTBLOCK),
                                                        TAG_REGION);
@@ -3503,6 +3520,12 @@ REGION_SetPolyPolygonRgn(
                     /* Send out the buffer */
                     if (iPts == NUMPTSTOBUFFER)
                     {
+                        if (numFullPtBlocks >= MAX_POLY_POINT_BLOCKS)
+                        {
+                            DPRINT1("The polygon region needs more than %u point blocks\n", MAX_POLY_POINT_BLOCKS);
+                            goto Cleanup;
+                        }
+
                         tmpPtBlock = ExAllocatePoolWithTag(PagedPool,
                                                            sizeof(POINTBLOCK),
                                                            TAG_REGION);

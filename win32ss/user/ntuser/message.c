@@ -3104,6 +3104,9 @@ NtUserMessageCall( HWND hWnd,
                   }
                   Visited[cVisited++] = rpdesk;
 
+                  /* A desktop that failed to get its DESKTOPINFO is linked until its deferred delete runs */
+                  if (!rpdesk->pDeskInfo)
+                      continue;
                   pwndDesk = rpdesk->pDeskInfo->spwnd;
                   if (!pwndDesk) /* CSRSS has exited (IntDesktopThreadProcessExit) */
                       continue;
