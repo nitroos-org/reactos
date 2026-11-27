@@ -173,6 +173,21 @@ typedef struct _VDM_PROCESS_OBJECTS
 } VDM_PROCESS_OBJECTS, *PVDM_PROCESS_OBJECTS;
 
 //
+// Is the current thread the one that runs the VDM of its process?
+// VdmObjects belongs to the process, but it is only there for the thread that runs V86 code (a BIOS call,
+// Ke386CallBios, attaches to a process with other threads and sets it while the call runs): the other threads of
+// the process are not VDM threads, whatever they trap on while it is set.
+//
+FORCEINLINE
+BOOLEAN
+VdmpIsCurrentThreadVdm(VOID)
+{
+    PVDM_PROCESS_OBJECTS VdmObjects = (PVDM_PROCESS_OBJECTS)PsGetCurrentProcess()->VdmObjects;
+
+    return (VdmObjects != NULL) && (VdmObjects->MainThread == PsGetCurrentThread());
+}
+
+//
 // Functions
 //
 NTSTATUS

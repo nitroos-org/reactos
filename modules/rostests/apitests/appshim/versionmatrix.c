@@ -1,13 +1,11 @@
 /*
  * PROJECT:     appshim_apitest
  * LICENSE:     MIT (https://spdx.org/licenses/MIT)
- * PURPOSE:     The version a program is told by GetVersion/GetVersionEx/VerifyVersionInfo (the S2 version lie,
- *              switch HKLM\SYSTEM\CurrentControlSet\Control\ReactOS\Settings\Version\UnmanifestedVersionLie).
+ * PURPOSE:     The version a program is told by GetVersion/GetVersionEx/VerifyVersionInfo.
  *              The rows are the ones measured on Windows 10 22H2 (19045): a program is told 6.2.9200 unless its
  *              own manifest names Windows 8.1 (6.3.9600) or Windows 10 (the real version); without a supportedOS its PE
  *              header OS version counts; a supportedOS beats the header; an embedded manifest beats a sidecar one.
  *              RtlGetVersion, RtlVerifyVersionInfo, RtlGetNtVersionNumbers and KUSER_SHARED_DATA never lie.
- *              With the switch off (the default on ReactOS) every program is told the real version.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -54,23 +52,6 @@ static const char g_Win10Manifest[] =
     "    <supportedOS Id=\"{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}\"/>\r\n"
     "  </application></compatibility>\r\n"
     "</assembly>\r\n";
-
-static BOOL switch_on(void)
-{
-    HKEY hKey;
-    DWORD Value = 0, Size = sizeof(Value), Type;
-
-    if (!is_reactos())
-        return TRUE; /* Windows 10 does it always */
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\ReactOS\\Settings\\Version",
-                      0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
-        return FALSE;
-    if (RegQueryValueExW(hKey, L"UnmanifestedVersionLie", NULL, &Type, (PBYTE)&Value, &Size) != ERROR_SUCCESS ||
-        Type != REG_DWORD)
-        Value = 0;
-    RegCloseKey(hKey);
-    return Value == 1;
-}
 
 static void expected_line(char *Line, int Level, const OSVERSIONINFOEXW *Real)
 {
@@ -151,13 +132,13 @@ static void dir_of_test(PWSTR Dir, size_t Count)
         Slash[1] = 0;
 }
 
-static void check_row(PCWSTR Exe, PCWSTR Result, int Level, PCSTR What, const OSVERSIONINFOEXW *Real, BOOL On)
+static void check_row(PCWSTR Exe, PCWSTR Result, int Level, PCSTR What, const OSVERSIONINFOEXW *Real)
 {
     char Got[600], Want[600];
 
     if (!run_probe(Exe, Result, Got, sizeof(Got)))
         return;
-    expected_line(Want, On ? Level : L_REAL, Real);
+    expected_line(Want, Level, Real);
     ok(!strcmp(Got, Want), "%s: got\n  %s\nwanted\n  %s\n", What, Got, Want);
 }
 
@@ -166,7 +147,6 @@ START_TEST(versionmatrix)
     RTLGETVERSIONPROC pRtlGetVersion = (RTLGETVERSIONPROC)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
     OSVERSIONINFOEXW Real = { sizeof(Real) };
     WCHAR Dir[MAX_PATH], Tmp[MAX_PATH], Exe[MAX_PATH + 40], Result[MAX_PATH + 40], Copy[MAX_PATH + 40], Side[MAX_PATH + 50];
-    BOOL On = switch_on();
     SIZE_T i;
     HANDLE hFile;
     DWORD Written;
@@ -177,7 +157,7 @@ START_TEST(versionmatrix)
         skip("the matrix is for a Windows 10 system, this one is %lu.%lu\n", Real.dwMajorVersion, Real.dwMinorVersion);
         return;
     }
-    trace("switch %s, real version %lu.%lu.%lu\n", On ? "ON" : "OFF", Real.dwMajorVersion, Real.dwMinorVersion, Real.dwBuildNumber);
+    trace("real version %lu.%lu.%lu\n", Real.dwMajorVersion, Real.dwMinorVersion, Real.dwBuildNumber);
 
     dir_of_test(Dir, ARRAYSIZE(Dir));
     GetTempPathW(ARRAYSIZE(Tmp), Tmp);
@@ -186,7 +166,7 @@ START_TEST(versionmatrix)
     for (i = 0; i < ARRAYSIZE(g_Rows); ++i)
     {
         swprintf(Exe, ARRAYSIZE(Exe), L"%lsappshim_vm_%S.exe", Dir, g_Rows[i].Name);
-        check_row(Exe, Result, g_Rows[i].Level, g_Rows[i].What, &Real, On);
+        check_row(Exe, Result, g_Rows[i].Level, g_Rows[i].What, &Real);
     }
 
     /* A sidecar manifest (x.exe.manifest) is honoured for a program without an embedded manifest, and ignored
@@ -216,7 +196,7 @@ START_TEST(versionmatrix)
             }
             WriteFile(hFile, g_Win10Manifest, sizeof(g_Win10Manifest) - 1, &Written, NULL);
             CloseHandle(hFile);
-            check_row(Copy, Result, Side_[i].Level, Side_[i].What, &Real, On);
+            check_row(Copy, Result, Side_[i].Level, Side_[i].What, &Real);
             DeleteFileW(Side);
             DeleteFileW(Copy);
         }

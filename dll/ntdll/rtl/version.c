@@ -11,8 +11,6 @@
 /* INCLUDES *******************************************************************/
 
 #include <ntdll.h>
-#include <compat_undoc.h>
-#include <verlie.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -156,7 +154,6 @@ RtlGetNtVersionNumbers(OUT PULONG pMajorVersion,
     PPEB pPeb = NtCurrentPeb();
     ULONG Major = pPeb->OSMajorVersion;
     ULONG Minor = pPeb->OSMinorVersion;
-    UINT EffectiveVersion;
 
     /* Never report less than XP (see NOTES above) */
     if ((Major < 5) || ((Major == 5) && (Minor < 1)))
@@ -165,16 +162,8 @@ RtlGetNtVersionNumbers(OUT PULONG pMajorVersion,
         Minor = 1;
     }
 
-    /* Honor a per-process compatibility version (app manifest / shim), like
-     * RtlGetVersion() and GetVersion(): base::win::OSInfo and similar callers read
-     * this export and must agree with them. Only ever raises the version. */
-    EffectiveVersion = RosGetProcessEffectiveVersion();
-    /* With the unmanifested-version switch on, this export stays real (kernel32 does the lie) */
-    if (EffectiveVersion > ((Major << 8) | Minor) && !RosVersionLieEnabled())
-    {
-        Major = EffectiveVersion >> 8;
-        Minor = EffectiveVersion & 0xFF;
-    }
+    /* This export always tells the real version, as on Windows (kernel32 tells a program the version
+     * Windows 10 tells it, see GetVersion) */
 
     if (pMajorVersion)
         *pMajorVersion = Major;
@@ -210,18 +199,7 @@ RtlGetVersion(IN OUT PRTL_OSVERSIONINFOW lpVersionInformation)
     lpVersionInformation->dwBuildNumber = Peb->OSBuildNumber;
     lpVersionInformation->dwPlatformId = Peb->OSPlatformId;
 
-    /* Honor a per-process compatibility version declared in the app manifest,
-     * reporting the higher of the manifest version and the real NT version, so
-     * GetVersionEx() agrees with GetVersion() for manifested apps (as on Windows). */
-    {
-        UINT EffectiveVersion = RosGetProcessEffectiveVersion();
-        /* With the unmanifested-version switch on, RtlGetVersion stays real (kernel32 does the lie) */
-        if (EffectiveVersion > ((Peb->OSMajorVersion << 8) | Peb->OSMinorVersion) && !RosVersionLieEnabled())
-        {
-            lpVersionInformation->dwMajorVersion = EffectiveVersion >> 8;
-            lpVersionInformation->dwMinorVersion = EffectiveVersion & 0xFF;
-        }
-    }
+    /* The real version, always: kernel32 tells a program the version Windows 10 tells it (GetVersionEx) */
     RtlZeroMemory(lpVersionInformation->szCSDVersion, sizeof(lpVersionInformation->szCSDVersion));
 
     /* If we have a CSD version string, initialized by Application Compatibility... */

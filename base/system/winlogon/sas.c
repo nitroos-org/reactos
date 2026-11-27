@@ -58,6 +58,50 @@ typedef struct tagLOGON_SOUND_DATA
 
 /* FUNCTIONS ****************************************************************/
 
+/*
+ * The logon of an interactive session records its name in the user's volatile environment, where
+ * CreateEnvironmentBlock finds it: 'Volatile Environment\<session id>' with SESSIONNAME = Console
+ * (the interactive session is the console session) and an empty CLIENTNAME, as on Windows.
+ */
+static VOID
+CreateSessionVolatileEnvironment(
+    IN PWLSESSION Session)
+{
+    static const WCHAR SessionName[] = L"Console";
+    static const WCHAR ClientName[] = L"";
+    WCHAR KeyName[32];
+    HKEY hKeyCurrentUser, hKeyVolatileEnv, hKeySession;
+
+    if (WlSessionId == 0 || !Session->UserToken)
+        return;
+
+    if (!ImpersonateLoggedOnUser(Session->UserToken))
+    {
+        ERR("ImpersonateLoggedOnUser() failed with error %lu\n", GetLastError());
+        return;
+    }
+
+    if (RegOpenCurrentUser(KEY_CREATE_SUB_KEY, &hKeyCurrentUser) == ERROR_SUCCESS)
+    {
+        if (RegCreateKeyExW(hKeyCurrentUser, L"Volatile Environment", 0, NULL, REG_OPTION_VOLATILE,
+                            KEY_CREATE_SUB_KEY, NULL, &hKeyVolatileEnv, NULL) == ERROR_SUCCESS)
+        {
+            StringCchPrintfW(KeyName, ARRAYSIZE(KeyName), L"%lu", WlSessionId);
+            if (RegCreateKeyExW(hKeyVolatileEnv, KeyName, 0, NULL, REG_OPTION_VOLATILE,
+                                KEY_SET_VALUE, NULL, &hKeySession, NULL) == ERROR_SUCCESS)
+            {
+                RegSetValueExW(hKeySession, L"SESSIONNAME", 0, REG_SZ, (const BYTE*)SessionName, sizeof(SessionName));
+                RegSetValueExW(hKeySession, L"CLIENTNAME", 0, REG_SZ, (const BYTE*)ClientName, sizeof(ClientName));
+                RegCloseKey(hKeySession);
+            }
+            RegCloseKey(hKeyVolatileEnv);
+        }
+        RegCloseKey(hKeyCurrentUser);
+    }
+
+    RevertToSelf();
+}
+
 static BOOL
 StartTaskManager(
     IN OUT PWLSESSION Session)
@@ -778,6 +822,9 @@ HandleLogon(
         WARN("WL: CreateUserEnvironment() failed\n");
         goto cleanup;
     }
+
+    /* Name the session in the user's volatile environment */
+    CreateSessionVolatileEnvironment(Session);
 
     /* Enable per-user settings */
     DisplayStatusMessage(Session, Session->WinlogonDesktop, IDS_APPLYINGYOURPERSONALSETTINGS);

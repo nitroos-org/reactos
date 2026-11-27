@@ -69,9 +69,9 @@ FORCEINLINE
 BOOLEAN
 KiVdmTrap(IN PKTRAP_FRAME TrapFrame)
 {
-    /* Either the V8086 flag is on, or this is user-mode with a VDM */
+    /* Either the V8086 flag is on, or this is user-mode in the thread that runs the VDM */
     return ((TrapFrame->EFlags & EFLAGS_V86_MASK) ||
-            ((KiUserTrap(TrapFrame)) && (PsGetCurrentProcess()->VdmObjects)));
+            ((KiUserTrap(TrapFrame)) && VdmpIsCurrentThreadVdm()));
 }
 
 FORCEINLINE
