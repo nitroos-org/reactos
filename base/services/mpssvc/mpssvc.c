@@ -114,7 +114,8 @@ static VOID ReportRules(VOID)
    leave an Allow LocalSubnet rule allowing the old subnet (broader than written) and a Block LocalSubnet rule missing
    the new one. So the policy is pushed again when what the keywords resolve from changes. NotifyAddrChange wakes the
    service for IPv4 changes; the signature below (the same fields the resolution reads) is also checked every
-   ADDR_POLL_TICKS poll ticks, which covers IPv6 (no notification there) and a failed notification request, and a
+   ADDR_POLL_TICKS poll ticks, which covers a failed notification request or registration (IPv6 changes are notified through
+   NotifyUnicastIpAddressChange), and a
    push happens only when the signature differs from the one of the last push. A change must stay quiet for
    ADDR_QUIET_MS before it is pushed (debounce: DHCP and SLAAC set several addresses), but never longer than
    ADDR_MAX_MS after the first change (an interface that keeps flapping must not postpone the push for ever).
@@ -134,6 +135,21 @@ static OVERLAPPED g_AddrOv;
 static HANDLE g_AddrFile;
 static BOOL g_AddrArmed;
 static BOOL g_AddrStuck;    /* the last request could not be confirmed cancelled: g_AddrOv stays untouched until it is */
+
+/* IPv6 address changes: NotifyAddrChange is IPv4 only, so the service also registers for the IPv6 unicast addresses.
+   The callback only sets g_hAddr6 (a manual-reset event, waited on with the others); what changed is found by the
+   signature, as for IPv4. The registration queues its next request in the stack before it reads its table, and the
+   stack completes only the requests that were queued before a change began, so it cannot loop. */
+DWORD WINAPI NotifyUnicastIpAddressChange(ADDRESS_FAMILY Family, PVOID Callback, PVOID CallerContext,
+                                          BOOLEAN InitialNotification, HANDLE *NotificationHandle);
+DWORD WINAPI CancelMibChangeNotify2(HANDLE NotificationHandle);
+static HANDLE g_hAddr6;
+static HANDLE g_Notify6;
+
+static VOID WINAPI Addr6Changed(PVOID Context, PVOID Row, DWORD Type)
+{
+    if (g_hAddr6) SetEvent(g_hAddr6);
+}
 
 static ULONG SigAdd(ULONG h, const void *p, SIZE_T n)
 {
@@ -262,7 +278,7 @@ VOID PromptRulesChanged(VOID);
 
 static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
 {
-    HKEY hKey = NULL; HANDLE hChange = NULL, hs[3]; DWORD wait, nWait; ULONG retryTicks = 0, addrTicks = 0;
+    HKEY hKey = NULL; HANDLE hChange = NULL; DWORD wait, nWait; ULONG retryTicks = 0, addrTicks = 0;
     FILETIME ft;
 
     g_hStatus = RegisterServiceCtrlHandlerExW(g_Name, CtrlHandler, NULL);
@@ -279,16 +295,25 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
     RegNotifyChangeKeyValue(hKey, TRUE, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET, hChange, TRUE);
     SetState(SERVICE_RUNNING);
     g_hAddr = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g_hAddr6 = CreateEventW(NULL, TRUE, FALSE, NULL);
+    /* registered before the first push: an IPv6 address that comes up after it is notified (without a registration
+       the signature poll still finds it) */
+    if (g_hAddr6 && NotifyUnicastIpAddressChange(AF_INET6, Addr6Changed, NULL, FALSE, &g_Notify6) != NO_ERROR)
+        g_Notify6 = NULL;
     ArmAddrNotify();
     Push();
-    hs[0] = g_hStop; hs[1] = hChange; hs[2] = g_hAddr;
     PromptInit(g_hStop);
     for (;;)
     {
         /* wake every POLL_MS for the block prompt; when the device is absent retry every NITROFW_RETRY_SECONDS;
            netsh/COM changes arrive through the key notification */
-        DWORD timeout = POLL_MS; BOOL early = FALSE;
-        nWait = g_AddrArmed ? 3 : 2;
+        DWORD timeout = POLL_MS; BOOL early = FALSE; BOOL addrWake;
+        HANDLE ws[4];
+        nWait = 0;
+        ws[nWait++] = g_hStop;
+        ws[nWait++] = hChange;
+        if (g_hAddr6) ws[nWait++] = g_hAddr6;
+        if (g_AddrArmed) ws[nWait++] = g_hAddr;
         if (g_SigDirty)
         {
             /* a push is due: wake for it, not at the next poll tick */
@@ -296,16 +321,18 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
             if (left < 0) left = 0;
             if ((DWORD)left < POLL_MS) { timeout = (DWORD)left; early = TRUE; }
         }
-        wait = WaitForMultipleObjects(nWait, hs, FALSE, timeout);
+        wait = WaitForMultipleObjects(nWait, ws, FALSE, timeout);
         if (wait == WAIT_OBJECT_0) break;
-        if (wait == WAIT_OBJECT_0 + 2)
+        addrWake = (wait >= WAIT_OBJECT_0 + 2 && wait < WAIT_OBJECT_0 + nWait);
+        if (addrWake)
         {
-            /* The address table changed. Whatever the stack does, the addresses are read at most once every
-               ADDR_COALESCE_MS: a burst of changes (DHCP, SLAAC) is one check after it, and a notification that
+            /* The address table changed (IPv4 or IPv6). Whatever the stack does, the addresses are read at most once
+               every ADDR_COALESCE_MS: a burst of changes (DHCP, SLAAC) is one check after it, and a notification that
                completes again at once cannot make this loop spin. The request is queued again before the check, so a
-               change after the check is notified. */
+               change after the check is notified; the IPv6 event is reset before it for the same reason. */
             DWORD since = GetTickCount();
             if (WaitForSingleObject(g_hStop, ADDR_COALESCE_MS) == WAIT_OBJECT_0) break;
+            if (g_hAddr6) ResetEvent(g_hAddr6);
             ArmAddrNotify();
             AddrCheck(since);
         }
@@ -336,6 +363,12 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
         }
     }
     PromptStop();
+    if (g_Notify6)
+    {
+        /* waits for a callback that is running, none runs after it returns */
+        CancelMibChangeNotify2(g_Notify6);
+        g_Notify6 = NULL;
+    }
     if (g_AddrArmed)
     {
         /* the request completes (aborted) once cancelled; confirm that before the event is closed and the static
@@ -354,6 +387,7 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
     }
 done:
     if (g_hAddr) CloseHandle(g_hAddr);
+    if (g_hAddr6) { HANDLE h6 = g_hAddr6; g_hAddr6 = NULL; CloseHandle(h6); }
     if (hKey) RegCloseKey(hKey);
     if (hChange) CloseHandle(hChange);
     if (g_hStop) CloseHandle(g_hStop);
