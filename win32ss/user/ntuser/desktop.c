@@ -1923,11 +1923,17 @@ IntIsLogonDesktopInput(VOID)
  * once the old one is freed): while that desktop lacks the input, what the DC reads and draws is not the real
  * screen (dclife.c, DC_vBlindOnScreen). 0 is the system's own DC, never blind; (ULONGLONG)-1 is a DC got by a
  * thread without a desktop, never equal to a desktop's number, so blind whenever a desktop has the input.
- * Before the first desktop has the input nothing is shown yet, so nothing is withheld.
+ * Before the first desktop has the input nothing is shown yet, so nothing is withheld. A session that does not
+ * own the console (session 0, the services) has no monitor: its screen is a memory display that nobody sees,
+ * and its programs draw and read it as they always did (the service desktops are not the one that "has the
+ * input" there, and must not be blinded).
  */
 BOOL FASTCALL
 UserDesktopLacksInput(ULONGLONG ullDesk)
 {
+    if (gbHeadlessSession)
+        return FALSE;
+
     return ullDesk != 0 && gpdeskInputDesktop != NULL && ullDesk != gpdeskInputDesktop->ullScreenSerial;
 }
 
