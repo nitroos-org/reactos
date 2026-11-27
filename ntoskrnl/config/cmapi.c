@@ -2349,7 +2349,9 @@ CmFlushKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
          * held exclusively: the check repairs what it takes for damage.
          */
         CheckStatus = CmpCheckLiveHive(CmHive);
-        ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
+        /* No memory for the check's cell map says nothing about the hive: the flush goes on without the check */
+        ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus) ||
+               CheckStatus == CM_CHECK_REGISTRY_ALLOCATE_MEM_STACK_FAIL);
 #endif
 
         ASSERT(CmHive->ViewLock);
