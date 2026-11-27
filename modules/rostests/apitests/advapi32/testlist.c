@@ -68,6 +68,7 @@ extern void func_IsTextUnicode(void);
 extern void func_LockServiceDatabase(void);
 extern void func_LabelAutoInherit(void);
 extern void func_LookupPrivilegeNames(void);
+extern void func_ThreadTokenIdentificationOpen(void);
 extern void func_TokenIncreaseWorkingSet(void);
 extern void func_LookupAccountSidCaller(void);
 extern void func_LogonUser(void);
@@ -174,6 +175,7 @@ extern void func_TokenIntegrity(void);
 extern void func_TraverseRestricted(void);
 extern void func_TokenLogonSid(void);
 extern void func_WellKnownSidTypes(void);
+extern void func_WorkingSetMinimumToken(void);
 extern void func_WriteRestrictedToken(void);
 extern void func_TokenQueryParity(void);
 extern void func_OpenProcessTokenLimited(void);
@@ -305,6 +307,7 @@ const struct test winetest_testlist[] =
     { "LockServiceDatabase" , func_LockServiceDatabase },
     { "LabelAutoInherit", func_LabelAutoInherit },
     { "LookupPrivilegeNames", func_LookupPrivilegeNames },
+    { "ThreadTokenIdentificationOpen", func_ThreadTokenIdentificationOpen },
     { "TokenIncreaseWorkingSet", func_TokenIncreaseWorkingSet },
     { "LookupAccountSidCaller", func_LookupAccountSidCaller },
     { "LogonUser", func_LogonUser },
@@ -411,6 +414,7 @@ const struct test winetest_testlist[] =
     { "TraverseRestricted", func_TraverseRestricted },
     { "TokenLogonSid", func_TokenLogonSid },
     { "WellKnownSidTypes", func_WellKnownSidTypes },
+    { "WorkingSetMinimumToken", func_WorkingSetMinimumToken },
     { "WriteRestrictedToken", func_WriteRestrictedToken },
     { "TokenQueryParity", func_TokenQueryParity },
     { "OpenProcessTokenLimited", func_OpenProcessTokenLimited },

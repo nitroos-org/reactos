@@ -70,6 +70,7 @@ list(APPEND SOURCE
     LockServiceDatabase.c
     LabelAutoInherit.c
     LookupPrivilegeNames.c
+    ThreadTokenIdentificationOpen.c
     TokenIncreaseWorkingSet.c
     LookupAccountSidCaller.c
     LogonUser.c
@@ -156,6 +157,7 @@ list(APPEND SOURCE
     TokenIntegrity.c
     TraverseRestricted.c
     TokenLogonSid.c
+    WorkingSetMinimumToken.c
     WriteRestrictedToken.c
     WellKnownSidTypes.c
     TokenQueryParity.c

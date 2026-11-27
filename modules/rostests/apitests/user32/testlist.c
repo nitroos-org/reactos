@@ -164,6 +164,7 @@ extern void func_ProcessConnectTerminate(void);
 extern void func_RawInput(void);
 extern void func_RealGetWindowClass(void);
 extern void func_RedirDesktop(void);
+extern void func_RedirIntegrity(void);
 extern void func_RedirGlassKeep(void);
 extern void func_RedirPresent(void);
 extern void func_RedirScroll(void);
@@ -195,6 +196,7 @@ extern void func_SetSysColorsWinsta(void);
 extern void func_SetWindowPlacement(void);
 extern void func_SetWindowPosOwned(void);
 extern void func_ScreenDesktopReads(void);
+extern void func_ScreenDesktopSerial(void);
 extern void func_SetWindowRgn(void);
 extern void func_ShowWindow(void);
 extern void func_SizeNoMaxTrack(void);
@@ -398,6 +400,7 @@ const struct test winetest_testlist[] =
     { "PngIconRows", func_PngIconRows },
     { "RealGetWindowClass", func_RealGetWindowClass },
     { "RedirDesktop", func_RedirDesktop },
+    { "RedirIntegrity", func_RedirIntegrity },
     { "RedirGlassKeep", func_RedirGlassKeep },
     { "RedirPresent", func_RedirPresent },
     { "RedirScroll", func_RedirScroll },
@@ -429,6 +432,7 @@ const struct test winetest_testlist[] =
     { "SetWindowPlacement", func_SetWindowPlacement },
     { "SetWindowPosOwned", func_SetWindowPosOwned },
     { "ScreenDesktopReads", func_ScreenDesktopReads },
+    { "ScreenDesktopSerial", func_ScreenDesktopSerial },
     { "SetWindowRgn", func_SetWindowRgn },
     { "ShowWindow", func_ShowWindow },
     { "SizeNoMaxTrack", func_SizeNoMaxTrack },

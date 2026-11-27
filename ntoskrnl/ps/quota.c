@@ -1330,9 +1330,15 @@ PspSetQuotaLimits(
         }
         else
         {
-            /* Check if the caller has the required privilege */
+            /*
+             * The quota privilege enabled, or the working set privilege held (enabled or not: Windows Server 2022
+             * lets a standard user, whose token lists it disabled, raise its own minimum; a token without it, such as
+             * a restricted token with every privilege removed, gets STATUS_PRIVILEGE_NOT_HELD)
+             */
             IncreaseOkay = SeSinglePrivilegeCheck(SeIncreaseQuotaPrivilege,
                                                   PreviousMode);
+            if (!IncreaseOkay)
+                IncreaseOkay = (PreviousMode == KernelMode) || SeSinglePrivilegeHeld(SeIncreaseWorkingSetPrivilege);
         }
 
         /* Attach to the target process and disable APCs */

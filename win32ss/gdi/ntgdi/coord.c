@@ -1427,12 +1427,26 @@ GreGetDCPoint(
 
 BOOL
 WINAPI
+GreSetDCScreenDesk(
+    _In_ HDC hdc,
+    _In_ ULONGLONG ullScreenDesk)
+{
+    PDC dc = DC_LockDc(hdc);
+
+    if (!dc) return FALSE;
+    dc->ullScreenDesk = ullScreenDesk;
+    DC_UnlockDc(dc);
+    return TRUE;
+}
+
+BOOL
+WINAPI
 GreSetDCOrg(
     _In_ HDC hdc,
     _In_ LONG x,
     _In_ LONG y,
     _In_opt_ PRECTL Rect,
-    _In_opt_ PVOID pvScreenDesk)
+    _In_ ULONGLONG ullScreenDesk)
 {
     PDC dc;
 
@@ -1440,7 +1454,7 @@ GreSetDCOrg(
     if (!dc) return FALSE;
 
     /* The desktop this DC was got for: what it reaches of the screen depends on that desktop having the input */
-    dc->pvScreenDesk = pvScreenDesk;
+    dc->ullScreenDesk = ullScreenDesk;
 
     /* Set DC Origin */
     dc->ptlDCOrig.x = x;

@@ -173,7 +173,7 @@ DceSetDrawable( PWND Window OPTIONAL,
 
   /* Set DC Origin and Window Rectangle; and the desktop the DC is got for (the window's, for the desktop DC the thread's) */
   GreSetDCOrg( hDC, rect.left, rect.top, &rect,
-               Window ? (PVOID)Window->head.rpdesk : (PVOID)GetW32ThreadInfo()->rpdesk);
+               UserDesktopScreenId(Window ? Window->head.rpdesk : GetW32ThreadInfo()->rpdesk));
 
   /* And where that surface is on the screen (GetRandomRgn SYSRGN) */
   if (Root)
@@ -563,6 +563,20 @@ DceReleaseDC(DCE* dce, BOOL EndPaint)
 }
 
 
+/*
+ * Window handles are not checked against the caller's desktop: a program can ask for the DC of a window of the desktop that
+ * has the input. The screen such a DC reaches is the screen of the caller's own desktop, not of the window's (user-mode
+ * entry points only: the system itself paints windows of other desktops, e.g. when it switches to them).
+ */
+VOID FASTCALL
+UserScreenDcOfCaller(HDC hdc, PWND Wnd)
+{
+    PTHREADINFO pti = GetW32ThreadInfo();
+
+    if (hdc && Wnd && Wnd->head.rpdesk != pti->rpdesk)
+        GreSetDCScreenDesk(hdc, UserDesktopScreenId(pti->rpdesk));
+}
+
 HDC FASTCALL
 UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
 {
@@ -847,8 +861,8 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
    if (gRedirOn || Dce->pRedir)
    {
       PWND RedirRoot = UserRedirRootFor(Wnd);
-      /* A thread of another desktop draws and reads as without redirection: never through the window's surface */
-      PVOID pRedir = (RedirRoot && UserRedirSameDesktop(RedirRoot)) ? UserRedirGet(RedirRoot) : NULL;
+      /* A thread of another desktop, or of a lower integrity level than the window's process, draws and reads as without redirection: never through the window's surface */
+      PVOID pRedir = (RedirRoot && UserRedirMayReach(RedirRoot)) ? UserRedirGet(RedirRoot) : NULL;
 
       /* Not eligible now (hidden, layered, glass): a surface it had no longer holds what it shows */
       if (!RedirRoot && Wnd)
@@ -1406,6 +1420,7 @@ NtUserGetDCEx(HWND hWnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
       goto Exit; // Return NULL
   }
   Ret = UserGetDCEx(Wnd, ClipRegion, Flags);
+  UserScreenDcOfCaller(Ret, Wnd);
 
 Exit:
   TRACE("Leave NtUserGetDCEx, ret=%p\n", Ret);

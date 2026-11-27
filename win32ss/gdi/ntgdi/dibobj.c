@@ -909,6 +909,18 @@ GreGetDIBitsInternal(
         goto done;
     }
 
+    /*
+     * The bitmap of a screen DC (GetCurrentObject OBJ_BITMAP) is the screen's own surface: its pixels are not read
+     * by a thread whose desktop does not have the input (the lock screen's content), through any DC.
+     */
+    if (Bits && gpmdev && gpmdev->ppdevGlobal && psurf == gpmdev->ppdevGlobal->pSurface &&
+        UserCurrentThreadLacksInput())
+    {
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        ScanLines = 0;
+        goto done;
+    }
+
     colorPtr = (LPBYTE)Info + Info->bmiHeader.biSize;
     rgbQuads = colorPtr;
 

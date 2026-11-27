@@ -142,7 +142,7 @@ typedef struct _DC
   PVOID       pvRedir;    /* while fs & DC_REDIRECTION: the redirection record of the window (ntuser/redir.c) */
   RECTL       rclRedirDraw; /* device rectangle of the primitive being drawn into that surface */
   POINTL      ptlRedirScreen; /* while fs & DC_REDIRECTION: where the surface's pixel 0, 0 is on the screen */
-  PVOID       pvScreenDesk; /* DCTYPE_DIRECT: the desktop whose screen the program got this DC for (compared, never used as a pointer); NULL = the system's */
+  ULONGLONG   ullScreenDesk; /* DCTYPE_DIRECT: serial number of the desktop whose screen the program got this DC for (UserDesktopScreenId); 0 = the system's, -1 = got by a thread without a desktop */
 } DC;
 
 /*
@@ -189,7 +189,9 @@ BOOL NTAPI GreRedirLoadFromDC(_In_ struct _SURFACE *psurfDst, _In_ HDC hdcSrc, _
 /* ntuser/redir.c */
 VOID FASTCALL UserRedirMarkDirty(_In_ PVOID pvRedir, _In_opt_ const RECTL *prcl);
 /* ntuser/desktop.c: the desktop is not the one that has the input (so its screen is not what the monitor shows) */
-BOOL FASTCALL UserDesktopLacksInput(_In_opt_ PVOID pvDesk);
+BOOL FASTCALL UserDesktopLacksInput(_In_ ULONGLONG ullDesk);
+ULONGLONG FASTCALL UserDesktopScreenId(_In_opt_ struct _DESKTOP *pdesk);
+BOOL FASTCALL UserCurrentThreadLacksInput(VOID);
 // typedef struct _DC *PDC;
 
 extern PDC defaultDCstate;

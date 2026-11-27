@@ -77,6 +77,8 @@ DWORD gdwWinlogonSectionSize = 128;
  * desktop (referenced by the thread) or re-reads this.
  */
 PDESKTOP gpdeskInputDesktop = NULL;
+static LARGE_INTEGER gliDesktopSerial;
+static KSPIN_LOCK gsplDesktopSerial;
 HDC ScreenDeviceContext = NULL;
 PTHREADINFO gptiDesktopThread = NULL;
 HCURSOR gDesktopCursor = NULL;
@@ -188,6 +190,15 @@ IntDesktopObjectParse(IN PVOID ParseObject,
     if (!NT_SUCCESS(Status))
         return Status;
     RtlZeroMemory(Desktop, sizeof(DESKTOP));
+
+    /* A serial number no other desktop gets: a screen DC names its desktop by it, and a freed desktop's address may be reused */
+    {
+        LARGE_INTEGER One, Old;
+
+        One.QuadPart = 1;
+        Old = ExInterlockedAddLargeInteger(&gliDesktopSerial, One, &gsplDesktopSerial);   /* the value before: unique per caller */
+        Desktop->ullScreenSerial = (ULONGLONG)Old.QuadPart + 1;
+    }
 
     /* Assign the session ID to the desktop */
     Desktop->dwSessionId = PsGetCurrentProcessSessionId(); // gSessionId
@@ -1866,14 +1877,32 @@ IntIsLogonDesktopInput(VOID)
 /*
  * Is the desktop one whose screen is NOT on the monitor: some other desktop has the input (the logon, lock
  * and elevation-prompt desktops included)? A DC that draws on the screen belongs to the desktop its program
- * got it for (GDI keeps the pointer only to compare it, DC::pvScreenDesk): while that desktop lacks the input,
- * what the DC reads and draws is not the real screen (dclife.c, DC_vBlindOnScreen). Before the first desktop
- * has the input nothing is shown yet, so nothing is withheld.
+ * got it for (DC::ullScreenDesk, the desktop's serial number: not its address, which a new desktop can reuse
+ * once the old one is freed): while that desktop lacks the input, what the DC reads and draws is not the real
+ * screen (dclife.c, DC_vBlindOnScreen). 0 is the system's own DC, never blind; (ULONGLONG)-1 is a DC got by a
+ * thread without a desktop, never equal to a desktop's number, so blind whenever a desktop has the input.
+ * Before the first desktop has the input nothing is shown yet, so nothing is withheld.
  */
 BOOL FASTCALL
-UserDesktopLacksInput(PVOID pvDesk)
+UserDesktopLacksInput(ULONGLONG ullDesk)
 {
-    return pvDesk != NULL && gpdeskInputDesktop != NULL && pvDesk != (PVOID)gpdeskInputDesktop;
+    return ullDesk != 0 && gpdeskInputDesktop != NULL && ullDesk != gpdeskInputDesktop->ullScreenSerial;
+}
+
+/* Does the desktop of the calling thread (none: a thread without one) lack the input? */
+BOOL FASTCALL
+UserCurrentThreadLacksInput(VOID)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+
+    return UserDesktopLacksInput(UserDesktopScreenId(pti ? pti->rpdesk : NULL));
+}
+
+/* The number a screen DC got for pdesk carries ((ULONGLONG)-1: no desktop) */
+ULONGLONG FASTCALL
+UserDesktopScreenId(PDESKTOP pdesk)
+{
+    return pdesk ? pdesk->ullScreenSerial : (ULONGLONG)-1;
 }
 
 /*
@@ -2296,9 +2325,19 @@ UserGetDesktopDC(ULONG DcType, BOOL bAltDc, BOOL ValidatehWnd)
 
     if (DcType == DCTYPE_DIRECT)
     {
-        /* A direct DC of the screen: the input desktop */
-        DesktopObject = UserGetDesktopWindow();
-        DesktopHDC = (HDC)UserGetWindowDC(DesktopObject);
+        /*
+         * A direct DC of the screen for the caller's own desktop (DirectDraw's primary surface asks for it): the
+         * desktop window of the input desktop would hand a program of another desktop the DC of the screen
+         * that is shown. A caller without a desktop gets none.
+         */
+        PTHREADINFO ptiCaller = PsGetCurrentThreadWin32Thread();
+
+        if (ptiCaller && ptiCaller->rpdesk)
+        {
+            DesktopObject = UserGetWindowObject(ptiCaller->rpdesk->DesktopWindow);
+            if (DesktopObject)
+                DesktopHDC = (HDC)UserGetWindowDC(DesktopObject);
+        }
     }
     else
     {

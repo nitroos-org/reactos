@@ -9,6 +9,7 @@ extern PKTIMER gRedirTailTimer;
 VOID NTAPI UserRedirInit(VOID);
 PWND FASTCALL UserRedirRootFor(PWND Wnd);
 BOOL FASTCALL UserRedirSameDesktop(PWND Root);
+BOOL FASTCALL UserRedirMayReach(PWND Root);
 PVOID FASTCALL UserRedirGet(PWND Root);
 VOID FASTCALL UserRedirDetachWindow(PWND Wnd);
 VOID FASTCALL UserRedirAddRef(PVOID pvRedir);

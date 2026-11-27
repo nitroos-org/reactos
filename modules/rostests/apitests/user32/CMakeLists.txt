@@ -135,6 +135,7 @@ list(APPEND SOURCE
     RawInput.c
     RealGetWindowClass.c
     RedirDesktop.c
+    RedirIntegrity.c
     RedirGlassKeep.c
     RedirPresent.c
     RedirScroll.c
@@ -166,6 +167,7 @@ list(APPEND SOURCE
     SetWindowPlacement.c
     SetWindowPosOwned.c
     ScreenDesktopReads.c
+    ScreenDesktopSerial.c
     SetWindowRgn.c
     ShowWindow.c
     SizeNoMaxTrack.c
