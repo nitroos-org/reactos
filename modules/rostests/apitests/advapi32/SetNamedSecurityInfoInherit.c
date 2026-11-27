@@ -621,6 +621,76 @@ static void TestVolumeRootChild(PCWSTR Base, PSID Admins)
     UNREFERENCED_PARAMETER(Admins);
 }
 
+/*
+ * WiX Burn resets the permissions of its cached files with an ACL structure it never initialized (all zero):
+ * the call succeeds and the object ends up with the inherited ACEs only.
+ */
+static void TestZeroAcl(PCWSTR Base, PSID Users)
+{
+    WCHAR Dir[MAX_PATH];
+    EXPLICIT_ACCESSW Entry;
+    SECURITY_DESCRIPTOR_CONTROL Control;
+    PACL Explicit = NULL, Dacl = NULL;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    ACL Zero;
+    DWORD Err, Revision, i;
+    BOOL AllInherited = TRUE;
+
+    StringCchPrintfW(Dir, _countof(Dir), L"%ls\\zeroacl", Base);
+    if (!CreateDirectoryW(Dir, NULL))
+    {
+        skip("cannot create %ls: %lu\n", Dir, GetLastError());
+        return;
+    }
+
+    /* the directory has one explicit ACE and no inherited ones */
+    MakeEntry(&Entry, Users, FILE_GENERIC_READ, GRANT_ACCESS, NO_INHERITANCE);
+    Err = SetEntriesInAclW(1, &Entry, NULL, &Explicit);
+    ok_dec(Err, ERROR_SUCCESS);
+    if (Err != ERROR_SUCCESS)
+        goto Done;
+    Err = SetNamedSecurityInfoW(Dir, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                NULL, NULL, Explicit, NULL);
+    ok_dec(Err, ERROR_SUCCESS);
+    LocalFree(Explicit);
+    Err = GetNamedSecurityInfoW(Dir, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &Dacl, NULL, &Sd);
+    ok_dec(Err, ERROR_SUCCESS);
+    if (Err != ERROR_SUCCESS || !Dacl)
+        goto Done;
+    ok_dec((int)Dacl->AceCount, 1);
+    ok(FindAce(Dacl, Users, 0, FILE_GENERIC_READ) != NULL, "the explicit ACE is missing\n");
+    LocalFree(Sd);
+    Sd = NULL;
+
+    ZeroMemory(&Zero, sizeof(Zero));
+    Err = SetNamedSecurityInfoW(Dir, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                NULL, NULL, &Zero, NULL);
+    ok_dec(Err, ERROR_SUCCESS);
+
+    Dacl = NULL;
+    Err = GetNamedSecurityInfoW(Dir, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &Dacl, NULL, &Sd);
+    ok_dec(Err, ERROR_SUCCESS);
+    if (Err != ERROR_SUCCESS || !Dacl)
+        goto Done;
+    ok(Dacl->AceCount > 0, "the directory inherited nothing\n");
+    ok(FindAce(Dacl, Users, 0, FILE_GENERIC_READ) == NULL, "the explicit ACE is still there\n");
+    for (i = 0; i < Dacl->AceCount; i++)
+    {
+        PACE_HEADER Ace;
+
+        if (GetAce(Dacl, i, (PVOID *)&Ace) && !(Ace->AceFlags & INHERITED_ACE))
+            AllInherited = FALSE;
+    }
+    ok(AllInherited, "an ACE of the directory is not inherited\n");
+    ok(GetSecurityDescriptorControl(Sd, &Control, &Revision), "no descriptor control\n");
+    ok(!(Control & SE_DACL_PROTECTED), "the DACL is still protected, control 0x%04x\n", Control);
+
+Done:
+    if (Sd)
+        LocalFree(Sd);
+    RemoveDirectoryW(Dir);
+}
+
 START_TEST(SetNamedSecurityInfoInherit)
 {
     WCHAR Temp[MAX_PATH], Base[MAX_PATH];
@@ -656,6 +726,7 @@ START_TEST(SetNamedSecurityInfoInherit)
     {
         TestInheritance(Base, Admins, System, Users);
         TestVolumeRootChild(Base, Admins);
+        TestZeroAcl(Base, Users);
     }
 
     RemoveDirectoryW(Base);
