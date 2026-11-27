@@ -919,11 +919,16 @@ IntCreateWindowStation(
      * No existing window station found, try to create a new one.
      */
 
-    /* Create the window station object */
+    /*
+     * Create the window station object for the requestor (AccessMode): its attributes and security descriptor are
+     * captured and assigned as for any object a program creates (OBJ_KERNEL_HANDLE and OBJ_KERNEL_EXCLUSIVE are not
+     * honoured). Only the lookup of its directory may be made in kernel mode (OwnerMode, set on the header below,
+     * after the checks that the name is a leaf of this session's directory).
+     */
     Status = ObCreateObject(AccessMode,
                             ExWindowStationObjectType,
                             ObjectAttributes,
-                            OwnerMode,
+                            AccessMode,
                             NULL,
                             sizeof(WINSTATION_OBJECT),
                             0,
@@ -937,13 +942,6 @@ IntCreateWindowStation(
         return Status;
     }
     RtlZeroMemory(WindowStation, sizeof(WINSTATION_OBJECT));
-
-    /*
-     * The handle goes to the caller, never into the kernel's handle table, whatever the attributes ask for: an
-     * object created for a lookup in kernel mode (OwnerMode) keeps OBJ_KERNEL_HANDLE from the attributes
-     */
-    if (AccessMode != KernelMode && OBJECT_TO_OBJECT_HEADER(WindowStation)->ObjectCreateInfo)
-        OBJECT_TO_OBJECT_HEADER(WindowStation)->ObjectCreateInfo->Attributes &= ~OBJ_KERNEL_HANDLE;
 
     /* Assign the session ID to the window station */
     WindowStation->dwSessionId = PsGetCurrentProcessSessionId(); // gSessionId
@@ -970,6 +968,10 @@ IntCreateWindowStation(
         SetLastNtError(Status);
         return Status;
     }
+
+    /* The directory is looked up without the requestor's create check (ObInsertObject reads this flag only) */
+    if (OwnerMode == KernelMode)
+        OBJECT_TO_OBJECT_HEADER(WindowStation)->Flags |= OB_FLAG_KERNEL_MODE;
 
     if (InputWindowStation == NULL)
     {
