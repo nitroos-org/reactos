@@ -1204,7 +1204,9 @@ int __cdecl wmain(int argc, WCHAR *argv[])
     {
         out_printf(L"\n%ls   ROBOCOPY     ::     Robust File Copy for ReactOS\n%ls\n", rule, rule);
         out_now(L"  Started");
-        out_printf(L"   Source : %ls\n     Dest : %ls\n\n", disp_dir(root_src), disp_dir(root_dst));
+        /* disp_dir() returns one shared buffer: print each name before asking for the next */
+        out_printf(L"   Source : %ls\n", disp_dir(root_src));
+        out_printf(L"     Dest : %ls\n\n", disp_dir(root_dst));
         out_printf(L"    Files : ");
         if (!opt.patterns.count) out_printf(L"*.*");
         for (i = 0; i < opt.patterns.count; i++) out_printf(L"%ls ", opt.patterns.v[i]);
