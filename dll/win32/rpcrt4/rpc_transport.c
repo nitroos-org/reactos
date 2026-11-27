@@ -320,13 +320,12 @@ rpcrt4_create_pipe_security(PSECURITY_DESCRIPTOR *SecDesc)
         goto Quit;
     }
 
-    if (!SetSecurityDescriptorOwner(AbsSD, AdminsSid, FALSE))
-    {
-        ErrCode = GetLastError();
-        ERR("rpcrt4_create_pipe_security(): Failed to set SD owner (error %lu)\n", ErrCode);
-        goto Quit;
-    }
-
+    /*
+     * No owner: the pipe gets the server's own (its token's default owner). Naming the Administrators made
+     * every server that is not an administrator (RpcSs and the other services of NetworkService and
+     * LocalService, a user's own RPC server) fail to create its endpoint once the owner is checked
+     * (ERROR_INVALID_OWNER, as on Windows for an owner the caller may not assign).
+     */
     if (!SetSecurityDescriptorGroup(AbsSD, AdminsSid, FALSE))
     {
         ErrCode = GetLastError();
