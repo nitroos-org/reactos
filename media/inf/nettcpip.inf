@@ -277,7 +277,7 @@ HKR,"Ndi\Interfaces","LowerRange",0x00000000,"ndis4,ndis5"
 
 [TCPIP_AddReg_Ipv6.NT]
 ; The IPv6 transport: msafd finds the helper of an AF_INET6 socket through it (the same helper DLL; it makes the socket only while
-; the stack says it takes IPv6 sockets, which it does even with Tcpip\Parameters\Ipv6Enable = 0: that only takes IPv6 off the adapters)
+; the stack says it takes IPv6 sockets, which it does even with Tcpip6\Parameters\DisabledComponents = 0xFF: that only takes IPv6 off the adapters)
 HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","UseDelayedAcceptance",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","MaxSockAddrLength",0x00010001,0x0000001c
 HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","MinSockAddrLength",0x00010001,0x0000001c
