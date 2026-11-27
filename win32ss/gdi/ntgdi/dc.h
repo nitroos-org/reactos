@@ -192,6 +192,7 @@ VOID FASTCALL UserRedirMarkDirty(_In_ PVOID pvRedir, _In_opt_ const RECTL *prcl)
 BOOL FASTCALL UserDesktopLacksInput(_In_ ULONGLONG ullDesk);
 ULONGLONG FASTCALL UserDesktopScreenId(_In_opt_ struct _DESKTOP *pdesk);
 BOOL FASTCALL UserCurrentThreadLacksInput(VOID);
+BOOL FASTCALL UserCallerLacksInput(VOID);
 // typedef struct _DC *PDC;
 
 extern PDC defaultDCstate;

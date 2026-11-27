@@ -12,6 +12,8 @@
  * memory DC, CreatePatternBrush and MaskBlt with it as the mask. None may read or write the screen: nothing of the
  * window's colour arrives, and the window keeps its colour. On the desktop with the input GetBitmapBits of the handle
  * must return without stopping the system (it asserted on a surface whose rows are not those of a bitmap).
+ * The same thread also tries the DCs of the display that belong to no process (the system's screen DC, the cache DCs
+ * GetDC takes back): every process can find them in the GDI handle table, and none may copy the other desktop's screen.
  */
 
 #include "precomp.h"
@@ -40,6 +42,40 @@ static HBITMAP MakeDib(HDC hdc, int cx, int cy, DWORD **ppBits)
     bi.bmiHeader.biPlanes = 1;
     bi.bmiHeader.biBitCount = 32;
     return CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, (void **)ppBits, NULL, 0);
+}
+
+
+/* The public DCs of the shared GDI handle table (GDI_TABLE_ENTRY: kernel pointer, owner, unique and type, user pointer) */
+static void TestPublicDCs(HDC hdcMem, DWORD *pDib)
+{
+    BYTE *pPeb = *(BYTE **)((BYTE *)NtCurrentTeb() + (sizeof(void *) == 8 ? 0x60 : 0x30));
+    BYTE *pTable = *(BYTE **)(pPeb + (sizeof(void *) == 8 ? 0xF8 : 0x94));
+    SIZE_T cbEntry = 2 * sizeof(void *) + 8;
+    BOOL bWow64 = FALSE;
+    int i, cTried = 0, cRead = 0;
+
+    IsWow64Process(GetCurrentProcess(), &bWow64);
+    if (!pTable || bWow64)
+    {
+        skip("no GDI handle table to scan\n");
+        return;
+    }
+    for (i = 0; i < 0x10000 && cTried < 32; i++)
+    {
+        BYTE *pEntry = pTable + i * cbEntry;
+        if (*(void **)pEntry && *(DWORD *)(pEntry + sizeof(void *)) == 0 && pEntry[sizeof(void *) + 6] == 1)
+        {
+            HDC hdc = (HDC)(ULONG_PTR)(((ULONG)*(USHORT *)(pEntry + sizeof(void *) + 4) << 16) | i);
+            ZeroMemory(pDib, 64 * 64 * 4);
+            BitBlt(hdcMem, 0, 0, 64, 64, hdc, 0, 0, SRCCOPY);
+            GdiFlush();
+            if (CountColor(pDib, 64 * 64))
+                cRead++;
+            cTried++;
+        }
+    }
+    trace("%d public DCs tried\n", cTried);
+    ok(cRead == 0, "%d public DCs copied the other desktop's screen\n", cRead);
 }
 
 static DWORD WINAPI ThreadB(LPVOID Param)
@@ -104,6 +140,8 @@ static DWORD WINAPI ThreadB(LPVOID Param)
     /* The screen bitmap as the mask of a MaskBlt: a mask is read from the bitmap */
     ok(MaskBlt(hdcMem, 0, 0, 64, 64, hdcMem, 0, 0, hbm, 0, 0, MAKEROP4(WHITENESS, BLACKNESS)) == FALSE,
        "MaskBlt took the screen bitmap as its mask\n");
+
+    TestPublicDCs(hdcMem, pDib);
 
     SelectObject(hdcMem, hOld);
     DeleteObject(hbmDib);
