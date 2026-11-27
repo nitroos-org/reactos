@@ -93,6 +93,7 @@ list(APPEND SOURCE
     PatBlt.c
     PathArcRobustness.c
     PolyPatBlt.c
+    PolygonRegionBound.c
     PolygonClipInvariance.c
     Rectangle.c
     RegionAllocFailure.c
