@@ -1349,6 +1349,78 @@ done:
     return dwError;
 }
 
+/*
+ * The descriptor of the process of a service that runs with a token of the controller and has no service SID: what
+ * the default DACL of the token gives (SYSTEM and the user of the token, all access) and the Administrators with
+ * PROCESS_QUERY_LIMITED_INFORMATION. Measured on Windows Server 2022: the process of every service host of
+ * LocalService, NetworkService and LocalSystem has an entry for the Administrators; an elevated administrator
+ * opens them for the limited query (the entry also lists PROCESS_QUERY_INFORMATION, which the integrity label of
+ * the process takes away from an administrator, so the limited query is all an administrator gets). The
+ * descriptor of the processes that have a service SID is ScmCreateServiceProcessSd.
+ */
+static
+DWORD
+ScmCreateAccountProcessSd(
+    _In_ HANDLE hToken,
+    _Out_ PSECURITY_DESCRIPTOR *ppSd)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    ULONG SystemSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    ULONG AdminsSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    PSID pSystemSid = (PSID)SystemSidBuffer, pAdminsSid = (PSID)AdminsSidBuffer;
+    PTOKEN_USER pUser = NULL;
+    PSECURITY_DESCRIPTOR pSd = NULL;
+    PACL pDacl;
+    DWORD dwSize = 0, dwError = ERROR_SUCCESS;
+
+    *ppSd = NULL;
+    GetTokenInformation(hToken, TokenUser, NULL, 0, &dwSize);
+    if (dwSize == 0)
+        return GetLastError();
+    pUser = HeapAlloc(GetProcessHeap(), 0, dwSize);
+    if (pUser == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    if (!GetTokenInformation(hToken, TokenUser, pUser, dwSize, &dwSize))
+    {
+        dwError = GetLastError();
+        goto done;
+    }
+
+    RtlInitializeSid(pSystemSid, &NtAuthority, 1);
+    *RtlSubAuthoritySid(pSystemSid, 0) = SECURITY_LOCAL_SYSTEM_RID;
+    RtlInitializeSid(pAdminsSid, &NtAuthority, 2);
+    *RtlSubAuthoritySid(pAdminsSid, 0) = SECURITY_BUILTIN_DOMAIN_RID;
+    *RtlSubAuthoritySid(pAdminsSid, 1) = DOMAIN_ALIAS_RID_ADMINS;
+
+    dwSize = SECURITY_DESCRIPTOR_MIN_LENGTH + sizeof(ACL) + 3 * FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) +
+             RtlLengthSid(pUser->User.Sid) + RtlLengthSid(pSystemSid) + RtlLengthSid(pAdminsSid);
+    pSd = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize);
+    if (pSd == NULL)
+    {
+        dwError = ERROR_NOT_ENOUGH_MEMORY;
+        goto done;
+    }
+    pDacl = (PACL)((PBYTE)pSd + SECURITY_DESCRIPTOR_MIN_LENGTH);
+    if (!InitializeSecurityDescriptor(pSd, SECURITY_DESCRIPTOR_REVISION) ||
+        !InitializeAcl(pDacl, dwSize - SECURITY_DESCRIPTOR_MIN_LENGTH, ACL_REVISION) ||
+        !AddAccessAllowedAce(pDacl, ACL_REVISION, GENERIC_ALL, pUser->User.Sid) ||
+        !AddAccessAllowedAce(pDacl, ACL_REVISION, GENERIC_ALL, pSystemSid) ||
+        !AddAccessAllowedAce(pDacl, ACL_REVISION, 0x1000 /* PROCESS_QUERY_LIMITED_INFORMATION */, pAdminsSid) ||
+        !SetSecurityDescriptorDacl(pSd, TRUE, pDacl, FALSE))
+    {
+        dwError = GetLastError();
+        goto done;
+    }
+    *ppSd = pSd;
+    pSd = NULL;
+
+done:
+    if (pSd != NULL)
+        HeapFree(GetProcessHeap(), 0, pSd);
+    HeapFree(GetProcessHeap(), 0, pUser);
+    return dwError;
+}
+
 static
 DWORD
 ScmApplyRequiredPrivileges(
@@ -4306,6 +4378,21 @@ ScmStartUserModeService(PSERVICE Service,
             ProcessSa.nLength = ThreadSa.nLength = sizeof(SECURITY_ATTRIBUTES);
             ProcessSa.bInheritHandle = ThreadSa.bInheritHandle = FALSE;
         }
+        else
+        {
+            /* Without one: the default descriptor and the Administrators' limited query */
+            dwError = ScmCreateAccountProcessSd(Service->lpImage->hToken, &ProcessSa.lpSecurityDescriptor);
+            if (dwError != ERROR_SUCCESS)
+            {
+                DPRINT1("ScmCreateAccountProcessSd() failed (Error %lu)\n", dwError);
+                if (lpEnvironment)
+                    DestroyEnvironmentBlock(lpEnvironment);
+                Result = FALSE;
+                goto SdQuit;
+            }
+            ProcessSa.nLength = sizeof(SECURITY_ATTRIBUTES);
+            ProcessSa.bInheritHandle = FALSE;
+        }
 
         /* Impersonate the new user */
         Result = ImpersonateLoggedOnUser(Service->lpImage->hToken);
@@ -4316,7 +4403,7 @@ ScmStartUserModeService(PSERVICE Service,
                                               Service->lpImage->hProcessToken : Service->lpImage->hToken,
                                           NULL,
                                           Service->lpImage->pszImagePath,
-                                          Service->lpImage->bServiceSid ? &ProcessSa : NULL,
+                                          &ProcessSa,
                                           Service->lpImage->bServiceSid ? &ThreadSa : NULL,
                                           FALSE,
                                           CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS | CREATE_SUSPENDED,
@@ -4368,11 +4455,25 @@ ScmStartUserModeService(PSERVICE Service,
         {
             if (Service->lpImage->hProcessToken != NULL)
             {
-                /* A service with a service SID: its own token (the controller is SYSTEM already, no impersonation) */
+                /* A service with a token of its own (the controller is SYSTEM already, no impersonation) */
+                if (!Service->lpImage->bServiceSid)
+                {
+                    dwError = ScmCreateAccountProcessSd(Service->lpImage->hProcessToken, &ProcessSa.lpSecurityDescriptor);
+                    if (dwError != ERROR_SUCCESS)
+                    {
+                        DPRINT1("ScmCreateAccountProcessSd() failed (Error %lu)\n", dwError);
+                        if (lpEnvironment)
+                            DestroyEnvironmentBlock(lpEnvironment);
+                        Result = FALSE;
+                        goto SdQuit;
+                    }
+                    ProcessSa.nLength = sizeof(SECURITY_ATTRIBUTES);
+                    ProcessSa.bInheritHandle = FALSE;
+                }
                 Result = CreateProcessAsUserW(Service->lpImage->hProcessToken,
                                               NULL,
                                               Service->lpImage->pszImagePath,
-                                              NULL,
+                                              ProcessSa.lpSecurityDescriptor ? &ProcessSa : NULL,
                                               NULL,
                                               FALSE,
                                               CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS | CREATE_SUSPENDED,
