@@ -591,8 +591,16 @@ DC_vBlindOnScreen(PDC pdc)
     PSURFACE psurfScreen = pdc->dclevel.pSurface, psurf = NULL;
 
     /* Only a display (a printer's direct DC is no screen); one that was got for no desktop is the system's */
-    if ((pdc->fs & DC_BLINDED) || !pdc->ullScreenDesk || !(pdc->ppdev->flFlags & PDEV_DISPLAY) ||
-        !UserDesktopLacksInput(pdc->ullScreenDesk))
+    if ((pdc->fs & DC_BLINDED) || !(pdc->ppdev->flFlags & PDEV_DISPLAY))
+        return;
+
+    /*
+     * Blind when the desktop the DC was got for lacks the input; and when the caller does not own the DC and its own
+     * desktop lacks the input: the system's screen DC and the cache DCs that GetDC hands out and takes back are public
+     * (any process finds them in the GDI handle table) and name the system or their last user, not the caller.
+     */
+    if (!(pdc->ullScreenDesk && UserDesktopLacksInput(pdc->ullScreenDesk)) &&
+        !(GreGetObjectOwner(pdc->BaseObject.hHmgr) != GDI_OBJ_HMGR_POWNED && UserCallerLacksInput()))
         return;
 
     if (psurfScreen)

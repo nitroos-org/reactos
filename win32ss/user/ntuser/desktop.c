@@ -1898,6 +1898,23 @@ UserCurrentThreadLacksInput(VOID)
     return UserDesktopLacksInput(UserDesktopScreenId(pti ? pti->rpdesk : NULL));
 }
 
+/*
+ * Does a program's thread call whose desktop lacks the input? The threads of the system and of CSRSS, and the logon
+ * process (which switches the desktops and paints the one it switches to), draw for every desktop: never. A kernel
+ * thread without Win32 thread information is the system's too.
+ */
+BOOL FASTCALL
+UserCallerLacksInput(VOID)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+
+    if (!pti || (pti->TIF_flags & (TIF_SYSTEMTHREAD | TIF_CSRSSTHREAD)))
+        return FALSE;
+    if (gpidLogon && PsGetCurrentProcessId() == gpidLogon)
+        return FALSE;
+    return UserDesktopLacksInput(UserDesktopScreenId(pti->rpdesk));
+}
+
 /* The number a screen DC got for pdesk carries ((ULONGLONG)-1: no desktop) */
 ULONGLONG FASTCALL
 UserDesktopScreenId(PDESKTOP pdesk)

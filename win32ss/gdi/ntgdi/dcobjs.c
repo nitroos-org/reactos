@@ -402,7 +402,7 @@ NtGdiSelectBitmap(
     else
     {
         /* Reference the new bitmap and check if it's valid */
-        psurfNew = SURFACE_ShareLockSurface(hbmp);
+        psurfNew = SURFACE_ShareLockSurfaceForCaller(hbmp);
         if (!psurfNew)
         {
             DC_UnlockDc(pdc);

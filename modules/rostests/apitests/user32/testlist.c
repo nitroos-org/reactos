@@ -197,6 +197,7 @@ extern void func_SetWindowPlacement(void);
 extern void func_SetWindowPosOwned(void);
 extern void func_ScreenDesktopReads(void);
 extern void func_ScreenDesktopSerial(void);
+extern void func_ScreenSurfaceHandle(void);
 extern void func_SetWindowRgn(void);
 extern void func_ShowWindow(void);
 extern void func_SizeNoMaxTrack(void);
@@ -433,6 +434,7 @@ const struct test winetest_testlist[] =
     { "SetWindowPosOwned", func_SetWindowPosOwned },
     { "ScreenDesktopReads", func_ScreenDesktopReads },
     { "ScreenDesktopSerial", func_ScreenDesktopSerial },
+    { "ScreenSurfaceHandle", func_ScreenSurfaceHandle },
     { "SetWindowRgn", func_SetWindowRgn },
     { "ShowWindow", func_ShowWindow },
     { "SizeNoMaxTrack", func_SizeNoMaxTrack },

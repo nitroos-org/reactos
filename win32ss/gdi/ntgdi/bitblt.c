@@ -671,7 +671,7 @@ NtGdiMaskBlt(
     if (ROP4_USES_MASK(rop4) && (hbmMask != NULL))
     {
         /* Reference the mask bitmap */
-        psurfMask = SURFACE_ShareLockSurface(hbmMask);
+        psurfMask = SURFACE_ShareLockSurfaceForCaller(hbmMask);
         if (psurfMask == NULL)
         {
             EngSetLastError(ERROR_INVALID_HANDLE);

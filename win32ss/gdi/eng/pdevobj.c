@@ -939,6 +939,34 @@ leave:
 }
 
 
+/*
+ * Is psurf the primary surface of a display the system has now (the meta display's or one of its displays')? Only the
+ * display list and its PDEVs, which it references, are read; psurf is compared, never followed.
+ */
+BOOL
+NTAPI
+PDEVOBJ_bIsDisplayPrimarySurface(
+    _In_ PSURFACE psurf)
+{
+    BOOL bPrimary = FALSE;
+    ULONG i;
+
+    EngAcquireSemaphoreShared(ghsemPDEV);
+    if (gpmdev)
+    {
+        if (gpmdev->ppdevGlobal && gpmdev->ppdevGlobal->pSurface == psurf)
+            bPrimary = TRUE;
+        for (i = 0; !bPrimary && i < gpmdev->cDev; i++)
+        {
+            if (gpmdev->dev[i].ppdev && gpmdev->dev[i].ppdev->pSurface == psurf)
+                bPrimary = TRUE;
+        }
+    }
+    EngReleaseSemaphore(ghsemPDEV);
+
+    return bPrimary;
+}
+
 PPDEVOBJ
 NTAPI
 EngpGetPDEV(

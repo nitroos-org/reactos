@@ -389,7 +389,7 @@ IntSetDIBits(
         return 0;
     }
 
-    psurfDst = SURFACE_ShareLockSurface(hBitmap);
+    psurfDst = SURFACE_ShareLockSurfaceForCaller(hBitmap);
     psurfSrc = SURFACE_ShareLockSurface(SourceBitmap);
 
     if(!(psurfSrc && psurfDst))
@@ -902,7 +902,7 @@ GreGetDIBitsInternal(
     }
 
     /* Get a pointer to the source bitmap object */
-    psurf = SURFACE_ShareLockSurface(hBitmap);
+    psurf = SURFACE_ShareLockSurfaceForCaller(hBitmap);
     if (psurf == NULL)
     {
         ScanLines = 0;
