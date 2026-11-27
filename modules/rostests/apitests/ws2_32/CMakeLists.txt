@@ -42,6 +42,7 @@ list(APPEND SOURCE
     handleinherit.c
     sendcancel.c
     sendwhole.c
+    sendorder.c
     routinectx.c
     notconn.c
     tcpnodelay.c
