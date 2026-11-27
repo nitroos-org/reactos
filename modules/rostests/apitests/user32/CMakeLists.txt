@@ -202,6 +202,7 @@ list(APPEND SOURCE
     DesktopLabels.c
     DesktopViewNoAddressSpace.c
     DesktopHandleNoProcessInfo.c
+    DesktopOpenCreateRace.c
     DesktopCloseUserObjects.c
     DesktopWindowSiblings.c
     ShutdownBlockReason.c

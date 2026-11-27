@@ -232,6 +232,7 @@ extern void func_DesktopHeapLeak(void);
 extern void func_DesktopLabels(void);
 extern void func_DesktopViewNoAddressSpace(void);
 extern void func_DesktopHandleNoProcessInfo(void);
+extern void func_DesktopOpenCreateRace(void);
 extern void func_DesktopCloseUserObjects(void);
 extern void func_DesktopWindowSiblings(void);
 extern void func_ShutdownBlockReason(void);
@@ -463,6 +464,7 @@ const struct test winetest_testlist[] =
     { "DesktopLabels", func_DesktopLabels },
     { "DesktopViewNoAddressSpace", func_DesktopViewNoAddressSpace },
     { "DesktopHandleNoProcessInfo", func_DesktopHandleNoProcessInfo },
+    { "DesktopOpenCreateRace", func_DesktopOpenCreateRace },
     { "DesktopCloseUserObjects", func_DesktopCloseUserObjects },
     { "DesktopWindowSiblings", func_DesktopWindowSiblings },
     { "ShutdownBlockReason", func_ShutdownBlockReason },

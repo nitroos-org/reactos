@@ -129,8 +129,14 @@ IntDesktopObjectParse(IN PVOID ParseObject,
             continue;
         }
 
+        /* A desktop that failed to get its DESKTOPINFO stays linked until its deferred delete runs */
+        if (Desktop->pDeskInfo == NULL)
+        {
+            NextEntry = NextEntry->Flink;
+            continue;
+        }
+
         /* Get the desktop name */
-        ASSERT(Desktop->pDeskInfo != NULL);
         RtlInitUnicodeString(&DesktopName, Desktop->pDeskInfo->szDesktopName);
 
         /* Compare the name */
@@ -3781,6 +3787,9 @@ NtUserOpenDesktop(
     if (SharedUserData->NtMajorVersion >= 6)
         dwDesiredAccess |= DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS;
 
+    /* The lookup walks the list of the desktops of the window station, which NtUserCreateDesktop changes
+       under the USER lock (a desktop is linked before its DESKTOPINFO exists) */
+    UserEnterExclusive();
     Status = ObOpenObjectByName(
                  ObjectAttributes,
                  ExDesktopObjectType,
@@ -3789,6 +3798,7 @@ NtUserOpenDesktop(
                  dwDesiredAccess,
                  NULL,
                  (HANDLE*)&Desktop);
+    UserLeave();
 
     if (!NT_SUCCESS(Status))
     {

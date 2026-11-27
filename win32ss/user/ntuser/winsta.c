@@ -2380,6 +2380,9 @@ BuildDesktopNameList(
          DesktopEntry = DesktopEntry->Flink)
     {
         DesktopObject = CONTAINING_RECORD(DesktopEntry, DESKTOP, ListEntry);
+        /* A desktop that failed to get its DESKTOPINFO stays linked until its deferred delete runs */
+        if (DesktopObject->pDeskInfo == NULL)
+            continue;
         RtlInitUnicodeString(&DesktopName, DesktopObject->pDeskInfo->szDesktopName);
         ReturnLength += DesktopName.Length + sizeof(WCHAR);
         EntryCount++;
@@ -2421,6 +2424,8 @@ BuildDesktopNameList(
          DesktopEntry = DesktopEntry->Flink)
     {
         DesktopObject = CONTAINING_RECORD(DesktopEntry, DESKTOP, ListEntry);
+        if (DesktopObject->pDeskInfo == NULL)
+            continue;
         RtlInitUnicodeString(&DesktopName, DesktopObject->pDeskInfo->szDesktopName);
         Status = MmCopyToCaller(lpBuffer, DesktopName.Buffer, DesktopName.Length);
         if (! NT_SUCCESS(Status))
