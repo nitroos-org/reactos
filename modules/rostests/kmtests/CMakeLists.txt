@@ -15,6 +15,7 @@ add_subdirectory(ntos_io)
 add_subdirectory(ntos_ke/KeTrapFrame)
 add_subdirectory(ntos_mm)
 add_subdirectory(ntos_po)
+add_subdirectory(ntos_ps)
 add_subdirectory(rdbss)
 add_subdirectory(tcpip)
 
@@ -276,6 +277,7 @@ list(APPEND KMTEST_SOURCE
     ntos_mm/NtCreateSection_user.c
     mup/MupProvider_user.c
     ntos_po/PoIrp_user.c
+    ntos_ps/PsExitStatus_user.c
     rdbss/RdbssLoop_user.c
     tcpip/TcpIp_user.c
     ${COMMON_SOURCE}
@@ -320,6 +322,8 @@ add_dependencies(kmtest_drivers
     mmmaplockedpagesspecifycache_drv
     ntcreatesection_drv
     poirp_drv
+    psexitstatus_drv
+    psexitstatus_child
     tcpip_drv
     cccopyread_drv
     cczerodata_drv
