@@ -106,6 +106,7 @@ extern void func_v4afterv6(void);
 extern void func_udpoptions(void);
 extern void func_connectcycle(void);
 extern void func_ephport(void);
+extern void func_ephportremote(void);
 extern void func_timewait(void);
 extern void func_transmitfile(void);
 extern void func_WSAAsync(void);
@@ -226,6 +227,7 @@ const struct test winetest_testlist[] =
     { "udpoptions", func_udpoptions },
     { "connectcycle", func_connectcycle },
     { "ephport", func_ephport },
+    { "ephportremote", func_ephportremote },
     { "timewait", func_timewait },
     { "transmitfile", func_transmitfile },
     { "WSAAsync", func_WSAAsync },
