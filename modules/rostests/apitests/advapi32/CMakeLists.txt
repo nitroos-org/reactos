@@ -154,6 +154,7 @@ list(APPEND SOURCE
     FileInheritedAce.c
     TokenDenyOnlyAttributes.c
     TokenFilteredFlags.c
+    TokenCreateLabel.c
     TokenDefaultDacl.c
     TokenElevation.c
     TokenIntegrity.c
