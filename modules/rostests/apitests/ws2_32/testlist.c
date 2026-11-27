@@ -46,6 +46,7 @@ extern void func_getsockname(void);
 extern void func_handleinherit(void);
 extern void func_sendcancel(void);
 extern void func_sendwhole(void);
+extern void func_sendorder(void);
 extern void func_routinectx(void);
 extern void func_notconn(void);
 extern void func_tcpnodelay(void);
@@ -160,6 +161,7 @@ const struct test winetest_testlist[] =
     { "handleinherit", func_handleinherit },
     { "sendcancel", func_sendcancel },
     { "sendwhole", func_sendwhole },
+    { "sendorder", func_sendorder },
     { "routinectx", func_routinectx },
     { "notconn", func_notconn },
     { "addresschange", func_addresschange },

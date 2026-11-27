@@ -121,7 +121,9 @@ static USHORT AfdTdiSendFlags(PAFD_FCB FCB)
     return 0;
 }
 
-/* Whether a queued whole send still has bytes to copy: later sends must not overtake it */
+/* Whether a queued send still has bytes to copy into the window (a whole send that is not all copied, or a send
+ * that waits for room and has nothing in the window yet): later sends must not overtake it, or the stream would
+ * carry their bytes before its own */
 static BOOLEAN AfdSendQueueHasRemainder(PAFD_FCB FCB)
 {
     PLIST_ENTRY Entry;
@@ -132,7 +134,7 @@ static BOOLEAN AfdSendQueueHasRemainder(PAFD_FCB FCB)
     {
         PIRP Queued = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
 
-        if ((ULONG_PTR)Queued->Tail.Overlay.DriverContext[2] != 0 && AfdSendNeedsFill(Queued))
+        if (AfdSendNeedsFill(Queued))
             return TRUE;
     }
     return FALSE;
@@ -269,11 +271,50 @@ static VOID AfdConsumeFrontGhost(PAFD_FCB FCB, PUINT SendLength)
     Ghost->Bytes -= Used;
     FCB->Send.BytesUsed -= Used;
     *SendLength -= Used;
+
+    /* The ghosts behind it move up too. A ghost that kept its old place (behind a request queued between the two)
+     * took the bytes of the request after it as its own, and that request then waited, with its bytes counted in a
+     * window that was empty, for a send completion that never came */
+    AfdAdvanceSendGhosts(FCB, Used);
+
     if (Ghost->Bytes == 0)
     {
         RemoveEntryList(&Ghost->ListEntry);
         ExFreePoolWithTag(Ghost, TAG_AFD_SEND_GHOST);
     }
+}
+
+/* Sent bytes at the front of the window that no queued request has: a ghost's, or, up to the next ghost, bytes that
+ * nothing records (a ghost that could not be allocated). Untracked bytes are used up only as far as the next ghost:
+ * the ghost's own bytes come after them, and taking more would leave it counting bytes that are gone */
+static VOID AfdConsumeUnowned(PAFD_FCB FCB, PUINT SendLength)
+{
+    PAFD_SEND_GHOST Ghost;
+    UINT Used = *SendLength;
+
+    if (!IsListEmpty(&FCB->SendGhosts))
+    {
+        Ghost = CONTAINING_RECORD(FCB->SendGhosts.Flink, AFD_SEND_GHOST, ListEntry);
+        if (Ghost->Ahead == 0)
+        {
+            AfdConsumeFrontGhost(FCB, SendLength);
+            return;
+        }
+        Used = MIN(Used, Ghost->Ahead);
+    }
+
+    Used = MIN(Used, FCB->Send.BytesUsed);
+    if (Used == 0)
+    {
+        /* The window holds less than was sent: nothing in it can be told apart any more */
+        AfdFreeSendGhosts(FCB);
+        *SendLength = 0;
+        return;
+    }
+
+    FCB->Send.BytesUsed -= Used;
+    *SendLength -= Used;
+    AfdAdvanceSendGhosts(FCB, Used);
 }
 
 static IO_COMPLETION_ROUTINE SendComplete;
@@ -365,8 +406,15 @@ AfdSendCompleted
             AfdConsumeFrontGhost(FCB, &SendLength);
             continue;
         }
-        if (IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]))
-            break;
+
+        /* Nothing of the first request is in the window (nor of those behind it): the bytes in front are no request's */
+        if (IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]) ||
+            CONTAINING_RECORD(FCB->PendingIrpList[FUNCTION_SEND].Flink, IRP,
+                              Tail.Overlay.ListEntry)->Tail.Overlay.DriverContext[3] == NULL)
+        {
+            AfdConsumeUnowned(FCB, &SendLength);
+            continue;
+        }
 
         NextIrpEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]);
         NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
@@ -374,14 +422,6 @@ AfdSendCompleted
         SendReq = GetLockedData(NextIrp, NextIrpSp);
 
         TotalBytesCopied = (ULONG_PTR)NextIrp->Tail.Overlay.DriverContext[3];
-
-        /* Nothing of this request is in the window: what is left of what was sent is not its */
-        if (TotalBytesCopied == 0)
-        {
-            InsertHeadList(&FCB->PendingIrpList[FUNCTION_SEND],
-                           &NextIrp->Tail.Overlay.ListEntry);
-            break;
-        }
 
         /* If we didn't get enough, keep waiting */
         if (TotalBytesCopied > SendLength)
@@ -408,13 +448,13 @@ AfdSendCompleted
         AfdAdvanceSendGhosts(FCB, (UINT)TotalBytesCopied);
 
         /* All that was copied is sent, but a whole send has more to copy: it stays queued
-         * and is refilled below, nothing can have been sent beyond it */
+         * and is refilled below; what was sent beyond it is no request's */
         if (AfdSendNeedsFill(NextIrp) && NextIrp->Tail.Overlay.DriverContext[2] != NULL)
         {
             NextIrp->Tail.Overlay.DriverContext[3] = NULL;
             InsertHeadList(&FCB->PendingIrpList[FUNCTION_SEND],
                            &NextIrp->Tail.Overlay.ListEntry);
-            break;
+            continue;
         }
 
         ASSERT(NextIrp->IoStatus.Information != 0);
@@ -432,26 +472,25 @@ AfdSendCompleted
         IoCompleteRequest(NextIrp, IO_NETWORK_INCREMENT);
     }
 
-    /* Bytes beyond the requests queued belong to a request that was cancelled with them in the window */
-    if (SendLength != 0)
-    {
-        FCB->Send.BytesUsed -= SendLength;
-        AfdAdvanceSendGhosts(FCB, SendLength);
-        SendLength = 0;
-    }
     /* Nothing is left in the window, so nothing that no request waits for either */
     if (FCB->Send.BytesUsed == 0)
         AfdFreeSendGhosts(FCB);
 
-    /* Copy into the window from the request at the head of the queue if it has bytes left to copy */
-    if (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND])) {
-        NextIrpEntry = FCB->PendingIrpList[FUNCTION_SEND].Flink;
+    /* Copy into the window from the queued requests that have bytes left to copy, in their order and as far as
+     * the window has room: a request is copied only when the ones before it are all in the window, so the stream
+     * carries the bytes in the order of the requests. One that is copied already waits for its bytes to be sent */
+    for (NextIrpEntry = FCB->PendingIrpList[FUNCTION_SEND].Flink;
+         NextIrpEntry != &FCB->PendingIrpList[FUNCTION_SEND];
+         NextIrpEntry = NextIrpEntry->Flink) {
         NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
         NextIrpSp = IoGetCurrentIrpStackLocation( NextIrp );
         SendReq = GetLockedData(NextIrp, NextIrpSp);
         Map = (PAFD_MAPBUF)(SendReq->BufferArray + SendReq->BufferCount);
 
-        if (AfdSendNeedsFill(NextIrp)) {
+        if (!AfdSendNeedsFill(NextIrp))
+            continue;
+
+        {
             BOOLEAN Whole = NextIrp->Tail.Overlay.DriverContext[2] != NULL;
             BOOLEAN Fill = TRUE;
 
@@ -551,8 +590,15 @@ AfdSendCompleted
                         if (AfdRequestLocked(NextIrp)) UnlockRequest(NextIrp, NextIrpSp);
                         IoCompleteRequest(NextIrp, IO_NETWORK_INCREMENT);
                     }
+
+                    /* The requests behind it are copied when the next send completes */
+                    break;
                 }
             }
+
+            /* It waits for room, or the window is full: the requests behind it wait for it */
+            if (!Fill || AfdSendNeedsFill(NextIrp) || FCB->Send.BytesUsed >= FCB->Send.Size)
+                break;
         }
     }
 
@@ -1184,6 +1230,10 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     {
         UnlockBuffers( SendReq->BufferArray, SendReq->BufferCount, FALSE );
 
+        /* No request waits for these bytes: later requests must not be counted against them. Recorded before the
+         * send to the transport, which can complete inside the call and take some of them */
+        AfdAddSendGhost(FCB, FCB->Send.BytesUsed - TotalBytesCopied, TotalBytesCopied);
+
         if (!FCB->SendIrp.InFlightRequest)
         {
             TdiSend(&FCB->SendIrp.InFlightRequest,
@@ -1194,9 +1244,6 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                     SendComplete,
                     FCB);
         }
-
-        /* No request waits for these bytes: later requests must not be counted against them */
-        AfdAddSendGhost(FCB, FCB->Send.BytesUsed - TotalBytesCopied, TotalBytesCopied);
 
         return UnlockAndMaybeComplete( FCB, STATUS_SUCCESS, Irp, TotalBytesCopied );
     }
@@ -1208,6 +1255,10 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     {
         UnlockBuffers( SendReq->BufferArray, SendReq->BufferCount, FALSE );
 
+        /* Recorded before the send to the transport, which can complete inside the call and take some of them:
+         * recorded after it, those bytes were recorded nowhere */
+        AfdAddSendGhost(FCB, FCB->Send.BytesUsed - TotalBytesCopied, TotalBytesCopied);
+
         if (!FCB->SendIrp.InFlightRequest)
         {
             TdiSend(&FCB->SendIrp.InFlightRequest,
@@ -1218,8 +1269,6 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                     SendComplete,
                     FCB);
         }
-
-        AfdAddSendGhost(FCB, FCB->Send.BytesUsed - TotalBytesCopied, TotalBytesCopied);
 
         return UnlockAndMaybeComplete( FCB, STATUS_SUCCESS, Irp, TotalBytesCopied );
     }
