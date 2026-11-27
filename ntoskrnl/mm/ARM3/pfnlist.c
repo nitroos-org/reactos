@@ -582,7 +582,7 @@ MiRemoveZeroPageOrWait(
     for (Retry = 0; ; Retry++)
     {
         /*
-         * Test (NitroPagerDebug 0x1000; free builds need /NITROPAGERDEBUG): the first attempt of every
+         * Test (NitroPagerDebug 0x1000, checked builds only): the first attempt of every
          * second call acts as if no page were usable, so that the wait below runs on a healthy system
          */
         static LONG InjectCalls, Injected;

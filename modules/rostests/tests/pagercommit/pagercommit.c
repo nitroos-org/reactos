@@ -8,8 +8,8 @@
  * pagercommit.exe mkpf [pf=MB] [path=...]   create the paging file only (a WoW64 process cannot:
  *                                            the 32-bit test runs the 64-bit build as pfhelper)
  *
- * Boot with NitroPager on, NitroPagerDebug non-zero (and /NITROPAGERDEBUG on a
- * free build) and NO paging file. Both phases are differential: they measure
+ * Boot a checked build with NitroPager on (amd64), NitroPagerDebug non-zero and NO
+ * paging file (a free build has no test hooks). Both phases are differential: they measure
  * the room left to RAM-bound commitment (pagefile-backed SEC_COMMIT sections,
  * charged as MiCommitUser, created until one is refused) before and after one
  * event, so what the rest of the system commits meanwhile is noise only.

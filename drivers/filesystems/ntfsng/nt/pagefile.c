@@ -32,8 +32,8 @@ static NTSTATUS NTAPI NgPagingCompletion(PDEVICE_OBJECT DeviceObject, PIRP Irp, 
  * and never probed and locked again.
  * Test (NitroPagerDebug 0x80): every third IRP or partial MDL allocation here fails, so that the
  * reserve IRP and MDL carry real paging I/O. The kernel decides (MmPagerInjectPagingAllocationFailure:
- * the value, and on free builds the /NITROPAGERDEBUG boot option) and counts the injected failures;
- * ntfsng reads no registry value for it.
+ * the value, in checked builds only) and counts the injected failures; ntfsng reads no registry
+ * value for it.
  */
 static NTSTATUS NgPagingDevIo(PNG_VCB Vcb, PFILE_OBJECT PagingFile, UCHAR Major, ULONGLONG Dev, PMDL Mdl, ULONG MdlOffset, ULONG Length)
 {
