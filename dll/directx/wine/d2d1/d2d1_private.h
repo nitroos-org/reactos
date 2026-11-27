@@ -216,6 +216,7 @@ struct d2d_device_context
     struct d2d_shape_resources shape_resources[D2D_SHAPE_TYPE_COUNT];
     ID3D11Buffer *vs_cb;
     ID3D11PixelShader *ps;
+    ID3D11PixelShader *ps_solid;
     ID3D11Buffer *ps_cb;
     ID3D11Buffer *ib;
     unsigned int vb_stride;
@@ -672,6 +673,7 @@ struct d2d_device
 
     ID3D10Blob *precompiled_shape_vs[D2D_SHAPE_TYPE_COUNT];
     ID3D10Blob *precompiled_shape_ps;
+    ID3D10Blob *precompiled_shape_ps_solid;
 
     struct d2d_indexed_objects shaders;
 };
