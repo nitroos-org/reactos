@@ -54,11 +54,14 @@ extern MMPFNLIST MmBadPageListHead;
 extern ULONG MmTotalPagesForPagingFile;
 
 /*
- * NitroPagerDebug (CmControlVector, read once at boot; a free build honours it only with /NITROPAGERDEBUG).
+ * NitroPagerDebug (CmControlVector, read once at boot): test hooks, only in checked builds. In a free
+ * build MiNitroPagerDebug is the constant 0 (mm.h) and no hook is reachable.
  * The pager mode itself is the constant MiNitroPagerMode of mm.h: 1 on amd64 (2026.11-1), 0 on i386, which has
  * not passed its gate yet (the 2 h soak at 512 MB, review rvpagerdef).
  */
+#if DBG
 ULONG MiNitroPagerDebug;
+#endif
 
 /* Private pages on the standby lists: repurposable */
 ULONG MmTransitionPrivatePages;
@@ -124,7 +127,7 @@ static volatile LONG MiPagerPauseReady;
 static volatile ULONG MiPagerFreeRefusedBase;
 static volatile ULONG MiPagerReadAheadRetriesBase;
 
-/* NitroPagerDebug bits that inject write failures (any build; test commands need the value non-zero anyway) */
+/* NitroPagerDebug bits that inject write failures (checked builds only) */
 #define MI_PAGER_DEBUG_FAIL_SOME_WRITES 0x10
 #define MI_PAGER_DEBUG_FAIL_ALL_WRITES  0x20
 /* Test of the exhaustion check: the trimmer frees nothing, starved means below the low-water mark, the window is 15 s */

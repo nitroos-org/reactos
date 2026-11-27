@@ -6,7 +6,7 @@
  */
 
 /*
- * iphlpapi's Icmp6SendEcho2 opens \Device\Ip6 (made only with Tcpip\Parameters\Ipv6Enable on) and asks for one
+ * iphlpapi's Icmp6SendEcho2 opens \Device\Ip6 and asks for one
  * echo: ICMPV6_ECHO_REQUEST and the data in, ICMPV6_ECHO_REPLY and the reply's data out. The request is an ICMPv6
  * echo request (RFC 4443 4.1) sent through lwIP's IPv6 (route, source selection, neighbour discovery) with an
  * identifier and sequence number of its own. The answer is taken from ip6_input (LibIp6NexthInput, core lock held):

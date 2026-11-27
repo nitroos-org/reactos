@@ -6,7 +6,7 @@
  */
 
 /*
- * A session that does not own the console (NitroSessions) has no display device of its own: the video
+ * A session that does not own the console has no display device of its own: the video
  * device belongs to the console session. Its win32k gets one virtual graphics device instead, driven by
  * this built-in driver, with one fixed mode. The screen surface is an engine-managed bitmap: every drawing
  * call is done by the engine in memory, and nothing reaches a device.

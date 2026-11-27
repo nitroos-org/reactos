@@ -3,7 +3,7 @@
 
 #define TAG_GDEV 'gdev'
 
-/* NitroSessions: a session without the console draws into memory (headless.c) */
+/* A session without the console draws into memory (headless.c) */
 extern BOOLEAN gbHeadlessSession;
 extern PGRAPHICS_DEVICE gpHeadlessGraphicsDevice;
 

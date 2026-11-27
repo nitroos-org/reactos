@@ -100,7 +100,7 @@
  *     the name. A Block rule with "*" is still sent without it and blocks every program: the processes of NitroOS
  *     services do not carry the SERVICE group yet (the service controller starts them with its own token), so a
  *     Block rule that skipped programs without it would block less than written.
- *  9. IPv6 (only while tcpip has IPv6 on, Tcpip\Parameters\Ipv6Enable; NITROFW_FEATURE_IPV6 says so): the same
+ *  9. IPv6 (only while tcpip has IPv6 on; NITROFW_FEATURE_IPV6 says so): the same
  *     rules, profiles and defaults apply to IPv6 packets. A rule's address lists are per family: a rule with
  *     only IPv4 addresses never matches an IPv6 packet, one with only IPv6 addresses never matches an IPv4
  *     packet, one with no addresses matches both. Protocol 58 is ICMPv6 (ICMP entries as for protocol 1).

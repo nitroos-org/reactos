@@ -274,8 +274,8 @@ static void FillList(void)
     RebuildSources();
     RebuildCategories();
     Populate(keep);
-    /* test hook: FEATMGR_TIMING_FILE=<path> appends how long the enumeration and the list fill took */
-    if (GetEnvironmentVariableW(L"FEATMGR_TIMING_FILE", tf, MAX_PATH))
+    /* test hook (checked builds): FEATMGR_TIMING_FILE=<path> appends how long the enumeration and the list fill took */
+    if (FmTestEnv(L"FEATMGR_TIMING_FILE", tf, MAX_PATH))
     {
         FILE *f = _wfopen(tf, L"a");
         if (f)

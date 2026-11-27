@@ -1185,7 +1185,7 @@ MiSessionCommitPageTables(IN PVOID StartVa,
 #ifdef _M_AMD64
     /*
      * Session 0 lives in the shared tables and keeps today's behaviour: no
-     * page table is committed here. The other sessions (NitroSessions) have a
+     * page table is committed here. The other sessions have a
      * private page directory, shared by all their processes: commit the page
      * tables in it, under the PFN lock so that two threads of the session
      * cannot both create one.

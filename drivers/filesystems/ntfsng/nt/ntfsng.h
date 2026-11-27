@@ -520,7 +520,7 @@ NTSTATUS NgCheckDeleteEntry(PSECURITY_DESCRIPTOR Sd, PSECURITY_DESCRIPTOR DirSd)
 
 /* pagefile.c */
 NTSTATUS NgPagingFileMap(PNG_FCB Fcb);
-/* NitroPager test knob (kernel decides: NitroPagerDebug 0x80 and, on free builds, /NITROPAGERDEBUG): this paging
+/* NitroPager test hook (kernel decides: NitroPagerDebug 0x80, checked builds only; always FALSE otherwise): this paging
    IRP/MDL allocation for FileObject (a paging file) is to fail */
 NTKERNELAPI BOOLEAN NTAPI MmPagerInjectPagingAllocationFailure(PFILE_OBJECT FileObject);
 NTSTATUS NgPagingFileIo(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, BOOLEAN Write, LONGLONG Offset, ULONG Length);

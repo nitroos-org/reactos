@@ -20,7 +20,7 @@
 static BOOL CompFile(LPWSTR out, DWORD cch)
 {
     WCHAR root[MAX_PATH];
-    if (GetEnvironmentVariableW(L"FEATMGR_COMPONENTS", out, cch) && out[0])
+    if (FmTestEnv(L"FEATMGR_COMPONENTS", out, cch) && out[0])
         return TRUE;
     if (!FmGetRootDir(root, MAX_PATH)) return FALSE;
     return SUCCEEDED(StringCchPrintfW(out, cch, L"%s\\Catalog\\components.ini", root));

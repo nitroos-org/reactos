@@ -16,7 +16,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
 /*
  * The tables are built from what the legacy queries give: GetIfTable for the interfaces, GetAdaptersAddresses for
  * their alias and description, GetIpAddrTable for the IPv4 addresses. IPv6 is in the tables only while the stack
- * has it on (Tcpip\Parameters\Ipv6Enable, see ipv6state.c): the IPv6 tables are empty and no interface is an IPv6
+ * has it on (see ipv6state.c): the IPv6 tables are empty and no interface is an IPv6
  * interface otherwise. What the stack cannot tell is filled in like Windows 10 does for an Ethernet adapter and
  * the loopback interface; the constants below were read from a Windows 10 22H2 system.
  */

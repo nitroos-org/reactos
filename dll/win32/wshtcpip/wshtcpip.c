@@ -49,8 +49,8 @@ C_ASSERT(sizeof(SOCKADDR_IN6_LH) == WSH_SOCKADDR_IN6_LENGTH);
 #endif
 
 /*
- * An AF_INET6 socket is made only while the stack says it has IPv6 on (Tcpip\Parameters\Ipv6Enable, read by
- * tcpip.sys when it starts) and takes IPv6 addresses for its sockets (TCP_IPV6_STATE_SOCKETS of its
+ * An AF_INET6 socket is made only while the stack says it has IPv6 on (tcpip.sys reports it)
+ * and takes IPv6 addresses for its sockets (TCP_IPV6_STATE_SOCKETS of its
  * IP_IPV6_TABLE_ENTRY_ID answer): otherwise WSAEAFNOSUPPORT, what an IPv6 socket has always got here. The stack
  * is the only source: no registry value is read here. Its answer cannot change while the system runs, so a
  * definite one is kept for the process; a stack that cannot be asked counts as "no IPv6" and is asked again.

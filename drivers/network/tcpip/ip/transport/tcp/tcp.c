@@ -253,7 +253,7 @@ NTSTATUS TCPStartup(VOID)
     /* Register this protocol with IP layer */
     IPRegisterProtocol(IPPROTO_TCP, TCPReceive);
 
-#if DBG || defined(TCPIP_IPV6_SELFTEST)
+#if DBG
     TCPStartIpv6SelfTest();
 #endif
 

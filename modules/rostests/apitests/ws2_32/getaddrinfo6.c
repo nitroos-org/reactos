@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS API tests
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
- * PURPOSE:     getaddrinfo with and without IPv6 on the stack (Tcpip\Parameters\Ipv6Enable): the answers of a system
+ * PURPOSE:     getaddrinfo with and without IPv6 on the stack (Tcpip6\Parameters\DisabledComponents): the answers of a system
  *              without IPv6 while it is off, and the order, flags and error codes Windows 10 22H2 gives for the
  *              names that mean this machine, numeric IPv6 addresses and AI_ADDRCONFIG while it is on
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
@@ -238,23 +238,15 @@ static BOOL FindUsableV6(void)
     return Found;
 }
 
-/* Whether IPv6 is on the adapters (the stack is up for the loopback interface either way): Ipv6Enable = 0 and
-   DisabledComponents with 0x10 (0xFF has it) leave it on the loopback interface only; an absent value is on */
+/* Whether IPv6 is on the adapters (the stack is up for the loopback interface either way):
+   DisabledComponents with 0x10 (0xFF has it) leaves it on the loopback interface only; an absent value is on */
 static BOOL ReadLinks(void)
 {
     HKEY Key;
     DWORD Value = 0, Size = sizeof(Value), Type = 0;
     BOOL On = TRUE;
 
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", 0, KEY_READ, &Key) ==
-        ERROR_SUCCESS)
-    {
-        if (RegQueryValueExA(Key, "Ipv6Enable", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
-            Type == REG_DWORD && Value == 0)
-            On = FALSE;
-        RegCloseKey(Key);
-    }
-    if (On && RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters", 0, KEY_READ,
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters", 0, KEY_READ,
                             &Key) == ERROR_SUCCESS)
     {
         Size = sizeof(Value);

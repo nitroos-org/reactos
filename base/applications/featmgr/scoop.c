@@ -41,7 +41,7 @@ BOOL FmScoopSupported(void)
     return FM_SCOOP_SUPPORTED;
 }
 
-/* Scoop root: FEATMGR_SCOOP_ROOT (test hook), else the machine SCOOP variable that the
+/* Scoop root: FEATMGR_SCOOP_ROOT (test hook, checked builds), else the machine SCOOP variable that the
  * scoop feature sets, else %SystemDrive%\scoop. The per-user environment is ignored on
  * purpose: the root must be the same for every user and for the featmgr process. */
 BOOL FmScoopRoot(LPWSTR buf, DWORD cch)
@@ -50,7 +50,7 @@ BOOL FmScoopRoot(LPWSTR buf, DWORD cch)
     HKEY k;
     DWORD cb, type;
 
-    if (GetEnvironmentVariableW(L"FEATMGR_SCOOP_ROOT", v, MAX_PATH) && v[0])
+    if (FmTestEnv(L"FEATMGR_SCOOP_ROOT", v, MAX_PATH) && v[0])
         return SUCCEEDED(StringCchCopyW(buf, cch, v));
 
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ENV_KEY, 0, KEY_READ, &k) == ERROR_SUCCESS)
@@ -137,7 +137,7 @@ BOOL FmScoopUsable(void)
 /* The command line that runs "scoop <args>". Production: PowerShell 7 runs Scoop's own shim
  * script directly. (M1 avoided Scoop's scoop.cmd shim because nitro's cmd did not return the
  * code of "exit /b"; that is fixed on main now, but the .ps1 entry point is still simpler and
- * stricter: no cmd.exe layer, no batch quoting, one process less. Kept on purpose.) Test hook:
+ * stricter: no cmd.exe layer, no batch quoting, one process less. Kept on purpose.) Test hook (checked builds):
  * FEATMGR_SCOOP_RUNNER = a .cmd that stands in for Scoop (used by tests\roundtrip.cmd).
  * args is built by the callers from validated parts only (app / bucket names, https URLs). */
 BOOL FmScoopCommandArgs(LPCWSTR args, LPWSTR out, DWORD cch)
@@ -145,7 +145,7 @@ BOOL FmScoopCommandArgs(LPCWSTR args, LPWSTR out, DWORD cch)
     WCHAR root[MAX_PATH], runner[MAX_PATH], pwsh[MAX_PATH];
     if (!FmScoopRoot(root, MAX_PATH) || wcspbrk(root, L"\"%\r\n")) return FALSE;
     if (!args[0] || wcspbrk(args, L"\"%\r\n&|<>^")) return FALSE;
-    if (GetEnvironmentVariableW(L"FEATMGR_SCOOP_RUNNER", runner, MAX_PATH) && runner[0] && !wcspbrk(runner, L"\"%\r\n"))
+    if (FmTestEnv(L"FEATMGR_SCOOP_RUNNER", runner, MAX_PATH) && runner[0] && !wcspbrk(runner, L"\"%\r\n"))
         return SUCCEEDED(StringCchPrintfW(out, cch, L"cmd.exe /c \"\"%s\" %s\"", runner, args));
     if (!FmPwshPath(pwsh, MAX_PATH)) return FALSE;
     return SUCCEEDED(StringCchPrintfW(out, cch,

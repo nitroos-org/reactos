@@ -233,25 +233,6 @@ LfbControllerCallback(
     return Status;
 }
 
-/* VideoPortGetRegistryParameters callback for a REG_DWORD value */
-static VP_STATUS
-NTAPI
-LfbRegistryDwordCallback(
-    _In_ PVOID HwDeviceExtension,
-    _In_ PVOID Context,
-    _In_ PWSTR ValueName,
-    _In_ PVOID ValueData,
-    _In_ ULONG ValueLength)
-{
-    UNREFERENCED_PARAMETER(HwDeviceExtension);
-    UNREFERENCED_PARAMETER(ValueName);
-
-    if (ValueLength != sizeof(ULONG))
-        return ERROR_INVALID_PARAMETER;
-    *(PULONG)Context = *(PULONG)ValueData;
-    return NO_ERROR;
-}
-
 static VOID
 LfbSetRegistryString(
     _In_ PLFB_DEVICE_EXTENSION DeviceExtension,
@@ -279,7 +260,7 @@ LfbFindAdapter(
     _Out_ PUCHAR Again)
 {
     PLFB_DEVICE_EXTENSION DeviceExtension = HwDeviceExtension;
-    ULONG WriteCombined = 1, One = 1, MemorySize;
+    ULONG One = 1, MemorySize;
     VP_STATUS Status;
 
     UNREFERENCED_PARAMETER(HwContext);
@@ -301,10 +282,6 @@ LfbFindAdapter(
     }
     DeviceExtension->Found = TRUE;
 
-    VideoPortGetRegistryParameters(DeviceExtension, L"WriteCombined", FALSE,
-                                   LfbRegistryDwordCallback, &WriteCombined);
-    DeviceExtension->WriteCombined = (WriteCombined != 0);
-
     /* No VGA: not usable as the base video device, and no VDM memory */
     ConfigInfo->VdmPhysicalVideoMemoryAddress.QuadPart = 0;
     ConfigInfo->VdmPhysicalVideoMemoryLength = 0;
@@ -321,11 +298,10 @@ LfbFindAdapter(
     VideoPortSetRegistryParameters(DeviceExtension, L"HardwareInformation.MemorySize", &MemorySize, sizeof(MemorySize));
 
     VideoDebugPrint((Warn, "LfbMp: firmware framebuffer %lux%lu, %lu bpp, stride %lu, at 0x%I64x, "
-                     "masks R %08lx G %08lx B %08lx, %s\n",
+                     "masks R %08lx G %08lx B %08lx, write-combined\n",
                      DeviceExtension->Width, DeviceExtension->Height, DeviceExtension->BitsPerPixel,
                      DeviceExtension->Stride, DeviceExtension->FrameBuffer.QuadPart,
-                     DeviceExtension->RedMask, DeviceExtension->GreenMask, DeviceExtension->BlueMask,
-                     DeviceExtension->WriteCombined ? "write-combined" : "uncached"));
+                     DeviceExtension->RedMask, DeviceExtension->GreenMask, DeviceExtension->BlueMask));
     return NO_ERROR;
 }
 
@@ -377,11 +353,9 @@ LfbMapVideoMemory(
     _Out_ PVIDEO_MEMORY_INFORMATION MapInformation,
     _Out_ PSTATUS_BLOCK StatusBlock)
 {
-    ULONG MemSpace = VIDEO_MEMORY_SPACE_MEMORY;
+    /* The framebuffer is mapped write-combined */
+    ULONG MemSpace = VIDEO_MEMORY_SPACE_MEMORY | VIDEO_MEMORY_SPACE_P6CACHE;
     VP_STATUS Status;
-
-    if (DeviceExtension->WriteCombined)
-        MemSpace |= VIDEO_MEMORY_SPACE_P6CACHE;
 
     MapInformation->VideoRamBase = RequestedAddress->RequestedVirtualAddress;
     MapInformation->VideoRamLength = DeviceExtension->MappedLength;

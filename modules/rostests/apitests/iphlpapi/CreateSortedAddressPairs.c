@@ -186,8 +186,7 @@ static BOOL FirstAdapterAddress(SOCKADDR_IN6 *Out)
 }
 
 static BOOL Ipv6On;
-/* The default table prefers IPv4 over ::1 when Tcpip\Parameters\Ipv6Enable is 0 (an alias of DisabledComponents 0xFF)
-   or Tcpip6\Parameters\DisabledComponents has bit 0x20 */
+/* The default table prefers IPv4 over ::1 when Tcpip6\Parameters\DisabledComponents has bit 0x20 (0xFF has it) */
 static BOOL Ipv4First;
 
 static BOOL ReadDword(const WCHAR *KeyName, const WCHAR *Name, DWORD *Value)
@@ -210,8 +209,6 @@ static void ReadPolicyKnobs(void)
     DWORD Value;
 
     Ipv4First = FALSE;
-    if (ReadDword(L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", L"Ipv6Enable", &Value) && Value == 0)
-        Ipv4First = TRUE;
     if (ReadDword(L"SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters", L"DisabledComponents", &Value) &&
         (Value & 0x20))
         Ipv4First = TRUE;

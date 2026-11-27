@@ -71,7 +71,7 @@ VOID UDPFreePort( UINT Port );
 /* RFC 6056: the ephemeral ports of this start begin at a random port of the range (after TCPConnectionKeyInit) */
 VOID UDPRandomizeFirstPort( VOID );
 
-/* UDP over IPv6 (ip/transport/udp/udp6.c), with Tcpip\Parameters\Ipv6Enable on */
+/* UDP over IPv6 (ip/transport/udp/udp6.c) */
 NTSTATUS UDPSendDatagram6(
     PADDRESS_FILE AddrFile,
     PTA_IP6_ADDRESS Remote,

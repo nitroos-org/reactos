@@ -60,7 +60,7 @@ InitCsrApiPort(IN HANDLE CsrPortHandle)
 }
 
 /*
- * A session other than session 0 (NitroSessions): the API port of the session's csrss, by its name, when
+ * A session other than session 0: the API port of the session's csrss, by its name, when
  * win32k needs it before any client has connected to winsrv (which hands it over, see UserClientConnect).
  * The port is created by that csrss in its session's directory, which only SYSTEM can create objects in.
  * Session 0 keeps getting it from winsrv.

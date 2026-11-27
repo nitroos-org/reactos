@@ -3,12 +3,6 @@ if(ARCH STREQUAL "i386")
     add_asm_files(ip_asm network/i386/checksum.S)
 endif()
 
-# The IPv6 self-test (transport/tcp/selftest6.c) is in debug builds; configure a release build with
-# -DTCPIP_IPV6_SELFTEST=ON to have it there for a test run
-if(TCPIP_IPV6_SELFTEST)
-    add_definitions(-DTCPIP_IPV6_SELFTEST)
-endif()
-
 list(APPEND SOURCE
     lwip_glue/ip.c
     lwip_glue/memory.c

@@ -51,7 +51,7 @@ PsConvertToGuiThread(VOID)
     /* Make sure win32k is here */
     if (!PspW32ProcessCallout) return STATUS_ACCESS_DENIED;
 
-    /* A session image (NitroSessions): it must be loaded in this process's session */
+    /* A session image: it must be loaded in this process's session */
     if (MmIsWin32kASessionImage() && !MmIsWin32kLoadedInCurrentSession())
         return STATUS_ACCESS_DENIED;
 

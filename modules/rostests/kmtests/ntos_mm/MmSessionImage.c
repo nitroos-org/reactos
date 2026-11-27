@@ -2,7 +2,6 @@
  * PROJECT:     ReactOS kernel tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     Session images: same address in every session, pages and data of their own in each
- *              (NitroSessions)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 

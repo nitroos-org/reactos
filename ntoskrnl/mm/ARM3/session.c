@@ -401,13 +401,13 @@ MiDereferenceSession(VOID)
 
         /*
          * A process that is not the leader is exiting. The leader may be the
-         * last one out (NitroSessions: everything else in the session died
+         * last one out (everything else in the session died
          * before it detached): it must still drop its view, its reference to
          * the session data page and its session bit, or it keeps a freed
          * session and every process it creates later joins it.
          *
          * A process that is not the leader is out of the session too
-         * (NitroSessions: sessions other than 0 go away when their last
+         * (sessions other than 0 go away when their last
          * process exits). Its session bit goes now: MmCleanProcessAddressSpace
          * runs twice for a process that had threads (at its last thread's
          * exit, then from PspDeleteProcess), and with the bit still set the
@@ -427,7 +427,7 @@ MiDereferenceSession(VOID)
         /* Get the global session address before we kill the session mapping */
         SessionGlobal = MmSessionSpace->GlobalVirtualAddress;
 
-        /* NitroSessions: the view of a session other than 0 goes now */
+        /* The view of a session other than 0 goes now */
         MiSessionLeaderDetachView(Process, SessionId);
 
         /* Delete all session PDEs and flush the TB */
@@ -477,11 +477,11 @@ MiSessionRemoveProcess(VOID)
 
 /*
  * The new process joins the session of the current process (its creator, or
- * the process of another session the creator is attached to: NitroSessions).
+ * the process of another session the creator is attached to).
  * Returns TRUE when it joined; FALSE when the current process is in no
  * session, or when the session is going away.
  *
- * NitroSessions: when the creator is attached to a process of another session,
+ * When the creator is attached to a process of another session,
  * that process can leave the session (it exits) or the session can lose its
  * last process after the attach. Whether the session is still live is decided
  * here, under the expansion lock, in the same step that takes the new
@@ -730,7 +730,7 @@ MiSessionLeaderUnmapView(
 }
 
 /*
- * NitroSessions (P0), lazy unmap. When the session leader detaches from
+ * Lazy unmap (P0). When the session leader detaches from
  * session 0, MiDereferenceSession leaves the leader's view of it mapped, as
  * it always did. Before the leader creates another session, that view is
  * dropped here. The first session create never finds one, so a boot that
@@ -750,7 +750,7 @@ MiSessionDropLeaderMapping(
 }
 
 /*
- * NitroSessions (P2). The leader detaches from a session other than 0: drop
+ * Sessions (P2). The leader detaches from a session other than 0: drop
  * its view now, not at the next create. Otherwise every process the leader
  * creates until then, in no session, would copy the view of that session.
  * The leader's detach from session 0 keeps today's lazy behaviour.
@@ -768,7 +768,7 @@ MiSessionLeaderDetachView(
 }
 
 /*
- * NitroSessions (P2). Called by MmCreateProcessAddressSpace once the new
+ * Sessions (P2). Called by MmCreateProcessAddressSpace once the new
  * process's top-level table is built as a copy of its creator's, and after
  * MiSessionAddProcess decided whether it joined the session of the current
  * process (NewProcess->Session). Its session tables are set explicitly from

@@ -374,6 +374,7 @@ DATA_SEG("INITDATA") CM_SYSTEM_CONTROL_VECTOR CmControlVector[] =
         NULL,
         NULL
     },
+#if DBG
     {
         L"Session Manager\\Memory Management",
         L"NitroPagerDebug",
@@ -381,6 +382,7 @@ DATA_SEG("INITDATA") CM_SYSTEM_CONTROL_VECTOR CmControlVector[] =
         NULL,
         NULL
     },
+#endif
     {
         L"Session Manager\\Memory Management",
         L"PoolTagSmallTableSize",

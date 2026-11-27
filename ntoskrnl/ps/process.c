@@ -13,7 +13,7 @@
 #define NDEBUG
 #include <debug.h>
 
-/* NitroSessions: how many times a create into another session picks a member of it before giving up */
+/* How many times a create into another session picks a member of it before giving up */
 #define PSP_SESSION_JOIN_TRIES 3
 
 /* GLOBALS *******************************************************************/
@@ -622,7 +622,7 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
     if (Parent)
     {
         /*
-         * Create the address space for the child. In another session (NitroSessions): attached to a process
+         * Create the address space for the child. In another session: attached to a process
          * of that session, so that the child joins it (MiSessionAddProcess takes the current session)
          */
         if (SessionMember)
@@ -689,7 +689,7 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
                         BooleanFlagOn(Process->DefaultHardErrorProcessing,
                                       SEM_NOALIGNMENTFAULTEXCEPT));
 
-    /* NitroSessions: the child is not in the session that was asked for. Fail closed */
+    /* The child is not in the session that was asked for. Fail closed */
     if (SessionJoinFailed)
     {
         ULONG NoFlags = 0;
@@ -1722,7 +1722,7 @@ NtCreateProcessWithAttributes(OUT PHANDLE ProcessHandle,
     _SEH2_END;
 
     /*
-     * Another session than the creator's (NitroSessions): only for a kernel-mode caller or one holding
+     * Another session than the creator's: only for a kernel-mode caller or one holding
      * SeTcbPrivilege, and only into a session that exists and is not going away
      */
     if (NT_SUCCESS(Status) && HaveSession && (TargetSession != PsGetCurrentProcessSessionId()))

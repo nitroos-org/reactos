@@ -276,7 +276,7 @@ add_library(win32ksys ${win32ksys_asm})
 set_target_properties(win32ksys PROPERTIES LINKER_LANGUAGE "C")
 add_dependencies(win32ksys asm)
 
-# The images loaded into session image space must fit in it (NitroSessions; i386 has 8 MB of it)
+# The images loaded into session image space must fit in it (i386 has 8 MB of it)
 if(ARCH STREQUAL "i386")
     add_custom_target(session_image_budget ALL
         COMMAND ${CMAKE_COMMAND}

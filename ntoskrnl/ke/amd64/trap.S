@@ -1098,7 +1098,7 @@ GLOBAL_LABEL KiSystemServiceExit
     test ecx, ecx
     jnz KiSystemServiceIrqlError
 
-#ifdef NITRO_THREAD_LOCK_TRACE
+#if defined(NITRO_THREAD_LOCK_TRACE) && DBG
     /* Diagnostic: a service returns at PASSIVE_LEVEL with no thread lock held */
     sub rsp, 48
     mov [rsp + 40], rax

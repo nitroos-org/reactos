@@ -941,40 +941,6 @@ ExBurnMemory(IN PLOADER_PARAMETER_BLOCK LoaderBlock,
     }
 }
 
-#if !DBG
-/*
- * TRUE if the (upcased) load options contain Name as a whole option: an exact token, optionally led
- * by '/', not a substring of another option or of an option's value (/NITROPAGERDEBUGX, /X=NITROPAGERDEBUG).
- */
-CODE_SEG("INIT")
-static
-BOOLEAN
-ExpLoadOptionIsPresent(
-    _In_opt_ PCSTR Options,
-    _In_ PCSTR Name)
-{
-    SIZE_T Length = strlen(Name);
-    PCSTR p = Options;
-
-    if (p == NULL)
-        return FALSE;
-    while (*p != ANSI_NULL)
-    {
-        while ((*p == ' ') || (*p == '\t') || (*p == '/'))
-            p++;
-        if ((strncmp(p, Name, Length) == 0) &&
-            ((p[Length] == ANSI_NULL) || (p[Length] == ' ') || (p[Length] == '\t') || (p[Length] == '/')))
-        {
-            return TRUE;
-        }
-        /* Next option */
-        while ((*p != ANSI_NULL) && (*p != ' ') && (*p != '\t') && (*p != '/'))
-            p++;
-    }
-    return FALSE;
-}
-#endif
-
 CODE_SEG("INIT")
 VOID
 NTAPI
@@ -1165,18 +1131,6 @@ ExpInitializeExecutive(IN ULONG Cpu,
      * before any other, draws into memory. Set before any win32k loads.
      */
     SharedUserData->ActiveConsoleId = 1;
-
-    /*
-     * NitroPagerDebug (fault injection, test commands) is a test value: a free build honours it only
-     * when booted with the /NITROPAGERDEBUG option, so that a value planted in the SYSTEM hive (writable
-     * by any user until registry ACLs are enforced) cannot make every paging write fail or force a
-     * NO_PAGES_AVAILABLE at the next boot. Checked builds always honour it. NTFS-NG applies the same rule
-     * (it reads SystemStartOptions). The load options were upcased above.
-     */
-#if !DBG
-    if (!ExpLoadOptionIsPresent(LoaderBlock->LoadOptions, "NITROPAGERDEBUG"))
-        MiNitroPagerDebug = 0;
-#endif
 
     /* Set the Service Pack Number and add it to the CSD Version number if needed */
     CmNtSpBuildNumber = VER_PRODUCTBUILD_QFE;

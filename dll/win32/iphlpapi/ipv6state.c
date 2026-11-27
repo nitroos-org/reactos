@@ -10,7 +10,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
 
 /*
- * IPv6 is off unless the stack says it is on (Tcpip\Parameters\Ipv6Enable, read by tcpip.sys when it starts):
+ * IPv6 is off unless the stack says it is on (the state tcpip.sys reports):
  * every answer of this DLL that talks about IPv6 follows what the stack reports here, so that no table claims an
  * address, an interface or a flag the stack does not have. A stack that does not know the query, or any failure,
  * counts as "off".

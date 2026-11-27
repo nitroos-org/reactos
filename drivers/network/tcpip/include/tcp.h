@@ -237,11 +237,11 @@ VOID TCPApplyAddressFileOptions(PADDRESS_FILE AddressFile, PCONNECTION_ENDPOINT 
 VOID
 TCPUpdateInterfaceLinkStatus(PIP_INTERFACE IF);
 
-/* IPv6 (ip/transport/tcp/if6.c): the stack is up (loopback IPv6, AF_INET6 sockets) whatever Ipv6Enable says; always
-   TRUE after TCPReadIpv6Switch, kept as the one gate the IPv6 code tests */
+/* IPv6 (ip/transport/tcp/if6.c): the stack is up (loopback IPv6, AF_INET6 sockets) whatever DisabledComponents says;
+   always TRUE after TCPReadIpv6Switch, kept as the one gate the IPv6 code tests */
 extern BOOLEAN TCPIpv6Enabled;
-/* IPv6 is on the non-loopback interfaces too: Ipv6Enable not 0 and Tcpip6\Parameters\DisabledComponents without the
-   0x10 bit (0xFF has it; Ipv6Enable = 0 is its alias). FALSE leaves IPv6 on the loopback interface only (::1) */
+/* IPv6 is on the non-loopback interfaces too: Tcpip6\Parameters\DisabledComponents without the
+   0x10 bit (0xFF has it). FALSE leaves IPv6 on the loopback interface only (::1) */
 extern BOOLEAN TCPIpv6Links;
 
 VOID
@@ -492,7 +492,7 @@ TCPAddrFileTransportAddress(PADDRESS_FILE AddrFile, PTRANSPORT_ADDRESS Address, 
 NTSTATUS
 TCPGetLocalAddress6(PCONNECTION_ENDPOINT Connection, PTRANSPORT_ADDRESS Address, ULONG Length);
 
-#if DBG || defined(TCPIP_IPV6_SELFTEST)
+#if DBG
 /* ip/transport/tcp/selftest6.c: runs with Tcpip\Parameters\Ipv6SelfTest set */
 VOID
 TCPStartIpv6SelfTest(VOID);

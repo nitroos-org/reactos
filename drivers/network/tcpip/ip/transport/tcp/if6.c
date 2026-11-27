@@ -12,11 +12,10 @@
  * found, or for ::1 through the loopback queue. The behaviour follows RFC 8200, 4861 and 4862 as lwIP
  * implements them.
  *
- * On by default: HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Ipv6Enable (REG_DWORD, read once
- * at startup; 0 = IPv6 off on the adapters, any other value, or no value, = on). 0 is an alias of
- * Tcpip6\Parameters\DisabledComponents = 0xFF: the stack stays up for the loopback interface (::1, AF_INET6
- * sockets, the IPv6 Winsock protocols), as on every Windows, because programs such as Java 8 assume AF_INET6
- * sockets exist. No adapter has an IPv6 address, nothing IPv6 is sent to or received from a wire.
+ * On by default; the one setting is Windows' Tcpip6\Parameters\DisabledComponents (REG_DWORD, read once at
+ * startup). With 0xFF the stack stays up for the loopback interface (::1, AF_INET6 sockets, the IPv6 Winsock
+ * protocols), as on every Windows, because programs such as Java 8 assume AF_INET6 sockets exist. No adapter has
+ * an IPv6 address, nothing IPv6 is sent to or received from a wire.
  *
  * There is no IPv6 socket yet (no TDI address type, no Winsock helper): nothing outside this driver can
  * create an IPv6 connection or listener. A frame from an adapter goes through the firewall first
@@ -38,8 +37,6 @@
 #include "lwip/netif.h"
 #include "lwip/tcpip.h"
 #include "lwip/priv/tcp_priv.h"
-
-#define TCP6_SWITCH_VALUE L"Ipv6Enable"
 
 /* udp6.c: the groups sockets joined on an interface, for its multicast list (core lock held) */
 VOID UDP6AddMulticastList(struct netif *netif, PUCHAR List, PUINT Count, UINT Max);
@@ -70,7 +67,7 @@ volatile LONG TCP6FilterDropped;
 volatile LONG TCP6IcmpErrorsLimited;
 volatile LONG TCP6IcmpErrorsSent;
 
-#if DBG || defined(TCPIP_IPV6_SELFTEST)
+#if DBG
 /* Test builds only (Tcpip\Parameters\Ipv6SelfTestChewFail, read below): the next so many queueings of the
    multicast worker (lan.c) fail as if ChewCreate had no memory */
 volatile LONG TCP6TestChewFail;
@@ -80,7 +77,7 @@ volatile LONG TCP6TestResetWindow;
 volatile LONG TCP6TestNotAccepted;
 #endif
 
-#if DBG || defined(TCPIP_IPV6_SELFTEST)
+#if DBG
 /* For the self-test (selftest6.c): ICMPv6 messages received, by kind (TCP6_RX_*) */
 volatile LONG TCP6ReceivedIcmp[TCP6_RX_KINDS];
 
@@ -111,36 +108,20 @@ TCP6CountReceived(const UCHAR *Datagram, UINT Length)
 VOID
 TCPReadIpv6Switch(VOID)
 {
-    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip\\Parameters");
-    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(TCP6_SWITCH_VALUE);
-    OBJECT_ATTRIBUTES Attributes;
     UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
     PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
     HANDLE Key;
     ULONG Length;
     NTSTATUS Status;
 
-    /* The stack is always up (loopback IPv6, AF_INET6 sockets). Only a REG_DWORD of 0 takes IPv6 off the adapters,
-       like DisabledComponents = 0xFF */
+    /* The stack is always up (loopback IPv6, AF_INET6 sockets) */
     TCPIpv6Enabled = TRUE;
     TCPIpv6Links = TRUE;
-
-    InitializeObjectAttributes(&Attributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-    if (!NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))
-        return;
-
-    Status = ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
-    if (NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
-        TCPIpv6Links = (*(PULONG)Info->Data != 0);
-
-    ZwClose(Key);
 
     /* Tcpip6\Parameters\DisabledComponents (REG_DWORD, the documented Windows value, read once): 0x10 = no IPv6 on
        the non-loopback interfaces (0xFF has it: IPv6 stays on the loopback interface only), 0x20 = prefer IPv4 is
        user mode's (the prefix policy table of iphlpapi's sortpairs.c reads it), 0x01 (tunnels) has nothing to
-       turn off here, other bits are ignored. Ipv6Enable = 0 already has the links off (the same state as 0xFF), and a
-       value of another type counts as absent */
-    if (TCPIpv6Links)
+       turn off here, other bits are ignored, and a value of another type counts as absent */
     {
         UNICODE_STRING ComponentsKeyName =
             RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip6\\Parameters");
@@ -166,10 +147,13 @@ TCPReadIpv6Switch(VOID)
 
     DbgPrint("TCPIP: IPv6 on (%s)\n", TCPIpv6Links ? "all interfaces" : "loopback interface only");
 
-#if DBG || defined(TCPIP_IPV6_SELFTEST)
+#if DBG
     {
+        UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip\\Parameters");
         UNICODE_STRING TestName = RTL_CONSTANT_STRING(L"Ipv6SelfTestMulticastOverflow");
+        OBJECT_ATTRIBUTES Attributes;
 
+        InitializeObjectAttributes(&Attributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
         if (TCPIpv6Enabled && NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))
         {
             Status = ZwQueryValueKey(Key, &TestName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
@@ -227,7 +211,7 @@ TCP6UpdateMulticast(struct netif *netif)
 
     RtlZeroMemory(List, sizeof(List));
 
-    /* With IPv6 on the loopback interface only (DisabledComponents, Ipv6Enable = 0) the list has no IPv6 group:
+    /* With IPv6 on the loopback interface only (DisabledComponents) the list has no IPv6 group:
        a group a socket joins on an adapter asks for no frames that would only be dropped (TCPReceive6) */
     if (!TCPIpv6Links)
         goto Ipv4Groups;
@@ -273,7 +257,7 @@ TCP6UpdateMulticast(struct netif *netif)
     if (Count <= LL_MULTICAST_MAX)
         UDP6AddMulticastList(netif, List, &Count, LL_MULTICAST_MAX);
 
-#if DBG || defined(TCPIP_IPV6_SELFTEST)
+#if DBG
     if (TCP6TestMulticastOverflow)
         Count = LL_MULTICAST_MAX + 1;
 #endif
@@ -615,7 +599,7 @@ TCPReceive6(PIP_INTERFACE IF, PIP_PACKET IPPacket)
         return;
     }
 
-#if DBG || defined(TCPIP_IPV6_SELFTEST)
+#if DBG
     TCP6CountReceived(p->payload, Total);
 #endif
 

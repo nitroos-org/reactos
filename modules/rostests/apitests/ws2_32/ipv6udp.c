@@ -5,7 +5,7 @@
  *              reports, connected sockets, the dual stack (IPv4 datagrams as ::ffff:a.b.c.d, replies to them,
  *              IPV6_V6ONLY), WSARecvMsg with IPV6_PKTINFO and IPV6_HOPLIMIT, the hop limit options reaching the
  *              stack, multicast groups with the loop, and the IPv6 UDP table. Runs only while the stack takes
- *              IPv6 datagram sockets (Tcpip\Parameters\Ipv6Enable); the Windows answers marked VERIFY ON ORACLE
+ *              IPv6 datagram sockets; the Windows answers marked VERIFY ON ORACLE
  *              in the code are this stack's, not measured on Windows.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
@@ -503,8 +503,8 @@ Done:
         closesocket(other);
 }
 
-/* The first adapter that is up with IPv4 and has no IPv6 (Ipv6IfIndex 0): the loopback-only state of Ipv6Enable = 0
-   and DisabledComponents 0x10/0xFF leaves every adapter like that. 0 when there is none (IPv6 is on, or no adapter) */
+/* The first adapter that is up with IPv4 and has no IPv6 (Ipv6IfIndex 0): the loopback-only state that
+   DisabledComponents 0x10/0xFF leaves every adapter like that. 0 when there is none (IPv6 is on, or no adapter) */
 static ULONG AdapterWithoutIpv6(void)
 {
     ULONG Size = 0, Index = 0, Result;

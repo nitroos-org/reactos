@@ -104,5 +104,4 @@ typedef struct _LFB_DEVICE_EXTENSION
     ULONG BlueMask;
     ULONG MappedLength;             /* Stride * Height, what MAP_VIDEO_MEMORY maps */
 
-    BOOLEAN WriteCombined;          /* Map the framebuffer write-combined (default) */
 } LFB_DEVICE_EXTENSION, *PLFB_DEVICE_EXTENSION;

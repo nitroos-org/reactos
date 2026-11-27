@@ -194,7 +194,7 @@ static VOID ParseAddr4(const FWR *raw, PCWSTR key, PCWSTR key2, DIM *d)
 }
 
 /* Does the running tcpip have IPv6? The kernel decides (IOCTL_NITROFW_GET_VERSION, NITROFW_FEATURE_IPV6: tcpip read
-   the Ipv6Enable registry value once, at load), not the registry value, which can change while tcpip runs: the rule
+   its IPv6 settings once, at load), not the registry, which can change while tcpip runs: the rule
    service must send the rules' IPv6 addresses (LA6/RA6) exactly when the kernel can see an IPv6 packet, or an Allow
    rule whose only scope is an IPv6 address is pushed without any address condition and matches everything. An
    older driver, or a failed query, means no IPv6: the addresses are not sent, as before IPv6 existed. */

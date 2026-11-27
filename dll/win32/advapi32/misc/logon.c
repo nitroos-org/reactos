@@ -1194,7 +1194,7 @@ Quit:
 
     /*
      * On any failure the process goes: it is terminated, and its handles are closed rather than left to a
-     * caller that is told the call failed (and may be in another session, NitroSessions). Then the last
+     * caller that is told the call failed (and may be in another session). Then the last
      * error is set, after the closes, which could change it.
      */
     if (!Success)
@@ -1326,7 +1326,7 @@ CreateProcessAsUserW(
 
     /*
      * Create the process with a suspended main thread. The token goes to kernel32 so that the process is
-     * created in the token's session (NitroSessions); it is given the token below.
+     * created in the token's session; it is given the token below.
      */
     if (!CreateProcessInternalW(GetCreationToken(hToken),
                                 lpApplicationName,

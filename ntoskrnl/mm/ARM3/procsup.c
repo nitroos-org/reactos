@@ -1484,7 +1484,7 @@ MmCreateProcessAddressSpace(IN ULONG MinWs,
 
     /*
      * Add the process to the session of the current process, if it is in one and the session is not going
-     * away; then its session tables, from that outcome (NitroSessions). A process that did not join is
+     * away; then its session tables, from that outcome. A process that did not join is
      * complete without a session: a caller that asked for a session checks Process->Session.
      */
     MiSessionAddProcess(Process);

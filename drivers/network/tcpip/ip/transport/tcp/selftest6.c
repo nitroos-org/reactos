@@ -6,9 +6,8 @@
  */
 
 /*
- * Built into debug builds, and into a release build configured with -DTCPIP_IPV6_SELFTEST=ON. It runs only
- * with IPv6 on (Ipv6Enable) and Tcpip\Parameters\Ipv6SelfTest (REG_DWORD) non-zero, once, from a system
- * thread started at TCPStartup. There is no IPv6 socket yet, so it uses lwIP's raw API under the core lock.
+ * Built into checked builds only. It runs only with Tcpip\Parameters\Ipv6SelfTest (REG_DWORD) non-zero,
+ * once, from a system thread started at TCPStartup. There is no IPv6 socket yet, so it uses lwIP's raw API under the core lock.
  * Every result is a line "IPV6TEST: <name>: PASS|FAIL ..." on the debug port and in
  * %SystemRoot%\Temp\ipv6selftest.txt (a release build has no debug output), the last one
  * "IPV6TEST: DONE pass=<n> fail=<m>".
@@ -28,7 +27,7 @@
 
 #include "precomp.h"
 
-#if DBG || defined(TCPIP_IPV6_SELFTEST)
+#if DBG
 
 #include "lwip/pbuf.h"
 #include "lwip/ip.h"
@@ -3850,4 +3849,4 @@ TCPStartIpv6SelfTest(VOID)
         ZwClose(Thread);
 }
 
-#endif /* DBG || TCPIP_IPV6_SELFTEST */
+#endif /* DBG */

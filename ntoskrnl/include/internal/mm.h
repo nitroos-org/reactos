@@ -946,7 +946,12 @@ extern KSPIN_LOCK MiPagingFileSlotLock;
 #else
 #define MiNitroPagerMode ((ULONG)0)
 #endif
+/* Pager test hooks (fault injection, test commands): a value of the SYSTEM hive in checked builds only */
+#if DBG
 extern ULONG MiNitroPagerDebug;
+#else
+#define MiNitroPagerDebug ((ULONG)0)
+#endif
 
 /* Session images (win32k and the images it imports, one copy per session) */
 BOOLEAN NTAPI MmIsSessionImage(_In_ PVOID ImageHandle);

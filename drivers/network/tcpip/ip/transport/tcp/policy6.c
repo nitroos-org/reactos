@@ -12,8 +12,7 @@
  * CreateSortedAddressPairs (and through them getaddrinfo) use, with the same prefix policy table: rules 1, 2, 3, 6
  * (label), 7 (temporary addresses, temp6.c) and 8 (longest matching prefix up to the /64 of the source).
  *
- * The table: Tcpip6\Parameters\PrefixPolicies (and its ActiveState subkey, DisabledComponents 0x20, Tcpip\Parameters\
- * Ipv6Enable = 0), as user mode
+ * The table: Tcpip6\Parameters\PrefixPolicies (and its ActiveState subkey, DisabledComponents 0x20), as user mode
  * reads it (addrsel.h); read at start and on IOCTL_IP6_POLICY_RELOAD, which NitroSetPrefixPolicies sends after
  * each change. Without a value the Windows default table. Selection runs under lwIP's core lock, which also guards
  * the table.
@@ -79,9 +78,6 @@ TCP6LoadPrefixPolicies(VOID)
     UNICODE_STRING KeyName = RTL_CONSTANT_STRING(POLICY6_PARAMETERS);
     UNICODE_STRING ActiveName = RTL_CONSTANT_STRING(ADDRSEL_ACTIVE_STATE_KEY);
     UNICODE_STRING ComponentsName = RTL_CONSTANT_STRING(L"DisabledComponents");
-    UNICODE_STRING SwitchKeyName =
-        RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip\\Parameters");
-    UNICODE_STRING SwitchName = RTL_CONSTANT_STRING(L"Ipv6Enable");
     OBJECT_ATTRIBUTES Attributes;
     PADDRSORT_POLICY_TABLE Table;
     PKEY_VALUE_PARTIAL_INFORMATION Info;
@@ -103,17 +99,6 @@ TCP6LoadPrefixPolicies(VOID)
     }
 
     AddrSortDefaultPolicy(Table);
-    /* Tcpip\Parameters\Ipv6Enable = 0 (a REG_DWORD of 0) is DisabledComponents 0xFF, which includes 0x20: prefer
-       IPv4, as user mode reads it (iphlpapi sortpairs.c) */
-    InitializeObjectAttributes(&Attributes, &SwitchKeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-    if (NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))
-    {
-        if (NT_SUCCESS(ZwQueryValueKey(Key, &SwitchName, KeyValuePartialInformation, Info, InfoSize, &Length)) &&
-            Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG) && *(PULONG)Info->Data == 0)
-            AddrSortPreferIpv4(Table);
-        ZwClose(Key);
-        Key = NULL;
-    }
     InitializeObjectAttributes(&Attributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
     if (NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))
     {

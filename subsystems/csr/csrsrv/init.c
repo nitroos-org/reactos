@@ -357,7 +357,7 @@ CsrSetDirectorySecurity(IN HANDLE ObjectDirectory)
 
     /*
      * Session 0 keeps the directory as it is (FIXME). A session other than
-     * 0 (NitroSessions) gets the DACL that Windows gives its \Sessions\<id>\Windows.
+     * 0 gets the DACL that Windows gives its \Sessions\<id>\Windows.
      */
     if (SessionId == 0) return STATUS_SUCCESS;
 
@@ -651,7 +651,7 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
         /* Use the direct name */
         RtlInitUnicodeString(&BnoString, L"\\BaseNamedObjects");
     }
-    /* A session other than 0 (NitroSessions): the link has Windows' DACL */
+    /* A session other than 0: the link has Windows' DACL */
     if (Session != 0)
     {
         Status = CsrBuildSessionProtection(CSR_PROTECT_BNOLINK, &LinkSd);
@@ -847,7 +847,7 @@ CsrParseServerCommandLine(IN ULONG ArgumentCount,
             RtlInitAnsiString(&AnsiString, ParameterValue);
             if (SessionId != 0)
             {
-                /* The csrss of a session other than 0 (NitroSessions):
+                /* The csrss of a session other than 0:
                    ObjectDirectory=\Windows means \Sessions\<id>\Windows */
                 UNICODE_STRING SessionDirectory;
                 WCHAR SessionPrefix[32];
@@ -1478,7 +1478,7 @@ CsrServerInitialization(IN ULONG ArgumentCount,
     if (!NT_SUCCESS(Status) && (SessionId != 0))
     {
         /*
-         * NitroSessions: the kernel has one default hard error port, which
+         * The kernel has one default hard error port, which
          * session 0's csrss owns. Until it has one per session, the hard
          * errors of other sessions keep going there.
          */
