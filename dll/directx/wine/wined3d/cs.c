@@ -3619,11 +3619,21 @@ static DWORD WINAPI wined3d_cs_run(void *ctx)
     unsigned int spin_count = 0;
     struct wined3d_cs *cs = ctx;
     HMODULE wined3d_module;
+    unsigned int spin_limit = WINED3D_CS_SPIN_COUNT;
     unsigned int poll = 0;
+    SYSTEM_INFO system_info;
     bool run = true;
 
     TRACE("Started.\n");
     SetThreadDescription(GetCurrentThread(), L"wined3d_cs");
+
+    /* The thread that would hand this one a command cannot run while this
+     * thread spins when there is only one processor: the spin delays the very
+     * command it waits for (and the rasteriser's threads) by its whole length
+     * every time the queue runs dry. */
+    GetSystemInfo(&system_info);
+    if (system_info.dwNumberOfProcessors < 2)
+        spin_limit = 1;
 
     /* Copy the module handle to a local variable to avoid racing with the
      * thread freeing "cs" before the FreeLibraryAndExitThread() call. */
@@ -3648,7 +3658,7 @@ static DWORD WINAPI wined3d_cs_run(void *ctx)
             if (wined3d_cs_queue_is_empty(cs, queue))
             {
                 YieldProcessor();
-                if (++spin_count >= WINED3D_CS_SPIN_COUNT)
+                if (++spin_count >= spin_limit)
                 {
                     if (poll)
                         poll = WINED3D_CS_QUERY_POLL_INTERVAL - 1;
