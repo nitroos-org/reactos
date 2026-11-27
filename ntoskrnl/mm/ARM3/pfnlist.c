@@ -863,8 +863,8 @@ ListLinked:
     ColorTable->Count++;
 
 ColorLinked:
-    /* Notify zero page thread if enough pages are on the free list now */
-    if (ListHead->Total >= 8)
+    /* Notify zero page thread if enough pages are on the free list now and fewer zeroed pages are ready than it keeps */
+    if ((ListHead->Total >= 8) && (MmZeroedPageListHead.Total < MiZeroedPageTarget))
     {
         /* Set the event */
         KeSetEvent(&MmZeroingPageEvent, IO_NO_INCREMENT, FALSE);
