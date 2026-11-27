@@ -166,6 +166,7 @@ list(APPEND SOURCE
     ServiceAccessCheck.c
     ServiceArgs.c
     ServiceControllerQuery.c
+    ServiceHostProcessAccess.c
     ServiceDependency.c
     ServiceEnv.c
     ServiceFailureActions.c
