@@ -205,7 +205,7 @@ EngpHaveDisplayDriverDevice(VOID)
 }
 
 /*
- * The virtual graphics device of a session without the console (NitroSessions): no device object, the
+ * The virtual graphics device of a session without the console: no device object, the
  * built-in headless driver, one mode. It is the primary device of the session.
  */
 static

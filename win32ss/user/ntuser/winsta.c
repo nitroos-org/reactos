@@ -978,7 +978,7 @@ IntCreateWindowStation(
         /*
          * The first window station of a session is the interactive one, and its creation starts the
          * desktop and raw input threads that every desktop of the session needs. Only Winlogon creates
-         * it. A session without the console (NitroSessions) has no Winlogon yet: there only its csrss or
+         * it. A session without the console has no Winlogon yet: there only its csrss or
          * a caller with SeTcbPrivilege enabled may, and the logon process registration does not count
          * (any process of the session can register itself while there is no Winlogon).
          * Anyone else is refused until it exists.
