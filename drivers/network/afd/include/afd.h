@@ -268,6 +268,8 @@ typedef struct _AFD_FCB {
     /* SO_RCVBUF, the largest receive window the transport may offer (0: the transport default) */
     ULONG RecvHint;
     LIST_ENTRY SendGhosts;      /* AFD_SEND_GHOST in window order */
+    LIST_ENTRY TransmitHolds;   /* the holds of msafd's overlapped TransmitFile and TransmitPackets (transmit.c) */
+    ULONG TransmitHoldSequence; /* the number of the last hold queued (transmit.c; never 0 on a hold) */
     KMUTEX Mutex;
     KEVENT InFlightIdle;
     PKEVENT EventSelect;
@@ -395,6 +397,13 @@ NTSTATUS AfdAddrChangeWait( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                             PIO_STACK_LOCATION IrpSp );
 NTSTATUS AfdAddrChangeComplete( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                 PIO_STACK_LOCATION IrpSp );
+
+/* transmit.c */
+NTSTATUS AfdTransmitHold( PDEVICE_OBJECT DeviceObject, PIRP Irp,
+                          PIO_STACK_LOCATION IrpSp );
+NTSTATUS AfdTransmitComplete( PDEVICE_OBJECT DeviceObject, PIRP Irp,
+                              PIO_STACK_LOCATION IrpSp );
+VOID AfdCompleteTransmitHolds( PAFD_FCB FCB );
 
 /* listen.c */
 NTSTATUS AfdWaitForListen( PDEVICE_OBJECT DeviceObject, PIRP Irp,

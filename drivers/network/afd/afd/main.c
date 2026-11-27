@@ -660,6 +660,7 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     }
 
     InitializeListHead( &FCB->SendGhosts );
+    InitializeListHead( &FCB->TransmitHolds );
     KeInitializeMutex( &FCB->Mutex, 0 );
     KeInitializeEvent( &FCB->RelistenIdle, NotificationEvent, TRUE );
     KeInitializeEvent( &FCB->AcceptWorkIdle, NotificationEvent, TRUE );
@@ -777,6 +778,9 @@ AfdCleanupSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     FCB->AbortingReceives = FALSE;
 
     KillSelectsForFCB( FCB->DeviceExt, FileObject, FALSE );
+
+    /* A TransmitFile whose worker is gone (its process ended) */
+    AfdCompleteTransmitHolds( FCB );
 
     return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, 0);
 }
@@ -1568,6 +1572,12 @@ AfdDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
         case IOCTL_AFD_ADDRCHANGE_COMPLETE:
             return AfdAddrChangeComplete( DeviceObject, Irp, IrpSp );
+
+        case IOCTL_AFD_TRANSMIT_HOLD:
+            return AfdTransmitHold( DeviceObject, Irp, IrpSp );
+
+        case IOCTL_AFD_TRANSMIT_COMPLETE:
+            return AfdTransmitComplete( DeviceObject, Irp, IrpSp );
 
         case IOCTL_AFD_ACCEPT:
             return AfdAccept( DeviceObject, Irp, IrpSp );

@@ -12,16 +12,24 @@
  *
  *  - without an OVERLAPPED the call does the whole transfer in the caller's thread;
  *  - with an OVERLAPPED the call returns FALSE/WSA_IO_PENDING and a worker thread (one per
- *    request) does the transfer. It then fills in Internal and InternalHigh of the OVERLAPPED
- *    (status, bytes sent), signals hEvent and, unless the low bit of hEvent is set, queues a
- *    packet on the completion port of the socket, if it has one.
+ *    request) does the transfer. Before the call returns, the calling thread makes a hold on the
+ *    socket (IOCTL_AFD_TRANSMIT_HOLD) with the OVERLAPPED as its status block and context and hEvent
+ *    as its event: the request of the socket the caller sees, which CancelIoEx(socket, &ov) and
+ *    CancelIo of the calling thread find, and which the end of the calling thread cancels.
+ *    The worker completes the hold with the status and the bytes sent (IOCTL_AFD_TRANSMIT_COMPLETE),
+ *    which fills in Internal and InternalHigh, signals hEvent and, unless the low bit of hEvent is
+ *    set, queues a packet on the completion port of the socket, if it has one. A cancel of the
+ *    hold aborts the connection (AFD), which ends the transfer; the hold then reports
+ *    STATUS_CANCELLED, as Windows does (measured on Windows Server 2022: the request completes as
+ *    cancelled with the bytes sent so far, a later send fails with WSAECONNABORTED, the peer gets a
+ *    reset). Without a hold (AFD refused it) the worker fills in the OVERLAPPED itself, as below.
  *
  * The worker uses a duplicate of the socket handle, so a closesocket can never make it work on
  * another socket that reuses the handle value. WSPCloseSocket calls MsafdTransmitSocketClosing,
  * which cancels the requests of the socket (the pending AFD send is cancelled by the worker; the
  * request completes with STATUS_CANCELLED).
  *
- * The packet of the completion port is made by a small request that AFD completes at once on the
+ * Without a hold, the packet of the completion port is made by a small request that AFD completes at once on the
  * socket, with the OVERLAPPED as the context: the I/O manager queues it as it queues the packet
  * of any request of the socket (a request that fails at once would queue none). The packet says
  * success and 0 bytes, whatever the transfer did: the transfer's own status and byte count are
@@ -63,6 +71,7 @@ typedef struct _TF_REQUEST
     HMODULE Module;             /* msafd, held for the worker thread */
     BOOLEAN NoDelaySet;         /* TfSetNoDelay switched it on */
     PVOID Copy;                 /* the copied head and tail of TransmitFile, owned by the request */
+    BOOLEAN Held;               /* the hold of the OVERLAPPED is pending in AFD */
 } TF_REQUEST, *PTF_REQUEST;
 
 static CRITICAL_SECTION TransmitLock;
@@ -125,8 +134,8 @@ TfWaitSend(
     Status = NtWaitForMultipleObjects(2, Handles, WaitAny, FALSE, NULL);
     if (Status == STATUS_WAIT_1)
     {
-        /* Our own request: NtCancelIoFile cancels the requests of this thread on the handle */
-        NtCancelIoFile(Request->Socket, &CancelIosb);
+        /* Our own send, and only that: the hold is completed with the result of the transfer */
+        NtCancelIoFileEx(Request->Socket, Iosb, &CancelIosb);
         NtWaitForSingleObject(Event, FALSE, NULL);
     }
     return Iosb->Status;
@@ -202,8 +211,8 @@ TfSetNoDelay(
     if (!Request->Cancelled && Request->Original != INVALID_SOCKET)
     {
         Socket = GetSocketStructure(Request->Original);
-        if (Socket && Socket->HelperData && Socket->SharedData->SocketType == SOCK_STREAM &&
-            !Socket->SharedData->TcpNoDelay)
+        if (Socket && Socket->HelperData && Socket->HelperContext &&
+            Socket->SharedData->SocketType == SOCK_STREAM && !Socket->SharedData->TcpNoDelay)
         {
             Socket->HelperData->WSHSetSocketInformation(Socket->HelperContext,
                                                         Socket->Handle,
@@ -478,6 +487,76 @@ TfCompleteOverlapped(
         SetEvent((HANDLE)((ULONG_PTR)Event & ~(ULONG_PTR)1));
 }
 
+/* The hold: the request of the socket with the caller's OVERLAPPED, event and completion context, pending in AFD
+ * until TfReleaseHold. Without it (AFD refused it, nothing was written to the OVERLAPPED) TfCompleteOverlapped does
+ * the completion */
+static
+VOID
+TfHold(
+    _In_ PTF_REQUEST Request)
+{
+    LPOVERLAPPED Overlapped = Request->Overlapped;
+    HANDLE Event = Overlapped->hEvent;
+    NTSTATUS Status;
+
+    /* As WSPSend: the OVERLAPPED is the context of the completion port's packet, unless the low bit of hEvent is set */
+    Status = NtDeviceIoControlFile(Request->Socket,
+                                   Event,
+                                   NULL,
+                                   ((ULONG_PTR)Event & 1) ? NULL : Overlapped,
+                                   (PIO_STATUS_BLOCK)Overlapped,
+                                   IOCTL_AFD_TRANSMIT_HOLD,
+                                   NULL,
+                                   0,
+                                   NULL,
+                                   0);
+    Request->Held = (Status == STATUS_PENDING);
+}
+
+/* Completes the hold with the result of the transfer: AFD fills in the OVERLAPPED, signals the event and queues the
+ * packet. A hold that a cancel aborted reports STATUS_CANCELLED; one that is gone already (the socket's cleanup, the
+ * end of the process) has been completed as cancelled */
+static
+VOID
+TfReleaseHold(
+    _In_ PTF_REQUEST Request)
+{
+    AFD_TRANSMIT_RESULT Result;
+    IO_STATUS_BLOCK Iosb;
+    HANDLE Event = NULL;
+    NTSTATUS Status;
+
+    ULONG Try;
+
+    Result.Iosb = (ULONG_PTR)Request->Overlapped;
+    Result.Information = Request->Sent;
+    Result.Status = Request->Status;
+    Result.Reserved = 0;
+
+    NtCreateEvent(&Event, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE);
+
+    /* Only a lack of memory for the request itself fails it: the caller waits for this completion, so it is tried
+     * again for a while */
+    for (Try = 0; ; Try++)
+    {
+        Iosb.Status = STATUS_PENDING;
+        Iosb.Information = 0;
+        Status = NtDeviceIoControlFile(Request->Socket, Event, NULL, NULL, &Iosb,
+                                       IOCTL_AFD_TRANSMIT_COMPLETE, &Result, sizeof(Result), NULL, 0);
+        if (Status == STATUS_PENDING && Event)
+        {
+            NtWaitForSingleObject(Event, FALSE, NULL);     /* not reached: AFD answers at once */
+            Status = Iosb.Status;
+        }
+        if (NT_SUCCESS(Status) || Status == STATUS_NOT_FOUND || Try == 300)
+            break;
+        Sleep(100);
+    }
+
+    if (Event)
+        NtClose(Event);
+}
+
 static
 VOID
 TfFree(
@@ -505,7 +584,10 @@ TfWorker(PVOID Param)
     HMODULE Module = Request->Module;
 
     TfTransfer(Request);
-    TfCompleteOverlapped(Request);
+    if (Request->Held)
+        TfReleaseHold(Request);
+    else
+        TfCompleteOverlapped(Request);
     TfFree(Request);
 
     /* Last thing: the DLL goes when the thread has gone */
@@ -624,12 +706,14 @@ TfStart(
     Overlapped->Internal = STATUS_PENDING;
     Overlapped->InternalHigh = 0;
 
-    /* The worker runs msafd's code: keep the DLL mapped until the thread has gone */
+    /* The worker runs msafd's code: keep the DLL mapped until the thread has gone. It is made suspended, so that
+       nothing can fail after the hold is made; the call never waits for it (a caller that holds the loader lock,
+       in DllMain or a TLS callback, would wait for ever: the new thread needs that lock before it runs) */
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)TfWorker, &Request->Module))
         Thread = NULL;
     else
     {
-        Thread = CreateThread(NULL, 0, TfWorker, Request, 0, NULL);
+        Thread = CreateThread(NULL, 0, TfWorker, Request, CREATE_SUSPENDED, NULL);
         if (!Thread)
             FreeLibrary(Request->Module);
     }
@@ -641,6 +725,13 @@ TfStart(
         SetLastError(WSAENOBUFS);
         return FALSE;
     }
+
+    /* The hold is this thread's request, made before the call returns: a CancelIoEx (or CancelIo of this thread)
+       right after the call finds it */
+    TfHold(Request);
+
+    /* The request may be gone once the worker runs (the transfer can end at once): not used after this */
+    ResumeThread(Thread);
     CloseHandle(Thread);
 
     SetLastError(WSA_IO_PENDING);

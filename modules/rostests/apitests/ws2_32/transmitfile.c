@@ -697,6 +697,123 @@ TestFailedOnPort(void)
     CloseHandle(Big);
 }
 
+/* CancelIoEx of an overlapped TransmitFile whose peer does not read, with the OVERLAPPED and with NULL (all the requests
+ * of the socket), 0 to 50 ms after the call. Measured on Windows Server 2022 (v4 and v6, 32 rows): CancelIoEx returns TRUE,
+ * the request completes at once with STATUS_CANCELLED (ERROR_OPERATION_ABORTED) and the bytes sent so far, a later send
+ * fails with WSAECONNABORTED, and the peer, which did not read, reads nothing and gets WSAECONNRESET */
+static
+void
+TestCancelIoEx(void)
+{
+    static const DWORD Delays[] = { 0, 1, 2, 50 };
+    BOOL (WINAPI *pCancelIoEx)(HANDLE, LPOVERLAPPED);
+    SOCKET Sender, Peer;
+    HANDLE Big;
+    WSAOVERLAPPED Overlapped;
+    DWORD Returned, Error, Start;
+    BOOL Result;
+    WCHAR Dir[MAX_PATH], Name[MAX_PATH];
+    LARGE_INTEGER Size;
+    char Buffer[65536];
+    int Row, Count, Got, End;
+    u_long NonBlocking = 1;
+
+    pCancelIoEx = (void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "CancelIoEx");
+    if (!pCancelIoEx)
+    {
+        skip("no CancelIoEx\n");
+        return;
+    }
+
+    GetTempPathW(RTL_NUMBER_OF(Dir), Dir);
+    _snwprintf(Name, RTL_NUMBER_OF(Name), L"%stfile-cancel-%lu.tmp", Dir, GetCurrentProcessId());
+    Big = CreateFileW(Name, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                      CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+    Size.QuadPart = 32 * 1024 * 1024;
+    if (Big == INVALID_HANDLE_VALUE || !SetFilePointerEx(Big, Size, NULL, FILE_BEGIN) || !SetEndOfFile(Big))
+    {
+        skip("cannot create the big file: %lu\n", GetLastError());
+        if (Big != INVALID_HANDLE_VALUE)
+            CloseHandle(Big);
+        return;
+    }
+
+    for (Row = 0; Row < 8; Row++)
+    {
+        BOOL All = (Row >= 4);
+
+        if (!MakePair(&Sender, &Peer))
+        {
+            ok(0, "row %d: no connection\n", Row);
+            continue;
+        }
+        Rewind(Big, 0);
+        ZeroMemory(&Overlapped, sizeof(Overlapped));
+        Overlapped.hEvent = WSACreateEvent();
+        Result = pTransmitFile(Sender, Big, 0, 0, &Overlapped, NULL, 0);
+        ok(Result == FALSE && WSAGetLastError() == WSA_IO_PENDING, "row %d: Result = %d, error %d\n", Row, Result, WSAGetLastError());
+        Sleep(Delays[Row % 4]);
+
+        SetLastError(0xdeadbeef);
+        Result = pCancelIoEx((HANDLE)Sender, All ? NULL : &Overlapped);
+        ok(Result == TRUE, "row %d: CancelIoEx returned %d, error %lu\n", Row, Result, GetLastError());
+
+        if (WaitForSingleObject(Overlapped.hEvent, 5000) != WAIT_OBJECT_0)
+        {
+            ok(0, "row %d: the transfer did not complete in 5 s after CancelIoEx\n", Row);
+            closesocket(Sender);
+            Sender = INVALID_SOCKET;
+            WaitForSingleObject(Overlapped.hEvent, 10000);
+        }
+        else
+        {
+            Returned = 0;
+            Result = GetOverlappedResult((HANDLE)Sender, &Overlapped, &Returned, FALSE);
+            Error = GetLastError();
+            ok(Result == FALSE && Error == ERROR_OPERATION_ABORTED, "row %d: GetOverlappedResult %d, error %lu\n", Row, Result, Error);
+            ok((NTSTATUS)Overlapped.Internal == STATUS_CANCELLED, "row %d: status %lx\n", Row, (ULONG)Overlapped.Internal);
+            ok(Returned < Size.QuadPart, "row %d: %lu bytes\n", Row, Returned);
+            trace("row %d (delay %lu ms, %s): %lu bytes sent before the cancel\n", Row, Delays[Row % 4], All ? "NULL" : "&ov", Returned);
+
+            /* The connection is aborted */
+            Count = send(Sender, "after", 5, 0);
+            ok(Count == SOCKET_ERROR && WSAGetLastError() == WSAECONNABORTED, "row %d: send after the cancel: %d, error %d\n",
+               Row, Count, WSAGetLastError());
+
+            ioctlsocket(Peer, FIONBIO, &NonBlocking);
+            Got = 0;
+            End = 0;
+            for (Start = GetTickCount(); GetTickCount() - Start < 3000; )
+            {
+                Count = recv(Peer, Buffer, sizeof(Buffer), 0);
+                if (Count > 0)
+                {
+                    Got += Count;
+                    continue;
+                }
+                if (Count == 0)
+                    break;
+                End = WSAGetLastError();
+                if (End != WSAEWOULDBLOCK)
+                    break;
+                End = 0;
+                Sleep(5);
+            }
+            ok(End == WSAECONNRESET, "row %d: the peer's reading ended with %d after %d bytes\n", Row, End, Got);
+            /* Windows: 0 (the reset discards what the peer did not read). Here the bytes the peer's socket had taken
+             * before the reset are read first when no receive was outstanding (its small first buffer was full) */
+            trace("probe: row %d: the peer read %d bytes before the reset\n", Row, Got);
+        }
+
+        WSACloseEvent(Overlapped.hEvent);
+        if (Sender != INVALID_SOCKET)
+            closesocket(Sender);
+        closesocket(Peer);
+    }
+
+    CloseHandle(Big);
+}
+
 START_TEST(transmitfile)
 {
     WSADATA WsaData;
@@ -729,6 +846,7 @@ START_TEST(transmitfile)
     TestPackets();
     TestErrors();
     TestFailedOnPort();
+    TestCancelIoEx();
 
     CloseHandle(g_File);
     DeleteFileW(g_FileName);

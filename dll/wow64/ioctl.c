@@ -920,6 +920,10 @@ BOOLEAN Wow64IsPlainIoctl(ULONG Code)
     case IOCTL_AFD_DEFER_ACCEPT:
     case IOCTL_AFD_GET_PENDING_CONNECT_DATA:
     case IOCTL_AFD_VALIDATE_GROUP:
+    /* msafd's TransmitFile hold: no buffers; its completion: AFD_TRANSMIT_RESULT, the same in both ABIs (the
+     * status block it names is compared with the guest address the kernel keeps in the hold) */
+    case IOCTL_AFD_TRANSMIT_HOLD:
+    case IOCTL_AFD_TRANSMIT_COMPLETE:
     /* TCP/IP */
     case IOCTL_QUERY_IP_HW_ADDRESS:
         return TRUE;
