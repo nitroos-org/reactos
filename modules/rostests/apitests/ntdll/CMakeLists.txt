@@ -317,6 +317,7 @@ list(APPEND SOURCE
     VectoredHandlerChurn.c
     ModuleRangeTable.c
     ZwQuerySystemInformationEx.c
+    ZeroedPageList.c
     Timer.c
     precomp.h)
 
