@@ -5,9 +5,12 @@
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
-#include <apitest.h>
-#include <winsock2.h>
-#include <iphlpapi.h>
+#include "Ipv6Common.h"
+#include <tcpioctl.h>
+#define NTOS_MODE_USER
+#include <ndk/iofuncs.h>
+#include <ndk/obfuncs.h>
+#include <ndk/rtlfuncs.h>
 
 #define CHANGE_TIMEOUT 15000
 
@@ -368,6 +371,180 @@ static void TestRearm(TARGET *Target)
     ok(AdapterHasAddress(Target), "The address of adapter %lu was not restored\n", Target->Index);
 }
 
+/* The same for a request that waits for IPv6 address changes (the family mask of IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST, as
+   the IPv6 registration of NotifyUnicastIpAddressChange and the firewall service make it): an address is added to and
+   deleted from an adapter, and the waiter that queues its next request at once is woken a few times for each, not in
+   a loop. */
+typedef struct
+{
+    SOCKADDR_INET Address;
+    NET_LUID InterfaceLuid;
+    ULONG InterfaceIndex;
+    ULONG PrefixOrigin;
+    ULONG SuffixOrigin;
+    ULONG ValidLifetime;
+    ULONG PreferredLifetime;
+    UINT8 OnLinkPrefixLength;
+    BOOLEAN SkipAsSource;
+    ULONG DadState;
+    SCOPE_ID ScopeId;
+    LARGE_INTEGER CreationTimeStamp;
+} UNICAST_ROW6;
+
+typedef struct _REARM6
+{
+    HANDLE Stop;
+    HANDLE Armed;
+    HANDLE Event;
+    HANDLE File;
+    IO_STATUS_BLOCK Iosb;
+    volatile LONG Wakes;
+} REARM6;
+
+static DWORD WINAPI Rearm6Thread(PVOID Context)
+{
+    REARM6 *Rearm = Context;
+    HANDLE Wait[2];
+    ULONG Families = TCP_CHANGE_FAMILY_IPV6;
+    NTSTATUS Status;
+
+    SetThreadAffinityMask(GetCurrentThread(), 1);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    Wait[0] = Rearm->Stop;
+    Wait[1] = Rearm->Event;
+    for (;;)
+    {
+        ResetEvent(Rearm->Event);
+        Rearm->Iosb.Status = STATUS_PENDING;
+        Status = NtDeviceIoControlFile(Rearm->File, Rearm->Event, NULL, NULL, &Rearm->Iosb,
+                                       IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST, &Families, sizeof(Families), NULL, 0);
+        if (Status != STATUS_PENDING)
+            break;
+        SetEvent(Rearm->Armed);
+        if (WaitForMultipleObjects(2, Wait, FALSE, INFINITE) == WAIT_OBJECT_0)
+        {
+            IO_STATUS_BLOCK Cancel;
+
+            NtDeviceIoControlFile(Rearm->File, NULL, NULL, NULL, &Cancel, IOCTL_IP_ADDCHANGE_CANCEL_REQUEST,
+                                  NULL, 0, NULL, 0);
+            WaitForSingleObject(Rearm->Event, 5000);
+            break;
+        }
+        InterlockedIncrement(&Rearm->Wakes);
+    }
+    return 0;
+}
+
+static ULONG FindIpv6Interface(void)
+{
+    ULONG Size = 16384, Index = 0, Tries;
+    IP_ADAPTER_ADDRESSES *Adapters = NULL, *A;
+    DWORD Error = ERROR_BUFFER_OVERFLOW;
+
+    for (Tries = 0; Tries < 3 && Error == ERROR_BUFFER_OVERFLOW; Tries++)
+    {
+        HeapFree(GetProcessHeap(), 0, Adapters);
+        Adapters = HeapAlloc(GetProcessHeap(), 0, Size);
+        if (!Adapters)
+            return 0;
+        Error = GetAdaptersAddresses(AF_INET6, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                     GAA_FLAG_SKIP_DNS_SERVER, NULL, Adapters, &Size);
+    }
+    if (Error == NO_ERROR)
+    {
+        for (A = Adapters; A && !Index; A = A->Next)
+            if (A->IfType != 24 && A->Ipv6IfIndex != 0 && A->FirstUnicastAddress)
+                Index = A->Ipv6IfIndex;
+    }
+    HeapFree(GetProcessHeap(), 0, Adapters);
+    return Index;
+}
+
+static void TestRearm6(void)
+{
+    typedef DWORD (WINAPI *PFN_ROW)(PVOID);
+    typedef VOID (WINAPI *PFN_INIT)(PVOID);
+    HMODULE Module = GetModuleHandleW(L"iphlpapi.dll");
+    PFN_ROW pCreate = Module ? (PFN_ROW)GetProcAddress(Module, "CreateUnicastIpAddressEntry") : NULL;
+    PFN_ROW pDelete = Module ? (PFN_ROW)GetProcAddress(Module, "DeleteUnicastIpAddressEntry") : NULL;
+    PFN_INIT pInit = Module ? (PFN_INIT)GetProcAddress(Module, "InitializeUnicastIpAddressEntry") : NULL;
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Device\\Tcp");
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Iosb;
+    UNICAST_ROW6 Row;
+    REARM6 Rearm;
+    HANDLE Thread;
+    LONG Base, AfterAdd, AfterDelete;
+    ULONG IfIndex;
+    DWORD Error;
+
+    if (!is_reactos() || !pCreate || !pDelete || !pInit)
+    {
+        skip("IPv6 address changes are only made on ReactOS\n");
+        return;
+    }
+    IfIndex = FindIpv6Interface();
+    if (!IfIndex)
+    {
+        skip("No adapter with an IPv6 address\n");
+        return;
+    }
+
+    ZeroMemory(&Rearm, sizeof(Rearm));
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenFile(&Rearm.File, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &Attributes, &Iosb,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, 0)))
+    {
+        skip("\\Device\\Tcp cannot be opened\n");
+        return;
+    }
+    Rearm.Stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+    Rearm.Armed = CreateEventW(NULL, FALSE, FALSE, NULL);
+    Rearm.Event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    SetThreadAffinityMask(GetCurrentThread(), 1);
+    Thread = CreateThread(NULL, 0, Rearm6Thread, &Rearm, 0, NULL);
+    ok(Thread != NULL, "CreateThread failed\n");
+    if (Thread)
+    {
+        ok(WaitForSingleObject(Rearm.Armed, CHANGE_TIMEOUT) == WAIT_OBJECT_0, "The IPv6 waiter did not queue its request\n");
+        Sleep(300);
+        Base = Rearm.Wakes;
+
+        pInit(&Row);
+        Row.InterfaceIndex = IfIndex;
+        Ipv6Parse(&Row.Address, "2001:db8:46::5", 0);
+        Row.OnLinkPrefixLength = 64;
+        pDelete(&Row);      /* a leftover of an earlier run */
+        Sleep(300);
+        Base = Rearm.Wakes;
+
+        Error = pCreate(&Row);
+        ok(Error == NO_ERROR, "CreateUnicastIpAddressEntry returned %lu\n", Error);
+        if (Error == NO_ERROR)
+        {
+            Sleep(1500);
+            AfterAdd = Rearm.Wakes - Base;
+            ok(AfterAdd >= 1, "No IPv6 wake-up when the address was added\n");
+            ok(AfterAdd <= REARM_MAX_WAKES, "%ld IPv6 wake-ups for the addition of an address\n", AfterAdd);
+            Base = Rearm.Wakes;
+            Error = pDelete(&Row);
+            ok(Error == NO_ERROR, "DeleteUnicastIpAddressEntry returned %lu\n", Error);
+            Sleep(1500);
+            AfterDelete = Rearm.Wakes - Base;
+            ok(AfterDelete >= 1, "No IPv6 wake-up when the address was deleted\n");
+            ok(AfterDelete <= REARM_MAX_WAKES, "%ld IPv6 wake-ups for the deletion of an address\n", AfterDelete);
+        }
+        SetEvent(Rearm.Stop);
+        WaitForSingleObject(Thread, 10000);
+        CloseHandle(Thread);
+    }
+    SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)-1);
+    NtClose(Rearm.File);
+    CloseHandle(Rearm.Stop);
+    CloseHandle(Rearm.Armed);
+    CloseHandle(Rearm.Event);
+}
+
 START_TEST(NotifyAddrChange)
 {
     TARGET Target;
@@ -392,4 +569,5 @@ START_TEST(NotifyAddrChange)
     TestChange(&Target);
     TestBlocking(&Target);
     TestRearm(&Target);
+    TestRearm6();
 }
