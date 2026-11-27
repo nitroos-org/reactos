@@ -1752,6 +1752,9 @@ typedef struct _EPROCESS
     ULONGLONG CycleTime;
     /* PS_PROTECTION: type in bits 0-2, signer in bits 4-7 (0: not protected) */
     UCHAR Protection;
+    /* The status of the first request to terminate the whole process; set and read under ProcessLock */
+    BOOLEAN TerminateStatusSet;
+    NTSTATUS TerminateStatus;
 #endif // ]
 } EPROCESS;
 

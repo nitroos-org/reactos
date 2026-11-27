@@ -74,6 +74,30 @@ PspCatchCriticalBreak(IN PCHAR Message,
     }
 }
 
+/*
+ * Records the status of a request to terminate the whole process. The first
+ * request decides: a later one with another status does not replace it. The
+ * last thread to exit makes it the exit status of the process (PspExitThread),
+ * also when that thread was exiting by itself with a status of its own while
+ * the request came in. Recorded before any thread is told to terminate, so
+ * the last thread cannot have counted itself out before it is set.
+ */
+static
+VOID
+PspSetProcessTerminateStatus(IN PEPROCESS Process,
+                             IN NTSTATUS ExitStatus)
+{
+    KeEnterCriticalRegion();
+    ExAcquirePushLockExclusive(&Process->ProcessLock);
+    if (!Process->TerminateStatusSet)
+    {
+        Process->TerminateStatus = ExitStatus;
+        Process->TerminateStatusSet = TRUE;
+    }
+    ExReleasePushLockExclusive(&Process->ProcessLock);
+    KeLeaveCriticalRegion();
+}
+
 NTSTATUS
 NTAPI
 PspTerminateProcess(IN PEPROCESS Process,
@@ -94,6 +118,9 @@ PspTerminateProcess(IN PEPROCESS Process,
                               Process,
                               Process->ImageFileName);
     }
+
+    /* Record the status before any thread is told to exit */
+    PspSetProcessTerminateStatus(Process, ExitStatus);
 
     /* Set the delete flag */
     InterlockedOr((PLONG)&Process->Flags, PSF_PROCESS_DELETE_BIT);
@@ -561,8 +588,14 @@ PspExitThread(IN NTSTATUS ExitStatus)
         /* Remember we are last */
         Last = TRUE;
 
+        /* A request to terminate the process decides its status, also
+           when this thread was exiting by itself with a status of its own */
+        if (CurrentProcess->TerminateStatusSet)
+        {
+            CurrentProcess->ExitStatus = CurrentProcess->TerminateStatus;
+        }
         /* Check if this termination is due to the thread dying */
-        if (ExitStatus == STATUS_THREAD_IS_TERMINATING)
+        else if (ExitStatus == STATUS_THREAD_IS_TERMINATING)
         {
             /* Check if the last thread was pending */
             if (CurrentProcess->ExitStatus == STATUS_PENDING)
@@ -1200,6 +1233,9 @@ PspTerminateCurrentProcessDeferred(IN NTSTATUS ExitStatus)
     ULONG Flags;
     PAGED_CODE();
 
+    /* Record the status before any thread is told to exit */
+    PspSetProcessTerminateStatus(Process, ExitStatus);
+
     /* Flag the process for deletion */
     InterlockedOr((PLONG)&Process->Flags, PSF_PROCESS_DELETE_BIT);
 
@@ -1403,7 +1439,16 @@ NtTerminateProcess(IN HANDLE ProcessHandle OPTIONAL,
     }
 
     /* Set the delete flag, unless the process is comitting suicide */
-    if (KillByHandle) PspSetProcessFlag(Process, PSF_PROCESS_DELETE_BIT);
+    if (KillByHandle)
+    {
+        /*
+         * Record the status before any thread is told to exit. Not for the
+         * call without a handle: it ends only the other threads (ExitProcess
+         * makes it before the DLLs are told), and the process goes on.
+         */
+        PspSetProcessTerminateStatus(Process, ExitStatus);
+        PspSetProcessFlag(Process, PSF_PROCESS_DELETE_BIT);
+    }
 
     /* Get the first thread */
     Status = STATUS_NOTHING_TO_TERMINATE;
