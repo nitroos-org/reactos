@@ -525,6 +525,7 @@ int ngos_dev_write_start(void *dev, unsigned long long off, void *buf, unsigned 
 #define NG_IO_WRITE_THROUGH 1   /* SL_WRITE_THROUGH on the write */
 #define NG_IO_REFUSAL_OK    2   /* a flush the stack does not implement counts as done */
 #define NG_IO_FUA           4   /* SL_WRITE_THROUGH when the device honours FUA (then the write is durable when it completes) */
+#define NG_IO_SKIP_CLEAN    8   /* a flush with nothing to make durable (no plain write completed since the last flush) is not sent */
 static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, void *buf, unsigned int len, ULONG Flags)
 {
     LARGE_INTEGER Offset;
@@ -543,6 +544,16 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
     if (St && St->NPend && NgDevDrainOwn(St))
         return -1;
     FlushStart = St ? St->Dirty : 0;
+
+    /*
+     * Nothing plain was written since the last successful flush (Dirty == Flushed, after this thread's own started writes were
+     * drained above; FUA writes are durable when they complete and are not counted): the flush would make nothing durable that
+     * is not durable already, e.g. the second of two flushes with no write between them, or the flush of a file that is not
+     * dirty.  The count is the one kept for the slots' FUA decision; a mount starts with Dirty != Flushed, so the first flush
+     * after a mount is always sent.  Not for NgDevFlushDurable: it follows writes that other paths made.
+     */
+    if ((Flags & NG_IO_SKIP_CLEAN) && Major == IRP_MJ_FLUSH_BUFFERS && St && St->Dirty == St->Flushed)
+        return 0;
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     Offset.QuadPart = (LONGLONG)off;
@@ -784,7 +795,7 @@ int NgDevWritePagesV(PDEVICE_OBJECT Dev, PMDL Src, const NG_PAGE_WRITE *Pw, ULON
 
 int ngos_dev_flush(void *dev)
 {
-    return NgDevIo(IRP_MJ_FLUSH_BUFFERS, dev, 0, NULL, 0, 0);
+    return NgDevIo(IRP_MJ_FLUSH_BUFFERS, dev, 0, NULL, 0, NG_IO_SKIP_CLEAN);
 }
 
 /*
