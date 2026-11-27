@@ -329,7 +329,11 @@ IntWinStaOkToClose(
     PWIN32_OKAYTOCLOSEMETHOD_PARAMETERS OkToCloseParameters = Parameters;
     PPROCESSINFO ppi;
 
-    ppi = PsGetCurrentProcessWin32Process();
+    /* The process whose handle it is, not the one the callout runs in (it can be attached to another) */
+    if (OkToCloseParameters->Process)
+        ppi = PsGetProcessWin32Process(OkToCloseParameters->Process);
+    else
+        ppi = PsGetCurrentProcessWin32Process();
 
     if (ppi && (OkToCloseParameters->Handle == ppi->hwinsta))
     {
