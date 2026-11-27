@@ -11,7 +11,7 @@
  * The policy's own NITROFW_POLICY_ENFORCE flag (mpssvc: HKLM\SOFTWARE\ReactOS\Nitro\Firewall Enforce)
  * must be set for a policy to be enforced.
  *
- * Scope: inbound. IPv4 here (NitroFwInboundAllowed); IPv6 (only with Tcpip\Parameters\Ipv6Enable, lwIP's
+ * Scope: inbound. IPv4 here (NitroFwInboundAllowed); IPv6 (lwIP's
  * stack) in NitroFwInboundAllowed6 further down, which applies the same rules and defaults.
  * Dropped: unsolicited TCP SYNs, unsolicited UDP,
  * ICMP requests and other protocols that no Allow rule admits, or that a Block rule matches. Passed
@@ -235,7 +235,7 @@ static BOOLEAN FwBootOptionOff(VOID)
  * Policy reference counting and the enforcing flag
  * ---------------------------------------------------------------------------------------------- */
 
-#if DBG || defined(TCPIP_IPV6_SELFTEST)
+#if DBG
 /* Test builds only (the IPv6 self-test): a policy that stands in for the installed one for IPv6 packets, so
    the test does not depend on what the rule service pushed or when */
 #define FW_TESTHOOKS 1
@@ -1985,7 +1985,7 @@ PassCounted:
 }
 
 /* ------------------------------------------------------------------------------------------------
- * IPv6 inbound (lwIP's stack, only with Tcpip\Parameters\Ipv6Enable; ip/transport/tcp/if6.c)
+ * IPv6 inbound (lwIP's stack; ip/transport/tcp/if6.c)
  *
  * One complete datagram as the adapter delivered it (before lwIP sees it, so before reassembly, neighbour
  * discovery, and any ICMPv6 error lwIP would send for it). The same policy, rules and defaults as IPv4:

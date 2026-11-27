@@ -16,8 +16,7 @@
  * The policy table lives in HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters, value PrefixPolicies
  * (REG_MULTI_SZ, one "prefix/length precedence label" per string, e.g. "fc00::/7 3 13"), and the volatile subkey
  * ActiveState with the same value, which wins while it exists; no value (or no valid line) = the Windows default
- * table below. Tcpip6\Parameters\DisabledComponents bit 0x20 (and Tcpip\Parameters\Ipv6Enable = 0, which stands for
- * DisabledComponents 0xFF) raises the precedence of ::ffff:0:0/96 in it.
+ * table below. Tcpip6\Parameters\DisabledComponents bit 0x20 (0xFF has it) raises the precedence of ::ffff:0:0/96 in it.
  * User mode reads it on every use; the stack reads it at start and when IOCTL_IP6_POLICY_RELOAD asks for it
  * (iphlpapi's NitroSetPrefixPolicies does after every change), so both sort and choose with the same table.
  */

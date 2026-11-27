@@ -420,7 +420,7 @@ NTSTATUS UDPSendDatagram(
  * IPv4 multicast groups (IP_ADD_MEMBERSHIP / IP_DROP_MEMBERSHIP, struct ip_mreq). As on Windows, a join puts the
  * group in the adapter's multicast list (RFC 1112 6.4: 01:00:5e and the low 23 bits of the group), next to IPv6's
  * groups (if6.c, UDP4AddMulticastList); an adapter that filters multicast frames by its list passes none of the
- * group otherwise. That holds with IPv6 on the adapters and without it (DisabledComponents, Ipv6Enable = 0).
+ * group otherwise. That holds with IPv6 on the adapters and without it (DisabledComponents).
  * A socket's filter for a group (IP_ADD_SOURCE_MEMBERSHIP, MCAST_JOIN_SOURCE_GROUP, MCAST_BLOCK_SOURCE,
  * SIO_SET_MULTICAST_FILTER and the others: the Winsock helper keeps the socket API's rules and hands the stack the
  * group's whole filter, NITRO_AO_OPTION_MCAST_FILTER, nitrotdi.h) is kept on the same table: Mode with the

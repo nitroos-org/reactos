@@ -45,8 +45,8 @@
 
 #define IP_SOF_BROADCAST_RECV           1
 
-/* The IPv6 core (ip_addr_t is a tagged union). It is used only with Tcpip\Parameters\Ipv6Enable on
- * (ip/transport/tcp/if6.c); off, no interface has an IPv6 address and no IPv6 frame reaches lwIP */
+/* The IPv6 core (ip_addr_t is a tagged union). With Tcpip6\Parameters\DisabledComponents 0x10
+ * (ip/transport/tcp/if6.c) no interface but the loopback one has an IPv6 address and no IPv6 frame reaches lwIP */
 #define LWIP_IPV6                       1
 /* MLD: the solicited-node groups of the addresses and the groups sockets joined (udp6.c), with the sockets' merged
  * source filters, are reported with MLDv2 (RFC 3810, MLD6_V2: state change reports, answers to general, group and
