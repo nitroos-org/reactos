@@ -365,6 +365,8 @@ typedef struct _AFD_TDI_HANDLE_DATA
 #define AFD_SUPER_CONNECT 49
 #define AFD_ADDRCHANGE_WAIT             90
 #define AFD_ADDRCHANGE_COMPLETE         91
+#define AFD_TRANSMIT_HOLD               92
+#define AFD_TRANSMIT_COMPLETE           93
 
 /* AFD IOCTLs */
 
@@ -451,6 +453,23 @@ typedef struct _AFD_TDI_HANDLE_DATA
   _AFD_CONTROL_CODE(AFD_ADDRCHANGE_WAIT, METHOD_BUFFERED)
 #define IOCTL_AFD_ADDRCHANGE_COMPLETE \
   _AFD_CONTROL_CODE(AFD_ADDRCHANGE_COMPLETE, METHOD_BUFFERED)
+/* msafd and AFD only (no Windows counterpart): msafd does an overlapped TransmitFile or TransmitPackets in a worker
+ * thread. The hold is the request the caller sees: it is made with the caller's OVERLAPPED (its status block and
+ * completion context) and event, stays pending in the driver, and is completed by the worker with the result of the
+ * transfer (IOCTL_AFD_TRANSMIT_COMPLETE, input AFD_TRANSMIT_RESULT; Iosb names the hold by its status block). A
+ * cancel of the hold (CancelIoEx) aborts the connection, which ends the transfer, and the hold then completes with
+ * STATUS_CANCELLED. The hold takes no buffers */
+#define IOCTL_AFD_TRANSMIT_HOLD \
+  _AFD_CONTROL_CODE(AFD_TRANSMIT_HOLD, METHOD_NEITHER)
+#define IOCTL_AFD_TRANSMIT_COMPLETE \
+  _AFD_CONTROL_CODE(AFD_TRANSMIT_COMPLETE, METHOD_BUFFERED)
+
+typedef struct _AFD_TRANSMIT_RESULT {
+    ULONGLONG Iosb;             /* the status block (OVERLAPPED) of the hold */
+    ULONGLONG Information;      /* the bytes sent */
+    LONG Status;                /* the status of the transfer */
+    ULONG Reserved;
+} AFD_TRANSMIT_RESULT, *PAFD_TRANSMIT_RESULT;
 
 typedef struct _AFD_SOCKET_INFORMATION {
     BOOL CommandChannel;

@@ -838,6 +838,12 @@ WSPCloseSocket(IN SOCKET Handle,
     /* HACK: Allow APC to be processed */
     SleepEx(0, TRUE);
 
+    /* The transmits of the socket first: their worker uses the helper's socket context (TCP_NODELAY for the transfer)
+     * under the transmit lock, and the close notification below and the cleanup further down take that context away
+     * (a worker that started its transfer as the socket was closed called the helper with a context of NULL). Asked
+     * again at the end for a transmit that starts meanwhile */
+    MsafdTransmitSocketClosing(Socket);
+
     if (Socket->HelperEvents & WSH_NOTIFY_CLOSE)
     {
         Status = Socket->HelperData->WSHNotify(Socket->HelperContext,
