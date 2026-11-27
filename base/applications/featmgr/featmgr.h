@@ -12,6 +12,14 @@
 #include <windows.h>
 #include <stdio.h>
 
+/* The environment variables FEATMGR_* are test hooks (they name another catalogue, a stand-in for Scoop, a timing
+ * file): they exist in checked builds only. GetEnvironmentVariableW's result: the length, 0 = not set. */
+#if DBG
+#define FmTestEnv(Name, Buffer, Cch) GetEnvironmentVariableW((Name), (Buffer), (Cch))
+#else
+#define FmTestEnv(Name, Buffer, Cch) ((DWORD)0)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -2292,7 +2292,7 @@ static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR un
         const WCHAR *app = f->App, *bucket = f->Bucket;
         {
             WCHAR pw[MAX_PATH], runner[MAX_PATH];
-            if (!GetEnvironmentVariableW(L"FEATMGR_SCOOP_RUNNER", runner, MAX_PATH)
+            if (!FmTestEnv(L"FEATMGR_SCOOP_RUNNER", runner, MAX_PATH)
                 && (!FmPwshPath(pw, MAX_PATH) || GetFileAttributesW(pw) == INVALID_FILE_ATTRIBUTES))
             {
                 LOGF(log, L"error: PowerShell 7 is required to run Scoop but is not installed\n");
@@ -4108,7 +4108,7 @@ static HRESULT ScoopPrereq(FILE *log)
         SetLastMsg(L"Scoop needs 64-bit PowerShell 7, which is not available on this architecture (x86).");
         return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
     }
-    if (!GetEnvironmentVariableW(L"FEATMGR_SCOOP_RUNNER", runner, MAX_PATH)
+    if (!FmTestEnv(L"FEATMGR_SCOOP_RUNNER", runner, MAX_PATH)
         && (!FmPwshPath(pw, MAX_PATH) || GetFileAttributesW(pw) == INVALID_FILE_ATTRIBUTES))
     {
         LOGF(log, L"error: PowerShell 7 is required to run Scoop but is not installed\n");

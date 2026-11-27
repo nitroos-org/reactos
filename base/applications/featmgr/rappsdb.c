@@ -290,7 +290,7 @@ static BOOL EnsureDir(LPCWSTR d)
 }
 
 /* Download (or take from a local file) the catalog cab and make it the current catalog. urlOverride NULL: the official address,
- * or FEATMGR_RAPPS_DB (a LOCAL cab path, never an address) when that variable is set - the tests use it. */
+ * or FEATMGR_RAPPS_DB (a LOCAL cab path, never an address) when that variable is set - the tests use it, in checked builds. */
 HRESULT FmRappsFetchDb(LPCWSTR urlOverride, FILE *log)
 {
     WCHAR root[MAX_PATH], base[MAX_PATH], cab[MAX_PATH], tmpDir[MAX_PATH], dbDir[MAX_PATH], oldDir[MAX_PATH], env[MAX_PATH * 2];
@@ -302,7 +302,7 @@ HRESULT FmRappsFetchDb(LPCWSTR urlOverride, FILE *log)
     if (!url || !url[0])
     {
         /* FEATMGR_RAPPS_DB: a catalog cab that is already on this disk (the tests use it). Never an address. */
-        if (GetEnvironmentVariableW(L"FEATMGR_RAPPS_DB", env, ARRAYSIZE(env)) && env[0]) url = env;
+        if (FmTestEnv(L"FEATMGR_RAPPS_DB", env, ARRAYSIZE(env)) && env[0]) url = env;
         else url = FM_RAPPS_DB_URL;
     }
     /* The catalog carries every download address and hash, so whoever supplies it decides what runs as administrator: it comes
