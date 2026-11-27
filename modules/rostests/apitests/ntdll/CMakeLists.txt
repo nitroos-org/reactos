@@ -238,6 +238,7 @@ list(APPEND SOURCE
     RtlHeapCompact.c
     RtlHeapDecommit.c
     RtlHeapExtendReuse.c
+    RtlHeapLargeFree.c
     RtlHeapFrontEnd.c
     RtlHeapGrowFail.c
     RtlHeapSegments.c

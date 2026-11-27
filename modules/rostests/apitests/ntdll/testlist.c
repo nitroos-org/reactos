@@ -215,6 +215,7 @@ extern void func_RtlHeapChurn(void);
 extern void func_RtlHeapCompact(void);
 extern void func_RtlHeapDecommit(void);
 extern void func_RtlHeapExtendReuse(void);
+extern void func_RtlHeapLargeFree(void);
 extern void func_RtlHeapFrontEnd(void);
 extern void func_RtlHeapGrowFail(void);
 extern void func_RtlHeapSegments(void);
@@ -522,6 +523,7 @@ const struct test winetest_testlist[] =
     { "RtlHeapCompact",                 func_RtlHeapCompact },
     { "RtlHeapDecommit",                func_RtlHeapDecommit },
     { "RtlHeapExtendReuse",             func_RtlHeapExtendReuse },
+    { "RtlHeapLargeFree",               func_RtlHeapLargeFree },
     { "RtlHeapFrontEnd",                func_RtlHeapFrontEnd },
     { "RtlHeapGrowFail",                func_RtlHeapGrowFail },
     { "RtlHeapSegments",                func_RtlHeapSegments },

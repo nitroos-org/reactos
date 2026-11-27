@@ -243,6 +243,28 @@ typedef struct _HEAP_FE_ACT
 /* HEAP.FeAct of a heap that is not counting any more (front end on, or none possible) */
 #define HEAP_FE_ACT_OFF         ((PHEAP_FE_ACT)(ULONG_PTR)1)
 
+/* Index of the free blocks above DeCommitFreeBlockThreshold (the large blocks). They stay in the one list of free
+   blocks sorted by size that holds every free block; the index remembers, for each size class, the first block of
+   the class in that list, so that an allocation and an insertion start at the class of their size instead of at the
+   first large block. A class spans 1/64 of a doubling of the size (64 bytes at 4 KB, 4 KB at 256 KB); the large
+   blocks are at most 127 times the threshold, 7 doublings. Classes grow with the size, so every block of a class is
+   larger than every block of a lower class. A user-mode heap makes the index (one page of its own, outside the heap
+   segments) when it holds HEAP_LARGE_INDEX_MIN large free blocks; without one, the list is walked as it is. */
+#define HEAP_LARGE_CLASS_SHIFT  6
+#define HEAP_LARGE_CLASSES      (7 << HEAP_LARGE_CLASS_SHIFT)
+#define HEAP_LARGE_INDEX_MIN    32
+
+typedef struct _HEAP_LARGE_INDEX
+{
+    ULONG ClassBitmap[HEAP_LARGE_CLASSES / 32];     /* bit set: the class has a free block */
+    PLIST_ENTRY ClassHints[HEAP_LARGE_CLASSES];     /* first free block of the class in Heap->FreeLists */
+} HEAP_LARGE_INDEX, *PHEAP_LARGE_INDEX;
+
+C_ASSERT(sizeof(HEAP_LARGE_INDEX) <= PAGE_SIZE);
+
+/* HEAP.BlocksIndex of a heap whose index could not be made: tried again every 256 more large free blocks */
+#define HEAP_LARGE_INDEX_FAILED ((PVOID)(ULONG_PTR)1)
+
 typedef struct _HEAP
 {
     HEAP_SEGMENT_MEMBERS;
@@ -276,8 +298,8 @@ typedef struct _HEAP
     LIST_ENTRY SegmentList;
     struct _HEAP_SEGMENT *Segments[HEAP_SEGMENTS]; //FIXME: non-Vista
     USHORT AllocatorBackTraceIndex;
-    ULONG NonDedicatedListLength;
-    PVOID BlocksIndex; // HEAP_LIST_LOOKUP
+    ULONG NonDedicatedListLength; /* number of free blocks above DeCommitFreeBlockThreshold */
+    PVOID BlocksIndex; /* PHEAP_LARGE_INDEX, NULL or HEAP_LARGE_INDEX_FAILED */
     PVOID UCRIndex;
     PHEAP_PSEUDO_TAG_ENTRY PseudoTagEntries;
     LIST_ENTRY FreeLists;
