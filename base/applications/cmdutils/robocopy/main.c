@@ -473,6 +473,25 @@ static void set_dir_info(const WCHAR *dst, const WIN32_FILE_ATTRIBUTE_DATA *src)
 
 /* ------------------------------------------------------------- file copy */
 
+/*
+ * Enable a privilege the caller holds (nothing happens if it does not). Windows' robocopy copies the
+ * owner of a file to one its caller may not otherwise assign (a file owned by SYSTEM, /COPY:O) also
+ * when the caller's SeRestorePrivilege is disabled, as it is in an elevated administrator's token by
+ * default (Windows Server 2022, measured): it enables the privilege itself.
+ */
+static void enable_privilege(const WCHAR *name)
+{
+    HANDLE token;
+    TOKEN_PRIVILEGES tp;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &token)) return;
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    if (LookupPrivilegeValueW(NULL, name, &tp.Privileges[0].Luid))
+        AdjustTokenPrivileges(token, FALSE, &tp, 0, NULL, NULL);
+    CloseHandle(token);
+}
+
 static DWORD copy_security(const WCHAR *src, const WCHAR *dst)
 {
     SECURITY_INFORMATION si = 0;
@@ -1170,6 +1189,8 @@ int __cdecl wmain(int argc, WCHAR *argv[])
         usage();
         return RC_FATAL;
     }
+    /* Copying the owner sets one the caller may not assign without it (see enable_privilege) */
+    if (opt.copy & CP_O) enable_privilege(L"SeRestorePrivilege");
 
     root_src = make_root(src_arg);
     root_dst = make_root(dst_arg);
