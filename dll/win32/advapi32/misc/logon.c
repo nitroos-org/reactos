@@ -407,6 +407,41 @@ Quit:
  */
 static
 BOOL
+SetNewProcessObjectSecurity(
+    _In_ HANDLE Handle,
+    _In_ PSECURITY_DESCRIPTOR Security)
+{
+    const SECURITY_INFORMATION All = DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION;
+    BOOLEAN WasEnabled, OnThread = TRUE;
+    NTSTATUS Status;
+    BOOL Success;
+
+    if (SetKernelObjectSecurity(Handle, All, Security))
+        return TRUE;
+    if (GetLastError() != ERROR_INVALID_OWNER)
+        return FALSE;
+
+    /*
+     * The owner is the new token's, which the caller may not assign as its own: the kernel accepts it with
+     * SeRestorePrivilege enabled (in the token the check uses: the thread's when it impersonates). A caller
+     * without the privilege leaves the owner the kernel gave the objects (its own) and sets the rest.
+     */
+    Status = RtlAdjustPrivilege(SE_RESTORE_PRIVILEGE, TRUE, TRUE, &WasEnabled);
+    if (Status == STATUS_NO_TOKEN)
+    {
+        OnThread = FALSE;
+        Status = RtlAdjustPrivilege(SE_RESTORE_PRIVILEGE, TRUE, FALSE, &WasEnabled);
+    }
+    Success = NT_SUCCESS(Status) && SetKernelObjectSecurity(Handle, All, Security);
+    if (NT_SUCCESS(Status) && !WasEnabled)
+        RtlAdjustPrivilege(SE_RESTORE_PRIVILEGE, FALSE, OnThread, &WasEnabled);
+    if (!Success)
+        Success = SetKernelObjectSecurity(Handle, DACL_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION, Security);
+    return Success;
+}
+
+static
+BOOL
 InsertProcessSecurityCommon(
     _In_ HANDLE ProcessHandle,
     _In_ HANDLE ThreadHandle,
@@ -414,18 +449,14 @@ InsertProcessSecurityCommon(
     _In_ PSECURITY_DESCRIPTOR ThreadSecurity)
 {
     /* Set new security data for the process */
-    if (!SetKernelObjectSecurity(ProcessHandle,
-                                 DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION,
-                                 ProcessSecurity))
+    if (!SetNewProcessObjectSecurity(ProcessHandle, ProcessSecurity))
     {
         ERR("InsertProcessSecurityCommon(): Failed to set security for process (error %lu)\n", GetLastError());
         return FALSE;
     }
 
     /* Set new security data for the thread */
-    if (!SetKernelObjectSecurity(ThreadHandle,
-                                 DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION,
-                                 ThreadSecurity))
+    if (!SetNewProcessObjectSecurity(ThreadHandle, ThreadSecurity))
     {
         ERR("InsertProcessSecurityCommon(): Failed to set security for thread (error %lu)\n", GetLastError());
         return FALSE;
