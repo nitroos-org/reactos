@@ -3390,11 +3390,12 @@ ObInsertObject(IN PVOID Object,
                                     &SdAllocated);
             }
 
-            /* Now assign it */
-            Status = ObAssignSecurity(AccessState,
-                                      ParentDescriptor,
-                                      Object,
-                                      ObjectType);
+            /* Now assign it; the owner of a descriptor given from user mode is checked */
+            Status = ObpAssignSecurity(AccessState,
+                                       ParentDescriptor,
+                                       Object,
+                                       ObjectType,
+                                       ObjectCreateInfo->ProbeMode);
 
             /* Check if we captured one */
             if (ParentDescriptor)
