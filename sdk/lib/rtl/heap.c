@@ -243,6 +243,9 @@ RtlpInitializeHeap(OUT PHEAP Heap,
                         DeCommitFreeBlockThreshold);
     RtlClearAllBits(&Heap->FreeHintBitmap);
     RtlZeroMemory(&Heap->FreeHints[0], sizeof(Heap->FreeHints[0]) * DeCommitFreeBlockThreshold);
+    Heap->NonDedicatedListLength = 0;
+    Heap->BlocksIndex = NULL;
+    Heap->UCRIndex = NULL;
 
     /* Initialise the Heap Virtual Allocated Blocks list */
     InitializeListHead(&Heap->VirtualAllocdBlocks);
@@ -256,6 +259,123 @@ RtlpInitializeHeap(OUT PHEAP Heap,
         InsertTailList(&Heap->UCRList, &UcrDescriptor[Index].ListEntry);
 
     return STATUS_SUCCESS;
+}
+
+/* The index of the large free blocks, when the heap has one */
+FORCEINLINE
+PHEAP_LARGE_INDEX
+RtlpHeapLargeIndex(PHEAP Heap)
+{
+    if (Heap->BlocksIndex == NULL || Heap->BlocksIndex == HEAP_LARGE_INDEX_FAILED)
+        return NULL;
+    return (PHEAP_LARGE_INDEX)Heap->BlocksIndex;
+}
+
+/* Size class of a large block (Size > DeCommitFreeBlockThreshold, a power of two): the doubling of the threshold the
+   size is in, and the next HEAP_LARGE_CLASS_SHIFT bits of the size below its highest one */
+FORCEINLINE
+ULONG
+RtlpHeapLargeClass(PHEAP Heap, SIZE_T Size)
+{
+    ULONG High, Base, Class;
+
+    ASSERT(Size > Heap->DeCommitFreeBlockThreshold);
+    BitScanReverse(&High, (ULONG)Size);
+    BitScanReverse(&Base, (ULONG)Heap->DeCommitFreeBlockThreshold);
+    Class = ((High - Base) << HEAP_LARGE_CLASS_SHIFT) +
+            (((ULONG)Size >> (High - HEAP_LARGE_CLASS_SHIFT)) & ((1 << HEAP_LARGE_CLASS_SHIFT) - 1));
+    if (Class >= HEAP_LARGE_CLASSES)
+        Class = HEAP_LARGE_CLASSES - 1;
+    return Class;
+}
+
+/* The first class from Class on that has a free block, HEAP_LARGE_CLASSES if none */
+static
+ULONG
+RtlpHeapLargeFindClass(PHEAP_LARGE_INDEX Index, ULONG Class)
+{
+    ULONG Word, Bits, Bit;
+
+    if (Class >= HEAP_LARGE_CLASSES)
+        return HEAP_LARGE_CLASSES;
+
+    Word = Class / 32;
+    Bits = Index->ClassBitmap[Word] & ((ULONG)~0 << (Class % 32));
+    for (;;)
+    {
+        if (Bits)
+        {
+            BitScanForward(&Bit, Bits);
+            return Word * 32 + Bit;
+        }
+        if (++Word == HEAP_LARGE_CLASSES / 32)
+            return HEAP_LARGE_CLASSES;
+        Bits = Index->ClassBitmap[Word];
+    }
+}
+
+/* Makes the index of a user-mode heap that holds enough large free blocks, from the sorted list. Heaps of the kernel,
+   heaps with a commit routine and heaps in memory of their creator (which other processes may map) have none.
+   The heap lock is held. */
+static
+VOID
+RtlpHeapLargeIndexCreate(PHEAP Heap)
+{
+    PHEAP_LARGE_INDEX Index = NULL;
+    SIZE_T Size = PAGE_SIZE;
+    PLIST_ENTRY Current;
+    NTSTATUS Status;
+
+    if (RtlpGetMode() != UserMode ||
+        Heap->CommitRoutine != NULL ||
+        (Heap->SegmentFlags & HEAP_USER_ALLOCATED) ||
+        (Heap->DeCommitFreeBlockThreshold & (Heap->DeCommitFreeBlockThreshold - 1)) ||
+        Heap->DeCommitFreeBlockThreshold < (1 << HEAP_LARGE_CLASS_SHIFT))
+        return;
+
+    if (Heap->BlocksIndex == HEAP_LARGE_INDEX_FAILED && (Heap->NonDedicatedListLength % 256) != 0)
+        return;
+
+    Status = ZwAllocateVirtualMemory(NtCurrentProcess(),
+                                     (PVOID *)&Index,
+                                     0,
+                                     &Size,
+                                     MEM_RESERVE | MEM_COMMIT,
+                                     PAGE_READWRITE);
+    if (!NT_SUCCESS(Status))
+    {
+        Heap->BlocksIndex = HEAP_LARGE_INDEX_FAILED;
+        return;
+    }
+
+    /* Fresh pages are zero: no class has a block yet. The list is sorted, so the first block of each class is the
+       one whose class differs from that of the block before it. */
+    for (Current = Heap->FreeHints[0]; Current != NULL && Current != &Heap->FreeLists; Current = Current->Flink)
+    {
+        PHEAP_FREE_ENTRY Entry = CONTAINING_RECORD(Current, HEAP_FREE_ENTRY, FreeList);
+        ULONG Class = RtlpHeapLargeClass(Heap, Entry->Size);
+
+        if (Index->ClassHints[Class] == NULL)
+        {
+            Index->ClassHints[Class] = Current;
+            Index->ClassBitmap[Class / 32] |= (ULONG)1 << (Class % 32);
+        }
+    }
+
+    Heap->BlocksIndex = Index;
+}
+
+/* Gives the index back with its heap */
+static
+VOID
+RtlpHeapLargeIndexDestroy(PHEAP Heap)
+{
+    PVOID Base = RtlpHeapLargeIndex(Heap);
+    SIZE_T Size = 0;
+
+    if (Base)
+        ZwFreeVirtualMemory(NtCurrentProcess(), &Base, &Size, MEM_RELEASE);
+    Heap->BlocksIndex = NULL;
 }
 
 VOID NTAPI
@@ -294,6 +414,20 @@ RtlpInsertFreeBlockHelper(PHEAP Heap,
     if (BlockSize > Heap->DeCommitFreeBlockThreshold)
     {
         PLIST_ENTRY ListEntry = Heap->FreeHints[0];
+        PHEAP_LARGE_INDEX Index;
+        ULONG Class = 0;
+
+        if (Heap->BlocksIndex != NULL && Heap->BlocksIndex != HEAP_LARGE_INDEX_FAILED)
+            Index = (PHEAP_LARGE_INDEX)Heap->BlocksIndex;
+        else if (Heap->NonDedicatedListLength >= HEAP_LARGE_INDEX_MIN)
+        {
+            RtlpHeapLargeIndexCreate(Heap);
+            Index = RtlpHeapLargeIndex(Heap);
+        }
+        else
+            Index = NULL;
+
+        Heap->NonDedicatedListLength++;
 
         /* Check if we have a hint there */
         if (ListEntry == NULL)
@@ -302,10 +436,32 @@ RtlpInsertFreeBlockHelper(PHEAP Heap,
             Heap->FreeHints[0] = &FreeEntry->FreeList;
             RtlSetBit(&Heap->FreeHintBitmap, 0);
             InsertTailList(&Heap->FreeLists, &FreeEntry->FreeList);
+            if (Index)
+            {
+                Class = RtlpHeapLargeClass(Heap, BlockSize);
+                ASSERT(Index->ClassHints[Class] == NULL);
+                Index->ClassHints[Class] = &FreeEntry->FreeList;
+                Index->ClassBitmap[Class / 32] |= (ULONG)1 << (Class % 32);
+            }
             return;
         }
 
         ASSERT(RtlTestBit(&Heap->FreeHintBitmap, 0));
+
+        /* The block goes in front of the first one that is not smaller. With the index the walk starts at the
+           first block of its class; when the class has none, at the first block of the next class that has one
+           (larger than this one), or at the end of the list */
+        if (Index)
+        {
+            Class = RtlpHeapLargeClass(Heap, BlockSize);
+            ListEntry = Index->ClassHints[Class];
+            if (ListEntry == NULL)
+            {
+                ULONG Next = RtlpHeapLargeFindClass(Index, Class + 1);
+
+                ListEntry = (Next < HEAP_LARGE_CLASSES) ? Index->ClassHints[Next] : &Heap->FreeLists;
+            }
+        }
 
         while (ListEntry != &Heap->FreeLists)
         {
@@ -326,6 +482,14 @@ RtlpInsertFreeBlockHelper(PHEAP Heap,
         /* Update our hint if needed */
         if (Heap->FreeHints[0] == ListEntry)
             Heap->FreeHints[0] = &FreeEntry->FreeList;
+
+        /* The block is the first of its class when the class had none or it went in front of the first one */
+        if (Index &&
+            (Index->ClassHints[Class] == NULL || Index->ClassHints[Class] == ListEntry))
+        {
+            Index->ClassHints[Class] = &FreeEntry->FreeList;
+            Index->ClassBitmap[Class / 32] |= (ULONG)1 << (Class % 32);
+        }
 
         return;
     }
@@ -467,7 +631,36 @@ RtlpRemoveFreeBlock(PHEAP Heap,
 
     /* Remove the free block */
     if (FreeEntry->Size > Heap->DeCommitFreeBlockThreshold)
+    {
+        PHEAP_LARGE_INDEX Index = RtlpHeapLargeIndex(Heap);
+
         HintIndex = 0;
+        ASSERT(Heap->NonDedicatedListLength != 0);
+        Heap->NonDedicatedListLength--;
+
+        /* The first block of a class hands the hint on to the next one, if that is of the class */
+        if (Index)
+        {
+            ULONG Class = RtlpHeapLargeClass(Heap, FreeEntry->Size);
+
+            ASSERT(Index->ClassHints[Class] != NULL);
+            if (Index->ClassHints[Class] == &FreeEntry->FreeList)
+            {
+                PLIST_ENTRY Next = FreeEntry->FreeList.Flink;
+
+                if (Next != &Heap->FreeLists &&
+                    RtlpHeapLargeClass(Heap, CONTAINING_RECORD(Next, HEAP_FREE_ENTRY, FreeList)->Size) == Class)
+                {
+                    Index->ClassHints[Class] = Next;
+                }
+                else
+                {
+                    Index->ClassHints[Class] = NULL;
+                    Index->ClassBitmap[Class / 32] &= ~((ULONG)1 << (Class % 32));
+                }
+            }
+        }
+    }
     else
         HintIndex = FreeEntry->Size - 1;
 
@@ -2067,6 +2260,9 @@ RtlDestroyHeap(HANDLE HeapPtr) /* [in] Handle of heap */
 
     /* Release the front end, if any */
     RtlpHeapFeDestroy(Heap);
+
+    /* And the index of the large free blocks */
+    RtlpHeapLargeIndexDestroy(Heap);
 
     /* Delete the heap lock */
     if (!(Heap->Flags & HEAP_NO_SERIALIZE))
@@ -4215,6 +4411,93 @@ RtlpValidateHeapSegment(
     return TRUE;
 }
 
+/* The large free blocks are the tail of the free list, as many as the heap counts; with the index, the first block of
+   every class is the class's hint, and every class with a hint has a block in the list */
+static
+BOOLEAN
+RtlpValidateHeapLargeIndex(PHEAP Heap)
+{
+    PHEAP_LARGE_INDEX Index = RtlpHeapLargeIndex(Heap);
+    PLIST_ENTRY Current;
+    ULONG Count = 0, Hints = 0, Class, PreviousClass = HEAP_LARGE_CLASSES;
+    BOOLEAN Large = FALSE;
+
+    for (Current = Heap->FreeLists.Flink; Current != &Heap->FreeLists; Current = Current->Flink)
+    {
+        PHEAP_FREE_ENTRY Entry = CONTAINING_RECORD(Current, HEAP_FREE_ENTRY, FreeList);
+
+        if (Entry->Size <= Heap->DeCommitFreeBlockThreshold)
+        {
+            if (Large)
+            {
+                DPRINT1("HEAP: Free entry %p of size %u follows a larger one\n", Entry, Entry->Size);
+                return FALSE;
+            }
+            continue;
+        }
+
+        if (!Large && Heap->FreeHints[0] != Current)
+        {
+            DPRINT1("HEAP: First large free entry %p is not the hint %p\n", Entry, Heap->FreeHints[0]);
+            return FALSE;
+        }
+        Large = TRUE;
+        Count++;
+
+        if (!Index)
+            continue;
+
+        Class = RtlpHeapLargeClass(Heap, Entry->Size);
+        if (Class != PreviousClass)
+        {
+            if (PreviousClass != HEAP_LARGE_CLASSES && Class < PreviousClass)
+            {
+                DPRINT1("HEAP: Large free entry %p of size %u is out of order\n", Entry, Entry->Size);
+                return FALSE;
+            }
+            if (Index->ClassHints[Class] != Current ||
+                !(Index->ClassBitmap[Class / 32] & ((ULONG)1 << (Class % 32))))
+            {
+                DPRINT1("HEAP: Class %lu starts at %p, its hint is %p\n", Class, Entry, Index->ClassHints[Class]);
+                return FALSE;
+            }
+            Hints++;
+            PreviousClass = Class;
+        }
+    }
+
+    if (Count != Heap->NonDedicatedListLength)
+    {
+        DPRINT1("HEAP: %lu large free entries, %lu counted\n", Count, Heap->NonDedicatedListLength);
+        return FALSE;
+    }
+
+    if (Index)
+    {
+        ULONG Set = 0;
+
+        for (Class = 0; Class < HEAP_LARGE_CLASSES; Class++)
+        {
+            BOOLEAN Bit = (Index->ClassBitmap[Class / 32] & ((ULONG)1 << (Class % 32))) != 0;
+
+            if (Bit != (Index->ClassHints[Class] != NULL))
+            {
+                DPRINT1("HEAP: Class %lu: bit %u, hint %p\n", Class, Bit, Index->ClassHints[Class]);
+                return FALSE;
+            }
+            Set += Bit;
+        }
+
+        if (Set != Hints)
+        {
+            DPRINT1("HEAP: %lu classes have a hint, %lu have blocks\n", Set, Hints);
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
 BOOLEAN NTAPI
 RtlpValidateHeap(PHEAP Heap,
                  BOOLEAN ForceValidation)
@@ -4292,6 +4575,10 @@ RtlpValidateHeap(PHEAP Heap,
         /* Add up to the total amount of free entries */
         FreeListEntriesCount++;
     }
+
+    /* Check the count and the index of the large free blocks */
+    if (!RtlpValidateHeapLargeIndex(Heap))
+        return FALSE;
 
     /* Check free list hints */
     for (HintIndex = 0; HintIndex < Heap->DeCommitFreeBlockThreshold; HintIndex++)
