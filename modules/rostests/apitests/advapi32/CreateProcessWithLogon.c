@@ -18,6 +18,7 @@
 #include <lm.h>
 #include <sddl.h>
 #include <ndk/cmfuncs.h>
+#include <ndk/exfuncs.h>
 #include <ndk/obfuncs.h>
 #include <ndk/psfuncs.h>
 
@@ -34,6 +35,16 @@
 #define STEP_HKCUNAME   11  /* HKEY_CURRENT_USER is not \REGISTRY\USER\<own SID> */
 #define STEP_HKCUWRITE  12  /* a key cannot be created under HKEY_CURRENT_USER\Software */
 #define STEP_NAMED      20  /* 20 + n: named object n (see ChildNamed) could not be created */
+#define STEP_LAUNCH     30  /* the launcher could not start its own child */
+#define STEP_RESULT     31  /* the grandchild cannot report through the caller's section and event */
+#define STEP_WSDIR      44  /* the WindowStations directory of the session cannot be opened */
+#define STEP_WSDIRMASK  45  /* ... grants other rights than traverse */
+#define STEP_WSDIREVENT 46  /* ... an event could be created in it */
+#define STEP_WSCREATE   47  /* a named window station could not be created */
+#define STEP_WSEXCLUSIVE 48 /* OBJ_KERNEL_EXCLUSIVE of a program was honoured (its window station cannot be opened) */
+#ifndef OBJ_KERNEL_EXCLUSIVE
+#define OBJ_KERNEL_EXCLUSIVE 0x00010000L /* kernel-mode only (ndk/obtypes.h) */
+#endif
 #define CONSOLE_EXIT    42
 
 static WCHAR TestPassword[] = L"RunAsGui-Test-2026!";
@@ -266,6 +277,252 @@ static DWORD ChildNamed(VOID)
 }
 
 /*
+ * A launcher: the program of the secondary logon starts the real program and exits at once. The real program
+ * (ChildGrand) waits 5 s, then creates its named objects and opens the desktop and makes a window there, and
+ * reports through the caller's section and event (their names carry Tag).
+ */
+static DWORD ChildLaunch(PCSTR Tag)
+{
+    WCHAR Exe[MAX_PATH], Command[MAX_PATH + 128];
+    STARTUPINFOW Si;
+    PROCESS_INFORMATION Pi;
+
+    GetModuleFileNameW(NULL, Exe, RTL_NUMBER_OF(Exe));
+    StringCchPrintfW(Command, RTL_NUMBER_OF(Command), L"\"%ls\" CreateProcessWithLogon child grand %hs", Exe, Tag);
+    ZeroMemory(&Si, sizeof(Si));
+    Si.cb = sizeof(Si);
+    if (!CreateProcessW(NULL, Command, NULL, NULL, FALSE, 0, NULL, NULL, &Si, &Pi))
+        return Fail(STEP_LAUNCH);
+    CloseHandle(Pi.hThread);
+    CloseHandle(Pi.hProcess);
+    return 0;
+}
+
+static DWORD ChildGrand(PCSTR Tag)
+{
+    WCHAR Name[64];
+    HANDLE Section, Event;
+    DWORD *Result, Value;
+
+    Sleep(5000);
+    Value = ChildNamed();
+    if (Value == 0)
+        Value = ChildGui(L"WinSta0", L"Default");
+
+    StringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"rgui-res-%hs", Tag);
+    Section = OpenFileMappingW(FILE_MAP_WRITE, FALSE, Name);
+    StringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"rgui-done-%hs", Tag);
+    Event = OpenEventW(EVENT_MODIFY_STATE, FALSE, Name);
+    if (!Section || !Event)
+        return Fail(STEP_RESULT);
+    Result = MapViewOfFile(Section, FILE_MAP_WRITE, 0, 0, sizeof(DWORD));
+    if (!Result)
+        return Fail(STEP_RESULT);
+    *Result = Value;
+    UnmapViewOfFile(Result);
+    SetEvent(Event);
+    CloseHandle(Event);
+    CloseHandle(Section);
+    return Value;
+}
+
+/*
+ * The WindowStations directory of the program's session gives it what Windows Server 2022 gives a standard user
+ * there (measured: traverse, 0x2): no object of its own can be put into it. A window station is still created
+ * through the window manager, which puts it there (not measured on Windows: no CreateWindowStation on the
+ * reference; ReactOS keeps what programs could do before).
+ */
+static DWORD ChildWinStaDir(VOID)
+{
+    WCHAR Path[80];
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES Attributes;
+    OBJECT_BASIC_INFORMATION Info;
+    HANDLE Directory, Event;
+    HWINSTA WinSta;
+    DWORD Session = 0;
+    NTSTATUS Status;
+
+    ProcessIdToSessionId(GetCurrentProcessId(), &Session);
+    if (Session == 0)
+        return 0;
+    StringCchPrintfW(Path, RTL_NUMBER_OF(Path), L"\\Sessions\\%lu\\Windows\\WindowStations", Session);
+    RtlInitUnicodeString(&Name, Path);
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenDirectoryObject(&Directory, MAXIMUM_ALLOWED, &Attributes);
+    if (!NT_SUCCESS(Status))
+        return (RtlNtStatusToDosError(Status) << 8) | STEP_WSDIR;
+    Status = NtQueryObject(Directory, ObjectBasicInformation, &Info, sizeof(Info), NULL);
+    NtClose(Directory);
+    if (!NT_SUCCESS(Status) || Info.GrantedAccess != DIRECTORY_TRAVERSE)
+        return (Info.GrantedAccess << 8) | STEP_WSDIRMASK;
+
+    StringCchPrintfW(Path, RTL_NUMBER_OF(Path), L"\\Sessions\\%lu\\Windows\\WindowStations\\rgui-ev-%lx",
+                     Session, GetCurrentProcessId());
+    RtlInitUnicodeString(&Name, Path);
+    Status = NtCreateEvent(&Event, EVENT_ALL_ACCESS, &Attributes, NotificationEvent, FALSE);
+    if (NT_SUCCESS(Status))
+    {
+        NtClose(Event);
+        return STEP_WSDIREVENT;
+    }
+    if (Status != STATUS_ACCESS_DENIED)
+        return (RtlNtStatusToDosError(Status) << 8) | STEP_WSDIREVENT;
+
+    if (is_reactos())
+    {
+        StringCchPrintfW(Path, RTL_NUMBER_OF(Path), L"rguiws-%lx", GetCurrentProcessId());
+        WinSta = CreateWindowStationW(Path, 0, WINSTA_ALL_ACCESS, NULL);
+        if (!WinSta)
+            return Fail(STEP_WSCREATE);
+        CloseWindowStation(WinSta);
+
+        /*
+         * The window station is created for the program, not for the kernel: OBJ_KERNEL_EXCLUSIVE, which only kernel
+         * callers may set, is not honoured (else nobody could open the window station from user mode)
+         */
+        {
+            typedef HWINSTA (NTAPI *PNTUSERCREATEWINDOWSTATION)(POBJECT_ATTRIBUTES, ACCESS_MASK, DWORD, DWORD, DWORD,
+                                                                DWORD, DWORD);
+            PNTUSERCREATEWINDOWSTATION pNtUserCreateWindowStation;
+            HWINSTA Open;
+
+            pNtUserCreateWindowStation = (PNTUSERCREATEWINDOWSTATION)
+                GetProcAddress(LoadLibraryW(L"win32u.dll"), "NtUserCreateWindowStation");
+            if (!pNtUserCreateWindowStation)
+                return STEP_WSEXCLUSIVE;
+            StringCchPrintfW(Path, RTL_NUMBER_OF(Path), L"\\Sessions\\%lu\\Windows\\WindowStations\\rguiex-%lx",
+                             Session, GetCurrentProcessId());
+            RtlInitUnicodeString(&Name, Path);
+            InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_EXCLUSIVE, NULL, NULL);
+            WinSta = pNtUserCreateWindowStation(&Attributes, WINSTA_ALL_ACCESS, 0, 0, 0, 0, 0);
+            if (!WinSta)
+                return Fail(STEP_WSEXCLUSIVE);
+            StringCchPrintfW(Path, RTL_NUMBER_OF(Path), L"rguiex-%lx", GetCurrentProcessId());
+            Open = OpenWindowStationW(Path, FALSE, WINSTA_ENUMDESKTOPS);
+            if (!Open)
+            {
+                CloseWindowStation(WinSta);
+                return Fail(STEP_WSEXCLUSIVE);
+            }
+            CloseWindowStation(Open);
+            CloseWindowStation(WinSta);
+        }
+    }
+    return 0;
+}
+
+/*
+ * A copy of the security descriptor (DACL only) of a window station or desktop (User) or of an object of the
+ * object manager, for a byte-for-byte comparison; HeapFree it
+ */
+static PSECURITY_DESCRIPTOR DaclCopy(HANDLE Object, BOOL User, DWORD *Length)
+{
+    SECURITY_INFORMATION Info = DACL_SECURITY_INFORMATION;
+    PSECURITY_DESCRIPTOR Sd;
+    ULONG Needed = 0;
+
+    *Length = 0;
+    if (User)
+        GetUserObjectSecurity(Object, &Info, NULL, 0, &Needed);
+    else
+        NtQuerySecurityObject(Object, Info, NULL, 0, &Needed);
+    if (Needed == 0)
+        return NULL;
+    Sd = HeapAlloc(GetProcessHeap(), 0, Needed);
+    if (Sd == NULL)
+        return NULL;
+    if (User ? !GetUserObjectSecurity(Object, &Info, Sd, Needed, &Needed)
+             : !NT_SUCCESS(NtQuerySecurityObject(Object, Info, Sd, Needed, &Needed)))
+    {
+        HeapFree(GetProcessHeap(), 0, Sd);
+        return NULL;
+    }
+    *Length = Needed;
+    return Sd;
+}
+
+/* The descriptors that a secondary logon changes for a while: the session's named-object directories, the window
+   station and the desktop of the caller */
+#define SNAP_COUNT 4
+typedef struct _SNAPSHOT
+{
+    PSECURITY_DESCRIPTOR Sd[SNAP_COUNT];
+    DWORD Length[SNAP_COUNT];
+} SNAPSHOT;
+
+static VOID TakeSnapshot(SNAPSHOT *Snap, HANDLE hWinSta, HANDLE hDesktop)
+{
+    static const PCWSTR Directories[] = { L"BaseNamedObjects", L"AppContainerNamedObjects" };
+    WCHAR Path[64];
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE Directory;
+    DWORD Session = 0, i;
+
+    ZeroMemory(Snap, sizeof(*Snap));
+    ProcessIdToSessionId(GetCurrentProcessId(), &Session);
+    for (i = 0; i < RTL_NUMBER_OF(Directories); i++)
+    {
+        if (Session)
+            StringCchPrintfW(Path, RTL_NUMBER_OF(Path), L"\\Sessions\\%lu\\%ls", Session, Directories[i]);
+        else
+            StringCchPrintfW(Path, RTL_NUMBER_OF(Path), L"\\%ls", Directories[i]);
+        RtlInitUnicodeString(&Name, Path);
+        InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        if (NT_SUCCESS(NtOpenDirectoryObject(&Directory, READ_CONTROL, &Attributes)))
+        {
+            Snap->Sd[i] = DaclCopy(Directory, FALSE, &Snap->Length[i]);
+            NtClose(Directory);
+        }
+    }
+    Snap->Sd[2] = DaclCopy(hWinSta, TRUE, &Snap->Length[2]);
+    Snap->Sd[3] = DaclCopy(hDesktop, TRUE, &Snap->Length[3]);
+}
+
+static VOID FreeSnapshot(SNAPSHOT *Snap)
+{
+    DWORD i;
+
+    for (i = 0; i < SNAP_COUNT; i++)
+    {
+        if (Snap->Sd[i])
+            HeapFree(GetProcessHeap(), 0, Snap->Sd[i]);
+    }
+}
+
+/* The index of the first descriptor that differs, SNAP_COUNT if all are equal byte for byte */
+static DWORD CompareSnapshots(const SNAPSHOT *A, const SNAPSHOT *B)
+{
+    DWORD i;
+
+    for (i = 0; i < SNAP_COUNT; i++)
+    {
+        if (A->Length[i] != B->Length[i] || (A->Sd[i] && B->Sd[i] && memcmp(A->Sd[i], B->Sd[i], A->Length[i])))
+            return i;
+    }
+    return SNAP_COUNT;
+}
+
+/* Waits up to 20 s for the descriptors to be as in Before again; the index of the first that differs, or SNAP_COUNT */
+static DWORD WaitForSnapshot(const SNAPSHOT *Before, HANDLE hWinSta, HANDLE hDesktop)
+{
+    SNAPSHOT Now;
+    DWORD i, Diff = 0;
+
+    for (i = 0; i < 200; i++)
+    {
+        TakeSnapshot(&Now, hWinSta, hDesktop);
+        Diff = CompareSnapshots(Before, &Now);
+        FreeSnapshot(&Now);
+        if (Diff == SNAP_COUNT)
+            break;
+        Sleep(100);
+    }
+    return Diff;
+}
+
+/*
  * The number of ACEs in the DACL of the named-object directory of the caller's session and the size of that
  * DACL (the size the list was given, used and free), MAXDWORD if unknown
  */
@@ -366,6 +623,7 @@ START_TEST(CreateProcessWithLogon)
     BOOL Started;
     DWORD Exit, Error, WinStaAces, DesktopAces, i, NamespaceAces, NamespaceBytes;
     HANDLE hWinSta, hDesktop;
+    SNAPSHOT Before;
     int argc;
     char **argv;
 
@@ -387,6 +645,12 @@ START_TEST(CreateProcessWithLogon)
             ExitProcess(ChildProfile());
         if (!strcmp(argv[3], "named"))
             ExitProcess(ChildNamed());
+        if (!strcmp(argv[3], "launch") && argc >= 5)
+            ExitProcess(ChildLaunch(argv[4]));
+        if (!strcmp(argv[3], "grand") && argc >= 5)
+            ExitProcess(ChildGrand(argv[4]));
+        if (!strcmp(argv[3], "winstadir"))
+            ExitProcess(ChildWinStaDir());
         ExitProcess(CONSOLE_EXIT);
     }
 
@@ -398,6 +662,61 @@ START_TEST(CreateProcessWithLogon)
     hDesktop = GetThreadDesktop(GetCurrentThreadId());
     WinStaAces = AceCount(hWinSta);
     DesktopAces = AceCount(hDesktop);
+    TakeSnapshot(&Before, hWinSta, hDesktop);
+
+    /*
+     * A launcher: the program starts the real one and exits at once. The real one creates named objects and
+     * opens the desktop 5 s later, when the program that the secondary logon started is long gone (Windows: the
+     * logon carries the caller's logon SID, so nothing ever changes; here the entries of the logon stay until its
+     * last process is gone). Then every descriptor is as it was before, byte for byte.
+     */
+    {
+        SECURITY_ATTRIBUTES Sa;
+        SECURITY_DESCRIPTOR OpenSd;
+        CHAR Tag[16], Mode[32];
+        WCHAR Name[64];
+        HANDLE Section, Done;
+        DWORD *Result, Diff;
+
+        InitializeSecurityDescriptor(&OpenSd, SECURITY_DESCRIPTOR_REVISION);
+        SetSecurityDescriptorDacl(&OpenSd, TRUE, NULL, FALSE);
+        Sa.nLength = sizeof(Sa);
+        Sa.lpSecurityDescriptor = &OpenSd;
+        Sa.bInheritHandle = FALSE;
+        StringCchPrintfA(Tag, RTL_NUMBER_OF(Tag), "%lx", GetCurrentProcessId());
+        StringCchPrintfA(Mode, RTL_NUMBER_OF(Mode), "launch %s", Tag);
+        StringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"rgui-res-%hs", Tag);
+        Section = CreateFileMappingW(INVALID_HANDLE_VALUE, &Sa, PAGE_READWRITE, 0, 4096, Name);
+        StringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"rgui-done-%hs", Tag);
+        Done = CreateEventW(&Sa, TRUE, FALSE, Name);
+        Result = Section ? MapViewOfFile(Section, FILE_MAP_WRITE, 0, 0, sizeof(DWORD)) : NULL;
+        ok(Result != NULL && Done != NULL, "no section or event for the grandchild: %lu\n", GetLastError());
+        if (Result != NULL && Done != NULL)
+        {
+            *Result = MAXDWORD;
+            Exit = RunChild(User, TestPassword, Mode, NULL, &Started, &Error);
+            ok(Started, "CreateProcessWithLogonW (launcher) failed: %lu\n", Error);
+            if (Started)
+            {
+                ok(Exit == 0, "launcher child: step %lu, error %lu (exit 0x%lx)\n", Exit & 0xff, Exit >> 8, Exit);
+                ok(WaitForSingleObject(Done, 30000) == WAIT_OBJECT_0, "the grandchild did not report\n");
+                ok(*Result == 0, "grandchild, 5 s after the launcher exited: step %lu, error %lu (0x%lx)\n",
+                   *Result & 0xff, *Result >> 8, *Result);
+                Diff = WaitForSnapshot(&Before, hWinSta, hDesktop);
+                ok(Diff == SNAP_COUNT, "descriptor %lu (0 BaseNamedObjects, 1 AppContainerNamedObjects, 2 window "
+                   "station, 3 desktop) differs after the launcher's logon ended\n", Diff);
+            }
+        }
+        if (Result) UnmapViewOfFile(Result);
+        if (Section) CloseHandle(Section);
+        if (Done) CloseHandle(Done);
+    }
+
+    /* The program's rights on the WindowStations directory of its session */
+    Exit = RunChild(User, TestPassword, "winstadir", NULL, &Started, &Error);
+    ok(Started, "CreateProcessWithLogonW (winstadir) failed: %lu\n", Error);
+    if (Started)
+        ok(Exit == 0, "WindowStations directory: step %lu, value 0x%lx (exit 0x%lx)\n", Exit & 0xff, Exit >> 8, Exit);
 
     /* A GUI program: no desktop given, the process must land on WinSta0\Default and open a window */
     Exit = RunChild(User, TestPassword, "gui", NULL, &Started, &Error);
@@ -579,24 +898,20 @@ START_TEST(CreateProcessWithLogon)
     ok(!Started, "CreateProcessWithLogonW with a wrong password succeeded\n");
     ok(Error == ERROR_LOGON_FAILURE, "wrong password: error %lu, expected %d\n", Error, ERROR_LOGON_FAILURE);
 
-    /* The logon of the children is taken out of the window station and the desktop again when they have exited
-     * (this is how the service of ReactOS does it, Windows was not measured) */
-    for (i = 0; i < 50; i++)
+    /*
+     * The logon of the children is taken out of the window station, the desktop and the named-object directories
+     * again when it has no process left (this is how the service of ReactOS does it; Windows Server 2022 changes
+     * none of them): every descriptor is as before the first child, byte for byte
+     */
     {
-        if (AceCount(hWinSta) == WinStaAces && AceCount(hDesktop) == DesktopAces)
-            break;
-        Sleep(100);
-    }
-    if (is_reactos())
-    {
+        DWORD Diff = WaitForSnapshot(&Before, hWinSta, hDesktop);
+
+        ok(Diff == SNAP_COUNT, "descriptor %lu (0 BaseNamedObjects, 1 AppContainerNamedObjects, 2 window station, "
+           "3 desktop) differs after all children\n", Diff);
         ok(AceCount(hWinSta) == WinStaAces, "window station DACL: %lu ACEs, was %lu\n", AceCount(hWinSta), WinStaAces);
         ok(AceCount(hDesktop) == DesktopAces, "desktop DACL: %lu ACEs, was %lu\n", AceCount(hDesktop), DesktopAces);
     }
-    else
-    {
-        trace("window station DACL: %lu ACEs, was %lu; desktop DACL: %lu, was %lu\n",
-              AceCount(hWinSta), WinStaAces, AceCount(hDesktop), DesktopAces);
-    }
+    FreeSnapshot(&Before);
 
     NetStatus = NetUserDel(NULL, User);
     ok(NetStatus == NERR_Success, "NetUserDel(%ls) failed: %lu\n", User, NetStatus);
