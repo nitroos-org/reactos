@@ -737,6 +737,7 @@ extern PFN_NUMBER MmSystemPageDirectory[PPE_PER_PAGE];
 extern PMMPTE MmSharedUserDataPte;
 extern LIST_ENTRY MmProcessList;
 extern KEVENT MmZeroingPageEvent;
+extern PFN_NUMBER MiZeroedPageTarget;
 extern BOOLEAN MiFreeListLifo;
 extern ULONG MmSystemPageColor;
 extern ULONG MmProcessColorSeed;

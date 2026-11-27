@@ -20,6 +20,28 @@
 KEVENT MmZeroingPageEvent;
 PKTHREAD MiZeroPageThread;
 
+/*
+ * The thread keeps this many zeroed pages ready, no more: the allocator uses a
+ * zeroed page when there is one and zeroes a free one itself when there is
+ * none, so zeroing every free page ahead only touches memory nobody asked for
+ * yet. In a virtual machine whose memory the host backs on first touch that
+ * was the whole of the guest's RAM, written once after every boot: several
+ * seconds of one processor in the first half minute, during which the
+ * processes of the system ran 3 to 25 times slower. The target is a thirtieth
+ * of the physical memory, from 32 MB to 256 MB.
+ */
+PFN_NUMBER MiZeroedPageTarget;
+#define MI_ZERO_TARGET_MIN_PAGES    (32 * 1024 * 1024 / PAGE_SIZE)
+#define MI_ZERO_TARGET_MAX_PAGES    (256 * 1024 * 1024 / PAGE_SIZE)
+
+/*
+ * Pages zeroed in one step. A step runs at DISPATCH_LEVEL on one processor, and
+ * a thread readied on it meanwhile waits for the end of the step: 32 pages
+ * (128 KB, with the cache flush of each line) took about 340 microseconds.
+ */
+#define MI_ZERO_STEP_PAGES          4
+C_ASSERT(MI_ZERO_STEP_PAGES <= MI_ZERO_PTES);
+
 /* PRIVATE FUNCTIONS **********************************************************/
 
 VOID
@@ -38,7 +60,7 @@ MmZeroPageThread(VOID)
 {
     PKTHREAD Thread = KeGetCurrentThread();
     PVOID StartAddress, EndAddress;
-    PVOID WaitObjects[2];
+    LARGE_INTEGER Timeout;
 
     ASSERT(MiZeroPageThread == NULL);
     MiZeroPageThread = Thread;
@@ -59,22 +81,17 @@ MmZeroPageThread(VOID)
     Thread->BasePriority = 0;
     KeSetPriorityThread(Thread, 0);
 
-    /* Setup the wait objects */
-    WaitObjects[0] = &MmZeroingPageEvent;
-//    WaitObjects[1] = &PoSystemIdleTimer; FIXME: Implement idle timer
+    /* How many zeroed pages to keep ready (see MiZeroedPageTarget) */
+    MiZeroedPageTarget = min(max(MmNumberOfPhysicalPages / 32, MI_ZERO_TARGET_MIN_PAGES),
+                             MI_ZERO_TARGET_MAX_PAGES);
+
+    /* A top up that finds nothing to do waits for a freed page, or for a second */
+    Timeout.QuadPart = -10 * 1000 * 1000;
 
     while (TRUE)
     {
         KIRQL OldIrql;
 
-        KeWaitForMultipleObjects(1, // 2
-                                 WaitObjects,
-                                 WaitAny,
-                                 WrFreePage,
-                                 KernelMode,
-                                 FALSE,
-                                 NULL,
-                                 NULL);
         OldIrql = MiAcquirePfnLock();
 
         while (TRUE)
@@ -87,11 +104,15 @@ MmZeroPageThread(VOID)
             KIRQL ZeroIrql;
 #endif
 
-            while (PageCount < MI_ZERO_PTES)
+            while (PageCount < MI_ZERO_STEP_PAGES)
             {
                 PMMPFN Pfn2;
 
                 if (!MmFreePageListHead.Total)
+                    break;
+
+                /* Enough zeroed pages are ready */
+                if (MmZeroedPageListHead.Total >= MiZeroedPageTarget)
                     break;
 
                 PageIndex = MmFreePageListHead.Flink;
@@ -145,6 +166,15 @@ MmZeroPageThread(VOID)
                 MiInsertPageInList(&MmZeroedPageListHead, PageIndex);
             }
         }
+
+        /* The PFN lock is not held here: wait for a freed page (the event is set only while
+           fewer zeroed pages are ready than the target, see MiInsertPageInFreeList) or for
+           a second, in case the zeroed pages were used up with no page freed since */
+        KeWaitForSingleObject(&MmZeroingPageEvent,
+                              WrFreePage,
+                              KernelMode,
+                              FALSE,
+                              &Timeout);
     }
 }
 

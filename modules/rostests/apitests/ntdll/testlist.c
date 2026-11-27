@@ -307,6 +307,7 @@ extern void func_RtlCreateUserThreadReturn(void);
 extern void func_RtlInitializeContext(void);
 extern void func_RtlWow64GetProcessMachines(void);
 extern void func_ZwQuerySystemInformationEx(void);
+extern void func_ZeroedPageList(void);
 
 const struct test winetest_testlist[] =
 {
@@ -612,6 +613,7 @@ const struct test winetest_testlist[] =
     { "RtlInitializeContext",           func_RtlInitializeContext },
     { "RtlWow64GetProcessMachines",     func_RtlWow64GetProcessMachines },
     { "ZwQuerySystemInformationEx",     func_ZwQuerySystemInformationEx },
+    { "ZeroedPageList",                 func_ZeroedPageList },
 #ifdef _M_IX86
     { "RtlUnwind",                      func_RtlUnwind },
 #endif
