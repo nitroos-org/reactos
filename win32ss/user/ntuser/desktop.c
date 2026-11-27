@@ -584,6 +584,17 @@ IntDesktopObjectDelete(
 
     TRACE("Deleting desktop object 0x%p\n", pdesk);
 
+    /*
+     * A desktop whose create failed before UserInitializeDesktop linked it to its window station (its
+     * security could not be assigned: a label above the creator, an owner it may not assign) is still the
+     * zeroed object of IntDesktopObjectParse: no window station reference, no list entry, no heap, no window
+     */
+    if (pdesk->ListEntry.Flink == NULL)
+    {
+        ASSERT(pdesk->rpwinstaParent == NULL && pdesk->pheapDesktop == NULL);
+        return STATUS_SUCCESS;
+    }
+
     /* Free the desktop window and the message window */
     UserEnterExclusive();
     pdesk->dwDTFlags |= DF_DESTROYED;

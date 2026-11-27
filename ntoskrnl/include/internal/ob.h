@@ -637,6 +637,16 @@ ObpCaptureObjectName(
 
 NTSTATUS
 NTAPI
+ObpAssignSecurity(
+    IN PACCESS_STATE AccessState,
+    IN PSECURITY_DESCRIPTOR SecurityDescriptor,
+    IN PVOID Object,
+    IN POBJECT_TYPE Type,
+    IN KPROCESSOR_MODE RequestorMode
+);
+
+NTSTATUS
+NTAPI
 ObpCaptureObjectCreateInformation(
     IN POBJECT_ATTRIBUTES ObjectAttributes,
     IN KPROCESSOR_MODE AccessMode,

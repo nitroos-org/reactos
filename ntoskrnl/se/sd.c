@@ -1661,6 +1661,7 @@ SeAssignSecurityEx(
 
     PAGED_CODE();
 
+    /* The explicit descriptor is the requestor's: its owner is checked in the mode the request came from */
     return SepAssignSecurity(_ParentDescriptor,
                              _ExplicitDescriptor,
                              NewDescriptor,
@@ -1669,7 +1670,8 @@ SeAssignSecurityEx(
                              AutoInheritFlags,
                              SubjectContext,
                              GenericMapping,
-                             TRUE);
+                             TRUE,
+                             ExGetPreviousMode());
 }
 
 /*
@@ -1720,6 +1722,18 @@ SepAclHasEffectiveLabel(
  * subject is the client token when the creator impersonates, else the
  * primary token. Token, process, thread and job objects have labels of
  * their own (ObAssignSecurity) and are assigned with CreatorLabel FALSE.
+ *
+ * An owner in the explicit descriptor must be one the subject may assign
+ * (SepCheckOwnerSid: its user, a group of it with SE_GROUP_OWNER, or any
+ * SID with SeRestorePrivilege enabled), else STATUS_INVALID_OWNER, when
+ * the request came from user mode (RequestorMode). Measured on Windows
+ * Server 2022 (an elevated administrator with SeRestorePrivilege and
+ * SeTakeOwnershipPrivilege each enabled and not, and a standard user):
+ * events named and unnamed, mutexes, sections, named pipes, files and
+ * directories on NTFS, registry keys and token duplicates are all refused
+ * the same way, ERROR_INVALID_OWNER; SeTakeOwnershipPrivilege does not
+ * help, the primary group is not checked. Kernel-mode requestors and
+ * callers that pass SEF_AVOID_OWNER_CHECK are not checked.
  */
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSTATUS
@@ -1733,7 +1747,8 @@ SepAssignSecurity(
     _In_ ULONG AutoInheritFlags,
     _In_ PSECURITY_SUBJECT_CONTEXT SubjectContext,
     _In_ PGENERIC_MAPPING GenericMapping,
-    _In_ BOOLEAN CreatorLabel)
+    _In_ BOOLEAN CreatorLabel,
+    _In_ KPROCESSOR_MODE RequestorMode)
 {
     PISECURITY_DESCRIPTOR ParentDescriptor = _ParentDescriptor;
     PISECURITY_DESCRIPTOR ExplicitDescriptor = _ExplicitDescriptor;
@@ -1777,6 +1792,20 @@ SepAssignSecurity(
     if (!ARGUMENT_PRESENT(SubjectContext))
     {
         return STATUS_NO_TOKEN;
+    }
+
+    /* An owner the requestor names must be one it may assign (see the remarks) */
+    if (ExplicitDescriptor != NULL && RequestorMode != KernelMode &&
+        !(AutoInheritFlags & SEF_AVOID_OWNER_CHECK))
+    {
+        Owner = SepGetOwnerFromDescriptor(ExplicitDescriptor);
+        if (Owner != NULL)
+        {
+            Status = SepCheckOwnerSid(Owner, SubjectContext, RequestorMode);
+            if (!NT_SUCCESS(Status))
+                return Status;
+            Owner = NULL;
+        }
     }
 
     /* Lock subject context */
@@ -2213,7 +2242,9 @@ SepCheckCreatorDescriptor(
  * or one of its groups that has SE_GROUP_OWNER (not a deny-only one), or any
  * SID with SeRestorePrivilege enabled. SeTakeOwnershipPrivilege does not
  * help (it opens for WRITE_OWNER; it does not choose the owner). The primary
- * group is not checked. Kernel-mode callers are not checked.
+ * group is not checked. Kernel-mode callers are not checked. Windows Server
+ * 2022 decides it the same way for every object type it was measured with,
+ * on create and on set (see SepAssignSecurity).
  *
  * @param[in] Owner
  * The owner to be set (captured).

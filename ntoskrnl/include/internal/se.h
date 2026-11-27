@@ -562,7 +562,8 @@ SepAssignSecurity(
     _In_ ULONG AutoInheritFlags,
     _In_ PSECURITY_SUBJECT_CONTEXT SubjectContext,
     _In_ PGENERIC_MAPPING GenericMapping,
-    _In_ BOOLEAN CreatorLabel);
+    _In_ BOOLEAN CreatorLabel,
+    _In_ KPROCESSOR_MODE RequestorMode);
 
 NTSTATUS
 NTAPI

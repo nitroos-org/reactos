@@ -553,7 +553,9 @@ ObCheckObjectAccess(IN PVOID Object,
 *
 * @return STATUS_SUCCESS or appropriate error value.
 *
-* @remarks None.
+* @remarks The owner in the access state's descriptor is checked against
+*          the subject when the request came from user mode (see
+*          ObpAssignSecurity).
 *
 *--*/
 NTSTATUS
@@ -562,6 +564,32 @@ ObAssignSecurity(IN PACCESS_STATE AccessState,
                  IN PSECURITY_DESCRIPTOR SecurityDescriptor,
                  IN PVOID Object,
                  IN POBJECT_TYPE Type)
+{
+    PAGED_CODE();
+
+    return ObpAssignSecurity(AccessState,
+                             SecurityDescriptor,
+                             Object,
+                             Type,
+                             ExGetPreviousMode());
+}
+
+/*
+ * ObAssignSecurity for a new object whose creator's descriptor was captured
+ * in RequestorMode (ObInsertObject passes the probe mode of the create): an
+ * owner in a descriptor that came from user mode must be one the subject may
+ * assign (SepAssignSecurity), whatever the object type. A descriptor that a
+ * kernel component built itself (captured in kernel mode) is not checked,
+ * also when the component runs in a user thread (the copy of a token for a
+ * new process carries the token's own owner, not its creator's).
+ */
+NTSTATUS
+NTAPI
+ObpAssignSecurity(IN PACCESS_STATE AccessState,
+                  IN PSECURITY_DESCRIPTOR SecurityDescriptor,
+                  IN PVOID Object,
+                  IN POBJECT_TYPE Type,
+                  IN KPROCESSOR_MODE RequestorMode)
 {
     PSECURITY_DESCRIPTOR NewDescriptor;
     NTSTATUS Status;
@@ -611,7 +639,8 @@ ObAssignSecurity(IN PACCESS_STATE AccessState,
                                &Type->TypeInfo.GenericMapping,
                                !(Type == SeTokenObjectType ||
                                  Type == PsProcessType ||
-                                 Type == PsThreadType));
+                                 Type == PsThreadType),
+                               RequestorMode);
     if (!NT_SUCCESS(Status)) return Status;
 
     /*
@@ -1088,10 +1117,42 @@ NtSetSecurityObject(IN HANDLE Handle,
         }
         else
         {
+            /*
+             * An object of the default security method that was created without
+             * a descriptor (an unnamed event) has none to change: Windows Server
+             * 2022 fails the set with ERROR_NO_SECURITY_ON_OBJECT before it looks
+             * at the label or the owner (measured). The checks below come after.
+             */
+            POBJECT_HEADER Header = OBJECT_TO_OBJECT_HEADER(Object);
+            BOOLEAN NoSecurity =
+                (Header->Type->TypeInfo.SecurityProcedure == SeDefaultObjectMethod) &&
+                (ExGetObjectFastReference(*(PEX_FAST_REF)&Header->SecurityDescriptor) == NULL);
+
             /* A mandatory label above the caller's own level needs SeRelabelPrivilege */
             Status = STATUS_SUCCESS;
-            if (SecurityInformation & LABEL_SECURITY_INFORMATION)
+            if ((SecurityInformation & LABEL_SECURITY_INFORMATION) && !NoSecurity)
                 Status = SeCheckLabelChange(CapturedDescriptor, PreviousMode);
+
+            /*
+             * The new owner must be one the caller may assign, for every object
+             * type: its user, a group of it with SE_GROUP_OWNER, or any SID with
+             * SeRestorePrivilege enabled (SepCheckOwnerSid). Measured on Windows
+             * Server 2022 with SetKernelObjectSecurity on events, mutexes,
+             * sections, named pipes, NTFS files and directories, registry keys
+             * and tokens: ERROR_INVALID_OWNER otherwise, WRITE_OWNER and
+             * SeTakeOwnershipPrivilege do not help; the group is not checked.
+             */
+            if (NT_SUCCESS(Status) && (SecurityInformation & OWNER_SECURITY_INFORMATION) &&
+                PreviousMode != KernelMode && !NoSecurity)
+            {
+                SECURITY_SUBJECT_CONTEXT SubjectContext;
+
+                SeCaptureSubjectContext(&SubjectContext);
+                Status = SepCheckOwnerSid((PSID)((PUCHAR)CapturedDescriptor + CapturedDescriptor->Owner),
+                                          &SubjectContext,
+                                          PreviousMode);
+                SeReleaseSubjectContext(&SubjectContext);
+            }
 
             /* Set security */
             if (NT_SUCCESS(Status))
