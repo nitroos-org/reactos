@@ -2882,6 +2882,25 @@ IntCalcWallpaperCoordinates(
     *pptDst = ptDst;
 }
 
+/*
+ * Deletes a wallpaper bitmap. The wallpaper bitmaps are public (no process owns them, so none can delete them
+ * through the handle); the object goes when the current process has taken it over.
+ */
+VOID
+IntDeleteWallpaperBitmap(
+    _In_opt_ HBITMAP hBitmap)
+{
+    if (!hBitmap)
+        return;
+    GreSetObjectOwner(hBitmap, GDI_OBJ_HMGR_POWNED);
+    if (!GreDeleteObject(hBitmap))
+        ERR("Cannot delete the wallpaper bitmap %p\n", hBitmap);
+}
+
+/*
+ * A copy of the wallpaper hBitmap stretched to the size of the desktop window, public. hBitmap is used up in
+ * every case: it is deleted, also when no copy could be made (then NULL is returned).
+ */
 HBITMAP
 IntStretchWallpaper(
     _In_ PWND pwndDesktop,
@@ -2931,12 +2950,14 @@ IntStretchWallpaper(
             NtGdiSelectBitmap(hSystemBM, hOldBitmap1);
             NtGdiSelectBitmap(hWallpaperDC, hOldBitmap2);
             NtGdiDeleteObjectApp(hWallpaperDC);
-            NtGdiDeleteObjectApp(hBitmap);
+            /* The source is public: NtGdiDeleteObjectApp would refuse it and leave it behind */
+            IntDeleteWallpaperBitmap(hBitmap);
             GreSetBitmapOwner(hNewBitmap, GDI_OBJ_HMGR_PUBLIC);
             return hNewBitmap;
         }
         NtGdiDeleteObjectApp(hWallpaperDC);
     }
+    IntDeleteWallpaperBitmap(hBitmap);
     return NULL;
 }
 

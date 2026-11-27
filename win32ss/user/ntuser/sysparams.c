@@ -265,6 +265,12 @@ SpiUpdatePerUserSystemParameters(VOID)
 
     TRACE("Enter SpiUpdatePerUserSystemParameters\n");
 
+    /*
+     * The wallpaper of the previous user goes with the values (the next logon sets its own): the bitmap is public,
+     * nothing else would ever delete it once its handle is cleared below.
+     */
+    IntDeleteWallpaperBitmap(gspv.hbmWallpaper);
+
     /* Clear the structure */
     RtlZeroMemory(&gspv, sizeof(gspv));
 
@@ -810,12 +816,8 @@ SpiSetWallpaper(PVOID pvParam, FLONG fl)
 
     /* Take care of the old wallpaper, if any */
     hOldBitmap = gspv.hbmWallpaper;
-    if(hOldBitmap != NULL)
-    {
-        /* Delete the old wallpaper */
-        GreSetObjectOwner(hOldBitmap, GDI_OBJ_HMGR_POWNED);
-        GreDeleteObject(hOldBitmap);
-    }
+    gspv.hbmWallpaper = NULL;
+    IntDeleteWallpaperBitmap(hOldBitmap);
 
     /* Set the new wallpaper */
     if (gspv.WallpaperMode == wmStretch ||

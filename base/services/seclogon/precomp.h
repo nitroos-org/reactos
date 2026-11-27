@@ -48,6 +48,22 @@ VOID
 SeclRevokeDesktopAccess(
     _In_opt_ SECL_DESKTOP_ACCESS *Access);
 
+/* namespace.c */
+typedef struct _SECL_NAMESPACE_ACCESS SECL_NAMESPACE_ACCESS;
+
+VOID
+SeclInitNamespaceAccess(VOID);
+
+DWORD
+SeclGrantNamespaceAccess(
+    _In_ HANDLE hToken,
+    _In_ DWORD SessionId,
+    _Out_ SECL_NAMESPACE_ACCESS **ppAccess);
+
+VOID
+SeclRevokeNamespaceAccess(
+    _In_opt_ SECL_NAMESPACE_ACCESS *Access);
+
 DWORD
 StartRpcServer(VOID);
 

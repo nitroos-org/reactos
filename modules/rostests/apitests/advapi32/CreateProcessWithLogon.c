@@ -18,6 +18,7 @@
 #include <lm.h>
 #include <sddl.h>
 #include <ndk/cmfuncs.h>
+#include <ndk/obfuncs.h>
 #include <ndk/psfuncs.h>
 
 #define STEP_WINSTA     1   /* no window station                */
@@ -32,6 +33,7 @@
 #define STEP_HKCU       10  /* RegOpenCurrentUser failed */
 #define STEP_HKCUNAME   11  /* HKEY_CURRENT_USER is not \REGISTRY\USER\<own SID> */
 #define STEP_HKCUWRITE  12  /* a key cannot be created under HKEY_CURRENT_USER\Software */
+#define STEP_NAMED      20  /* 20 + n: named object n (see ChildNamed) could not be created */
 #define CONSOLE_EXIT    42
 
 static WCHAR TestPassword[] = L"RunAsGui-Test-2026!";
@@ -227,6 +229,81 @@ static DWORD ChildProfile(VOID)
 }
 
 /* The string SID of a local account, LocalFree it */
+/*
+ * The program of the secondary logon creates named objects in the namespace of its session: an event, a mutex
+ * and a section with a plain and with a Local\ name, and an event with a Global\ name (measured on Windows
+ * Server 2022: all succeed for a standard user started by a standard user; a Global\ section needs
+ * SeCreateGlobalPrivilege and is not tried)
+ */
+static DWORD ChildNamed(VOID)
+{
+    static const PCWSTR Prefixes[] = { L"", L"Local\\" };
+    WCHAR Name[64];
+    HANDLE Objects[7] = { NULL };
+    DWORD i, n = 0, Result = 0;
+
+    for (i = 0; i < RTL_NUMBER_OF(Prefixes) && !Result; i++)
+    {
+        StringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"%lsrgui-ev-%lx", Prefixes[i], GetCurrentProcessId());
+        if (!(Objects[n++] = CreateEventW(NULL, TRUE, FALSE, Name)))
+            Result = Fail(STEP_NAMED + n);
+        StringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"%lsrgui-mx-%lx", Prefixes[i], GetCurrentProcessId());
+        if (!Result && !(Objects[n++] = CreateMutexW(NULL, FALSE, Name)))
+            Result = Fail(STEP_NAMED + n);
+        StringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"%lsrgui-sc-%lx", Prefixes[i], GetCurrentProcessId());
+        if (!Result && !(Objects[n++] = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 4096, Name)))
+            Result = Fail(STEP_NAMED + n);
+    }
+    StringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"Global\\rgui-ev-%lx", GetCurrentProcessId());
+    if (!Result && !(Objects[n++] = CreateEventW(NULL, TRUE, FALSE, Name)))
+        Result = Fail(STEP_NAMED + n);
+    for (i = 0; i < n; i++)
+    {
+        if (Objects[i])
+            CloseHandle(Objects[i]);
+    }
+    return Result;
+}
+
+/*
+ * The number of ACEs in the DACL of the named-object directory of the caller's session and the size of that
+ * DACL (the size the list was given, used and free), MAXDWORD if unknown
+ */
+static DWORD NamespaceAceCount(DWORD *AclBytes)
+{
+    WCHAR Path[64];
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE Directory;
+    UCHAR Buffer[4096];
+    PSECURITY_DESCRIPTOR Sd = (PSECURITY_DESCRIPTOR)Buffer;
+    ACL_SIZE_INFORMATION Size;
+    PACL Dacl;
+    BOOL Present, Defaulted;
+    DWORD Session = 0, Count = MAXDWORD;
+    ULONG Length;
+
+    *AclBytes = MAXDWORD;
+    ProcessIdToSessionId(GetCurrentProcessId(), &Session);
+    if (Session)
+        StringCchPrintfW(Path, RTL_NUMBER_OF(Path), L"\\Sessions\\%lu\\BaseNamedObjects", Session);
+    else
+        StringCchCopyW(Path, RTL_NUMBER_OF(Path), L"\\BaseNamedObjects");
+    RtlInitUnicodeString(&Name, Path);
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenDirectoryObject(&Directory, READ_CONTROL, &Attributes)))
+        return MAXDWORD;
+    if (NT_SUCCESS(NtQuerySecurityObject(Directory, DACL_SECURITY_INFORMATION, Sd, sizeof(Buffer), &Length)) &&
+        GetSecurityDescriptorDacl(Sd, &Present, &Dacl, &Defaulted) && Present && Dacl != NULL &&
+        GetAclInformation(Dacl, &Size, sizeof(Size), AclSizeInformation))
+    {
+        Count = Size.AceCount;
+        *AclBytes = Size.AclBytesInUse + Size.AclBytesFree;
+    }
+    NtClose(Directory);
+    return Count;
+}
+
 static PWSTR AccountSidString(PCWSTR Account)
 {
     BYTE SidBuffer[SECURITY_MAX_SID_SIZE];
@@ -287,7 +364,7 @@ START_TEST(CreateProcessWithLogon)
     static WCHAR User[32];
     NET_API_STATUS NetStatus;
     BOOL Started;
-    DWORD Exit, Error, WinStaAces, DesktopAces, i;
+    DWORD Exit, Error, WinStaAces, DesktopAces, i, NamespaceAces, NamespaceBytes;
     HANDLE hWinSta, hDesktop;
     int argc;
     char **argv;
@@ -308,11 +385,14 @@ START_TEST(CreateProcessWithLogon)
         }
         if (!strcmp(argv[3], "profile"))
             ExitProcess(ChildProfile());
+        if (!strcmp(argv[3], "named"))
+            ExitProcess(ChildNamed());
         ExitProcess(CONSOLE_EXIT);
     }
 
     if (!CreateTestUser(User, RTL_NUMBER_OF(User)))
         return;
+    NamespaceAces = NamespaceAceCount(&NamespaceBytes);
 
     hWinSta = GetProcessWindowStation();
     hDesktop = GetThreadDesktop(GetCurrentThreadId());
@@ -380,6 +460,33 @@ START_TEST(CreateProcessWithLogon)
     ok(Started, "CreateProcessWithLogonW (console) failed: %lu\n", Error);
     if (Started)
         ok(Exit == CONSOLE_EXIT, "console child: exit code %lu\n", Exit);
+
+    /*
+     * The program creates named objects in its session's namespace (single-instance checks, shared memory);
+     * once it and the programs before it have exited the directory has the DACL it had before the first one,
+     * also in size (Windows Server 2022: its DACL never changes; here the entry each program got is taken out
+     * again when it has exited, which may come a moment after the exit)
+     */
+    {
+        DWORD Now = MAXDWORD, Bytes = MAXDWORD;
+
+        Exit = RunChild(User, TestPassword, "named", NULL, &Started, &Error);
+        ok(Started, "CreateProcessWithLogonW (named) failed: %lu\n", Error);
+        if (Started)
+            ok(Exit == 0, "named-object child: object %lu, error %lu (exit 0x%lx)\n",
+               (Exit & 0xff) - STEP_NAMED, Exit >> 8, Exit);
+        for (i = 0; i < 50; i++)
+        {
+            Now = NamespaceAceCount(&Bytes);
+            if (Now == NamespaceAces && Bytes == NamespaceBytes)
+                break;
+            Sleep(100);
+        }
+        ok(Now == NamespaceAces, "named-object directory DACL: %lu ACEs after the children, %lu before\n",
+           Now, NamespaceAces);
+        ok(Bytes == NamespaceBytes, "named-object directory DACL: %lu bytes after the children, %lu before\n",
+           Bytes, NamespaceBytes);
+    }
 
     /*
      * LOGON_WITH_PROFILE (runas' default): the child runs with its own hive loaded as HKEY_CURRENT_USER

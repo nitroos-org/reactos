@@ -5,6 +5,7 @@ spec2def(seclogon.dll seclogon.spec ADD_IMPORTLIB)
 
 list(APPEND SOURCE
     desktop.c
+    namespace.c
     rpcserver.c
     seclogon.c
     precomp.h)
