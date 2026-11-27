@@ -39,7 +39,7 @@ static HANDLE GetThreadHandles[SMBENG_MAX_GET_THREADS];
 static DWORD GetThreadCount;
 static HANDLE LogFile = INVALID_HANDLE_VALUE;
 
-/* Debug output, and the log file of Parameters\LogFile when one is set (tests) */
+/* Debug output (levels above 0 and the log file of Parameters\LogFile only in checked builds) */
 VOID
 SmbEngLog(DWORD Level, const char *Format, ...)
 {
@@ -94,7 +94,11 @@ ReadConfig(VOID)
     HKEY Key = NULL;
 
     RegOpenKeyExW(HKEY_LOCAL_MACHINE, SMBENG_PARAMETERS_KEY, 0, KEY_QUERY_VALUE, &Key);
+#if DBG
     SmbEngConfig.DebugLevel = ReadDword(Key, L"DebugLevel", 0, 0, 2);
+#else
+    SmbEngConfig.DebugLevel = 0;
+#endif
     SmbEngConfig.IdleSeconds = ReadDword(Key, L"IdleSeconds", 600, 5, 86400);
     /* below the driver's own limit (NITRO_SMBRDR_REQUEST_TIMEOUT_SECONDS), so that a
      * stuck server ends as our timeout, with the connection dropped, not the driver's */
@@ -104,13 +108,19 @@ ReadConfig(VOID)
     SmbEngConfig.MaxConnections = ReadDword(Key, L"MaxConnections", 256, 1, 4096);
     SmbEngConfig.MaxConnectionsPerLogon = ReadDword(Key, L"MaxConnectionsPerLogon", 64, 1, 4096);
     SmbEngConfig.StatsSeconds = ReadDword(Key, L"StatsSeconds", 300, 0, 86400);
+#if DBG
+    /* Tests, checked builds only: restrict the negotiation to one dialect */
     SmbEngConfig.Dialect = ReadDword(Key, L"Dialect", 0, 0, 0x311);
+#else
+    SmbEngConfig.Dialect = 0;
+#endif
     if (Key != NULL)
     {
+#if DBG
         WCHAR Path[MAX_PATH];
         DWORD Size = sizeof(Path) - sizeof(WCHAR), Type;
 
-        /* Tests: a file the log is appended to (no secrets are logged at any level) */
+        /* Tests, checked builds only: a file the log is appended to (no secrets are logged at any level) */
         if (RegQueryValueExW(Key, L"LogFile", NULL, &Type, (LPBYTE)Path, &Size) == ERROR_SUCCESS &&
             Type == REG_SZ && Size >= 2 * sizeof(WCHAR))
         {
@@ -118,6 +128,7 @@ ReadConfig(VOID)
             LogFile = CreateFileW(Path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                                   OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         }
+#endif
         RegCloseKey(Key);
     }
 }

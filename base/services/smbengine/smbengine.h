@@ -56,14 +56,14 @@
 
 typedef struct _SMBENG_CONFIG
 {
-    DWORD DebugLevel;           /* 0 errors, 1 connections, 2 every request (no data, no secrets) */
+    DWORD DebugLevel;           /* 0 errors, 1 connections, 2 every request (no data, no secrets); 0 in free builds */
     DWORD IdleSeconds;          /* a connection without open files and without requests is closed after this */
     DWORD RequestTimeoutSeconds;/* libsmb2 per-request limit, below the driver's */
     DWORD GetThreads;           /* threads waiting for requests of the driver */
     DWORD MaxConnections;       /* (logon id, server, share) keys at a time */
     DWORD MaxConnectionsPerLogon; /* of those, for one logon session (one user cannot take them all) */
     DWORD StatsSeconds;         /* period of the statistics line (DebugLevel >= 1), 0 = off */
-    DWORD Dialect;              /* 0 = negotiate 2.0.2..3.1.1; 0x210, 0x300, 0x302, 0x311 = only that one (tests) */
+    DWORD Dialect;              /* 0 = negotiate 2.0.2..3.1.1; 0x210, 0x300, 0x302, 0x311 = only that one (tests; 0 in free builds) */
 } SMBENG_CONFIG;
 
 extern SMBENG_CONFIG SmbEngConfig;
