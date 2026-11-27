@@ -38,7 +38,15 @@ typedef struct _GUI_INIT_INFO
     GUI_CONSOLE_INFO TermInfo;
 } GUI_INIT_INFO, *PGUI_INIT_INFO;
 
-static BOOL ConsInitialized = FALSE;
+/*
+ * The one-time initialization (the window class, the font cache) runs under
+ * ConsInitLock. Two programs that allocate their first console at the same
+ * moment are served by two CSR threads: without the lock both see
+ * ConsInitialized == FALSE, the second registration of the window class fails,
+ * and that program ends with c0000142 (the console it needs is not created).
+ */
+static volatile LONG ConsInitialized = FALSE;
+static RTL_SRWLOCK ConsInitLock = RTL_SRWLOCK_INIT;
 
 /*
  * Console input threads, one per desktop (identified by window station and
@@ -709,13 +717,22 @@ GuiInit(IN PCONSOLE_INIT_INFO ConsoleInitInfo,
     /* Perform one-time initialization */
     if (!ConsInitialized)
     {
-        /* Initialize and register the console window class */
-        if (!RegisterConWndClass(ConSrvDllInstance)) return FALSE;
+        RtlAcquireSRWLockExclusive(&ConsInitLock);
+        if (!ConsInitialized)
+        {
+            /* Initialize and register the console window class */
+            if (!RegisterConWndClass(ConSrvDllInstance))
+            {
+                RtlReleaseSRWLockExclusive(&ConsInitLock);
+                return FALSE;
+            }
 
-        /* Initialize the font support -- additional TrueType font cache */
-        InitTTFontCache();
+            /* Initialize the font support -- additional TrueType font cache */
+            InitTTFontCache();
 
-        ConsInitialized = TRUE;
+            InterlockedExchange(&ConsInitialized, TRUE);
+        }
+        RtlReleaseSRWLockExclusive(&ConsInitLock);
     }
 
     /*
