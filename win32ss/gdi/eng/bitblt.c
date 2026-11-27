@@ -865,6 +865,74 @@ IsBgrTrueColorSurface(SURFOBJ *psoDest, XLATEOBJ *pxloRGB2Dest)
     return XLATEOBJ_iXlate(pxloRGB2Dest, RGB(0x12, 0x34, 0x56)) == 0x00123456;
 }
 
+#if defined(_M_AMD64)
+#include <emmintrin.h>
+
+/*
+ * ClearType masks blended onto 32 bpp B, G, R, X pixels four pixels at a time, in the 16-bit lanes of SSE2 (always
+ * there on amd64). Each colour byte becomes BLEND_CHANNEL(byte, colour, coverage) exactly as in the loop of
+ * LcdBltMask: every intermediate value fits a lane (byte * (255 - a) + colour * a + 128 <= 65153, plus its high byte
+ * <= 65407). That loop skips a pixel without coverage and writes the colour where all three coverages are full;
+ * BLEND_CHANNEL gives the same there (it is x / 255 rounded, for x = byte * 255 or colour * 255), so blending every
+ * byte of a group of four writes the same bytes. The X byte gets coverage 0 and keeps its value.
+ */
+static __inline __m128i
+LcdBlendLanes(__m128i Dst, __m128i Cov, __m128i Colour)
+{
+    __m128i t = _mm_add_epi16(_mm_mullo_epi16(Dst, _mm_sub_epi16(_mm_set1_epi16(255), Cov)),
+                              _mm_mullo_epi16(Colour, Cov));
+    t = _mm_add_epi16(t, _mm_set1_epi16(128));
+    return _mm_srli_epi16(_mm_add_epi16(t, _mm_srli_epi16(t, 8)), 8);
+}
+
+/* The colour 0x00RRGGBB in the lanes of two pixels: B, G, R, 0, B, G, R, 0 */
+static __inline __m128i
+LcdColourLanes(ULONG Colour)
+{
+    short b = (short)(Colour & 0xff), g = (short)((Colour >> 8) & 0xff), r = (short)((Colour >> 16) & 0xff);
+    return _mm_set_epi16(0, r, g, b, 0, r, g, b);
+}
+
+/* The groups of four pixels of a row of a ClearType mask (three bytes per pixel, bIdx the one for blue): returns how
+ * many pixels were done; the caller's loop does the rest of the row */
+static __inline LONG
+LcdBlendRow32Sse2(BYTE *pd, const BYTE *lMask, LONG dx, int bIdx, __m128i Colour)
+{
+    const __m128i Zero = _mm_setzero_si128();
+    LONG i;
+    ULONG c0, c1, c2, c3;
+
+    for (i = 0; i + 4 <= dx; i += 4, lMask += 12, pd += 16)
+    {
+        __m128i Cov, Dst;
+
+        if (bIdx == 0)
+        {
+            c0 = lMask[0] | (lMask[1] << 8) | (lMask[2] << 16);
+            c1 = lMask[3] | (lMask[4] << 8) | (lMask[5] << 16);
+            c2 = lMask[6] | (lMask[7] << 8) | (lMask[8] << 16);
+            c3 = lMask[9] | (lMask[10] << 8) | (lMask[11] << 16);
+        }
+        else
+        {
+            c0 = lMask[2] | (lMask[1] << 8) | (lMask[0] << 16);
+            c1 = lMask[5] | (lMask[4] << 8) | (lMask[3] << 16);
+            c2 = lMask[8] | (lMask[7] << 8) | (lMask[6] << 16);
+            c3 = lMask[11] | (lMask[10] << 8) | (lMask[9] << 16);
+        }
+        if ((c0 | c1 | c2 | c3) == 0)
+            continue;
+
+        Cov = _mm_set_epi32((int)c3, (int)c2, (int)c1, (int)c0);
+        Dst = _mm_loadu_si128((const __m128i *)pd);
+        _mm_storeu_si128((__m128i *)pd,
+                         _mm_packus_epi16(LcdBlendLanes(_mm_unpacklo_epi8(Dst, Zero), _mm_unpacklo_epi8(Cov, Zero), Colour),
+                                          LcdBlendLanes(_mm_unpackhi_epi8(Dst, Zero), _mm_unpackhi_epi8(Cov, Zero), Colour)));
+    }
+    return i;
+}
+#endif
+
 /* renders a ClearType mask: three coverage bytes per pixel, one for each colour channel */
 static BOOLEAN APIENTRY
 LcdBltMask(SURFOBJ* psoDest,
@@ -880,6 +948,9 @@ LcdBltMask(SURFOBJ* psoDest,
     int r, g, b, rIdx, bIdx;
     const BYTE *tMask, *lMask;
     BOOLEAN bFast;
+#if defined(_M_AMD64)
+    __m128i Colour;
+#endif
 
     dx = prclDest->right  - prclDest->left;
     dy = prclDest->bottom - prclDest->top;
@@ -908,12 +979,24 @@ LcdBltMask(SURFOBJ* psoDest,
         r = (BrushColor >> 16) & 0xff;
         g = (BrushColor >> 8) & 0xff;
         b = BrushColor & 0xff;
+#if defined(_M_AMD64)
+        Colour = LcdColourLanes(BrushColor);
+#endif
 
         for (j = 0; j < dy; j++)
         {
             BYTE *pd = tDest;
             lMask = tMask;
-            for (i = 0; i < dx; i++, lMask += 3, pd += cbPixel)
+            i = 0;
+#if defined(_M_AMD64)
+            if (cbPixel == 4)
+            {
+                i = LcdBlendRow32Sse2(pd, lMask, dx, bIdx, Colour);
+                lMask += 3 * i;
+                pd += 4 * i;
+            }
+#endif
+            for (; i < dx; i++, lMask += 3, pd += cbPixel)
             {
                 int ar = lMask[rIdx], ag = lMask[1], ab = lMask[bIdx];
 

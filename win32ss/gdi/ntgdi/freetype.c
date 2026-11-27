@@ -247,15 +247,22 @@ do { \
     ExReleaseFastMutexUnsafeAndLeaveCriticalRegion(g_FreeTypeLock); \
 } while(0)
 
-#define MAX_FONT_CACHE 256
+/* The glyph bitmap cache keeps at most MAX_FONT_CACHE glyphs and MAX_FONT_CACHE_BYTES of them (entries and bitmaps),
+ * whichever limit is reached first; the least recently used glyphs go first. With room for 256 glyphs only, a few
+ * fonts in a few sizes (four fonts drawing 80 different characters each) did not fit, and every glyph of every call
+ * was loaded and rendered again: 80 characters of text took 2 ms instead of 20 us. The byte limit also bounds what
+ * large glyphs can hold, which the count alone did not. */
+#define MAX_FONT_CACHE 4096
+#define MAX_FONT_CACHE_BYTES (4 * 1024 * 1024)
 
 static RTL_STATIC_LIST_HEAD(g_FontCacheListHead);
 static UINT g_FontCacheNumEntries;
+static SIZE_T g_FontCacheNumBytes;
 
 /* The list above keeps the entries in the order of their last use (the last one is dropped when the cache is
  * full). A lookup that walked it compared every entry in front of the match, and a text that cycles through
  * many glyphs always matched deep in the list, so the entries are also chained by hash. */
-#define FONT_CACHE_BUCKETS 256
+#define FONT_CACHE_BUCKETS 1024
 static PFONT_CACHE_ENTRY g_FontCacheBuckets[FONT_CACHE_BUCKETS];
 #define FONT_CACHE_BUCKET(dwHash) (((dwHash) ^ ((dwHash) >> 8) ^ ((dwHash) >> 16)) % FONT_CACHE_BUCKETS)
 
@@ -309,6 +316,21 @@ typedef struct _ABC_CACHE_ENTRY
     INT adv;
 } ABC_CACHE_ENTRY;
 static ABC_CACHE_ENTRY g_AbcCache[ABC_CACHE_SLOTS];
+
+/* The size request last made of a face. Text output and measuring request the size of their font on every call,
+ * and FreeType carries out every request, the same one too: it computes the scaled metrics again and drops the
+ * face's hinting state, so that the next glyph load runs the TrueType prep program again. A request that is the
+ * one the face had last is skipped (IntRequestFaceSize). Direct mapped by face; the FreeType lock protects it; the
+ * entry of a face is dropped with its other caches. */
+#define SIZE_REQUEST_CACHE_SLOTS 64
+typedef struct _SIZE_REQUEST_ENTRY
+{
+    FT_Face Face;               /* NULL: empty */
+    FT_Size Size;               /* the face's active size object, which holds the result */
+    FT_Size_RequestRec Request;
+} SIZE_REQUEST_ENTRY;
+static SIZE_REQUEST_ENTRY g_SizeRequestCache[SIZE_REQUEST_CACHE_SLOTS];
+#define SIZE_REQUEST_SLOT(Face) ((UINT)(((ULONG_PTR)(Face) >> 6) ^ ((ULONG_PTR)(Face) >> 12)) % SIZE_REQUEST_CACHE_SLOTS)
 
 static PWCHAR g_ElfScripts[32] =   /* These are in the order of the fsCsb[0] bits */
 {
@@ -539,6 +561,16 @@ SharedFace_AddRef(PSHARED_FACE Ptr)
     ++Ptr->RefCount;
 }
 
+/* What an entry of the glyph cache holds: the entry, the glyph and its bitmap */
+static SIZE_T
+IntGlyphCacheEntryBytes(PFONT_CACHE_ENTRY Entry)
+{
+    const FT_Bitmap *pBitmap = &Entry->BitmapGlyph->bitmap;
+
+    return sizeof(FONT_CACHE_ENTRY) + sizeof(FT_BitmapGlyphRec) +
+           (SIZE_T)pBitmap->rows * (SIZE_T)abs(pBitmap->pitch);
+}
+
 static void
 RemoveCachedEntry(PFONT_CACHE_ENTRY Entry)
 {
@@ -546,6 +578,8 @@ RemoveCachedEntry(PFONT_CACHE_ENTRY Entry)
 
     ASSERT_FREETYPE_LOCK_HELD();
 
+    ASSERT(g_FontCacheNumBytes >= IntGlyphCacheEntryBytes(Entry));
+    g_FontCacheNumBytes -= IntGlyphCacheEntryBytes(Entry);
     FT_Done_Glyph((FT_Glyph)Entry->BitmapGlyph);
     RemoveEntryList(&Entry->ListEntry);
     for (ppLink = &g_FontCacheBuckets[FONT_CACHE_BUCKET(Entry->dwHash)]; *ppLink != NULL;
@@ -588,6 +622,9 @@ RemoveCacheEntries(FT_Face Face)
         if (g_AbcCache[i].bValid && g_AbcCache[i].Face == Face)
             g_AbcCache[i].bValid = FALSE;
     }
+
+    if (g_SizeRequestCache[SIZE_REQUEST_SLOT(Face)].Face == Face)
+        g_SizeRequestCache[SIZE_REQUEST_SLOT(Face)].Face = NULL;
 
     for (CurrentEntry = g_FontCacheListHead.Flink;
          CurrentEntry != &g_FontCacheListHead;
@@ -1142,6 +1179,7 @@ InitFontSupport(VOID)
     ULONG ulError;
 
     g_FontCacheNumEntries = 0;
+    g_FontCacheNumBytes = 0;
     RtlZeroMemory(g_FontCacheBuckets, sizeof(g_FontCacheBuckets));
 
     g_FreeTypeLock = ExAllocatePoolWithTag(NonPagedPool, sizeof(FAST_MUTEX), TAG_INTERNAL_SYNC);
@@ -4332,10 +4370,14 @@ IntGetBitmapGlyphWithCache(
     InsertHeadList(&g_FontCacheListHead, &NewEntry->ListEntry);
     NewEntry->HashNext = g_FontCacheBuckets[FONT_CACHE_BUCKET(NewEntry->dwHash)];
     g_FontCacheBuckets[FONT_CACHE_BUCKET(NewEntry->dwHash)] = NewEntry;
-    if (++g_FontCacheNumEntries > MAX_FONT_CACHE)
+    g_FontCacheNumEntries++;
+    g_FontCacheNumBytes += IntGlyphCacheEntryBytes(NewEntry);
+
+    /* Drop the least recently used glyphs while over a limit; never the new one, which the caller is given */
+    while ((g_FontCacheNumEntries > MAX_FONT_CACHE || g_FontCacheNumBytes > MAX_FONT_CACHE_BYTES) &&
+           g_FontCacheListHead.Blink != &NewEntry->ListEntry)
     {
-        NewEntry = CONTAINING_RECORD(g_FontCacheListHead.Blink, FONT_CACHE_ENTRY, ListEntry);
-        RemoveCachedEntry(NewEntry);
+        RemoveCachedEntry(CONTAINING_RECORD(g_FontCacheListHead.Blink, FONT_CACHE_ENTRY, ListEntry));
     }
 
     return BitmapGlyph;
@@ -4539,6 +4581,41 @@ static unsigned int get_bezier_glyph_outline(FT_Outline *outline, unsigned int b
     return needed;
 }
 
+/* FT_Request_Size, skipped when the request is the one the face had last (see g_SizeRequestCache) */
+static FT_Error
+IntRequestFaceSize(
+    _In_ FT_Face face,
+    _In_ FT_Size_Request req)
+{
+    SIZE_REQUEST_ENTRY *pEntry = &g_SizeRequestCache[SIZE_REQUEST_SLOT(face)];
+    FT_Error error;
+
+    ASSERT_FREETYPE_LOCK_HELD();
+
+    if (pEntry->Face == face && pEntry->Size == face->size &&
+        pEntry->Request.type == req->type &&
+        pEntry->Request.width == req->width &&
+        pEntry->Request.height == req->height &&
+        pEntry->Request.horiResolution == req->horiResolution &&
+        pEntry->Request.vertResolution == req->vertResolution)
+    {
+        return FT_Err_Ok;
+    }
+
+    error = FT_Request_Size(face, req);
+    if (error)
+    {
+        if (pEntry->Face == face)
+            pEntry->Face = NULL;
+        return error;
+    }
+
+    pEntry->Face = face;
+    pEntry->Size = face->size;
+    pEntry->Request = *req;
+    return FT_Err_Ok;
+}
+
 static FT_Error
 IntRequestFontSizeEx(
     _In_ FT_Face face,
@@ -4680,7 +4757,7 @@ IntRequestFontSizeEx(
     req.height         = (EmHeight << 6);
     req.horiResolution = 0;
     req.vertResolution = 0;
-    error = FT_Request_Size(face, &req);
+    error = IntRequestFaceSize(face, &req);
     if (error)
     {
         ERR("%s: Failed to request font size.\n", face->family_name);
