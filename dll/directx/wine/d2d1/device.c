@@ -162,7 +162,13 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
     ID3D11DeviceContext1_VSSetConstantBuffers(context, 0, 1, &vs_cb);
     ID3D11DeviceContext1_VSSetShader(context, shape_resources->vs, NULL, 0);
     ID3D11DeviceContext1_PSSetConstantBuffers(context, 0, 1, &ps_cb);
-    ID3D11DeviceContext1_PSSetShader(context, render_target->ps, NULL, 0);
+    /* A triangle of a fill never discards a pixel, and a solid brush without an opacity brush is one constant:
+     * the shader that does only that is much cheaper to run (and to compile) than the one that serves every brush. */
+    if (shape_type == D2D_SHAPE_TYPE_TRIANGLE && brush && brush->type == D2D_BRUSH_TYPE_SOLID && !opacity_brush
+            && render_target->ps_solid)
+        ID3D11DeviceContext1_PSSetShader(context, render_target->ps_solid, NULL, 0);
+    else
+        ID3D11DeviceContext1_PSSetShader(context, render_target->ps, NULL, 0);
     ID3D11DeviceContext1_RSSetViewports(context, 1, &vp);
     if (render_target->clip_stack.count)
     {
@@ -296,6 +302,8 @@ static ULONG STDMETHODCALLTYPE d2d_device_context_inner_Release(IUnknown *iface)
         ID3D11Buffer_Release(context->vb);
         ID3D11Buffer_Release(context->ib);
         ID3D11Buffer_Release(context->ps_cb);
+        if (context->ps_solid)
+            ID3D11PixelShader_Release(context->ps_solid);
         ID3D11PixelShader_Release(context->ps);
         ID3D11Buffer_Release(context->vs_cb);
         for (i = 0; i < D2D_SHAPE_TYPE_COUNT; ++i)
@@ -4336,6 +4344,34 @@ static const char shape_ps_code[] =
     "\n"
     "    return colour;\n"
     "}\n";
+/* The part of the shader above that a triangle of a solid brush without an opacity brush runs, with the same
+ * constant buffer layout (declared in a constant buffer of its own, so that unused members keep their place). */
+static const char shape_ps_code_solid[] =
+    "struct brush\n"
+    "{\n"
+    "    uint type;\n"
+    "    float opacity;\n"
+    "    float4 data[3];\n"
+    "};\n"
+    "\n"
+    "cbuffer ps_cb\n"
+    "{\n"
+    "    bool outline;\n"
+    "    bool is_arc;\n"
+    "    struct brush colour_brush, opacity_brush;\n"
+    "};\n"
+    "\n"
+    "struct input\n"
+    "{\n"
+    "    float2 p : WORLD_POSITION;\n"
+    "    float4 b : BEZIER;\n"
+    "    nointerpolation float2x2 stroke_transform : STROKE_TRANSFORM;\n"
+    "};\n"
+    "\n"
+    "float4 main(struct input i) : SV_Target\n"
+    "{\n"
+    "    return colour_brush.data[0] * colour_brush.opacity;\n"
+    "}\n";
 static const struct shape_info
 {
     enum d2d_shape_type shape_type;
@@ -4462,6 +4498,13 @@ static HRESULT d2d_device_context_init(struct d2d_device_context *render_target,
         goto err;
     }
 
+    /* Optional: without it every draw uses the shader above. */
+    if ((precompiled = device->precompiled_shape_ps_solid)
+            && FAILED(hr = ID3D11Device1_CreatePixelShader(render_target->d3d_device,
+            ID3D10Blob_GetBufferPointer(precompiled), ID3D10Blob_GetBufferSize(precompiled),
+            NULL, &render_target->ps_solid)))
+        WARN("Failed to create the solid fill pixel shader, hr %#lx.\n", hr);
+
     buffer_desc.ByteWidth = sizeof(struct d2d_ps_cb);
     buffer_desc.Usage = D3D11_USAGE_DYNAMIC;
     buffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
@@ -4560,6 +4603,8 @@ err:
         ID3D11Buffer_Release(render_target->ib);
     if (render_target->ps_cb)
         ID3D11Buffer_Release(render_target->ps_cb);
+    if (render_target->ps_solid)
+        ID3D11PixelShader_Release(render_target->ps_solid);
     if (render_target->ps)
         ID3D11PixelShader_Release(render_target->ps);
     if (render_target->vs_cb)
@@ -4710,6 +4755,8 @@ static ULONG WINAPI d2d_device_Release(ID2D1Device6 *iface)
         }
         if (device->precompiled_shape_ps)
             ID3D10Blob_Release(device->precompiled_shape_ps);
+        if (device->precompiled_shape_ps_solid)
+            ID3D10Blob_Release(device->precompiled_shape_ps_solid);
         free(device);
     }
 
@@ -4968,6 +5015,13 @@ HRESULT d2d_device_init(struct d2d_device *device, ID2D1Factory1 *factory, IDXGI
         return hr;
     }
     device->precompiled_shape_ps = compiled;
+
+    /* Optional: only a faster path for the most common draw. */
+    if (SUCCEEDED(hr = D3DCompile(shape_ps_code_solid, sizeof(shape_ps_code_solid) - 1, "ps_solid", NULL, NULL,
+            "main", "ps_4_0", 0, 0, &compiled, NULL)))
+        device->precompiled_shape_ps_solid = compiled;
+    else
+        WARN("Failed to compile the solid fill pixel shader, hr %#lx.\n", hr);
 
     return S_OK;
 }
