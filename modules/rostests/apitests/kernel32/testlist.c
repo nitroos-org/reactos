@@ -84,6 +84,7 @@ extern void func_DefaultDllDirectories(void);
 extern void func_CreateWaitableTimerEx(void);
 extern void func_ThreadImpersonationToken(void);
 extern void func_DebugApi(void);
+extern void func_DebugFreezeNested(void);
 extern void func_DebugTrapInterrupts(void);
 extern void func_ActCtxResDirBound(void);
 extern void func_DefaultActCtx(void);
@@ -388,6 +389,7 @@ const struct test winetest_testlist[] =
     { "CreateWaitableTimerEx",       func_CreateWaitableTimerEx },
     { "ThreadImpersonationToken",    func_ThreadImpersonationToken },
     { "DebugApi",                    func_DebugApi },
+    { "DebugFreezeNested",           func_DebugFreezeNested },
     { "DebugTrapInterrupts",         func_DebugTrapInterrupts },
     { "ActCtxResDirBound",          func_ActCtxResDirBound },
     { "DefaultActCtx",               func_DefaultActCtx },

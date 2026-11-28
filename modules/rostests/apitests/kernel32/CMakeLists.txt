@@ -78,6 +78,7 @@ list(APPEND SOURCE
     DefaultDllDirectories.c
     ThreadImpersonationToken.c
     DebugApi.c
+    DebugFreezeNested.c
     DebugTrapInterrupts.c
     ActCtxResDirBound.c
     DefaultActCtx.c
