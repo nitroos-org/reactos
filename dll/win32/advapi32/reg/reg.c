@@ -3897,6 +3897,63 @@ Cleanup:
 
 
 /************************************************************************
+ *  RegLoadAppKeyW
+ *
+ * Application hives are not supported: the call fails and hands back no
+ * key, so that a caller never uses a handle that does not exist.
+ *
+ * @unimplemented
+ */
+LONG WINAPI
+RegLoadAppKeyW(LPCWSTR lpFile,
+               PHKEY phkResult,
+               REGSAM samDesired,
+               DWORD dwOptions,
+               DWORD Reserved)
+{
+    UNREFERENCED_PARAMETER(lpFile);
+    UNREFERENCED_PARAMETER(samDesired);
+    UNREFERENCED_PARAMETER(dwOptions);
+    UNREFERENCED_PARAMETER(Reserved);
+
+    if (phkResult == NULL)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    *phkResult = NULL;
+    return ERROR_CALL_NOT_IMPLEMENTED;
+}
+
+
+/************************************************************************
+ *  RegLoadAppKeyA
+ *
+ * @unimplemented
+ */
+LONG WINAPI
+RegLoadAppKeyA(LPCSTR lpFile,
+               PHKEY phkResult,
+               REGSAM samDesired,
+               DWORD dwOptions,
+               DWORD Reserved)
+{
+    UNREFERENCED_PARAMETER(lpFile);
+    UNREFERENCED_PARAMETER(samDesired);
+    UNREFERENCED_PARAMETER(dwOptions);
+    UNREFERENCED_PARAMETER(Reserved);
+
+    if (phkResult == NULL)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    *phkResult = NULL;
+    return ERROR_CALL_NOT_IMPLEMENTED;
+}
+
+
+/************************************************************************
  *  RegNotifyChangeKeyValue
  *
  * @implemented
