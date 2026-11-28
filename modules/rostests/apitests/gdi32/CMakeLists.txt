@@ -97,6 +97,7 @@ list(APPEND SOURCE
     PolygonClipInvariance.c
     Rectangle.c
     RegionAllocFailure.c
+    PathAllocFailure.c
     RealizePalette.c
     RemoveFontResourceEx.c
     SelectBitmapOwner.c
