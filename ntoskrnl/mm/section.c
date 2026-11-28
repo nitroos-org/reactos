@@ -4188,6 +4188,54 @@ ExeFmtpCreateImageSection(PFILE_OBJECT FileObject,
     return Status;
 }
 
+/*
+ * The threads that flush a file's data section before they create an image section of it (MmCreateImageSection):
+ * their flushes write the pages that are dirty in the segment and leave the dirty bits of the user views of the file
+ * in their PTEs (MmFlushSegment). A thread is in the table only around that flush; when the table is full the flush
+ * takes the bits as any other (the image then sees what the views wrote, as before).
+ */
+#define MI_FLUSH_WITHOUT_USER_VIEWS_SLOTS 32
+static PETHREAD volatile MiFlushWithoutUserViews[MI_FLUSH_WITHOUT_USER_VIEWS_SLOTS];
+
+static
+LONG
+MiBeginFlushWithoutUserViews(VOID)
+{
+    PETHREAD Thread = PsGetCurrentThread();
+    LONG i;
+
+    for (i = 0; i < MI_FLUSH_WITHOUT_USER_VIEWS_SLOTS; i++)
+    {
+        if (InterlockedCompareExchangePointer((PVOID volatile *)&MiFlushWithoutUserViews[i], Thread, NULL) == NULL)
+            return i;
+    }
+    return -1;
+}
+
+static
+VOID
+MiEndFlushWithoutUserViews(
+    _In_ LONG Slot)
+{
+    if (Slot >= 0)
+        InterlockedExchangePointer((PVOID volatile *)&MiFlushWithoutUserViews[Slot], NULL);
+}
+
+static
+BOOLEAN
+MiIsFlushWithoutUserViews(VOID)
+{
+    PETHREAD Thread = PsGetCurrentThread();
+    LONG i;
+
+    for (i = 0; i < MI_FLUSH_WITHOUT_USER_VIEWS_SLOTS; i++)
+    {
+        if (MiFlushWithoutUserViews[i] == Thread)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 NTSTATUS
 MmCreateImageSection(PSECTION *SectionObject,
                      ACCESS_MASK DesiredAccess,
@@ -4290,8 +4338,18 @@ grab_image_section_object:
 
         MiReleasePfnLock(OldIrql);
 
-        /* Purge the cache */
-        CcFlushCache(FileObject->SectionObjectPointer, NULL, 0, NULL);
+        /*
+         * Write what the cache and the closed views of the file left dirty: the image pages are read from the
+         * file. A write that is still only in a live data view of the file (a dirty bit in its PTE) is not taken:
+         * as on Windows, the image does not see what a view has not flushed (the format check does, through the
+         * resident page: ExeFmtpReadFile).
+         */
+        {
+            LONG Slot = MiBeginFlushWithoutUserViews();
+
+            CcFlushCache(FileObject->SectionObjectPointer, NULL, 0, NULL);
+            MiEndFlushWithoutUserViews(Slot);
+        }
 
         StatusExeFmt = ExeFmtpCreateImageSection(FileObject, ImageSectionObject);
 
@@ -8110,8 +8168,9 @@ MmFlushSegment(
         BlockEnd.QuadPart = FlushStart.QuadPart + ((LONGLONG)MM_TAKE_VIEW_DIRTY_MAX_PAGES << PAGE_SHIFT);
         if (BlockEnd.QuadPart > FlushEnd.QuadPart)
             BlockEnd.QuadPart = FlushEnd.QuadPart;
-        /* No view in any process (UserMapCount is raised when a view is set up, before it can have a PTE): no PTE has a bit */
-        if (*(volatile LONG *)&Segment->UserMapCount != 0)
+        /* No view in any process (UserMapCount is raised when a view is set up, before it can have a PTE): no PTE has a
+           bit. The flush before an image section is created leaves them (see MmCreateImageSection) */
+        if ((*(volatile LONG *)&Segment->UserMapCount != 0) && !MiIsFlushWithoutUserViews())
             MiTakeMappedDirtyBits(Segment, FlushStart.QuadPart, (BlockEnd.QuadPart + PAGE_SIZE - 1) & ~((LONGLONG)PAGE_SIZE - 1));
 
         while (FlushStart.QuadPart < BlockEnd.QuadPart)
