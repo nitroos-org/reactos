@@ -303,6 +303,7 @@ typedef struct _AFD_FCB {
     PIO_WORKITEM RelistenWorkItem;
     KEVENT RelistenIdle;
     BOOLEAN Relistening;
+    ULONG ListenStatedRoom; /* the room the transport was told of with the last listen request (IssueListen) */
     BOOLEAN ListenConnectionReady;
     NTSTATUS ListenStatus;
     PIO_WORKITEM AcceptWorkItem;
@@ -503,6 +504,7 @@ IO_COMPLETION_ROUTINE PacketSocketRecvComplete;
 USHORT AfdDatagramReceiveFlags(PAFD_FCB FCB);
 
 NTSTATUS AfdApplyReceiveHint(PAFD_FCB FCB);
+NTSTATUS AfdStateListenRoom(PAFD_FCB FCB, ULONG Room);
 
 NTSTATUS NTAPI
 AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp, BOOLEAN Short);

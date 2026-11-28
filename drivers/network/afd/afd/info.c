@@ -119,35 +119,18 @@ AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
 }
 
-/* Gives the transport the receive window SO_RCVBUF asked for (a stream socket with a connection object):
- * the transport announces at most that to the peer, and announces more as the data is read (tcpip.sys).
- * Without a hint the transport gets its default window.
- *
- * On Windows a socket whose application does not read takes about twice SO_RCVBUF from the sender (measured on
- * Windows 10 22H2: the buffer of AFD, which FIONREAD reports, and the receive window of TCP; 8K, 64K and 1M all
- * match). AFD's own buffer here is its small staging area (Recv.Size), so the window makes up the rest. */
-NTSTATUS
-AfdApplyReceiveHint(PAFD_FCB FCB)
+/* Sets a ULONG connection option of the transport on a connection file object, and waits for it */
+static NTSTATUS
+AfdSetConnectionUlong(PFILE_OBJECT FileObject, ULONG Id, ULONG Value)
 {
-    PFILE_OBJECT FileObject = FCB->Connection.Object;
     PDEVICE_OBJECT DeviceObject;
     PTCP_REQUEST_SET_INFORMATION_EX Request;
     ULONG RequestSize = FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer) + sizeof(ULONG);
-    ULONG Window;
     IO_STATUS_BLOCK Iosb;
     KEVENT Event;
     PIRP Irp;
     PIO_STACK_LOCATION IrpSp;
     NTSTATUS Status;
-
-    if (!FileObject || (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
-        return STATUS_SUCCESS;
-
-    /* No hint: 0, the transport's default window (a connection starts with 64K, the most a SYN announces).
-     * A hint above 1 GB is clamped by the transport anyway (4 MB) */
-    Window = min(FCB->RecvHint, 0x40000000UL);
-    if (Window > FCB->Recv.Size)
-        Window = Window * 2 - FCB->Recv.Size;
 
     Request = ExAllocatePoolWithTag(NonPagedPool, RequestSize, TAG_AFD_DATA_BUFFER);
     if (!Request)
@@ -156,9 +139,9 @@ AfdApplyReceiveHint(PAFD_FCB FCB)
     RtlZeroMemory(Request, RequestSize);
     Request->ID.toi_class = INFO_CLASS_PROTOCOL;
     Request->ID.toi_type = INFO_TYPE_CONNECTION;
-    Request->ID.toi_id = TCP_SOCKET_WINDOW;
+    Request->ID.toi_id = Id;
     Request->BufferSize = sizeof(ULONG);
-    RtlCopyMemory(Request->Buffer, &Window, sizeof(ULONG));
+    RtlCopyMemory(Request->Buffer, &Value, sizeof(ULONG));
 
     DeviceObject = IoGetRelatedDeviceObject(FileObject);
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
@@ -189,6 +172,41 @@ AfdApplyReceiveHint(PAFD_FCB FCB)
 
     ExFreePoolWithTag(Request, TAG_AFD_DATA_BUFFER);
     return Status;
+}
+
+/* Gives the transport the receive window SO_RCVBUF asked for (a stream socket with a connection object):
+ * the transport announces at most that to the peer, and announces more as the data is read (tcpip.sys).
+ * Without a hint the transport gets its default window.
+ *
+ * On Windows a socket whose application does not read takes about twice SO_RCVBUF from the sender (measured on
+ * Windows 10 22H2: the buffer of AFD, which FIONREAD reports, and the receive window of TCP; 8K, 64K and 1M all
+ * match). AFD's own buffer here is its small staging area (Recv.Size), so the window makes up the rest. */
+NTSTATUS
+AfdApplyReceiveHint(PAFD_FCB FCB)
+{
+    ULONG Window;
+
+    if (!FCB->Connection.Object || (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
+        return STATUS_SUCCESS;
+
+    /* No hint: 0, the transport's default window (a connection starts with 64K, the most a SYN announces).
+     * A hint above 1 GB is clamped by the transport anyway (4 MB) */
+    Window = min(FCB->RecvHint, 0x40000000UL);
+    if (Window > FCB->Recv.Size)
+        Window = Window * 2 - FCB->Recv.Size;
+
+    return AfdSetConnectionUlong(FCB->Connection.Object, TCP_SOCKET_WINDOW, Window);
+}
+
+/* Tells the transport how many more connections the queue of the listening socket has room for: the room a listen
+ * request states is that of the moment it was made, and the transport refuses what does not fit it */
+NTSTATUS
+AfdStateListenRoom(PAFD_FCB FCB, ULONG Room)
+{
+    if (!FCB->Connection.Object)
+        return STATUS_SUCCESS;
+
+    return AfdSetConnectionUlong(FCB->Connection.Object, TCP_SOCKET_LISTEN_ROOM, Room);
 }
 
 NTSTATUS NTAPI

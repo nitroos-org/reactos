@@ -1716,6 +1716,21 @@ NTSTATUS DispTdiSetInformationEx(
             return TCPSetReceiveWindow((PCONNECTION_ENDPOINT)Request.Handle.ConnectionContext,
                                        *(ULONG UNALIGNED *)Info->Buffer);
         }
+
+        /* So is the room the listener has left (by AFD, from the size of its queue of accepted connections) */
+        if (Info->ID.toi_class == INFO_CLASS_PROTOCOL &&
+            Info->ID.toi_type == INFO_TYPE_CONNECTION &&
+            Info->ID.toi_id == TCP_SOCKET_LISTEN_ROOM)
+        {
+            if (Request.Handle.ConnectionContext == NULL ||
+                Info->BufferSize < sizeof(ULONG) ||
+                IrpSp->Parameters.DeviceIoControl.InputBufferLength <
+                    FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer) + sizeof(ULONG))
+                return STATUS_INVALID_PARAMETER;
+
+            return TCPSetListenRoom((PCONNECTION_ENDPOINT)Request.Handle.ConnectionContext,
+                                    *(ULONG UNALIGNED *)Info->Buffer);
+        }
         break;
 
     case TDI_CONTROL_CHANNEL_FILE:

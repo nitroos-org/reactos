@@ -15,6 +15,7 @@ extern void func_backlog_listen(void);
 extern void func_backlog_open(void);
 extern void func_backlog_replace(void);
 extern void func_backlogrefuse(void);
+extern void func_backlogroom(void);
 extern void func_bind(void);
 extern void func_bindconflict(void);
 extern void func_broadcast(void);
@@ -136,6 +137,7 @@ const struct test winetest_testlist[] =
     { "backlog_open", func_backlog_open },
     { "backlog_replace", func_backlog_replace },
     { "backlogrefuse", func_backlogrefuse },
+    { "backlogroom", func_backlogroom },
     { "bind", func_bind },
     { "bindconflict", func_bindconflict },
     { "broadcast", func_broadcast },

@@ -179,7 +179,10 @@ NTSTATUS TCPAccept ( PTDI_REQUEST Request,
            the lock that hands connections to it: one handed over to this request is then counted
            against the room (LibTCPAccept), not lost when the lwIP thread applies the room */
         if (Room)
+        {
+            InterlockedExchange(&Listener->ListenHanded, 0);
             InterlockedExchange(&Listener->ListenRoom, (LONG)Room + 1);
+        }
     }
     else
         Status = STATUS_NO_MEMORY;
@@ -191,4 +194,37 @@ NTSTATUS TCPAccept ( PTDI_REQUEST Request,
         LibTCPClaimPendingAccept(Listener);
 
     return Status;
+}
+
+/* The room a listen request states is that of the moment the request was made. The owner takes connections out of its
+   queue between two requests, and until the next connection arrives (which is when the next request is made) the
+   listener would refuse connections the owner has room for: it states the room again, with this. The connection that
+   was handed to the request in flight and that the owner has not queued yet is not in the owner's count: it is taken
+   off the room here */
+NTSTATUS TCPSetListenRoom(PCONNECTION_ENDPOINT Connection, ULONG Room)
+{
+    PADDRESS_FILE AddressFile;
+    PCONNECTION_ENDPOINT Listener = NULL;
+    LONG Handed;
+
+    if (!Room)
+        return STATUS_INVALID_PARAMETER;
+
+    LockObject(Connection);
+    AddressFile = Connection->AddressFile;
+    if (AddressFile)
+    {
+        LockObject(AddressFile);
+        Listener = AddressFile->Listener;
+        if (Listener)
+        {
+            Handed = Listener->ListenHanded;
+            if (Room > (ULONG)Handed)
+                InterlockedExchange(&Listener->ListenRoom, (LONG)(Room - Handed) + 1);
+        }
+        UnlockObject(AddressFile);
+    }
+    UnlockObject(Connection);
+
+    return Listener ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
 }
