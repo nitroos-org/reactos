@@ -3947,8 +3947,14 @@ static void test_select(void)
     FD_SET(fdWrite, &readfds);
     FD_SET(fdRead, &readfds);
     ret = select(maxfd+1, &readfds, &readfds, NULL, &select_timeout);
+#if ROSTESTS_233_IS_FIXED
     ok(ret == 1, "select returned %d\n", ret);
     ok(!FD_ISSET(fdWrite, &readfds), "fdWrite socket is in the set\n");
+#else
+    /* The send buffer of fdWrite was not filled above, so it is writable and in the set with fdRead */
+    ok(ret == 2, "select returned %d\n", ret);
+    ok(FD_ISSET(fdWrite, &readfds), "fdWrite socket is not in the set\n");
+#endif
     ok(FD_ISSET(fdRead, &readfds), "fdRead socket is not in the set\n");
 
     ok(send(fdRead, "test", 4, 0) == 4, "failed to send data\n");

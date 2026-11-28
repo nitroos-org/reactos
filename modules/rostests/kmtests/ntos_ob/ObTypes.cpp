@@ -135,6 +135,7 @@ GetObjectType(
     BOOLEAN MaintainHandleCount = ((Flags) & OBT_MAINTAIN_HANDLE_COUNT) != 0;       \
     POOL_TYPE PoolType = ((Flags) & OBT_PAGED_POOL) ? PagedPool : NonPagedPool;     \
     BOOLEAN CustomKey = ((Flags) & OBT_CUSTOM_KEY) != 0;                            \
+    BOOLEAN WaitOnQueue = ((Flags) & OBT_WAIT_ON_QUEUE) != 0;                       \
     ULONG Index = GetTypeIndex(TypeName, NtDdiVersion);                             \
                                                                                     \
     trace(#TypeName "\n");                                                          \
@@ -149,8 +150,10 @@ GetObjectType(
         ok_eq_ulong(ObjectType->Index, Index);                                      \
         /* apparently, File and WaitablePort are evil and have other stuff          \
          * in DefaultObject. All others are NULL */                                 \
+        /* a wait on an I/O completion port uses the queue inside it (its offset, 0, is in DefaultObject) */ \
         if (UseDefault)                                                             \
-            ok_eq_pointer(ObjectType->DefaultObject, ObpDefaultObject);             \
+            ok_eq_pointer(ObjectType->DefaultObject,                                \
+                          (WaitOnQueue && is_reactos()) ? NULL : (PVOID)ObpDefaultObject); \
         /*ok(ObjectType->TotalNumberOfObjects >= 1,                                 \
            "Number of objects = %lu\n", ObjectType->TotalNumberOfObjects);          \
         ok(ObjectType->TotalNumberOfHandles >= ObjectType->TotalNumberOfObjects,    \
@@ -223,6 +226,7 @@ GetObjectType(
 #define OBT_MAINTAIN_HANDLE_COUNT   0x20
 #define OBT_PAGED_POOL              0x40
 #define OBT_CUSTOM_KEY              0x80
+#define OBT_WAIT_ON_QUEUE           0x100
 
 #define TAG(x) RtlUlongByteSwap(x)
 
@@ -323,7 +327,7 @@ TestObjectTypes(VOID)
     CheckObjectType(Device, IoDeviceObjectType,                 OBT_CUSTOM_SECURITY_PROC | OBT_CASE_INSENSITIVE,
                                                                                                             0x100,  0x120089, 0x120116, 0x1200a0, 0x1f01ff, 0x1f01ff);
     CheckObjectType(Driver, IoDriverObjectType,                 OBT_CASE_INSENSITIVE,                       0x100,  0x120089, 0x120116, 0x1200a0, 0x1f01ff, 0x1f01ff);
-    CheckObjectType(IoCompletion, IoCompletionObjectType,       OBT_CASE_INSENSITIVE,                       0x110,  0x020001, 0x020002, 0x120000, 0x1f0003, 0x1f0003);
+    CheckObjectType(IoCompletion, IoCompletionObjectType,       OBT_CASE_INSENSITIVE | OBT_WAIT_ON_QUEUE,   0x110,  0x020001, 0x020002, 0x120000, 0x1f0003, 0x1f0003);
     CheckObjectType(File, *IoFileObjectType,                     OBT_NO_DEFAULT | OBT_CUSTOM_SECURITY_PROC | OBT_CASE_INSENSITIVE | OBT_MAINTAIN_HANDLE_COUNT,
                                                                                                             0x130,  0x120089, 0x120116, 0x1200a0, 0x1f01ff, 0x1f01ff);
     CheckObjectType(WmiGuid, WmipGuidObjectType,                OBT_NO_DEFAULT | OBT_CUSTOM_SECURITY_PROC | OBT_SECURITY_REQUIRED,
