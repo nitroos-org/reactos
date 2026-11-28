@@ -350,13 +350,19 @@ KeFreezeAllThreads(VOID)
         if ((Current != CurrentThread) && (Current->ApcQueueable))
         {
             /* Sanity check */
-            OldCount = Current->SuspendCount;
+            OldCount = Current->FreezeCount;
             ASSERT(OldCount != MAXIMUM_SUSPEND_COUNT);
 
             /* Increase the freeze count */
             Current->FreezeCount++;
 
-            /* Make sure it wasn't already suspended */
+            /*
+             * Suspend it only if it was neither frozen nor suspended: a thread
+             * that an overlapping freeze already holds has its suspend APC
+             * queued or is waiting on its semaphore. Queuing the APC again (or
+             * taking the semaphore once more) would leave it suspended after
+             * the last thaw.
+             */
             if (!(OldCount) && !(Current->SuspendCount))
             {
                 /* Did we already insert it? */
