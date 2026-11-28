@@ -1,6 +1,14 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
+/* A native 64-bit caller of NtOpenKey / NtOpenKeyEx / NtCreateKey has its
+ * KEY_WOW64_32KEY / KEY_WOW64_64KEY bits ignored by the kernel, as on
+ * Windows: the registry API selects the view. advapi32 asks the kernel to
+ * apply the view it was given by setting this reserved access bit next to
+ * the selector. The kernel removes it before the access check. A process
+ * running under WoW64 needs no marker: the kernel always applies its view. */
+#define CM_WOW64_VIEW_REQUEST   0x08000000
+
 /* Shared by the configuration manager and advapi32's nested-create retry.
  * A shortened path must retain the destination of the original request. */
 /* Windows 7 / Server 2008 R2: shared Software subtrees. Match complete
