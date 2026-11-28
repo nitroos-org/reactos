@@ -134,6 +134,7 @@ list(APPEND SOURCE
     RegQueryValueExW.c
     RegQueryMultipleValues.c
     RegKeyNameCase.c
+    RegLoadAppKey.c
     RegRenameKey.c
     RegHiveKeyControl.c
     RegAuditShare.c
