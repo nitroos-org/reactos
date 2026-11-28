@@ -1533,6 +1533,56 @@ SetMessageExtraInfo(
   return NtUserxSetMessageExtraInfo(lParam);
 }
 
+/*
+ * A fault inside a dialog procedure is swallowed by the callers below (the message returns 0),
+ * so say what was raised, where, and the top of the stack of the faulting code.
+ */
+static LONG
+IntDialogExceptionFilter(
+    _In_ PEXCEPTION_POINTERS ExceptionInfo,
+    _In_ WNDPROC WndProc,
+    _In_ UINT Msg)
+{
+    PEXCEPTION_RECORD Record = ExceptionInfo->ExceptionRecord;
+    PCONTEXT Context = ExceptionInfo->ContextRecord;
+
+    ERR("Dialog procedure %p Msg 0x%x raised %08lx at %p flags %lx, %lu parameters: %p %p\n",
+        WndProc, Msg, Record->ExceptionCode, Record->ExceptionAddress, Record->ExceptionFlags,
+        Record->NumberParameters,
+        Record->NumberParameters > 0 ? (PVOID)Record->ExceptionInformation[0] : NULL,
+        Record->NumberParameters > 1 ? (PVOID)Record->ExceptionInformation[1] : NULL);
+
+#if defined(_M_AMD64)
+    ERR("  rip %p rsp %p rbp %p rax %p rcx %p rdx %p rbx %p rsi %p rdi %p\n",
+        (PVOID)Context->Rip, (PVOID)Context->Rsp, (PVOID)Context->Rbp, (PVOID)Context->Rax,
+        (PVOID)Context->Rcx, (PVOID)Context->Rdx, (PVOID)Context->Rbx, (PVOID)Context->Rsi,
+        (PVOID)Context->Rdi);
+    _SEH2_TRY
+    {
+        PULONG_PTR Stack = (PULONG_PTR)Context->Rsp;
+        ULONG i;
+
+        for (i = 0; i < 48; i += 4)
+        {
+            ERR("  stack %p: %p %p %p %p\n", &Stack[i],
+                (PVOID)Stack[i], (PVOID)Stack[i + 1], (PVOID)Stack[i + 2], (PVOID)Stack[i + 3]);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ERR("  stack not readable\n");
+    }
+    _SEH2_END;
+#elif defined(_M_IX86)
+    ERR("  eip %p esp %p ebp %p eax %p ecx %p edx %p ebx %p esi %p edi %p\n",
+        (PVOID)Context->Eip, (PVOID)Context->Esp, (PVOID)Context->Ebp, (PVOID)Context->Eax,
+        (PVOID)Context->Ecx, (PVOID)Context->Edx, (PVOID)Context->Ebx, (PVOID)Context->Esi,
+        (PVOID)Context->Edi);
+#endif
+
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 LRESULT FASTCALL
 IntCallWindowProcW(BOOL IsAnsiProc,
                    WNDPROC WndProc,
@@ -1607,7 +1657,7 @@ IntCallWindowProcW(BOOL IsAnsiProc,
       {
          Result = CALL_EXTERN_WNDPROC(WndProc, AnsiMsg.hwnd, AnsiMsg.message, AnsiMsg.wParam, AnsiMsg.lParam);
       }
-      _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+      _SEH2_EXCEPT(IntDialogExceptionFilter(_SEH2_GetExceptionInformation(), WndProc, Msg))
       {
          ERR("Exception Dialog Ansi %p Msg %d pti %p Wndpti %p\n",WndProc,Msg,GetW32ThreadInfo(),KPTR_LOW(KPTR(pWnd->head.pti)));
       }
@@ -1663,7 +1713,7 @@ IntCallWindowProcW(BOOL IsAnsiProc,
       {
          Result = CALL_EXTERN_WNDPROC(WndProc, hWnd, Msg, wParam, lParam);
       }
-      _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+      _SEH2_EXCEPT(IntDialogExceptionFilter(_SEH2_GetExceptionInformation(), WndProc, Msg))
       {
          ERR("Exception Dialog unicode %p Msg %d pti %p Wndpti %p\n",WndProc, Msg,GetW32ThreadInfo(),KPTR_LOW(KPTR(pWnd->head.pti)));
       }
@@ -1757,7 +1807,7 @@ IntCallWindowProcA(BOOL IsAnsiProc,
       {
          Result = CALL_EXTERN_WNDPROC(WndProc, hWnd, Msg, wParam, lParam);
       }
-      _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+      _SEH2_EXCEPT(IntDialogExceptionFilter(_SEH2_GetExceptionInformation(), WndProc, Msg))
       {
          ERR("Exception Dialog Ansi %p Msg %d pti %p Wndpti %p\n",WndProc,Msg,GetW32ThreadInfo(),KPTR_LOW(KPTR(pWnd->head.pti)));
       }
@@ -1820,7 +1870,7 @@ IntCallWindowProcA(BOOL IsAnsiProc,
       {
          Result = CALL_EXTERN_WNDPROC(WndProc, UnicodeMsg.hwnd, UnicodeMsg.message, UnicodeMsg.wParam, UnicodeMsg.lParam);
       }
-      _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+      _SEH2_EXCEPT(IntDialogExceptionFilter(_SEH2_GetExceptionInformation(), WndProc, Msg))
       {
          ERR("Exception Dialog unicode %p Msg %d pti %p Wndpti %p\n",WndProc, Msg,GetW32ThreadInfo(),KPTR_LOW(KPTR(pWnd->head.pti)));
       }
