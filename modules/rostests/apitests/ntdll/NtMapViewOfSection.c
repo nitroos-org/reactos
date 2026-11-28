@@ -2284,6 +2284,103 @@ Test_ImageSectionUnmapAfterClose(void)
     }
 }
 
+/*
+ * An image section created after a data view of the file wrote to it: a write whose view is gone (the page is dirty in
+ * the file's data section) is in the image; a write that a view still mapped has not flushed is not (the image comes
+ * from the file, as in Test_ImageSection). Bytes of the DOS stub (between the DOS header and the NT headers): not
+ * looked at by the format check. Not measured on Windows: checked on ReactOS only (verify on the Windows reference:
+ * this test there).
+ */
+static void
+Test_ImageSectionAfterDataView(void)
+{
+    WCHAR SystemDll[MAX_PATH], TempDir[MAX_PATH], Copy[MAX_PATH];
+    HANDLE File, Mapping = NULL, Section;
+    PUCHAR View = NULL, Image = NULL;
+    PIMAGE_DOS_HEADER DosHeader;
+    ULONG Original = 0;
+    SIZE_T ViewSize;
+    NTSTATUS Status;
+
+    if (!is_reactos())
+    {
+        skip("Not measured on Windows\n");
+        return;
+    }
+    if (!GetSystemDirectoryW(SystemDll, _countof(SystemDll)) ||
+        FAILED(StringCchCatW(SystemDll, _countof(SystemDll), L"\\shlwapi.dll")) ||
+        !GetTempPathW(_countof(TempDir), TempDir) ||
+        !GetTempFileNameW(TempDir, L"iav", 0, Copy))
+    {
+        skip("No source DLL or temporary file\n");
+        return;
+    }
+    if (!CopyFileW(SystemDll, Copy, FALSE))
+    {
+        skip("Cannot make a copy of the DLL: %lu\n", GetLastError());
+        DeleteFileW(Copy);
+        return;
+    }
+
+    File = CreateFileW(Copy, GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFileW failed with %lu\n", GetLastError());
+    if (File == INVALID_HANDLE_VALUE)
+    {
+        DeleteFileW(Copy);
+        return;
+    }
+
+    /* A write through a view that is unmapped before the image section is created */
+    Mapping = CreateFileMappingW(File, NULL, PAGE_READWRITE, 0, 0, NULL);
+    ok(Mapping != NULL, "CreateFileMappingW failed with %lu\n", GetLastError());
+    if (Mapping)
+        View = MapViewOfFile(Mapping, FILE_MAP_WRITE, 0, 0, 0x1000);
+    ok(View != NULL, "MapViewOfFile failed with %lu\n", GetLastError());
+    if (!View)
+        goto Cleanup;
+    DosHeader = (PIMAGE_DOS_HEADER)View;
+    if (DosHeader->e_magic != IMAGE_DOS_SIGNATURE || DosHeader->e_lfanew < sizeof(*DosHeader) + 8)
+    {
+        skip("No DOS stub\n");
+        goto Cleanup;
+    }
+    Original = *(PULONG)(View + sizeof(*DosHeader) + 4);
+    *(PULONG)(View + sizeof(*DosHeader)) = 0x5a5aa5a5;
+    UnmapViewOfFile(View);
+
+    /* A write through a view that stays mapped (not flushed) */
+    View = MapViewOfFile(Mapping, FILE_MAP_WRITE, 0, 0, 0x1000);
+    ok(View != NULL, "MapViewOfFile failed with %lu\n", GetLastError());
+    if (!View)
+        goto Cleanup;
+    *(PULONG)(View + sizeof(*DosHeader) + 4) = 0xa5a55a5a;
+
+    Status = NtCreateSection(&Section, SECTION_ALL_ACCESS, NULL, NULL, PAGE_EXECUTE_READ, SEC_IMAGE, File);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    ViewSize = 0;
+    Status = NtMapViewOfSection(Section, NtCurrentProcess(), (PVOID *)&Image, 0, 0, NULL, &ViewSize, ViewShare, 0,
+                                PAGE_READONLY);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    NtClose(Section);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    ok_hex(*(PULONG)(Image + sizeof(*DosHeader)), 0x5a5aa5a5);
+    ok_hex(*(PULONG)(Image + sizeof(*DosHeader) + 4), Original);
+    ok_hex(*(PULONG)(View + sizeof(*DosHeader) + 4), 0xa5a55a5a);
+    NtUnmapViewOfSection(NtCurrentProcess(), Image);
+
+Cleanup:
+    if (View)
+        UnmapViewOfFile(View);
+    if (Mapping)
+        CloseHandle(Mapping);
+    CloseHandle(File);
+    DeleteFileW(Copy);
+}
+
 /* A view keeps the file from being truncated under it, also once its section handle is closed */
 static void
 Test_TruncateAfterSectionClose(void)
@@ -2402,5 +2499,6 @@ START_TEST(NtMapViewOfSection)
     Test_CopyOnWritePageFileSection();
     Test_CopyOnWriteUnalignedWrite();
     Test_ImageSectionUnmapAfterClose();
+    Test_ImageSectionAfterDataView();
     Test_TruncateAfterSectionClose();
 }
