@@ -16,6 +16,7 @@ list(APPEND SOURCE
     backlog.c
     basehandle.c
     backlogrefuse.c
+    backlogroom.c
     bindconflict.c
     bind.c
     broadcast.c
