@@ -2078,6 +2078,12 @@ PATH_StrokePath(
             PATH_Delete(pNewPath->BaseObject.hHmgr);
             return TRUE;
         }
+
+        /* The lines below would be drawn with the same pen, wide at any transform: IntGdiPolyline strokes them
+           through a path and comes back here. Without the widened path (no memory) that recursion only ends when
+           the kernel stack does: draw nothing */
+        if (IntIsEffectiveWidePen(pbrLine))
+            return FALSE;
     }
 
     /* The points of the path are device points: draw them with the identity transform, changing the mapping mode as
