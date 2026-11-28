@@ -65,6 +65,14 @@ typedef struct _EPATHOBJ
   CLIPOBJ *pco;
 } EPATHOBJ, *PEPATHOBJ;
 
+#if DBG
+/* Debug builds only: ExtEscape code that makes one path allocation of the calling thread fail (the path object,
+   its point array or its flag array, in PATH_CreatePath). Input: a LONG, the number of such allocations to let
+   through first; -1 disarms. Returns 2 if a failure was injected since the previous call, 1 if not, -1 on bad input. */
+#define GDI_DBG_ESCAPE_FAIL_PATH_ALLOC 0x7FFE5048
+INT FASTCALL PATH_iDbgArmAllocFailure(_In_reads_bytes_opt_(cjIn) PVOID pvIn, _In_ INT cjIn);
+#endif
+
 #define  PATH_AllocPath() ((PPATH) GDIOBJ_AllocObj(GDIObjType_PATH_TYPE))
 #define  PATH_AllocPathWithHandle() ((PPATH) GDIOBJ_AllocObjWithHandle (GDI_OBJECT_TYPE_PATH, sizeof(PATH)))
 #define  PATH_LockPath(hPath) ((PPATH)GDIOBJ_ShareLockObj((HGDIOBJ)hPath, GDI_OBJECT_TYPE_PATH))
