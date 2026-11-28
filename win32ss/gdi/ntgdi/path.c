@@ -1313,7 +1313,11 @@ PATH_PolyBezierTo(
     pPath = PATH_LockPath(dc->dclevel.hPath);
     if (!pPath) return FALSE;
 
-    ret = add_log_points_new_stroke(dc, pPath, pts, cbPoints, PT_BEZIERTO , TRUE);
+    /* The points are the control and end points only: NtGdiPolyPolyDraw drops the current position that gdi32
+       puts first. The stroke starts at the current position: take a MoveToEx that gdi32 made in the DC attribute
+       (PATH_MoveTo), then start_new_stroke adds the move to it */
+    PATH_MoveTo(dc, pPath);
+    ret = add_log_points_new_stroke(dc, pPath, pts, cbPoints, PT_BEZIERTO , FALSE);
 
     PATH_UnlockPath(pPath);
     return ret;
