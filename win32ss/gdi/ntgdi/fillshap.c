@@ -833,6 +833,12 @@ IntRectangle(PDC dc,
             IntLPtoDP(dc, (PPOINTL)ptCorner, 4);
 
             pPath = PATH_CreatePath(5);
+            if (!pPath)
+            {
+                /* No memory for the outline: the rectangle is filled but not outlined */
+                ret = FALSE;
+                goto cleanup;
+            }
             dc->dclevel.flPath |= DCPATH_ACTIVE;
             dc->dclevel.hPath = pPath->BaseObject.hHmgr;
             for (i = 0; i < 5; i++)
