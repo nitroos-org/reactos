@@ -331,6 +331,9 @@ typedef struct _CONNECTION_ENDPOINT {
        over before the lwIP thread takes it is taken off it (LibTCPAccept) */
     volatile LONG ListenRoom;
     BOOLEAN RoomManaged;
+    /* Connections handed over to a listen request since the last one was made: the owner has not counted them
+       in its queue yet when it states the room again (TCPSetListenRoom) */
+    volatile LONG ListenHanded;
 
     /* Disconnect Timer */
     KTIMER DisconnectTimer;

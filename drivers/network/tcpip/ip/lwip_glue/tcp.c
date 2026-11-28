@@ -2323,6 +2323,7 @@ LibTCPAccept(PTCP_PCB pcb, struct tcp_pcb *listen_pcb, void *arg)
     {
         PCONNECTION_ENDPOINT Listener = listen_pcb->callback_arg;
 
+        InterlockedIncrement(&Listener->ListenHanded);
         if (Listener->ListenRoom > 1)
             InterlockedDecrement(&Listener->ListenRoom);
         if (Listener->RoomManaged && ((struct tcp_pcb_listen *)listen_pcb)->backlog)

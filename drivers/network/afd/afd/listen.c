@@ -428,6 +428,8 @@ static NTSTATUS IssueListen(PAFD_FCB FCB)
        ones beyond it before it answers them, as Windows does */
     Room = CountPendingConnections(FCB);
     Room = Room < FCB->Backlog ? FCB->Backlog - Room : 1;
+    Room = min(Room, 0x7FFF);
+    FCB->ListenStatedRoom = Room;
 
     Status = TdiListenEx( &FCB->ListenIrp.InFlightRequest,
                           FCB->Connection.Object,
@@ -435,7 +437,7 @@ static NTSTATUS IssueListen(PAFD_FCB FCB)
                           &FCB->ListenIrp.ConnectionReturnInfo,
                           ListenComplete,
                           FCB,
-                          (ULONG)min(Room, 0x7FFF) << 16 );
+                          Room << 16 );
 
     if (Status == STATUS_PENDING)
         Status = STATUS_SUCCESS;
@@ -550,9 +552,29 @@ static VOID NTAPI RelistenWorker(PDEVICE_OBJECT DeviceObject, PVOID Context)
     SocketStateUnlock(FCB);
 }
 
+/* The room a listen request states is that of the moment it was made, and the transport goes by it until the next
+ * request, which it makes when the next connection arrives: after a full queue is drained by accepts, the first
+ * connections that come meanwhile would be refused although the queue has room. An accept that makes more room than
+ * the request in flight states says so */
+static VOID RestateListenRoom(PAFD_FCB FCB)
+{
+    ULONG Room;
+
+    if (FCB->SharedData.State != SOCKET_STATE_LISTENING || !FCB->ListenIrp.InFlightRequest)
+        return;
+
+    Room = CountPendingConnections(FCB);
+    Room = Room < FCB->Backlog ? FCB->Backlog - Room : 1;
+    Room = min(Room, 0x7FFF);
+    if (Room > FCB->ListenStatedRoom && NT_SUCCESS(AfdStateListenRoom(FCB, Room)))
+        FCB->ListenStatedRoom = Room;
+}
+
 /* An accept made room in a full queue that stopped listening: listen again from a system thread */
 static VOID ResumeListen(PAFD_FCB FCB)
 {
+    RestateListenRoom(FCB);
+
     if (FCB->SharedData.State != SOCKET_STATE_LISTENING || FCB->ListenIrp.InFlightRequest ||
         FCB->Relistening || !KeReadStateEvent(&FCB->RelistenIdle) ||
         CountPendingConnections(FCB) >= FCB->Backlog)

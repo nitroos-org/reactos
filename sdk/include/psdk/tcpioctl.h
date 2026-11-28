@@ -522,6 +522,9 @@ typedef struct _UDP6_ROW_OWNER_PID
 #define TCP_SOCKET_KEEPALIVEVALS 3
 /* The largest receive window of the connection in bytes (SO_RCVBUF; a ULONG) */
 #define TCP_SOCKET_WINDOW 4
+/* How many more connections the listener of the connection's address file has room for (a ULONG, set on the
+   connection file object of a listen request by AFD, which owns the queue of accepted connections) */
+#define TCP_SOCKET_LISTEN_ROOM 5
 
 typedef struct IFEntry
 {

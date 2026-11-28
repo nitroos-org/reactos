@@ -226,6 +226,9 @@ NTSTATUS TCPSetNoDelay(PCONNECTION_ENDPOINT Connection, BOOLEAN Set);
 
 NTSTATUS TCPSetReceiveWindow(PCONNECTION_ENDPOINT Connection, ULONG Size);
 
+/* States anew how many connections the listener of the connection's address file has room for (see TCPAccept) */
+NTSTATUS TCPSetListenRoom(PCONNECTION_ENDPOINT Connection, ULONG Room);
+
 NTSTATUS TCPSetKeepAlive(PCONNECTION_ENDPOINT Connection, BOOLEAN Set);
 
 NTSTATUS TCPSetKeepAliveValues(PCONNECTION_ENDPOINT Connection, DWORD KeepAliveTime, DWORD KeepAliveInterval);
