@@ -28,6 +28,13 @@ NTSTATUS FileOpenAddress(
 NTSTATUS FileCloseAddress(
   PTDI_REQUEST Request);
 
+BOOLEAN AddrEphemeralPortMovable(
+  PADDRESS_FILE AddrFile);
+
+VOID AddrMoveEphemeralPort(
+  PADDRESS_FILE AddrFile,
+  USHORT NewPort);
+
 NTSTATUS FileOpenConnection(
   PTDI_REQUEST Request,
   PVOID ClientContext);
