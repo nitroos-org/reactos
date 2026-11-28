@@ -12,16 +12,78 @@
 
 static LARGE_INTEGER TestStartTime;
 
+#define SPIN_TIME 1000000
+
+/*
+ * Busy-wait so that both KernelTime and UserTime grow. Both are charged by
+ * clock tick to the mode the tick finds the thread in, so each mode needs
+ * a stretch of its own: a loop with a system call per turn spends most of
+ * its time in the kernel (on a 2-vCPU VM a tick found it in user mode in
+ * about half of the 100 ms runs, and UserTime stayed 0), a loop without one
+ * stays in user mode (reading the system time does not enter the kernel: it
+ * is in the shared user data). Each stretch lasts SPIN_TIME and, on a busy
+ * machine where the thread gets few ticks, until a tick charged this
+ * thread's time in that mode (at most 50 times SPIN_TIME).
+ */
+static
+LONGLONG
+ThreadTime(BOOLEAN User)
+{
+    KERNEL_USER_TIMES Times;
+
+    if (!NT_SUCCESS(NtQueryInformationThread(NtCurrentThread(), ThreadTimes, &Times, sizeof(Times), NULL)))
+        return -1;
+    return User ? Times.UserTime.QuadPart : Times.KernelTime.QuadPart;
+}
+
+static
+void
+SpinKernelAndUser(void)
+{
+    LARGE_INTEGER Start, Now, Counter;
+    LONGLONG Before;
+    ULONG Turns = 0;
+    NTSTATUS Status;
+
+    /* Kernel time: a system call per turn */
+    Before = ThreadTime(FALSE);
+    NtQuerySystemTime(&Start);
+    do
+    {
+        NtQueryPerformanceCounter(&Counter, NULL);
+        Status = NtQuerySystemTime(&Now);
+        if (!NT_SUCCESS(Status))
+        {
+            ok(0, "NtQuerySystemTime failed with %lx\n", Status);
+            return;
+        }
+    } while (Now.QuadPart - Start.QuadPart < SPIN_TIME ||
+             (ThreadTime(FALSE) == Before && Now.QuadPart - Start.QuadPart < 50 * SPIN_TIME));
+
+    /* User time: no system call, but for a look at the thread's time now and then */
+    Before = ThreadTime(TRUE);
+    Start = Now;
+    do
+    {
+        Status = NtQuerySystemTime(&Now);
+        if (!NT_SUCCESS(Status))
+        {
+            ok(0, "NtQuerySystemTime failed with %lx\n", Status);
+            return;
+        }
+    } while (Now.QuadPart - Start.QuadPart < SPIN_TIME ||
+             (((++Turns & 0xffff) || ThreadTime(TRUE) == Before) && Now.QuadPart - Start.QuadPart < 50 * SPIN_TIME));
+}
+
 static
 void
 Test_ProcessTimes(void)
 {
-#define SPIN_TIME 1000000
     NTSTATUS Status;
     KERNEL_USER_TIMES Times1;
     KERNEL_USER_TIMES Times2;
     ULONG Length;
-    LARGE_INTEGER Time1, Time2, Counter;
+    LARGE_INTEGER Time1, Time2;
 
     /* Everything is NULL */
     Status = NtQueryInformationProcess(NULL,
@@ -97,23 +159,8 @@ Test_ProcessTimes(void)
     ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
     ok_dec(Length, 0x55555555);
 
-    Status = NtQuerySystemTime(&Time1);
-    ok_hex(Status, STATUS_SUCCESS);
-
-    /* Do some busy waiting to increase UserTime */
-    do
-    {
-        /* A system call per round: reading the system time does not enter the kernel (the time is in the
-           shared user data), and the kernel time that the checks below expect is charged at clock ticks
-           that find the thread in the kernel */
-        NtQueryPerformanceCounter(&Counter, NULL);
-        Status = NtQuerySystemTime(&Time2);
-        if (!NT_SUCCESS(Status))
-        {
-            ok(0, "NtQuerySystemTime failed with %lx\n", Status);
-            break;
-        }
-    } while (Time2.QuadPart - Time1.QuadPart < SPIN_TIME);
+    /* Do some busy waiting to increase KernelTime and UserTime */
+    SpinKernelAndUser();
 
     /* Valid parameters, no return length */
     Status = NtQuerySystemTime(&Time1);
@@ -133,23 +180,10 @@ Test_ProcessTimes(void)
     ok(Times1.ExitTime.QuadPart == 0,
        "ExitTime is %I64u, expected 0\n", Times1.ExitTime.QuadPart);
     ok(Times1.KernelTime.QuadPart != 0, "KernelTime is 0\n");
-    ros_skip_flaky
     ok(Times1.UserTime.QuadPart != 0, "UserTime is 0\n");
 
-    /* Do some busy waiting to increase UserTime */
-    do
-    {
-        /* A system call per round: reading the system time does not enter the kernel (the time is in the
-           shared user data), and the kernel time that the checks below expect is charged at clock ticks
-           that find the thread in the kernel */
-        NtQueryPerformanceCounter(&Counter, NULL);
-        Status = NtQuerySystemTime(&Time2);
-        if (!NT_SUCCESS(Status))
-        {
-            ok(0, "NtQuerySystemTime failed with %lx\n", Status);
-            break;
-        }
-    } while (Time2.QuadPart - Time1.QuadPart < SPIN_TIME);
+    /* Do some busy waiting to increase KernelTime and UserTime */
+    SpinKernelAndUser();
 
     /* Again, this time with a return length */
     Length = 0x55555555;
@@ -174,7 +208,6 @@ Test_ProcessTimes(void)
     /* Time values must have increased */
     ok(Times2.KernelTime.QuadPart > Times1.KernelTime.QuadPart,
        "KernelTime values inconsistent. Expected %I64u > %I64u\n", Times2.KernelTime.QuadPart, Times1.KernelTime.QuadPart);
-    ros_skip_flaky
     ok(Times2.UserTime.QuadPart > Times1.UserTime.QuadPart,
        "UserTime values inconsistent. Expected %I64u > %I64u\n", Times2.UserTime.QuadPart, Times1.UserTime.QuadPart);
     /* They can't have increased by more than wall clock time difference (we only have one thread) */
