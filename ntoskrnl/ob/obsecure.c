@@ -629,6 +629,15 @@ ObpAssignSecurity(IN PACCESS_STATE AccessState,
      * label to objects: the security subsystem labels process, thread, access
      * token and job objects when they are created).
      */
+    if (Type == SeTokenObjectType)
+    {
+        /* An explicit label of a new token may not be above its creator's level (see there) */
+        Status = SepCheckTokenCreatorLabel(AccessState->SecurityDescriptor,
+                                           &AccessState->SubjectSecurityContext,
+                                           RequestorMode);
+        if (!NT_SUCCESS(Status)) return Status;
+    }
+
     Status = SepAssignSecurity(SecurityDescriptor,
                                AccessState->SecurityDescriptor,
                                &NewDescriptor,

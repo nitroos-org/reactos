@@ -171,6 +171,7 @@ extern void func_SaferIdentifyLevel(void);
 extern void func_FileInheritedAce(void);
 extern void func_TokenDenyOnlyAttributes(void);
 extern void func_TokenFilteredFlags(void);
+extern void func_TokenCreateLabel(void);
 extern void func_TokenDefaultDacl(void);
 extern void func_TokenElevation(void);
 extern void func_TokenIntegrity(void);
@@ -413,6 +414,7 @@ const struct test winetest_testlist[] =
     { "FileInheritedAce", func_FileInheritedAce },
     { "TokenDenyOnlyAttributes", func_TokenDenyOnlyAttributes },
     { "TokenFilteredFlags", func_TokenFilteredFlags },
+    { "TokenCreateLabel", func_TokenCreateLabel },
     { "TokenDefaultDacl", func_TokenDefaultDacl },
     { "TokenElevation", func_TokenElevation },
     { "TokenIntegrity", func_TokenIntegrity },

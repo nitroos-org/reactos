@@ -567,6 +567,13 @@ SepAssignSecurity(
 
 NTSTATUS
 NTAPI
+SepCheckTokenCreatorLabel(
+    _In_opt_ PSECURITY_DESCRIPTOR ExplicitDescriptor,
+    _In_ PSECURITY_SUBJECT_CONTEXT SubjectContext,
+    _In_ KPROCESSOR_MODE RequestorMode);
+
+NTSTATUS
+NTAPI
 SeAssignObjectLabel(
     _In_ PTOKEN Token,
     _In_ ACCESS_MASK Policy,

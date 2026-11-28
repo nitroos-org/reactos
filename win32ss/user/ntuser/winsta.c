@@ -2359,6 +2359,7 @@ BuildDesktopNameList(
     ULONG ReturnLength;
     WCHAR NullWchar;
     UNICODE_STRING DesktopName;
+    PVOID Snapshot = NULL;
 
     Status = IntValidateWindowStationHandle(hWindowStation,
                                             UserMode,
@@ -2369,6 +2370,14 @@ BuildDesktopNameList(
     {
         return Status;
     }
+
+    /*
+     * The list of the desktops is changed under the USER lock (NtUserCreateDesktop links a desktop, the
+     * delete procedure of the desktop object unlinks it): count, and copy the names into a buffer of ours
+     * in one hold, so that the count and the names agree. Nothing is copied to the caller under the lock:
+     * a fault in the caller's buffer (a page being read in, a guard page) must not hold up every USER call.
+     */
+    UserEnterExclusive();
 
     /*
      * Count the required size of buffer.
@@ -2388,11 +2397,45 @@ BuildDesktopNameList(
         EntryCount++;
     }
     TRACE("Required size: %lu Entry count: %lu\n", ReturnLength, EntryCount);
+
+    /* Only a buffer that is large enough gets the names */
+    if (dwSize >= ReturnLength)
+    {
+        Snapshot = ExAllocatePoolWithTag(PagedPool, ReturnLength, TAG_WINSTA);
+        if (Snapshot != NULL)
+        {
+            PCHAR Cursor = (PCHAR)Snapshot;
+
+            RtlCopyMemory(Cursor, &EntryCount, sizeof(DWORD));
+            Cursor += sizeof(DWORD);
+
+            NullWchar = L'\0';
+            for (DesktopEntry = WindowStation->DesktopListHead.Flink;
+                 DesktopEntry != &WindowStation->DesktopListHead;
+                 DesktopEntry = DesktopEntry->Flink)
+            {
+                DesktopObject = CONTAINING_RECORD(DesktopEntry, DESKTOP, ListEntry);
+                if (DesktopObject->pDeskInfo == NULL)
+                    continue;
+                RtlInitUnicodeString(&DesktopName, DesktopObject->pDeskInfo->szDesktopName);
+                RtlCopyMemory(Cursor, DesktopName.Buffer, DesktopName.Length);
+                Cursor += DesktopName.Length;
+                RtlCopyMemory(Cursor, &NullWchar, sizeof(WCHAR));
+                Cursor += sizeof(WCHAR);
+            }
+            ASSERT(Cursor == (PCHAR)Snapshot + ReturnLength);
+        }
+    }
+
+    UserLeave();
+
     if (NULL != pRequiredSize)
     {
         Status = MmCopyToCaller(pRequiredSize, &ReturnLength, sizeof(ULONG));
         if (! NT_SUCCESS(Status))
         {
+            if (Snapshot != NULL)
+                ExFreePoolWithTag(Snapshot, TAG_WINSTA);
             ObDereferenceObject(WindowStation);
             return STATUS_BUFFER_TOO_SMALL;
         }
@@ -2407,47 +2450,23 @@ BuildDesktopNameList(
         return STATUS_BUFFER_TOO_SMALL;
     }
 
+    if (Snapshot == NULL)
+    {
+        ObDereferenceObject(WindowStation);
+        return STATUS_NO_MEMORY;
+    }
+
     /*
      * Generate the resulting buffer contents.
      */
-    Status = MmCopyToCaller(lpBuffer, &EntryCount, sizeof(DWORD));
-    if (! NT_SUCCESS(Status))
-    {
-        ObDereferenceObject(WindowStation);
-        return Status;
-    }
-    lpBuffer = (PVOID) ((PCHAR) lpBuffer + sizeof(DWORD));
-
-    NullWchar = L'\0';
-    for (DesktopEntry = WindowStation->DesktopListHead.Flink;
-         DesktopEntry != &WindowStation->DesktopListHead;
-         DesktopEntry = DesktopEntry->Flink)
-    {
-        DesktopObject = CONTAINING_RECORD(DesktopEntry, DESKTOP, ListEntry);
-        if (DesktopObject->pDeskInfo == NULL)
-            continue;
-        RtlInitUnicodeString(&DesktopName, DesktopObject->pDeskInfo->szDesktopName);
-        Status = MmCopyToCaller(lpBuffer, DesktopName.Buffer, DesktopName.Length);
-        if (! NT_SUCCESS(Status))
-        {
-            ObDereferenceObject(WindowStation);
-            return Status;
-        }
-        lpBuffer = (PVOID) ((PCHAR)lpBuffer + DesktopName.Length);
-        Status = MmCopyToCaller(lpBuffer, &NullWchar, sizeof(WCHAR));
-        if (! NT_SUCCESS(Status))
-        {
-            ObDereferenceObject(WindowStation);
-            return Status;
-        }
-        lpBuffer = (PVOID) ((PCHAR) lpBuffer + sizeof(WCHAR));
-    }
+    Status = MmCopyToCaller(lpBuffer, Snapshot, ReturnLength);
+    ExFreePoolWithTag(Snapshot, TAG_WINSTA);
 
     /*
      * Clean up and return
      */
     ObDereferenceObject(WindowStation);
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 /*
