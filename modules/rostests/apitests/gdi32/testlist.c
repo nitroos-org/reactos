@@ -90,13 +90,16 @@ extern void func_OffsetClipRgn(void);
 extern void func_OffsetRgn(void);
 extern void func_PaintRgn(void);
 extern void func_PatBlt(void);
+extern void func_PathAllocFailure(void);
 extern void func_PathArcRobustness(void);
+extern void func_PathPolyBezierTo(void);
 extern void func_PolyPatBlt(void);
 extern void func_PolygonRegionBound(void);
 extern void func_PolygonClipInvariance(void);
 extern void func_Rectangle(void);
 extern void func_RegionAllocFailClip(void);
 extern void func_RegionAllocFailVis(void);
+extern void func_RegionAllocFailCombine(void);
 extern void func_RealizePalette(void);
 extern void func_RemoveFontResourceEx(void);
 extern void func_SelectBitmapOwner(void);
@@ -216,13 +219,16 @@ const struct test winetest_testlist[] =
     { "OffsetRgn", func_OffsetRgn },
     { "PaintRgn", func_PaintRgn },
     { "PatBlt", func_PatBlt },
+    { "PathAllocFailure", func_PathAllocFailure },
     { "PathArcRobustness", func_PathArcRobustness },
+    { "PathPolyBezierTo", func_PathPolyBezierTo },
     { "PolyPatBlt", func_PolyPatBlt },
     { "PolygonRegionBound", func_PolygonRegionBound },
     { "PolygonClipInvariance", func_PolygonClipInvariance },
     { "Rectangle", func_Rectangle },
     { "RegionAllocFailClip", func_RegionAllocFailClip },
     { "RegionAllocFailVis", func_RegionAllocFailVis },
+    { "RegionAllocFailCombine", func_RegionAllocFailCombine },
     { "RealizePalette", func_RealizePalette },
     { "RemoveFontResourceEx", func_RemoveFontResourceEx },
     { "SelectBitmapOwner", func_SelectBitmapOwner },

@@ -149,8 +149,8 @@ SeInitializeProcessAuditName(
     if ((ObjectNameInfo) &&
         (!(NT_SUCCESS(Status)) || (ReturnLength == sizeof(LocalNameInfo))))
     {
-        /* First, free any buffer we might've allocated */
-        ASSERT(FALSE);
+        /* First, free any buffer we might've allocated (the second query can
+           fail for lack of memory: an empty name is made below) */
         if (ObjectNameInfo) ExFreePool(ObjectNameInfo);
 
         /* Now allocate a temporary one */

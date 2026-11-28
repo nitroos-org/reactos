@@ -221,6 +221,13 @@ IntGdiLineTo(DC  *dc,
 
                 /* Begin a path */
                 pPath = PATH_CreatePath(2);
+                if (!pPath)
+                {
+                    /* No memory: nothing drawn, the current position stays */
+                    Ret = FALSE;
+                }
+                else
+                {
                 dc->dclevel.flPath |= DCPATH_ACTIVE;
                 dc->dclevel.hPath = pPath->BaseObject.hHmgr;
                 IntGetCurrentPositionEx(dc, &pPath->pos);
@@ -240,6 +247,7 @@ IntGdiLineTo(DC  *dc,
                 PATH_UnlockPath(pPath);
                 PATH_Delete(dc->dclevel.hPath);
                 dc->dclevel.hPath = NULL;
+                }
             }
             else
             {
@@ -398,6 +406,13 @@ IntGdiPolyline(DC      *dc,
                    transform them again, replace the first point by the current position when the application has
                    moved it, and move the current position (Polyline neither uses nor changes it). */
                 pPath = PATH_CreatePath(Count);
+                if (!pPath)
+                {
+                    /* No memory: nothing drawn */
+                    Ret = FALSE;
+                    EngFreeMem(Points);
+                    goto Exit;
+                }
                 dc->dclevel.flPath |= DCPATH_ACTIVE;
                 dc->dclevel.hPath = pPath->BaseObject.hHmgr;
                 for (i = 0; i < Count; ++i)
@@ -443,6 +458,7 @@ IntGdiPolyline(DC      *dc,
         }
     }
 
+Exit:
     DC_vFinishBlit(dc, NULL);
     DC_vRedirKeepOuter(dc, &rclOuter);
 

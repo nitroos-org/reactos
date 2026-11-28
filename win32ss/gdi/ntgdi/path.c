@@ -35,10 +35,70 @@ static int PathCount = 0;
  * Internal functions
  */
 
+#if DBG
+INT
+FASTCALL
+PATH_iDbgArmAllocFailure(
+    _In_reads_bytes_opt_(cjIn) PVOID pvIn,
+    _In_ INT cjIn)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+    LONG lAllowed;
+    INT iRet;
+
+    if (!pti || !pvIn || cjIn != sizeof(LONG))
+        return -1;
+
+    _SEH2_TRY
+    {
+        ProbeForRead(pvIn, sizeof(LONG), 1);
+        lAllowed = *(LONG *)pvIn;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return -1);
+    }
+    _SEH2_END;
+
+    /* Returns 2 when a failure was injected since the previous arming, else 1 */
+    iRet = pti->bDbgPathFailFired ? 2 : 1;
+    pti->bDbgPathFailFired = FALSE;
+    pti->bDbgPathFailArmed = (lAllowed >= 0);
+    pti->lDbgPathFailCountdown = lAllowed;
+    return iRet;
+}
+
+static
+BOOL
+PATH_bDbgFailAlloc(VOID)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+
+    if (!pti || !pti->bDbgPathFailArmed)
+        return FALSE;
+
+    if (pti->lDbgPathFailCountdown > 0)
+    {
+        pti->lDbgPathFailCountdown--;
+        return FALSE;
+    }
+
+    /* One failure per arming */
+    pti->bDbgPathFailArmed = FALSE;
+    pti->bDbgPathFailFired = TRUE;
+    ERR("Injected path allocation failure\n");
+    return TRUE;
+}
+#define PATH_DBG_FAIL_ALLOC() PATH_bDbgFailAlloc()
+#else
+#define PATH_DBG_FAIL_ALLOC() FALSE
+#endif
+
+/* Makes a path with room for count entries; NULL (and ERROR_NOT_ENOUGH_MEMORY) when an allocation fails */
 PPATH FASTCALL
 PATH_CreatePath(int count)
 {
-    PPATH pPath = PATH_AllocPathWithHandle();
+    PPATH pPath = PATH_DBG_FAIL_ALLOC() ? NULL : PATH_AllocPathWithHandle();
 
     if (!pPath)
     {
@@ -56,11 +116,23 @@ PATH_CreatePath(int count)
 
     count = max( NUM_ENTRIES_INITIAL, count );
 
-    pPath->numEntriesAllocated = count;
+    pPath->pPoints = PATH_DBG_FAIL_ALLOC() ? NULL :
+                     (POINT *)ExAllocatePoolWithTag(PagedPool, count * sizeof(POINT), TAG_PATH);
+    pPath->pFlags = (!pPath->pPoints || PATH_DBG_FAIL_ALLOC()) ? NULL :
+                    (BYTE *)ExAllocatePoolWithTag(PagedPool, count * sizeof(BYTE), TAG_PATH);
+    if (!pPath->pFlags)
+    {
+        HPATH hPath = pPath->BaseObject.hHmgr;
 
-    pPath->pPoints = (POINT *)ExAllocatePoolWithTag(PagedPool, count * sizeof(POINT), TAG_PATH);
+        /* PATH_Delete frees the point array */
+        PATH_UnlockPath(pPath);
+        PATH_Delete(hPath);
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
+
+    pPath->numEntriesAllocated = count;
     RtlZeroMemory( pPath->pPoints, count * sizeof(POINT));
-    pPath->pFlags  =  (BYTE *)ExAllocatePoolWithTag(PagedPool, count * sizeof(BYTE),  TAG_PATH);
     RtlZeroMemory( pPath->pFlags, count * sizeof(BYTE));
 
     /* Initialize variables for new path */
@@ -197,6 +269,12 @@ BOOL PATH_SavePath( DC *dst, DC *src )
        TRACE("PATH_SavePath 1\n");
 
        pdstPath = PATH_CreatePath(psrcPath->numEntriesAllocated);
+       if (!pdstPath)
+       {
+          /* No memory: the saved state has no path */
+          PATH_UnlockPath(psrcPath);
+          return FALSE;
+       }
 
        dst->dclevel.flPath = src->dclevel.flPath;
 
@@ -218,7 +296,15 @@ BOOL PATH_RestorePath( DC *dst, DC *src )
     {
        PPATH pdstPath, psrcPath = PATH_LockPath(src->dclevel.hPath);
        TRACE("PATH_RestorePath 1\n");
+       if (!psrcPath)
+          return FALSE;
        pdstPath = PATH_CreatePath(psrcPath->numEntriesAllocated);
+       if (!pdstPath)
+       {
+          /* No memory: the DC stays without a path */
+          PATH_UnlockPath(psrcPath);
+          return FALSE;
+       }
        dst->dclevel.flPath = src->dclevel.flPath;
        dst->dclevel.hPath = pdstPath->BaseObject.hHmgr;
 
@@ -1227,7 +1313,11 @@ PATH_PolyBezierTo(
     pPath = PATH_LockPath(dc->dclevel.hPath);
     if (!pPath) return FALSE;
 
-    ret = add_log_points_new_stroke(dc, pPath, pts, cbPoints, PT_BEZIERTO , TRUE);
+    /* The points are the control and end points only: NtGdiPolyPolyDraw drops the current position that gdi32
+       puts first. The stroke starts at the current position: take a MoveToEx that gdi32 made in the DC attribute
+       (PATH_MoveTo), then start_new_stroke adds the move to it */
+    PATH_MoveTo(dc, pPath);
+    ret = add_log_points_new_stroke(dc, pPath, pts, cbPoints, PT_BEZIERTO , FALSE);
 
     PATH_UnlockPath(pPath);
     return ret;
@@ -1988,6 +2078,12 @@ PATH_StrokePath(
             PATH_Delete(pNewPath->BaseObject.hHmgr);
             return TRUE;
         }
+
+        /* The lines below would be drawn with the same pen, wide at any transform: IntGdiPolyline strokes them
+           through a path and comes back here. Without the widened path (no memory) that recursion only ends when
+           the kernel stack does: draw nothing */
+        if (IntIsEffectiveWidePen(pbrLine))
+            return FALSE;
     }
 
     /* The points of the path are device points: draw them with the identity transform, changing the mapping mode as
@@ -2064,6 +2160,13 @@ PATH_StrokePath(
                 {
                     INT nBzrPts, nMinAlloc;
                     POINT *pBzrPts = GDI_Bezier(&pPath->pPoints[i - 1], 4, &nBzrPts);
+                    if (!pBzrPts)
+                    {
+                        /* No memory for the flattened curve */
+                        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                        ret = FALSE;
+                        goto end;
+                    }
                     /* Make sure we have allocated enough memory for the lines of
                      * this bezier and the rest of the path, assuming we won't get
                      * another one (since we won't reallocate again then). */
@@ -3847,6 +3950,14 @@ NtGdiBeginPath(HDC  hDC)
         }
     }
     pPath = PATH_CreatePath(NUM_ENTRIES_INITIAL);
+    if (!pPath)
+    {
+        /* No memory: no path (the previous one, if any, is gone) */
+        dc->dclevel.hPath = NULL;
+        dc->dclevel.flPath &= ~DCPATH_ACTIVE;
+        DC_UnlockDc(dc);
+        return FALSE;
+    }
     dc->dclevel.flPath |= DCPATH_ACTIVE; // Set active ASAP!
     dc->dclevel.hPath = pPath->BaseObject.hHmgr;
     IntGetCurrentPositionEx(dc, &pPath->pos);
@@ -3977,6 +4088,15 @@ NtGdiFillPath(HDC  hDC)
         DC_vUpdateFillBrush(dc);
 
     pNewPath = PATH_FlattenPath(pPath);
+    if (!pNewPath)
+    {
+        /* No memory: nothing drawn, the path stays */
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        PATH_UnlockPath(pPath);
+        DC_vFinishBlit(dc, NULL);
+        DC_UnlockDc(dc);
+        return FALSE;
+    }
 
     if (pNewPath->state != PATH_Closed)
     {
@@ -4331,6 +4451,15 @@ NtGdiStrokeAndFillPath(HDC hDC)
         DC_vUpdateLineBrush(pDc);
 
     pNewPath = PATH_FlattenPath(pPath);
+    if (!pNewPath)
+    {
+        /* No memory: nothing drawn, the path stays */
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        PATH_UnlockPath(pPath);
+        DC_vFinishBlit(pDc, NULL);
+        DC_UnlockDc(pDc);
+        return FALSE;
+    }
 
     if (pNewPath->state != PATH_Closed)
     {
@@ -4388,6 +4517,15 @@ NtGdiStrokePath(HDC hDC)
         DC_vUpdateLineBrush(pDc);
 
     pNewPath = PATH_FlattenPath(pPath);
+    if (!pNewPath)
+    {
+        /* No memory: nothing drawn, the path stays */
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        DC_vFinishBlit(pDc, NULL);
+        PATH_UnlockPath(pPath);
+        DC_UnlockDc(pDc);
+        return FALSE;
+    }
 
     if (pNewPath->state != PATH_Closed)
     {

@@ -174,7 +174,12 @@ typedef struct _THREADINFO
     /* Region allocation failure injection, see REGION_iDbgArmAllocFailure */
     BOOLEAN bDbgRgnFailArmed;
     BOOLEAN bDbgRgnFailFired;
+    BOOLEAN bDbgRgnFailBuffers;
     LONG lDbgRgnFailCountdown;
+    /* Path allocation failure injection, see PATH_iDbgArmAllocFailure */
+    BOOLEAN bDbgPathFailArmed;
+    BOOLEAN bDbgPathFailFired;
+    LONG lDbgPathFailCountdown;
 #endif
 #endif // __cplusplus
 } THREADINFO;

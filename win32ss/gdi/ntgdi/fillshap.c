@@ -122,6 +122,12 @@ IntGdiPolygon(PDC    dc,
                 /* Begin a path. Points are device coordinates plus the DC origin by now, and a path holds device
                    coordinates without the origin: add the entries as they are (PATH_LineTo would transform them again). */
                 pPath = PATH_CreatePath(Count + 1);
+                if (!pPath)
+                {
+                    /* No memory for the outline: the polygon is filled but not outlined */
+                    ret = FALSE;
+                    goto NoOutline;
+                }
                 dc->dclevel.flPath |= DCPATH_ACTIVE;
                 dc->dclevel.hPath = pPath->BaseObject.hHmgr;
                 for (i = 0; i <= Count; ++i)
@@ -182,6 +188,8 @@ IntGdiPolygon(PDC    dc,
                                        ROP2_TO_MIX(pdcattr->jROP2)); /* MIX */
                 }
             }
+NoOutline:
+            ;
         }
 
         /*
@@ -825,6 +833,12 @@ IntRectangle(PDC dc,
             IntLPtoDP(dc, (PPOINTL)ptCorner, 4);
 
             pPath = PATH_CreatePath(5);
+            if (!pPath)
+            {
+                /* No memory for the outline: the rectangle is filled but not outlined */
+                ret = FALSE;
+                goto cleanup;
+            }
             dc->dclevel.flPath |= DCPATH_ACTIVE;
             dc->dclevel.hPath = pPath->BaseObject.hHmgr;
             for (i = 0; i < 5; i++)

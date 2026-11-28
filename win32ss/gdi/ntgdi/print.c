@@ -108,6 +108,10 @@ NtGdiExtEscape(
 #if DBG
    if (Escape == GDI_DBG_ESCAPE_FAIL_REGION_ALLOC)
       return REGION_iDbgArmAllocFailure(UnsafeInData, InSize);
+   if (Escape == GDI_DBG_ESCAPE_FAIL_REGION_BUFFER)
+      return REGION_iDbgArmBufferFailure(UnsafeInData, InSize);
+   if (Escape == GDI_DBG_ESCAPE_FAIL_PATH_ALLOC)
+      return PATH_iDbgArmAllocFailure(UnsafeInData, InSize);
 #endif
 
    if (hDC == NULL)
