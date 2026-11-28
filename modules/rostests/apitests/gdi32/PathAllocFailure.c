@@ -236,6 +236,25 @@ START_TEST(PathAllocFailure)
         ok(Rectangle(hdc, 10, 10, 80, 80), "Rectangle with a wide pen after %ld allowed: failed\n", n);
     }
     ok(cFired == 9, "LineTo, Polyline, Rectangle: %d of 9 failures injected\n", cFired);
+
+    /* StrokePath with a wide pen widens the flattened path (a second new path): without it nothing is drawn
+       (before, the outline was drawn with the same wide pen, which strokes through a path again: a recursion) */
+    cFired = 0;
+    for (n = 3; n < 6; n++)
+    {
+        ok(MakeClosedPath(hdc), "wide StrokePath, %ld allowed: no path\n", n);
+        ArmPathAllocFailure(n);
+        bRet = StrokePath(hdc);
+        bFired = Disarm();
+        /* the widening has a fallback of its own for some of the allocations: either result, but no stop */
+        if (bFired)
+            cFired++;
+        trace("wide StrokePath, %ld allowed: %d, fired %d\n", n, bRet, bFired);
+        AbortPath(hdc);
+        ok(MakeClosedPath(hdc), "wide StrokePath after %ld allowed: no path\n", n);
+        ok(StrokePath(hdc), "wide StrokePath after %ld allowed: failed\n", n);
+    }
+    ok(cFired == 3, "wide StrokePath: %d of 3 failures injected\n", cFired);
     SelectObject(hdc, hpenOld);
     DeleteObject(hpen);
 
