@@ -20,6 +20,7 @@
 
 #define B_COLOR   RGB(0x12, 0xA5, 0x34)
 #define A_MARK    RGB(0xFF, 0x00, 0xFF)
+#define PROBE_COLOR RGB(0x01, 0x02, 0x03)
 #define DESK_B    L"ScreenDesktopReadsB"
 
 static HDESK s_hdeskB;
@@ -27,6 +28,7 @@ static HANDLE s_hReady, s_hCmd, s_hDone, s_hQuit;
 static volatile LONG s_Cmd;            /* 1: read the screen from B and count the pixels of A_MARK and B_COLOR */
 static volatile LONG s_cMarkB, s_cColorB;
 static int s_cx, s_cy;
+static BOOL s_bCanDraw[4];             /* the kept DC of the route drew on the screen before the switch */
 
 static LRESULT CALLBACK WndProcB(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
@@ -221,6 +223,28 @@ START_TEST(ScreenDesktopReads)
     ok(cColor == 0, "the colour of B on the screen before the switch\n");
     ReleaseDC(NULL, hdc);
 
+    /*
+     * Which of the kept DCs draw on the screen at all while A has the input: the DC of the desktop window clips the
+     * windows on it (WS_CLIPCHILDREN), so where a window covers the screen it draws nothing, before the switch as
+     * after it. What a DC could draw before, it must draw again after the switch back. Each route has a rectangle
+     * of its own (what one route drew must not be what another one reads back), in a colour that is not the mark.
+     */
+    {
+        HBRUSH hbrProbe = CreateSolidBrush(PROBE_COLOR);
+        HDC hdcRead = GetDC(NULL);
+
+        for (i = 0; i < 4; i++)
+        {
+            RECT rcProbe = { 300 + 60 * i, 400, 340 + 60 * i, 440 };
+
+            FillRect(held[i].hdcHeld, &rcProbe, hbrProbe);
+            GdiFlush();
+            s_bCanDraw[i] = GetPixel(hdcRead, rcProbe.left + 20, rcProbe.top + 20) == PROBE_COLOR;
+        }
+        ReleaseDC(NULL, hdcRead);
+        DeleteObject(hbrProbe);
+    }
+
     if (!SwitchDesktop(s_hdeskB))
     {
         skip("SwitchDesktop failed (%lu)\n", GetLastError());
@@ -257,24 +281,34 @@ START_TEST(ScreenDesktopReads)
     /* back to A: reads and draws as before, also with the DCs kept over the switch */
     ok(SwitchDesktop(hdeskA), "SwitchDesktop back failed (%lu)\n", GetLastError());
     hbr = CreateSolidBrush(A_MARK);
-    rc.left = 300; rc.top = 300; rc.right = 340; rc.bottom = 340;
     for (i = 0; i < 4; i++)
     {
         hdc = held[i].hdcHeld;
         ok(hdc != NULL, "%s: no DC\n", held[i].name);
         if (!hdc)
             continue;
+
+        /* A DC that drew nothing before the switch (see above) reads the screen again, and that is all it is asked */
+        if (!s_bCanDraw[i])
+        {
+            ok(CountScreen(hdc, &cMark, &cColor, &err) == TRUE, "%s: BitBlt after the switch back failed (%lu)\n", held[i].name, err);
+            continue;
+        }
+
+        /* A rectangle of its own: what another route drew is not what this one has to read back */
+        rc.left = 300 + 60 * i; rc.top = 300; rc.right = rc.left + 40; rc.bottom = 340;
+
         /* The windows of A repaint after the switch back and may paint over the mark between the draw and the read: try again */
         for (n = 0; n < 20; n++)
         {
             ok(FillRect(hdc, &rc, hbr) != 0, "%s: FillRect after the switch back failed (%lu)\n", held[i].name, GetLastError());
-            if (GetPixel(hdc, 320, 320) == A_MARK &&
+            if (GetPixel(hdc, rc.left + 20, rc.top + 20) == A_MARK &&
                 CountScreen(hdc, &cMark, &cColor, &err) && cMark >= 40 * 40)
                 break;
             Sleep(100);
         }
         ok(n < 20, "%s: the mark was not read back after the switch back (GetPixel 0x%08lx, %d pixels, error %lu)\n",
-           held[i].name, GetPixel(hdc, 320, 320), cMark, err);
+           held[i].name, GetPixel(hdc, rc.left + 20, rc.top + 20), cMark, err);
     }
     DeleteObject(hbr);
 
