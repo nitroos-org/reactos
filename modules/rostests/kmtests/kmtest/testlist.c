@@ -42,6 +42,7 @@ KMT_TESTFUNC Test_MupProvider;
 KMT_TESTFUNC Test_NtCreateSection;
 KMT_TESTFUNC Test_NtSystemDebugControl;
 KMT_TESTFUNC Test_PoIrp;
+KMT_TESTFUNC Test_PsExitStatus;
 KMT_TESTFUNC Test_RdbssLoop;
 KMT_TESTFUNC Test_RdbssLoopStress;
 KMT_TESTFUNC Test_RdbssRaces;
@@ -103,6 +104,7 @@ const KMT_TEST TestList[] =
     { "NtCreateSection",              Test_NtCreateSection },
     { "NtSystemDebugControl",         Test_NtSystemDebugControl },
     { "PoIrp",                        Test_PoIrp },
+    { "PsExitStatus",                 Test_PsExitStatus },
     { "RdbssLoop",                    Test_RdbssLoop },
     { "-RdbssLoopStress",             Test_RdbssLoopStress },
     { "-RdbssRaces",                  Test_RdbssRaces },

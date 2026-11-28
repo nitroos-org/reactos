@@ -28,6 +28,7 @@ list(APPEND SOURCE
     IocpThreadExit.c
     IoCompletionWait.c
     TerminateProcessWait.c
+    TerminateProcessExitCode.c
     ApplicationRestart.c
     AppModel.c
     CalendarInfo.c
