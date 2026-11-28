@@ -243,3 +243,106 @@ START_TEST(RegionAllocFailVis)
 
     DestroyWindow(hwnd);
 }
+
+/* Debug builds of win32k only, see GDI_DBG_ESCAPE_FAIL_REGION_BUFFER in win32ss/gdi/ntgdi/region.h */
+#define ESCAPE_FAIL_REGION_BUFFER 0x7FFE5242
+
+static INT
+ArmRegionBufferFailure(LONG lAllowed)
+{
+    return ExtEscape(NULL, ESCAPE_FAIL_REGION_BUFFER, sizeof(lAllowed), (LPCSTR)&lAllowed, 0, NULL);
+}
+
+static HRGN
+MakeComb(INT x)
+{
+    HRGN hrgn = CreateRectRgn(x, 0, x + 10, 10), hrgn2;
+    INT i;
+
+    for (i = 1; i < 6; i++)
+    {
+        hrgn2 = CreateRectRgn(x + i * 7, i * 15, x + i * 7 + 20, i * 15 + 10);
+        CombineRgn(hrgn, hrgn, hrgn2, RGN_OR);
+        DeleteObject(hrgn2);
+    }
+    return hrgn;
+}
+
+static BOOL
+SameRegion(HRGN hrgn1, HRGN hrgn2)
+{
+    return EqualRgn(hrgn1, hrgn2);
+}
+
+/* A region operation that cannot get its rectangle buffer fails and leaves the destination as it was */
+START_TEST(RegionAllocFailCombine)
+{
+    static const INT Modes[] = { RGN_AND, RGN_OR, RGN_XOR, RGN_DIFF };
+    HRGN hrgnDst, hrgnSrc, hrgnBefore, hrgnExpected, hrgnOther;
+    INT ret, iMode, cFired = 0;
+    LONG n;
+    BOOL bFired;
+
+    ret = ArmRegionBufferFailure(-1);
+    if (ret != 1 && ret != 2)
+    {
+        skip("No region buffer allocation failure injection (not a Debug build of win32k)\n");
+        return;
+    }
+
+    for (iMode = 0; iMode < 4; iMode++)
+    {
+        for (n = 0; n < 3; n++)
+        {
+            /* the destination is one of the sources */
+            hrgnDst = MakeComb(0);
+            hrgnSrc = MakeComb(5);
+            hrgnBefore = MakeComb(0);
+            hrgnExpected = MakeComb(0);
+            CombineRgn(hrgnExpected, hrgnExpected, hrgnSrc, Modes[iMode]);
+
+            ArmRegionBufferFailure(n);
+            ret = CombineRgn(hrgnDst, hrgnDst, hrgnSrc, Modes[iMode]);
+            bFired = ArmRegionBufferFailure(-1) == 2;
+            if (bFired)
+            {
+                cFired++;
+                ok(ret == ERROR, "mode %d, %ld allowed: %d without memory\n", Modes[iMode], n, ret);
+                ok(SameRegion(hrgnDst, hrgnBefore), "mode %d, %ld allowed: the destination changed\n", Modes[iMode], n);
+            }
+            else
+            {
+                ok(ret != ERROR, "mode %d, %ld allowed: ERROR\n", Modes[iMode], n);
+                ok(SameRegion(hrgnDst, hrgnExpected), "mode %d, %ld allowed: wrong result\n", Modes[iMode], n);
+            }
+
+            /* it works once nothing fails */
+            DeleteObject(hrgnDst);
+            hrgnDst = MakeComb(0);
+            ret = CombineRgn(hrgnDst, hrgnDst, hrgnSrc, Modes[iMode]);
+            ok(ret != ERROR, "mode %d after %ld allowed: ERROR\n", Modes[iMode], n);
+            ok(SameRegion(hrgnDst, hrgnExpected), "mode %d after %ld allowed: wrong result\n", Modes[iMode], n);
+
+            /* a destination that is not a source */
+            hrgnOther = CreateRectRgn(100, 100, 110, 110);
+            DeleteObject(hrgnBefore);
+            hrgnBefore = CreateRectRgn(100, 100, 110, 110);
+            ArmRegionBufferFailure(n);
+            ret = CombineRgn(hrgnOther, hrgnDst, hrgnSrc, Modes[iMode]);
+            if (ArmRegionBufferFailure(-1) == 2)
+            {
+                cFired++;
+                ok(ret == ERROR, "mode %d into another region, %ld allowed: %d without memory\n", Modes[iMode], n, ret);
+                ok(SameRegion(hrgnOther, hrgnBefore), "mode %d into another region, %ld allowed: it changed\n",
+                   Modes[iMode], n);
+            }
+
+            DeleteObject(hrgnOther);
+            DeleteObject(hrgnDst);
+            DeleteObject(hrgnSrc);
+            DeleteObject(hrgnBefore);
+            DeleteObject(hrgnExpected);
+        }
+    }
+    ok(cFired >= 4, "Only %d injected failures reached a region operation\n", cFired);
+}
