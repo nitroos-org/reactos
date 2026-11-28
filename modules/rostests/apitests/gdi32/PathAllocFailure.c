@@ -183,6 +183,59 @@ START_TEST(PathAllocFailure)
         ok(Polygon(hdc, pts, 4), "Polygon with a wide pen after %ld allowed: failed\n", n);
     }
     ok(cFired == 3, "Polygon: %d of 3 failures injected\n", cFired);
+
+    /* LineTo, Polyline and Rectangle with a wide pen stroke a path too */
+    cFired = 0;
+    for (n = 0; n < 3; n++)
+    {
+        POINT pt;
+
+        MoveToEx(hdc, 5, 5, NULL);
+        ArmPathAllocFailure(n);
+        bRet = LineTo(hdc, 50, 60);
+        bFired = Disarm();
+        GetCurrentPositionEx(hdc, &pt);
+        if (bFired)
+        {
+            cFired++;
+            ok(!bRet, "LineTo with a wide pen, %ld allowed: TRUE without the path\n", n);
+            ok(pt.x == 5 && pt.y == 5, "LineTo with a wide pen, %ld allowed: moved to (%ld,%ld)\n", n, pt.x, pt.y);
+        }
+        else
+        {
+            ok(bRet, "LineTo with a wide pen, %ld allowed: failed\n", n);
+        }
+        ok(LineTo(hdc, 50, 60), "LineTo with a wide pen after %ld allowed: failed\n", n);
+
+        ArmPathAllocFailure(n);
+        bRet = Polyline(hdc, pts, 4);
+        bFired = Disarm();
+        if (bFired)
+        {
+            cFired++;
+            ok(!bRet, "Polyline with a wide pen, %ld allowed: TRUE without the path\n", n);
+        }
+        else
+        {
+            ok(bRet, "Polyline with a wide pen, %ld allowed: failed\n", n);
+        }
+        ok(Polyline(hdc, pts, 4), "Polyline with a wide pen after %ld allowed: failed\n", n);
+
+        ArmPathAllocFailure(n);
+        bRet = Rectangle(hdc, 10, 10, 80, 80);
+        bFired = Disarm();
+        if (bFired)
+        {
+            cFired++;
+            ok(!bRet, "Rectangle with a wide pen, %ld allowed: TRUE without the outline\n", n);
+        }
+        else
+        {
+            ok(bRet, "Rectangle with a wide pen, %ld allowed: failed\n", n);
+        }
+        ok(Rectangle(hdc, 10, 10, 80, 80), "Rectangle with a wide pen after %ld allowed: failed\n", n);
+    }
+    ok(cFired == 9, "LineTo, Polyline, Rectangle: %d of 9 failures injected\n", cFired);
     SelectObject(hdc, hpenOld);
     DeleteObject(hpen);
 
