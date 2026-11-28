@@ -186,6 +186,24 @@ CmpGetSymbolicLink(IN PHHIVE Hive,
         RtlCopyMemory(ObjectName->Buffer, LinkName, ValueLength);
     }
 
+    /*
+     * The targets of the links are stored as \Registry\..., but the root of
+     * the registry in the object namespace is named REGISTRY. A caller that
+     * did not ask for a case-insensitive lookup (a kernel-mode open without
+     * OBJ_CASE_INSENSITIVE) restarts the lookup with this name and would not
+     * find the root again. Use the exact case of the root directory.
+     */
+    {
+        static const UNICODE_STRING RootName = RTL_CONSTANT_STRING(L"\\REGISTRY");
+
+        if (RtlPrefixUnicodeString(&RootName, ObjectName, TRUE) &&
+            (ObjectName->Length == RootName.Length ||
+             ObjectName->Buffer[RootName.Length / sizeof(WCHAR)] == OBJ_NAME_PATH_SEPARATOR))
+        {
+            RtlCopyMemory(ObjectName->Buffer, RootName.Buffer, RootName.Length);
+        }
+    }
+
     /* Null-terminate the whole thing */
     ObjectName->Buffer[ObjectName->Length / sizeof(WCHAR)] = UNICODE_NULL;
     Result = TRUE;
