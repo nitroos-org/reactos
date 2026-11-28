@@ -218,9 +218,22 @@ START_TEST(nitrofw)
     GetStatus(File, &Before);
     Generation = max(Before.Generation, TEST_GENERATION_BASE) + 1;
 
-    /* a policy with one allow rule: accepted, reported, enforcing (enabled profile, flag set) */
-    Size = BuildPolicy(Blob, Generation, NITROFW_POLICY_ENFORCE, 1, NITROFW_IFTYPE_ALL);
-    Status = FwIoctl(File, IOCTL_NITROFW_SET_POLICY, Blob, Size, NULL, 0);
+    /* a policy with one allow rule: accepted, reported, enforcing (enabled profile, flag set). The driver keeps
+       the highest generation it ever accepted (CLEAR does not lower it, and nothing reports it), so a run after
+       an earlier run of this test in the same boot starts at a generation the driver has seen: it asks again
+       with a larger one, by larger steps, until the policy is accepted */
+    {
+        ULONGLONG Step;
+
+        for (Step = 1; ; Step <<= 1)
+        {
+            Size = BuildPolicy(Blob, Generation, NITROFW_POLICY_ENFORCE, 1, NITROFW_IFTYPE_ALL);
+            Status = FwIoctl(File, IOCTL_NITROFW_SET_POLICY, Blob, Size, NULL, 0);
+            if (Status != STATUS_REVISION_MISMATCH || Step > 0x10000000000ULL)
+                break;
+            Generation += Step;
+        }
+    }
     ok_hex(Status, STATUS_SUCCESS);
     if (NT_SUCCESS(Status) && GetStatus(File, &Info))
     {
