@@ -2160,6 +2160,13 @@ PATH_StrokePath(
                 {
                     INT nBzrPts, nMinAlloc;
                     POINT *pBzrPts = GDI_Bezier(&pPath->pPoints[i - 1], 4, &nBzrPts);
+                    if (!pBzrPts)
+                    {
+                        /* No memory for the flattened curve */
+                        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                        ret = FALSE;
+                        goto end;
+                    }
                     /* Make sure we have allocated enough memory for the lines of
                      * this bezier and the rest of the path, assuming we won't get
                      * another one (since we won't reallocate again then). */
