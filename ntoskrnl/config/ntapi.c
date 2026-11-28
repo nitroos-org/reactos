@@ -13,8 +13,39 @@
 #define NDEBUG
 #include "debug.h"
 
+#ifdef BUILD_WOW64_ENABLED
+#include <wow64reg.h>
+#endif
+
 BOOLEAN CmBootAcceptFirstTime = TRUE;
 BOOLEAN CmFirstTime = TRUE;
+
+#ifdef BUILD_WOW64_ENABLED
+/*
+ * Registry view requested through the access mask of an open or create.
+ * A process running under WoW64 always has its view selectors applied (its
+ * 32-bit code reaches the kernel through the translator, which chooses the
+ * default view). For a native caller the selectors are ignored, as on
+ * Windows, unless advapi32 marked the request: the registry API chooses the
+ * view there. Both selectors at once are invalid for every caller.
+ * The selectors and the marker are not access rights and are removed.
+ */
+static
+NTSTATUS
+CmpGetWow64View(
+    _Inout_ PACCESS_MASK DesiredAccess,
+    _Out_ PULONG Wow64Flags)
+{
+    ULONG Flags = *DesiredAccess & KEY_WOW64_RES;
+    BOOLEAN Marked = (*DesiredAccess & CM_WOW64_VIEW_REQUEST) != 0;
+
+    *DesiredAccess &= ~(KEY_WOW64_RES | CM_WOW64_VIEW_REQUEST);
+    *Wow64Flags = 0;
+    if (Flags == KEY_WOW64_RES) return STATUS_INVALID_PARAMETER;
+    if (Marked || PsGetCurrentProcess()->Wow64Process) *Wow64Flags = Flags;
+    return STATUS_SUCCESS;
+}
+#endif
 
 
 /* PRIVATE FUNCTIONS *********************************************************/
@@ -317,12 +348,13 @@ NtCreateKey(OUT PHANDLE KeyHandle,
             ObjectAttributes->ObjectName, ObjectAttributes->RootDirectory,
             DesiredAccess, CreateOptions);
 
-#ifdef BUILD_WOW64_ENABLED
-    ParseContext.Wow64Flags = DesiredAccess & KEY_WOW64_RES;
-    if (ParseContext.Wow64Flags == KEY_WOW64_RES) return STATUS_INVALID_PARAMETER;
-#endif
     /* View selectors are not access rights. Native i386 ignores them. */
+#ifdef BUILD_WOW64_ENABLED
+    Status = CmpGetWow64View(&DesiredAccess, &ParseContext.Wow64Flags);
+    if (!NT_SUCCESS(Status)) return Status;
+#else
     DesiredAccess &= ~KEY_WOW64_RES;
+#endif
 
     /* Check for user-mode caller */
     if (PreviousMode != KernelMode)
@@ -503,12 +535,13 @@ CmpOpenKeyInternal(OUT PHANDLE KeyHandle,
     /* Reject options we don't recognize, matching Windows validation */
     if (OpenOptions & ~CMP_OPEN_LEGAL_OPTIONS) return STATUS_INVALID_PARAMETER;
 
-#ifdef BUILD_WOW64_ENABLED
-    ParseContext.Wow64Flags = DesiredAccess & KEY_WOW64_RES;
-    if (ParseContext.Wow64Flags == KEY_WOW64_RES) return STATUS_INVALID_PARAMETER;
-#endif
     /* View selectors are not access rights. Native i386 ignores them. */
+#ifdef BUILD_WOW64_ENABLED
+    Status = CmpGetWow64View(&DesiredAccess, &ParseContext.Wow64Flags);
+    if (!NT_SUCCESS(Status)) return Status;
+#else
     DesiredAccess &= ~KEY_WOW64_RES;
+#endif
 
     /*
      * REG_OPTION_OPEN_LINK is legal but does nothing here: Windows opens the target of a symbolic link

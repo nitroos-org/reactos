@@ -39,6 +39,45 @@ static BOOLEAN DefaultHandlesDisabled = FALSE;
 static BOOLEAN DefaultHandleHKUDisabled = FALSE;
 static BOOLEAN DllInitialized = FALSE; /* HACK */
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+/*
+ * The kernel ignores KEY_WOW64_32KEY and KEY_WOW64_64KEY from a native
+ * 64-bit caller of the system calls, as Windows does: the registry API
+ * chooses the view. Every open and create in this file that carries a view
+ * selector asks the kernel to apply it through the reserved access bit.
+ */
+static ACCESS_MASK
+ViewRequest(ACCESS_MASK Access)
+{
+    return (Access & KEY_WOW64_RES) ? (Access | CM_WOW64_VIEW_REQUEST) : Access;
+}
+
+static NTSTATUS
+ViewNtOpenKey(PHANDLE KeyHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes)
+{
+    return NtOpenKey(KeyHandle, ViewRequest(DesiredAccess), ObjectAttributes);
+}
+
+static __inline NTSTATUS
+ViewNtOpenKeyEx(PHANDLE KeyHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes,
+                ULONG OpenOptions)
+{
+    return NtOpenKeyEx(KeyHandle, ViewRequest(DesiredAccess), ObjectAttributes, OpenOptions);
+}
+
+static NTSTATUS
+ViewNtCreateKey(PHANDLE KeyHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes,
+                ULONG TitleIndex, PUNICODE_STRING Class, ULONG CreateOptions, PULONG Disposition)
+{
+    return NtCreateKey(KeyHandle, ViewRequest(DesiredAccess), ObjectAttributes, TitleIndex, Class,
+                       CreateOptions, Disposition);
+}
+
+#define NtOpenKey ViewNtOpenKey
+#define NtOpenKeyEx ViewNtOpenKeyEx
+#define NtCreateKey ViewNtCreateKey
+#endif
+
 /* PROTOTYPES ***************************************************************/
 
 static NTSTATUS MapDefaultKey (PHANDLE ParentKey, HKEY Key);
