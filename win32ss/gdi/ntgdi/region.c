@@ -129,11 +129,37 @@ SOFTWARE.
 PREGION prgnDefault = NULL;
 
 #if DBG
+static
+INT
+REGION_iDbgArm(
+    _In_reads_bytes_opt_(cjIn) PVOID pvIn,
+    _In_ INT cjIn,
+    _In_ BOOLEAN bBuffers);
+
 INT
 FASTCALL
 REGION_iDbgArmAllocFailure(
     _In_reads_bytes_opt_(cjIn) PVOID pvIn,
     _In_ INT cjIn)
+{
+    return REGION_iDbgArm(pvIn, cjIn, FALSE);
+}
+
+INT
+FASTCALL
+REGION_iDbgArmBufferFailure(
+    _In_reads_bytes_opt_(cjIn) PVOID pvIn,
+    _In_ INT cjIn)
+{
+    return REGION_iDbgArm(pvIn, cjIn, TRUE);
+}
+
+static
+INT
+REGION_iDbgArm(
+    _In_reads_bytes_opt_(cjIn) PVOID pvIn,
+    _In_ INT cjIn,
+    _In_ BOOLEAN bBuffers)
 {
     PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
     LONG lAllowed;
@@ -157,17 +183,20 @@ REGION_iDbgArmAllocFailure(
     iRet = pti->bDbgRgnFailFired ? 2 : 1;
     pti->bDbgRgnFailFired = FALSE;
     pti->bDbgRgnFailArmed = (lAllowed >= 0);
+    pti->bDbgRgnFailBuffers = bBuffers;
     pti->lDbgRgnFailCountdown = lAllowed;
     return iRet;
 }
 
+/* bBuffer: a rectangle buffer allocation (counted when armed for buffers), else a region object */
 static
 BOOL
-REGION_bDbgFailAlloc(VOID)
+REGION_bDbgFailAlloc(
+    _In_ BOOLEAN bBuffer)
 {
     PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
 
-    if (!pti || !pti->bDbgRgnFailArmed)
+    if (!pti || !pti->bDbgRgnFailArmed || pti->bDbgRgnFailBuffers != bBuffer)
         return FALSE;
 
     if (pti->lDbgRgnFailCountdown > 0)
@@ -182,6 +211,9 @@ REGION_bDbgFailAlloc(VOID)
     DPRINT1("Injected region allocation failure\n");
     return TRUE;
 }
+#define REGION_DBG_FAIL_BUFFER() REGION_bDbgFailAlloc(TRUE)
+#else
+#define REGION_DBG_FAIL_BUFFER() FALSE
 #endif
 HRGN    hrgnDefault = NULL;
 
@@ -488,7 +520,7 @@ REGION_bGrowBufferSize(
     }
 
     /* Allocate the new buffer */
-    pvBuffer = ExAllocatePoolWithTag(PagedPool, cjNewSize, TAG_REGION);
+    pvBuffer = REGION_DBG_FAIL_BUFFER() ? NULL : ExAllocatePoolWithTag(PagedPool, cjNewSize, TAG_REGION);
     if (pvBuffer == NULL)
     {
         return FALSE;
@@ -1028,6 +1060,8 @@ REGION_RegionOp(
     INT ybot;                          /* Bottom of intersection */
     INT ytop;                          /* Top of intersection */
     RECTL *oldRects;                   /* Old rects for newReg */
+    ULONG oldCount;                    /* Old rect count of newReg */
+    ULONG oldSize;                     /* Old buffer size of newReg */
     ULONG prevBand;                    /* Index of start of
                                         * Previous band in newReg */
     ULONG curBand;                     /* Index of start of current band in newReg */
@@ -1050,6 +1084,8 @@ REGION_RegionOp(
      * note of its rects pointer (so that we can free them later), preserve its
      * extents and simply set numRects to zero. */
     oldRects = newReg->Buffer;
+    oldCount = newReg->rdh.nCount;
+    oldSize = newReg->rdh.nRgnSize;
     newReg->rdh.nCount = 0;
 
     /* Allocate a reasonable number of rectangles for the new region. The idea
@@ -1059,13 +1095,11 @@ REGION_RegionOp(
      * nuke the Xrealloc() at the end of this function eventually. */
     newReg->rdh.nRgnSize = max(reg1->rdh.nCount + 1, reg2->rdh.nCount) * 2 * sizeof(RECT);
 
-    newReg->Buffer = ExAllocatePoolWithTag(PagedPool,
-                                           newReg->rdh.nRgnSize,
-                                           TAG_REGION);
+    newReg->Buffer = REGION_DBG_FAIL_BUFFER() ? NULL :
+                     ExAllocatePoolWithTag(PagedPool, newReg->rdh.nRgnSize, TAG_REGION);
     if (newReg->Buffer == NULL)
     {
-        newReg->rdh.nRgnSize = 0;
-        return FALSE;
+        goto Fail;
     }
 
     /* Initialize ybot and ytop.
@@ -1126,7 +1160,7 @@ REGION_RegionOp(
 
             if ((top != bot) && (nonOverlap1Func != NULL))
             {
-                if (!(*nonOverlap1Func)(newReg, r1, r1BandEnd, top, bot)) return FALSE;
+                if (!(*nonOverlap1Func)(newReg, r1, r1BandEnd, top, bot)) goto Fail;
             }
 
             ytop = r2->top;
@@ -1138,7 +1172,7 @@ REGION_RegionOp(
 
             if ((top != bot) && (nonOverlap2Func != NULL))
             {
-                if (!(*nonOverlap2Func)(newReg, r2, r2BandEnd, top, bot) ) return FALSE;
+                if (!(*nonOverlap2Func)(newReg, r2, r2BandEnd, top, bot) ) goto Fail;
             }
 
             ytop = r1->top;
@@ -1163,7 +1197,7 @@ REGION_RegionOp(
         curBand = newReg->rdh.nCount;
         if (ybot > ytop)
         {
-            if (!(*overlapFunc)(newReg, r1, r1BandEnd, r2, r2BandEnd, ytop, ybot)) return FALSE;
+            if (!(*overlapFunc)(newReg, r1, r1BandEnd, r2, r2BandEnd, ytop, ybot)) goto Fail;
         }
 
         if (newReg->rdh.nCount != curBand)
@@ -1203,7 +1237,7 @@ REGION_RegionOp(
                                    r1BandEnd,
                                    max(r1->top,ybot),
                                    r1->bottom))
-                    return FALSE;
+                    goto Fail;
                 r1 = r1BandEnd;
             }
             while (r1 != r1End);
@@ -1224,7 +1258,7 @@ REGION_RegionOp(
                                r2BandEnd,
                                max(r2->top,ybot),
                                r2->bottom))
-                return FALSE;
+                goto Fail;
             r2 = r2BandEnd;
         }
         while (r2 != r2End);
@@ -1283,6 +1317,15 @@ REGION_RegionOp(
     if (oldRects != &newReg->rdh.rcBound)
         ExFreePoolWithTag(oldRects, TAG_REGION);
     return TRUE;
+
+Fail:
+    /* No memory: the destination keeps what it had (the sources were only read) */
+    if (newReg->Buffer && newReg->Buffer != oldRects && newReg->Buffer != &newReg->rdh.rcBound)
+        ExFreePoolWithTag(newReg->Buffer, TAG_REGION);
+    newReg->Buffer = oldRects;
+    newReg->rdh.nCount = oldCount;
+    newReg->rdh.nRgnSize = oldSize;
+    return FALSE;
 }
 
 /***********************************************************************
@@ -2275,7 +2318,7 @@ REGION_AllocRgnWithHandle(
     PREGION pReg;
 
 #if DBG
-    if (REGION_bDbgFailAlloc())
+    if (REGION_bDbgFailAlloc(FALSE))
         return NULL;
 #endif
 
@@ -2505,7 +2548,7 @@ IntSysCreateRectpRgn(
     PREGION prgn;
 
 #if DBG
-    if (REGION_bDbgFailAlloc())
+    if (REGION_bDbgFailAlloc(FALSE))
         return NULL;
 #endif
 

@@ -26,6 +26,9 @@ extern PREGION prgnDefault;
    Returns 2 if a failure was injected since the previous call, 1 if not, -1 on bad input. */
 #define GDI_DBG_ESCAPE_FAIL_REGION_ALLOC 0x7FFE5247
 INT FASTCALL REGION_iDbgArmAllocFailure(_In_reads_bytes_opt_(cjIn) PVOID pvIn, _In_ INT cjIn);
+/* The same for the rectangle buffers of the region operations (combining, growing) */
+#define GDI_DBG_ESCAPE_FAIL_REGION_BUFFER 0x7FFE5242
+INT FASTCALL REGION_iDbgArmBufferFailure(_In_reads_bytes_opt_(cjIn) PVOID pvIn, _In_ INT cjIn);
 #endif
 extern HRGN hrgnDefault;
 
